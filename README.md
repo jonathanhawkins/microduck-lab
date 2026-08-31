@@ -8,9 +8,9 @@ browser.
 
 ![Duck farm viewer: four policies side by side](docs/media/viewer.png)
 
-| Walking (locally trained, CPU) | Backflip showcase — spotter-assisted launch, policy landing, stand handoff |
+| Running (locally trained on CPU, BAM actuator physics) | Backflip showcase — spotter-assisted launch, policy landing, stand handoff |
 |---|---|
-| ![walking](docs/media/walking.gif) | ![backflip](docs/media/backflip.gif) |
+| ![running](docs/media/running.gif) | ![backflip](docs/media/backflip.gif) |
 
 The official [microduck_rl](https://github.com/pollen-robotics/microduck_rl)
 stack trains through MuJoCo Warp and needs a CUDA GPU. This project is the
@@ -47,6 +47,9 @@ side-by-side checkouts (see setup).
     shaping with no Python in the loop.
   - Staged curricula for hard tricks (the backflip is 5 chained stages), with
     the viewer narrating the chain
+  - **🎬 Animate panel**: a keyframe pose editor with a game-style control
+    rig — author a motion clip in the browser, then "train this" makes RL
+    learn to physically execute it
 
 ![Teaching a trick from the browser](docs/media/teach.png)
 
@@ -105,6 +108,30 @@ the viewer's teach panel with live sliders. The full playbook — contract
 invariants, reward-design rules, and the verification discipline that keeps
 you from fooling yourself — is in
 [microduck_local/AGENTS.md](microduck_local/AGENTS.md).
+
+## Animate: keyframe a motion, then make it real
+
+The 🎬 animate panel is a pose-and-timeline editor for authoring **reference
+motion clips** in the browser — and the bridge from animation to RL:
+
+![Dragging the rig's squat handle](docs/media/animate-rig.gif)
+
+- **Pose the duck directly** (click a body part, drag) or through the
+  **🎮 control rig** — animator-style macro handles (`squat`, `lean`, leg
+  swings, `sway`, `stance`, `twist`, `toes`, `look`). Each control is a
+  direction in joint space chosen so feet stay planted and the controls are
+  mutually orthogonal: squatting never disturbs the lean slider, and a stride
+  keyed over a crouch keeps the crouch. A ⇕ handle parks on the duck itself —
+  dragging it down above is what drives the squat.
+- **Keyframe timeline** with auto-key, scrub/playback, and looping; the farm
+  solves each pose server-side so the preview duck stays grounded. Clips save
+  to [`microduck_local/clips/`](microduck_local/clips) as plain JSON
+  (`run`, `sprint-cycle`, `backflip` ship as examples).
+- **⚡ Train this**: the clip becomes the reward — DeepMimic-style motion
+  imitation ("be in the reference pose for right now"), which turns an
+  open-ended search like *discover a backflip* into a tracking problem the
+  policy can solve, without touching the 61-obs deployment contract. See
+  [`motion.py`](microduck_local/src/microduck_local/motion.py).
 
 ## Working with AI assistants
 
