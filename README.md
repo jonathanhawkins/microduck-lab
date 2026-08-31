@@ -8,7 +8,7 @@ browser.
 
 ![Duck farm viewer: four policies side by side](docs/media/viewer.png)
 
-| Walking (locally trained, CPU) | Backflip → stand handoff (taught in the browser) |
+| Walking (locally trained, CPU) | Backflip showcase — spotter-assisted launch, policy landing, stand handoff |
 |---|---|
 | ![walking](docs/media/walking.gif) | ![backflip](docs/media/backflip.gif) |
 
