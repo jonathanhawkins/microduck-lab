@@ -1,0 +1,43 @@
+[build-system]
+requires = ["uv_build>=0.8.19,<0.9.0"]
+build-backend = "uv_build"
+
+[project]
+name = "microduck-local"
+version = "0.1.0"
+description = "Local CPU-MuJoCo PPO training for Microduck on Apple Silicon (prototyping harness; the sim2real recipe lives in microduck_rl)"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    # Same mujoco major as mjlab 1.3.0 resolves (3.10.x) so MJCF parsing matches.
+    "mujoco>=3.10,<3.11",
+    "gymnasium>=1.0",
+    "stable-baselines3>=2.4",
+    # Match microduck_rl's pin so tensors/ONNX opsets stay comparable.
+    "torch==2.9.1",
+    "onnx>=1.20.1",
+    "onnxruntime>=1.20",
+    "numpy",
+    "tensorboard",
+    # duck-farm web viewer backend (streams poses to ../duck-viewer).
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    # System/trainer stats in the farm's frame stream.
+    "psutil>=6.0",
+    # render-rollout: offscreen frames -> mp4 (imageio-ffmpeg ships the binary,
+    # so a machine without a system ffmpeg still writes video) + contact sheets.
+    "imageio>=2.35",
+    "imageio-ffmpeg>=0.5",
+    "pillow>=10.1",
+    "numba>=0.67.0",
+]
+
+[project.scripts]
+train-walk = "microduck_local.train:main"
+export-walk = "microduck_local.export_onnx:main"
+eval-walk = "microduck_local.eval_onnx:main"
+eval-run = "microduck_local.eval_onnx:main"
+bench-walk = "microduck_local.bench:main"
+bench-envs = "microduck_local.bench_envs:main"
+duck-farm = "microduck_local.viz_server:main"
+train-behavior = "microduck_local.train_behavior:main"
+render-rollout = "microduck_local.render_rollout:main"

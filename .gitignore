@@ -1,0 +1,22 @@
+# Upstream Pollen Robotics clones — cloned side by side, not part of this repo
+# (see README "Getting set up"). This repo tracks only the local-training stack.
+/microduck/
+/microduck_rl/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Training artifacts and runtime state (regenerated; runs/ grows to GBs)
+microduck_local/runs/
+microduck_local/farm-state.json
+microduck_local/teach-weights.json
+
+# Pre-monorepo scaffold history, kept aside locally
+duck-viewer/.git-scaffold-backup/
+
+# macOS
+.DS_Store
