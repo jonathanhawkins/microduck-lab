@@ -1,14 +1,14 @@
-// Types + client for the duck-farm server (microduck_local viz_server.py).
+// Types + client for the duck-lab server (microduck_local viz_server.py).
 
-// `?farm=host:port` points the page at a different farm (a scratch server, a
-// farm on another machine). The module only loads client-side (the viewer is
+// `?lab=host:port` points the page at a different lab (a scratch server, a
+// lab on another machine). The module only loads client-side (the viewer is
 // ssr:false), but guard anyway so an SSR import can't crash the build.
-const FARM_HOST =
+const LAB_HOST =
   (typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("farm")) ||
+    new URLSearchParams(window.location.search).get("lab")) ||
   "127.0.0.1:8788";
-export const FARM_HTTP = `http://${FARM_HOST}`;
-export const FARM_WS = `ws://${FARM_HOST}/ws`;
+export const LAB_HTTP = `http://${LAB_HOST}`;
+export const LAB_WS = `ws://${LAB_HOST}/ws`;
 
 export interface SceneMesh {
   v: number[]; // flat xyz, MuJoCo frame (Z-up)
@@ -35,6 +35,11 @@ export interface Scene {
 export interface DuckFrame {
   id: string; // stable identity ("d0".."dN", "trainee", "helper1"…) — survives renames
   name: string; // mutable display label (tracks the assigned policy)
+  /** Brain provenance — the palette id this duck runs ("run:<name>",
+   *  "ckpt:<name>@Nk", "pollen:<name>") or null (a zero-infer trainee before
+   *  its first snapshot, or a server predating the field). Lets selection
+   *  load the duck's run into the teach panel. */
+  policy?: string | null;
   falls: number;
   step: number;
   rew: number;
@@ -73,7 +78,7 @@ export interface ProcStats {
 export interface SystemStats {
   cpu: number; // machine-wide, 0-100
   mem: number; // machine-wide, 0-100
-  farm: ProcStats;
+  lab: ProcStats;
   trainer: ProcStats | null; // null when no trainer subprocess is alive
   trainFps: number | null; // training steps/s from progress.jsonl, null right after a restart
 }
@@ -117,6 +122,10 @@ export interface TrainingProgress {
    *  to reset when a stage hands off. */
   overallSteps?: number;
   overallTotal?: number;
+  /** Wall-clock seconds the JOB has been training — spans stage handoffs
+   *  and warm restarts, where elapsed_s starts over with each subprocess.
+   *  Frozen at finish; null for adopted (already-finished) runs. */
+  overallElapsed?: number | null;
 }
 /** Active stage of a staged-curriculum teach job (1-based idx). */
 export interface TrainingStage {
@@ -184,16 +193,129 @@ export interface Policy {
    *  a chain's stages into one family row of compact chips. */
   chain?: string;
   stage?: number;
+  /** Bytes the run dir occupies (run policies only) — shown in the delete
+   *  confirmation so the user can see what a delete actually frees. */
+  sizeBytes?: number;
+}
+
+/** Permanently delete a training run's directory — its policy, checkpoints
+ *  and progress log. `chain` treats `name` as a curriculum-chain prefix and
+ *  deletes every stage of it in one all-or-nothing call. There is no undo:
+ *  only call this behind an explicit user confirmation. Throws with the
+ *  server's own message (a run of the ACTIVE training job is refused). */
+/** ⚙ BYOK Hugging Face settings. The token goes UP once and never comes
+ *  back: the lab validates it against whoami(), stores it 0600 beside runs/,
+ *  and every read returns only a mask + the username. It unlocks the real
+ *  training step — GPU runs of microduck_rl on HF Jobs, on the user's own
+ *  account and dime. */
+export interface HfSettings {
+  configured: boolean;
+  username?: string;
+  masked?: string;
+}
+
+async function hfError(res: Response, fallback: string): Promise<never> {
+  const detail = await res
+    .json()
+    .then((d: { detail?: string }) => d?.detail)
+    .catch(() => undefined);
+  throw new Error(detail || fallback);
+}
+
+export async function fetchHfSettings(): Promise<HfSettings> {
+  const res = await fetch(`${LAB_HTTP}/settings/hf`).catch(() => {
+    throw new Error(`can't reach the lab at ${LAB_HOST}`);
+  });
+  if (!res.ok) return hfError(res, `settings failed: ${res.status}`);
+  return res.json();
+}
+
+export async function saveHfToken(token: string): Promise<HfSettings> {
+  const res = await fetch(`${LAB_HTTP}/settings/hf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  }).catch(() => {
+    throw new Error(`can't reach the lab at ${LAB_HOST} — token not saved`);
+  });
+  if (!res.ok) return hfError(res, `token rejected: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteHfToken(): Promise<HfSettings> {
+  const res = await fetch(`${LAB_HTTP}/settings/hf`, { method: "DELETE" }).catch(() => {
+    throw new Error(`can't reach the lab at ${LAB_HOST}`);
+  });
+  if (!res.ok) return hfError(res, `disconnect failed: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteRun(
+  name: string,
+  chain = false
+): Promise<{ deleted: string[]; freedBytes: number }> {
+  const res = await fetch(
+    `${LAB_HTTP}/runs/${encodeURIComponent(name)}${chain ? "?chain=true" : ""}`,
+    { method: "DELETE" }
+  ).catch(() => {
+    // A dead lab throws a bare "Failed to fetch"; say WHERE nothing answered,
+    // matching the panel's "can't load policies from :8788" line.
+    throw new Error(`can't reach the lab at ${LAB_HOST} — nothing was deleted`);
+  });
+  if (!res.ok) {
+    // FastAPI puts the human-readable reason in `detail`; fall back to the
+    // status so a proxy/500 with no JSON body still says something useful.
+    const detail = await res
+      .json()
+      .then((d: { detail?: string }) => d?.detail)
+      .catch(() => undefined);
+    throw new Error(detail || `delete failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** "240 MB" / "1.4 GB" — delete-confirmation sizing, not an exact accounting. */
+export function formatBytes(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n >= 1e6) return `${Math.round(n / 1e6)} MB`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)} KB`;
+  return `${n} B`;
 }
 
 export async function fetchScene(): Promise<Scene> {
-  const res = await fetch(`${FARM_HTTP}/scene`);
+  const res = await fetch(`${LAB_HTTP}/scene`);
   if (!res.ok) throw new Error(`scene fetch failed: ${res.status}`);
   return res.json();
 }
 
+/** True for palette ids with a training run behind them — the only ones the
+ *  teach panel can load (shipped Pollen policies have no recipe to refine). */
+export function isRunPolicy(policyId: string | null | undefined): boolean {
+  return !!policyId && (policyId.startsWith("run:") || policyId.startsWith("ckpt:"));
+}
+
+/** The run-dir name behind a palette id ("run:x" / "ckpt:x@123k" → "x"). */
+export function runNameOfPolicy(policyId: string): string {
+  return policyId.split(":", 2)[1]?.split("@", 1)[0] ?? policyId;
+}
+
+/** POST /teach/load — seat a finished run in the teach panel (no training
+ *  started): its recipe streams back in "done" state, sliders unlocked,
+ *  fine-tune targeting that run. Refused while a job is actively training. */
+export async function loadTeachRun(
+  policyId: string
+): Promise<{ ok: boolean; message?: string }> {
+  const res = await fetch(`${LAB_HTTP}/teach/load`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ policy: policyId }),
+  });
+  if (!res.ok) throw new Error(`teach/load failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchPolicies(): Promise<Policy[]> {
-  const res = await fetch(`${FARM_HTTP}/policies`);
+  const res = await fetch(`${LAB_HTTP}/policies`);
   if (!res.ok) throw new Error(`policies fetch failed: ${res.status}`);
   const data: { policies: Policy[] } = await res.json();
   // Keep the first of each id: the server can emit duplicates (two checkpoints
@@ -210,7 +332,7 @@ export async function fetchPolicies(): Promise<Policy[]> {
 
 /** React keys for a duck-roster render, aligned by index. Normally just the
  *  stable duck id — but the stream is not guaranteed duplicate-free (legacy
- *  farm-state.json rosters used policy labels as duck ids, and the server
+ *  lab-state.json rosters used policy labels as duck ids, and the server
  *  restores saved ids verbatim), and two rows sharing a key made React log an
  *  error on every HUD poll and free to drop/duplicate rows. Repeats get a
  *  "~n" suffix; server list order is stable, so keys are stable too. */
@@ -224,11 +346,11 @@ export function duckRowKeys(ducks: { id: string }[]): string[] {
 }
 
 /** WebSocket with auto-reconnect; latest frame lands in a mutable ref. */
-export class FarmClient {
+export class LabClient {
   frame: Frame | null = null;
   connected = false;
   /** Date.now() of the last frame received (or of the open, before the first
-   *  one). An OPEN socket is not the same as ARRIVING frames: the farm's duck
+   *  one). An OPEN socket is not the same as ARRIVING frames: the lab's duck
    *  loop has died with its socket still open, leaving a green "live" badge
    *  over an empty scene for as long as anyone cared to watch. Consumers age
    *  this out to say "stalled" instead. 0 = not connected. */
@@ -247,9 +369,9 @@ export class FarmClient {
 
   private connect() {
     if (this.closed) return;
-    const ws = new WebSocket(FARM_WS);
+    const ws = new WebSocket(LAB_WS);
     this.ws = ws;
-    // Every handler ignores sockets that are no longer this.ws: across farm
+    // Every handler ignores sockets that are no longer this.ws: across lab
     // restarts, out-of-order close events used to schedule overlapping
     // connect()s, leaving TWO live sockets — frames arrived on one while
     // sendCmd wrote into the other (a corpse), so buttons/keys silently did

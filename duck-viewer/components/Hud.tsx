@@ -4,11 +4,220 @@
 // so the 25 Hz stream never causes React re-renders), a system-stats strip,
 // helper spawn/remove buttons, and the command bar.
 
-import { useEffect, useRef, useState } from "react";
-import { duckRowKeys, type DuckFrame, type FarmClient, type Frame } from "@/lib/farm";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  deleteHfToken,
+  duckRowKeys,
+  fetchHfSettings,
+  saveHfToken,
+  type DuckFrame,
+  type Frame,
+  type HfSettings,
+  type LabClient,
+} from "@/lib/lab";
 import { loadJSON, saveJSON } from "@/lib/persist";
+import { setSelectedDuck, useSelectedDuck } from "@/lib/select";
+import { pushModal, setDuckLabels, setHudRight } from "@/lib/ui";
 
 const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
+
+/** ⚙ settings: connect a Hugging Face token (BYOK). The token is posted to
+ *  the LOCAL lab once, validated against whoami(), stored 0600 on the user's
+ *  machine, and only a mask ever comes back — this modal never holds a live
+ *  token after Save resolves. Unlocks the coming real-GPU training step
+ *  (microduck_rl on HF Jobs, the user's own account and billing). */
+function HfSettingsModal({ onClose }: { onClose: () => void }) {
+  const [settings, setSettings] = useState<HfSettings | null>(null);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Claim the keyboard while this is open. stopPropagation CANNOT do this:
+    // the scene's shortcut listener is on window/capture too and registered
+    // first, and stopPropagation never affects same-element listeners — so the
+    // earlier attempt let Backspace delete the duck behind the modal anyway,
+    // while blocking React's own onKeyDown (Enter-to-save) on the way down.
+    // The scene stands down via the shared gate instead.
+    const release = pushModal();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      release();
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  useEffect(() => {
+    let alive = true;
+    fetchHfSettings()
+      .then((s) => alive && setSettings(s))
+      .catch((e) => alive && setError(e instanceof Error ? e.message : String(e)));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setSettings(await saveHfToken(token));
+      setToken("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setSettings(await deleteHfToken());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      // data-policy-ui: the armed-chip global pointerdown handler skips panel
+      // UI. Without it, clicking inside this modal while a chip is armed
+      // assigns that policy to whichever duck sits behind the overlay
+      // (nearestDuck projects screen positions; it can't see the modal).
+      data-policy-ui
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        zIndex: 1100, // above the drag ghost (100) and the tooltips (1000)
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#161b26",
+          border: "1px solid rgba(255,255,255,0.12)",
+          borderRadius: 10,
+          padding: "14px 16px",
+          width: 340,
+          fontFamily: mono,
+          fontSize: 11,
+          color: "#aab3c0",
+          lineHeight: 1.5,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "baseline", marginBottom: 8 }}>
+          <span style={{ color: "#dfe5ee", fontSize: 12 }}>⚙ settings</span>
+          <span style={{ flex: 1 }} />
+          <button
+            onClick={onClose}
+            style={{ background: "none", border: "none", color: "#8b93a3", cursor: "pointer", fontFamily: mono }}
+          >
+            ✕
+          </button>
+        </div>
+        <div style={{ color: "#dfe5ee", marginBottom: 4 }}>🤗 Hugging Face</div>
+        {settings?.configured ? (
+          <>
+            <div style={{ marginBottom: 8 }}>
+              connected as <span style={{ color: "#7ab87a" }}>{settings.username}</span>{" "}
+              <span style={{ color: "#566072" }}>({settings.masked})</span>
+            </div>
+            <button
+              onClick={disconnect}
+              disabled={busy}
+              style={{
+                background: "#1c2230",
+                border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: 6,
+                color: "#e07a5f",
+                cursor: "pointer",
+                fontFamily: mono,
+                fontSize: 11,
+                padding: "3px 10px",
+              }}
+            >
+              disconnect
+            </button>
+          </>
+        ) : (
+          <>
+            <div style={{ marginBottom: 8 }}>
+              Paste an access token to unlock GPU training on HF Jobs — your own
+              account, your own billing. Create one at{" "}
+              <a
+                href="https://huggingface.co/settings/tokens"
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "#7db8d8" }}
+              >
+                hf.co/settings/tokens
+              </a>{" "}
+              (write access).
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                type="password"
+                // Not a site login: keep password managers from offering to
+                // save the token and later autofilling a revoked one.
+                autoComplete="off"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && token && !busy && save()}
+                placeholder="hf_…"
+                autoFocus
+                style={{
+                  flex: 1,
+                  background: "#0f131c",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: 6,
+                  color: "#dfe5ee",
+                  fontFamily: mono,
+                  fontSize: 11,
+                  padding: "4px 8px",
+                  outline: "none",
+                }}
+              />
+              <button
+                onClick={save}
+                disabled={busy || !token}
+                style={{
+                  background: "#243247",
+                  border: "1px solid #7db8d8",
+                  borderRadius: 6,
+                  color: "#cfe4f5",
+                  cursor: busy || !token ? "default" : "pointer",
+                  opacity: busy || !token ? 0.5 : 1,
+                  fontFamily: mono,
+                  fontSize: 11,
+                  padding: "3px 10px",
+                }}
+              >
+                {busy ? "checking…" : "save"}
+              </button>
+            </div>
+            <div style={{ color: "#566072", marginTop: 6 }}>
+              stored only on this machine (hf-token.json, gitignored) — never
+              sent anywhere but huggingface.co.
+            </div>
+          </>
+        )}
+        {error && <div style={{ color: "#e07a5f", marginTop: 8 }}>{error}</div>}
+      </div>
+    </div>
+  );
+}
 
 /** cpu% → strip color: calm → amber >75 → red >90. */
 function cpuColor(cpu: number): string {
@@ -67,23 +276,34 @@ function abbrevSteps(n: number): string {
   return `${Math.round(n)}`;
 }
 
+/** 47 → "47s", 312 → "5m", 5_580 → "1h33m" — how long the run has been
+ *  training, for the stats strip. Minutes drop the seconds: at a glance
+ *  "5m" answers "how long has this been going", and the strip already
+ *  ticks via steps/s. */
+function abbrevElapsed(s: number): string {
+  if (s < 60) return `${Math.floor(s)}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
 /** No frame for this long ⇒ the stream is stalled, however open the socket
  *  looks. ~75 missed frames at the server's 25 Hz. Measured, not guessed: at
  *  2 s this fired constantly while a teach run had the machine at 98% cpu and
- *  the farm loop was merely starved, not dead. 3 s still catches a real
+ *  the lab loop was merely starved, not dead. 3 s still catches a real
  *  stoppage in a couple of seconds — the one that prompted this ran 9 s. */
 const STALL_MS = 3000;
 
 /** The corner badge. "live" has to mean frames are ARRIVING, not merely that
- *  the WebSocket is open — a farm whose duck loop died kept the socket up and
+ *  the WebSocket is open — a lab whose duck loop died kept the socket up and
  *  the badge sat green over a frozen, empty scene. */
 function linkBadge(connected: boolean, stalled: boolean) {
   if (!connected)
     return { dot: "○", label: "offline", color: "#e07a5f",
-             title: "not connected to the farm" };
+             title: "not connected to the lab" };
   if (stalled)
     return { dot: "●", label: "stalled", color: "#d8c97d",
-             title: "connected, but no frames for 3s — the farm is still there, "
+             title: "connected, but no frames for 3s — the lab is still there, "
                     + "its duck loop may have stopped" };
   return { dot: "●", label: "live", color: "#7dd87d", title: "frames arriving" };
 }
@@ -162,7 +382,7 @@ export function Hud({
   connected,
   error,
 }: {
-  clientRef: React.MutableRefObject<FarmClient | null>;
+  clientRef: React.MutableRefObject<LabClient | null>;
   connected: boolean;
   error: string | null;
 }) {
@@ -171,10 +391,18 @@ export function Hud({
   // bar is unaffected). Persisted like the PolicyPanel/TeachPanel toggles.
   // Hooks below run regardless of `open` so the poll keeps hook order stable.
   const [open, setOpen] = useState(() => loadJSON("hudOpen", true));
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Stable: this HUD re-renders ~4x/s, and an inline arrow would make the
+  // modal's keyboard-gate effect tear down and re-run on every one of them.
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
   // Same treatment for the bottom-left camera-help bar — it's pure reference
   // text, so folding it away frees corner space (and the Next dev badge sits
-  // right under it in dev). Unconditional hook: order stays stable.
-  const [cmdBarOpen, setCmdBarOpen] = useState(() => loadJSON("cmdBarOpen", true));
+  // right under it in dev). Starts collapsed: first sight of the scene should
+  // be ducks, not a key list. Unconditional hook: order stays stable.
+  const [cmdBarOpen, setCmdBarOpen] = useState(() => loadJSON("cmdBarOpen", false));
+  // Floating duck name labels on/off — persisted here, mirrored into the
+  // shared ui store so every Duck inside the Canvas reacts live.
+  const [labels, setLabels] = useState(() => loadJSON("duckLabels", true));
   // In embedded panes the surrounding app may keep keyboard focus for itself —
   // the page can't fix that, but it can at least SAY so (cmd-bar hint below).
   const [pageFocused, setPageFocused] = useState(true);
@@ -200,9 +428,16 @@ export function Hud({
 
   useEffect(() => saveJSON("hudOpen", open), [open]);
   useEffect(() => saveJSON("cmdBarOpen", cmdBarOpen), [cmdBarOpen]);
+  useEffect(() => {
+    saveJSON("duckLabels", labels);
+    setDuckLabels(labels);
+  }, [labels]);
 
   const panel: React.CSSProperties = {
     position: "absolute",
+    // Above the ducks' floating DOM labels (drei Html, zIndexRange [10, 0]) —
+    // matching AnimPanel; labels must never scribble over panel text.
+    zIndex: 20,
     background: "rgba(14, 16, 20, 0.82)",
     border: "1px solid rgba(255,255,255,0.09)",
     borderRadius: 10,
@@ -214,16 +449,46 @@ export function Hud({
     backdropFilter: "blur(6px)",
   };
 
+  // Publish this panel's right edge into the shared ui store so the
+  // top-center 🎥/📷 capture panel can dodge a wide HUD (long duck names
+  // reached right under its buttons). One callback ref serves both the open
+  // panel and the collapsed pill — only one is mounted at a time.
+  const hudRO = useRef<ResizeObserver | null>(null);
+  const hudEdgeRef = useCallback((el: HTMLElement | null) => {
+    hudRO.current?.disconnect();
+    hudRO.current = null;
+    if (!el) {
+      setHudRight(0);
+      return;
+    }
+    const publish = () => setHudRight(el.getBoundingClientRect().right);
+    publish();
+    hudRO.current = new ResizeObserver(publish);
+    hudRO.current.observe(el);
+  }, []);
+
   const stats = frame?.stats;
   const training = frame?.training ?? null;
   const restarting = training?.restarting ?? false;
   const rowKeys = frame ? duckRowKeys(frame.ducks) : [];
   const link = linkBadge(connected, stalled);
+  // Stage selection (click a duck / a row): the selected row echoes the amber
+  // ring under the duck, and Delete removes it.
+  const selectedDuck = useSelectedDuck();
 
   return (
     <>
+      {settingsOpen && <HfSettingsModal onClose={closeSettings} />}
       {open ? (
-      <div style={{ ...panel, top: 14, left: 14, minWidth: 240 }}>
+      <div
+        ref={hudEdgeRef}
+        // data-policy-ui: the armed-chip pointerdown handler skips panel UI.
+        // nearestDuck is pure projection with an 80px radius, so without this
+        // a click on a HUD button assigns the armed policy to whatever duck
+        // happens to project behind the panel.
+        data-policy-ui
+        style={{ ...panel, top: 14, left: 14, minWidth: 240 }}
+      >
         <div
           style={{
             fontSize: 13,
@@ -233,10 +498,44 @@ export function Hud({
             alignItems: "center",
           }}
         >
-          <span style={{ flex: 1 }}>🦆 duck farm</span>
+          <span style={{ flex: 1 }}>🦆 duck lab</span>
           <span style={{ color: link.color }} title={link.title}>
             {link.dot} {link.label}
           </span>
+          <button
+            onClick={() => setLabels((v) => !v)}
+            title={labels ? "hide duck name labels" : "show duck name labels"}
+            style={{
+              background: "none",
+              border: "none",
+              color: labels ? "#8b93a3" : "#566072",
+              cursor: "pointer",
+              fontFamily: mono,
+              fontSize: 12,
+              padding: "0 4px",
+              marginLeft: 10,
+              // Emoji ignore CSS color — dim + desaturate carries the state.
+              opacity: labels ? 1 : 0.45,
+              filter: labels ? "none" : "grayscale(1)",
+            }}
+          >
+            🏷
+          </button>
+          <button
+            onClick={() => setSettingsOpen(true)}
+            title="settings — connect Hugging Face for real GPU training"
+            style={{
+              background: "none",
+              border: "none",
+              color: "#8b93a3",
+              cursor: "pointer",
+              fontFamily: mono,
+              fontSize: 12,
+              padding: "0 4px",
+            }}
+          >
+            ⚙
+          </button>
           <button
             onClick={() => setOpen(false)}
             title="collapse"
@@ -330,19 +629,39 @@ export function Hud({
                           ? "restarting…"
                           : isHelper
                             ? "remove this helper"
-                            : "remove this duck from the farm"
+                            : "remove this duck from the lab"
                       }
                       color="#e0a08f"
                       disabled={isHelper && restarting}
                       onClick={() => clientRef.current?.sendRemoveDuck(d.id)}
                     />
                   );
+                const isSelected = d.id === selectedDuck;
                 return (
                   // keyed by stable id (dedup-qualified) — several ducks can
                   // run (and be named after) the same policy since assignment
-                  // landed
-                  <tr key={rowKeys[i]}>
-                    <td style={{ whiteSpace: "nowrap" }}>{name}</td>
+                  // landed. Clicking a row (toggle-)selects the duck, same as
+                  // clicking it on the stage; amber echoes the floor ring.
+                  <tr
+                    key={rowKeys[i]}
+                    onClick={(e) => {
+                      // the ✕/＋ buttons keep their own click
+                      if ((e.target as HTMLElement).closest("button")) return;
+                      setSelectedDuck(isSelected ? null : d.id);
+                    }}
+                    title={isSelected ? "selected — ⌫ removes it" : "click to select"}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <td
+                      style={{
+                        whiteSpace: "nowrap",
+                        color: isSelected ? "#e8b24a" : undefined,
+                        fontWeight: isSelected ? 700 : undefined,
+                      }}
+                    >
+                      {isSelected ? "▸ " : ""}
+                      {name}
+                    </td>
                     <td
                       style={{
                         whiteSpace: "nowrap",
@@ -391,13 +710,23 @@ export function Hud({
             <span>· mem {Math.round(stats.mem)}%</span>
             {/* live steps/s only while the trainer actually runs — a finished
                 job kept showing its last rate, which read as "still going"
-                (and the server only nulls trainFps after its next restart). */}
+                (and the server only nulls trainFps after its next restart).
+                The wall clock rides along in both states: overallElapsed
+                spans stage handoffs and warm restarts (unlike elapsed_s)
+                and freezes at finish, so "✔ done · 1h07m" is the run's
+                total training time. */}
             {training &&
               (training.status === "training" || training.restarting ? (
-                <span>· train {trainFpsLabel(stats.trainFps)}</span>
+                <span>
+                  · train {trainFpsLabel(stats.trainFps)}
+                  {training.progress.overallElapsed != null &&
+                    ` · ${abbrevElapsed(training.progress.overallElapsed)}`}
+                </span>
               ) : (
                 <span style={{ color: "#566072" }}>
                   · train {TRAIN_STATE_BADGE[training.status]}
+                  {training.progress.overallElapsed != null &&
+                    ` · ${abbrevElapsed(training.progress.overallElapsed)}`}
                 </span>
               ))}
           </div>
@@ -407,9 +736,11 @@ export function Hud({
         // Collapsed: the whole stats panel folds into this pill (same pattern
         // as the collapsed 🧠 policies / 🎓 teach buttons), dot still live.
         <button
+          ref={hudEdgeRef}
           onClick={() => setOpen(true)}
           style={{
             position: "absolute",
+            zIndex: 20,
             top: 14,
             left: 14,
             background: "rgba(14,16,20,0.86)",
@@ -423,7 +754,7 @@ export function Hud({
             backdropFilter: "blur(6px)",
           }}
         >
-          🦆 duck farm{" "}
+          🦆 duck lab{" "}
           <span style={{ color: link.color }} title={link.title}>
             {link.dot}
           </span>
@@ -445,6 +776,9 @@ export function Hud({
                   badge sits on top of. Camera list keeps the tail. */}
               <div style={{ color: "#a5adbb", marginBottom: 3 }}>
                 ↺ R restart sim — every duck&apos;s episode from zero
+              </div>
+              <div style={{ color: "#a5adbb", marginBottom: 3 }}>
+                🖱 click a duck to select · ⌫ remove it · esc deselect
               </div>
               🎥 drag orbit · scroll zoom · 2-finger swipe slide · A/D slide ·
               W/S·↑↓ dolly · ←/→ orbit · Q/E up·down · Shift+R reset view
@@ -480,6 +814,7 @@ export function Hud({
           title="keyboard controls"
           style={{
             position: "absolute",
+            zIndex: 20,
             bottom: 14,
             left: 56,
             background: "rgba(14,16,20,0.86)",

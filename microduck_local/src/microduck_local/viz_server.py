@@ -1,6 +1,6 @@
-"""Duck farm: run many policies side by side and stream poses to the web viewer.
+"""Duck lab: run many policies side by side and stream poses to the web viewer.
 
-    uv run duck-farm --checkpoints runs/first-gait ../microduck/policies/alpha_walking.onnx
+    uv run duck-lab --checkpoints runs/first-gait ../microduck/policies/alpha_walking.onnx
 
 Each argument becomes one live duck: a .onnx file, a run dir (uses policy.onnx,
 exporting it on the fly if the run finished without one), or with --checkpoints
@@ -11,6 +11,12 @@ HTTP (default 127.0.0.1:8788):
                     (the jenga-stacker extract_visual_scene trick)
   GET  /policies    everything assignable: shipped Pollen policies, local runs,
                     checkpoints — for the viewer's drag-and-drop palette
+  DELETE /runs/{name}  permanently delete a training run's directory (policy,
+                    checkpoints, progress log). `?chain=true` treats {name} as
+                    a curriculum-chain prefix and deletes every stage of it in
+                    one go. Refused (409) for any run of the job that is
+                    training right now. Shipped Pollen policies are not
+                    deletable — they are not ours to delete.
   GET  /behaviors   the teachable-behavior library (cards for the teach panel)
   POST /teach       {"text": "stand on one leg"} → match a behavior and start a
                     local training run (subprocess); progress streams in frames.
@@ -35,6 +41,11 @@ HTTP (default 127.0.0.1:8788):
                     meaning "per stage", "stageSteps": {"<1-based stage>": N}
                     explicit per-stage budgets laid over that split. Both are
                     sticky per behavior, like the weights.
+  POST /teach/load  {"policy": "run:<name>"} seat a FINISHED run in the teach
+                    panel without training anything: its recipe card/sliders
+                    stream in "done" state so ✨ fine-tune targets that run.
+                    Accepts palette ids ("run:…", "ckpt:…@Nk") or bare run
+                    names; refused while a job is actively training.
   POST /teach/weights  {"stageWeights": {...}} live edit on the active chain:
                     future stages record; a changed ACTIVE stage warm-restarts
   POST /teach/stop  stop the active training run/chain (final policy still saved)
@@ -59,6 +70,15 @@ key the poses, save a clip an imitation-RL reward can track):
   GET  /clips/{n}   one clip
   PUT  /clips/{n}   save (validates the clip contract, clamps joints to limits)
   DELETE /clips/{n} remove
+Screen captures (the viewer's 🎥 record button — the browser records its
+canvas with MediaRecorder and this server makes shareable files of the take):
+  POST /captures?name=<duck>  raw video body (any MediaRecorder container) →
+                    {name, mp4, gif, mp4Kb, gifKb, dir}: converts with
+                    imageio-ffmpeg's bundled binary to captures/<slug>-<ts>.mp4
+                    (h264, full resolution) + .gif (480 px palette gif), beside
+                    runs/ (MICRODUCK_CAPTURES_DIR relocates it)
+  GET  /captures/{file}       download one capture (Content-Disposition set)
+
   Clips are JSON files in clips/ beside runs/ (MICRODUCK_CLIPS_DIR relocates
   it). Format v1: {version, name, duration, loop, keys: [{t, joints[14],
   rootPitch}]} — t seconds ascending from 0, joints ABSOLUTE radians in
@@ -72,8 +92,10 @@ WS /ws — ~25 Hz frames:
               stage: {idx, count, label, detail, start} | null} | null}
   progress carries the ACTIVE stage's fields verbatim plus overallSteps /
   overallTotal, cumulative across the stage chain (== steps/total when the
-  job is a single run)
-  stats: {cpu, mem: machine-wide %, farm/trainer: {cpu, memMb} per process
+  job is a single run), and overallElapsed: wall-clock seconds since the job
+  launched (spans stage handoffs and warm restarts, unlike the per-subprocess
+  elapsed_s; frozen at finish, null for adopted runs)
+  stats: {cpu, mem: machine-wide %, lab/trainer: {cpu, memMb} per process
           (trainer sums its SubprocVecEnv workers; null when not training),
           trainFps: training steps/s from progress.jsonl | null}
 accepts:
@@ -88,18 +110,18 @@ accepts:
                            no-op for policies without a curriculum behind them
   {"spawn_helper": true}   add a helper duck: another viewer of the same
                            live.onnx snapshot. Helpers do NOT add trainer
-                           workers — measured live-farm, 16 envs ran at
+                           workers — measured live-lab, 16 envs ran at
                            10.0k steps/s and 26 envs (5 helpers × +2) at
                            6.8k, because the extra processes fight the
-                           farm's own sim loop.
+                           lab's own sim loop.
   {"remove_duck": {"duck": "d3"}}   remove ANY duck (declutter the roster);
                            the trainee is only removable when no run is active
   {"spawn_duck": {"policy": "pollen:alpha_stand"}}   add a fresh duck running
                            that palette policy (cap 20 ducks); accepts the
                            same optional "showcase" flag as assign
 
-The roster persists to farm-state.json next to runs/ (override the path with
-the FARM_STATE_PATH env var) and is restored on startup, at which point the CLI
+The roster persists to lab-state.json next to runs/ (override the path with
+the LAB_STATE_PATH env var) and is restored on startup, at which point the CLI
 duck args are ignored — pass --fresh to delete the state file and reseed from
 the CLI. Training jobs are NOT resumed across restarts (the subprocess dies
 with the server): a restored trainee/helper simply keeps its last live.onnx
@@ -119,10 +141,11 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
-import traceback
 import sys
 import time
+import traceback
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager, nullcontext
@@ -135,17 +158,18 @@ import psutil
 # so FastAPI resolves handler type hints against MODULE globals — a
 # function-local `WebSocket` import makes the ws param unresolvable and every
 # connection is denied with HTTP 403 (cost an hour; leave these here).
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import contract as C
 # Imported AS A MODULE so /teach can importlib.reload it: recipe edits in
 # behaviors.py are picked up by the training SUBPROCESS (fresh import) but
 # were invisible to this long-running server — the teach panel then showed a
 # stale scorecard missing new terms (bit the user twice: head_up, head_up_pull).
 from . import behaviors as behaviors_mod
+from . import contract as C
 from . import motion as motion_mod
 from .train import RUNS_DIR
 from .walk_env import MicroduckWalkEnv, shared_model_scope
@@ -163,19 +187,45 @@ EPISODE_RESET_S = 30.0  # periodic reset so wandering ducks regroup
 OVERRIDE_HOLD_S = 6.0
 POLICIES_DIR = Path(__file__).resolve().parents[3] / "microduck" / "policies"
 # Authored keyframe clips (the 🎬 animate panel), beside runs/ — same
-# overridable-path convention as RUNS_DIR/FARM_STATE_PATH so tests and scratch
+# overridable-path convention as RUNS_DIR/LAB_STATE_PATH so tests and scratch
 # servers never write into the real workspace.
 CLIPS_DIR = Path(os.environ.get("MICRODUCK_CLIPS_DIR")
                  or RUNS_DIR.parent / "clips")
+# 🎥 viewer screen captures (the record button), beside runs/ — the browser
+# uploads whatever container MediaRecorder produced and this server converts
+# it to a shareable mp4 + gif with imageio-ffmpeg's bundled binary.
+CAPTURES_DIR = Path(os.environ.get("MICRODUCK_CAPTURES_DIR")
+                    or RUNS_DIR.parent / "captures")
+# 🤗 BYOK Hugging Face token (the viewer's ⚙ settings), beside runs/ — same
+# overridable-path convention. Holds {"token", "username"}; written 0600 and
+# gitignored, validated against whoami() before it is ever saved, and NEVER
+# returned to the browser (only a mask + the username go back over the wire).
+# This is the doorway to the real-GPU step: the Jobs API trains microduck_rl
+# on HF hardware under the user's own account.
+HF_TOKEN_PATH = Path(os.environ.get("MICRODUCK_HF_TOKEN_PATH")
+                     or RUNS_DIR.parent / "hf-token.json")
 
-# Trainer env count is FIXED at BASE_ENVS for farm-launched jobs.
+
+def _hf_mask(token: str) -> str:
+    return f"{token[:7]}…{token[-4:]}" if len(token) > 14 else "•••"
+
+
+def load_hf_token() -> dict | None:
+    """{"token", "username"} or None. Corrupt files read as absent."""
+    try:
+        d = json.loads(HF_TOKEN_PATH.read_text())
+        return d if isinstance(d, dict) and d.get("token") else None
+    except (OSError, ValueError):
+        return None
+
+# Trainer env count is FIXED at BASE_ENVS for lab-launched jobs.
 #
-# 32, not 16. The old 16 came from a live-farm test that seemed to invert the
+# 32, not 16. The old 16 came from a live-lab test that seemed to invert the
 # idle-machine curve (teach-run-be11cc, "26 envs", held 6.8k steps/s vs 10.0k
 # at 16) — but that test was CONFOUNDED: its 26 trainer envs arrived as 5
 # helper ducks × 2, so it also carried five extra 50 Hz viewer sims in this
 # server. Helpers no longer resize the trainer, and an A/B with helpers-as-
-# viewers only (2026-08-30, farm + browser + a competing 16-env trainer all
+# viewers only (2026-08-30, lab + browser + a competing 16-env trainer all
 # live) re-agreed with the idle curve: 16 → 4.7k, 24 → 5.4k (+15%), 32 → 6.5k
 # (+37%). Idle the same day: 16 → 14.3k, 24 → 15.6k, 32 → 16.5k, ~17.1k
 # asymptote. Profiling says why more-than-cores wins: the parent's serial
@@ -265,7 +315,7 @@ class Duck:
         self.label = label
         self.infer = infer  # (obs[61]) -> action[14]
         self.env_kwargs = dict(env_kwargs or {})
-        # Brain provenance, for farm-state.json: a palette id, an .onnx path,
+        # Brain provenance, for lab-state.json: a palette id, an .onnx path,
         # or neither (a zero-infer trainee before its first snapshot).
         self.policy_id = policy_id
         self.onnx_path = onnx_path
@@ -282,23 +332,39 @@ class Duck:
         self.handoff_infer = None
         self.handoff_label = None
         self.handed = False
+        # Kept: rebuild_env re-seeds the env RNG, and every duck must keep
+        # drawing its own spawn stream (helpers exist to be independent).
+        self.seed = seed
         self.env = self._make_env(seed)
         self.obs, _ = self.env.reset(seed=seed)
         self._hold_yaw = None   # heading-hold anchor (see set_cmd)
+        self._settle = 0        # ticks since handoff (see _recenter_wz)
         self.falls = 0
         self.reward_ema = 0.0
         # Rolling window of heading-frame forward speeds (see sample_speed).
         self.speed_hist: deque[float] = deque(maxlen=SPEED_WINDOW)
 
-    def _make_env(self, seed: int):
+    def _make_env(self, seed: int, kwargs: dict | None = None):
         """A `behavior_id` in env_kwargs asks for the behavior's OWN env class
-        — spawn families and all — with `spawn_overrides` carrying the active
-        curriculum stage's knobs per instance. That's the trainee preview: the
-        plain walk env only ever spawns STANDING, so during "learning to land"
-        the user watched stand-then-topple while the real trainer practiced
-        mid-roll drops invisibly."""
-        kw = dict(self.env_kwargs)
+        — the walk env is only for policies that actually walk. Every policy
+        with a behavior behind it needs this: the walk env resamples a random
+        locomotion twist into the observation, which a trick policy trained on
+        pinned-zero twist reads as a walk order (measured: an assigned one_leg
+        policy fell 106x per 1500 steps there, 0x in its own env).
+
+        `spawn_overrides` then carries the active curriculum stage's knobs per
+        instance — that's the trainee preview, where spawn families matter: the
+        walk env only ever spawns STANDING, so during "learning to land" the
+        user watched stand-then-topple while the real trainer practiced
+        mid-roll drops invisibly. `standing_spawns` asks for the opposite
+        (keyframe starts under the behavior's own physics) — see
+        env_kwargs_for_behavior."""
+        # `kwargs` lets a caller build an env BEFORE committing it to
+        # self.env_kwargs (see rebuild_env), so a failed build can't poison
+        # the memo the rebuild guard compares against.
+        kw = dict(self.env_kwargs if kwargs is None else kwargs)
         behavior_id = kw.pop("behavior_id", None)
+        standing = kw.pop("standing_spawns", False)  # BehaviorEnv-only knob
         # 30 s episodes, matching EPISODE_RESET_S: the env default of 10 s
         # truncated preview ducks mid-sprint (the user watched a 1.0 m/s run
         # get cut off by the reset).
@@ -311,19 +377,29 @@ class Duck:
         # One compiled mjModel per (scene, actuator) for the whole roster. A
         # model costs ~470 MB as a process's first compile and ~90-140 MB per
         # extra copy, against the ~0.9 MB of mjData that is all a duck actually
-        # owns — a 6-duck farm was paying ~1.4 GB to simulate ~5 MB of state.
+        # owns — a 6-duck lab was paying ~1.4 GB to simulate ~5 MB of state.
         # Safe in particular because `common` pins domain_rand=False, so no env
         # here ever writes to the model, and the frame loop steps ducks
         # serially. BAM is the exception: it rewrites dof_frictionloss every
-        # physics substep, so a farm launched with MICRODUCK_ACTUATOR=bam
+        # physics substep, so a lab launched with MICRODUCK_ACTUATOR=bam
         # (resolved exactly as the env resolves it) keeps private models.
-        actuator = os.environ.get(
-            "MICRODUCK_ACTUATOR", kw.get("actuator", "xml")).strip().lower()
+        # actuator_force FIRST — it is what walk_env resolves as the winner, so
+        # this mirror has to agree with it or the two disagree in the worst
+        # possible way: a stage declaring bam on a lab whose process env does
+        # not (uv run duck-lab, no MICRODUCK_ACTUATOR) computed "xml" here,
+        # entered the SHARED-model scope, and handed every duck one mjModel
+        # that the BAM actuator then rewrites every substep — walk_env refuses it
+        # outright, and the raise lands inside the 50 Hz loop.
+        actuator = (
+            kw.get("actuator_force")
+            or os.environ.get("MICRODUCK_ACTUATOR", kw.get("actuator", "xml"))
+        ).strip().lower()
         scope = (nullcontext() if actuator == "bam"
                  else shared_model_scope(exclusive=False))
         with scope:
             if behavior_id:
-                return behaviors_mod.BehaviorEnv(behavior_id, **common, **kw)
+                return behaviors_mod.BehaviorEnv(
+                    behavior_id, standing_spawns=standing, **common, **kw)
             return MicroduckWalkEnv(**common, **kw)
 
     def set_cmd(self, cmd: np.ndarray) -> None:
@@ -361,10 +437,33 @@ class Duck:
         and fall-termination would reset it every couple of seconds."""
         if env_kwargs == self.env_kwargs:
             return
-        self.env_kwargs = dict(env_kwargs)
-        seed = 41
-        self.env = self._make_env(seed)
+        # The duck's OWN seed, not a constant: _make_env and env.reset both
+        # re-seed the env RNG that picks spawn families and pose noise, so
+        # rebuilding every duck with one seed (a stage handoff rebuilds the
+        # trainee AND every helper) made the helpers draw identical starts
+        # episode after episode — they stop being independent samples, which
+        # is the whole point of having them.
+        seed = self.seed
+        # Build FIRST, commit after. Committing env_kwargs up front meant a
+        # construction failure left the duck describing an env it does not
+        # have — and because the guard above compares against that memo, every
+        # retry with the same kwargs then returned instantly without rebuilding.
+        want = dict(env_kwargs)
+        env = self._make_env(seed, kwargs=want)
+        self.env_kwargs = want
+        self.env = env
         self.obs, _ = self.env.reset(seed=seed)
+        # Per-episode heading state belongs to the env that just died: the
+        # hold anchor is a yaw in the OLD sim's frame, and carrying it into a
+        # fresh one commands a saturated turn until the next episode reset.
+        self._hold_yaw = None
+        self._settle = 0
+        # Same reasoning as reset(): speed samples from the dead sim would be
+        # averaged into the HUD for the next half second, and a duck that had
+        # already handed off would run the stand policy in the fresh episode
+        # instead of the trick it was rebuilt to perform.
+        self.speed_hist.clear()
+        self.handed = False
 
     def swap_policy(self, label: str, infer, policy_id: str | None = None,
                     onnx_path: str | None = None) -> None:
@@ -375,6 +474,14 @@ class Duck:
         self.falls = 0
         self.reward_ema = 0.0
         self.speed_hist.clear()  # the old brain's speed is not this one's
+        # Handoff state belongs to the OUTGOING brain. Left standing, a duck
+        # that had already handed off kept handed=True while do_assign cleared
+        # handoff_infer for the incoming plain policy — the next tick called
+        # None(obs) and the TypeError killed the whole 50 Hz loop.
+        self.handed = False
+        self.handoff_infer = None
+        self.handoff_label = None
+        self._settle = 0
 
     def _handoff_due(self) -> bool:
         """The trick is finished and the duck is on both feet."""
@@ -394,10 +501,78 @@ class Duck:
         w = env.data.sensordata[env.gyro_adr]
         return float(w[0] ** 2 + w[1] ** 2 + w[2] ** 2) < 2.0
 
+    _walker_infer = None   # class-level lazy alpha_walking for recentering
+    _walker_missing = False  # upstream policies/ absent: try once, then skip
+
+    def _recenter_wz(self) -> float | None:
+        """After the trick settles, drive yaw back to the spawn heading.
+
+        The policy cannot learn this (yaw is unobservable — the whole
+        heading saga), so the COMMANDER owns it, exactly like the run's
+        heading-hold: hand the settled duck to alpha_walking with a turn
+        command until it faces its spawn vector again, then hand back to the
+        stand. Returns the wz command while recentring, else None.
+        """
+        if not self.handed:
+            self._settle = 0
+            return None
+        q = self.env.data.qpos[3:7]
+        yaw = float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]),
+                               1 - 2 * (q[2] ** 2 + q[3] ** 2)))
+        # Read home_yaw LIVE, deliberately. It is not a spawn anchor —
+        # BehaviorEnv re-anchors it to the current heading every ~5 s — so this
+        # correction only fires between resamples and self-heals afterwards.
+        # Latching it at handoff was measurably worse: a mid-flip spawn (~85%
+        # of a showcase mix) reports home_yaw ≈ ±180° because the ZYX yaw
+        # degenerates at trick pitch, and freezing that spun the duck ~140°
+        # on every landing. A real fix needs an upright-measured spawn anchor
+        # the env does not currently keep.
+        err = yaw - float(getattr(self.env, "home_yaw", 0.0) or 0.0)
+        err = float(np.arctan2(np.sin(err), np.cos(err)))
+        self._settle = getattr(self, "_settle", 0) + 1
+        if self._settle < 50:              # let the landing settle ~1 s first
+            return None
+        # Wider deadband + a timeout: at 8 deg the walker chased tiny errors
+        # and read as "shuffling toward the old vector" (alpha_walking's
+        # turn-in-place drifts forward slightly). 20 deg only triggers on
+        # genuinely crooked landings, and after ~3 s it stands wherever it is
+        # rather than pacing forever.
+        if abs(err) < 0.35 or self._settle > 200:
+            return None
+        return float(np.clip(-2.0 * err, -0.8, 0.8))
+
     def tick(self) -> None:
         if self.handoff_infer is not None and not self.handed and self._handoff_due():
             self.handed = True
-        action = (self.handoff_infer if self.handed else self.infer)(self.obs)
+
+        # handed without a brain to hand off to is the one combination that
+        # calls None(obs) and kills the loop; make it unrepresentable here
+        # rather than relying on every writer of handoff_infer to pair them.
+        if self.handed and self.handoff_infer is None:
+            self.handed = False
+        wz = self._recenter_wz() if self.handoff_infer is not None else None
+        if wz is not None:
+            if Duck._walker_infer is None and not Duck._walker_missing:
+                # POLICIES_DIR, not a cwd-relative path: this load happens
+                # deep inside the duck loop, where an exception kills the
+                # whole loop (every duck freezes while HTTP/WS stay green),
+                # and it would fire for any lab started outside
+                # microduck_local/.
+                try:
+                    Duck._walker_infer = _onnx_infer(
+                        POLICIES_DIR / "alpha_walking.onnx")
+                except Exception:
+                    # The upstream microduck/ clone is optional (the roster
+                    # loader already checks POLICIES_DIR.exists()), and this
+                    # runs inside lab_loop — an unguarded raise here stops the
+                    # sim for every duck while HTTP/WS stay green. Recentring
+                    # is a nicety; losing the whole loop is not.
+                    Duck._walker_missing = True
+        if wz is not None and Duck._walker_infer is not None:
+            self.env.twist_cmd[:] = (0.0, 0.0, wz)
+            action = Duck._walker_infer(self.obs)
+        else:
+            action = (self.handoff_infer if self.handed else self.infer)(self.obs)
         self.obs, reward, terminated, truncated, _ = self.env.step(action)
         self.reward_ema = 0.98 * self.reward_ema + 0.02 * float(reward)
         self.sample_speed()
@@ -428,7 +603,7 @@ class Duck:
         actually sideways, and a body-axis projection also pays for DIVING —
         a duck falling nose-down scores metres per second while covering no
         ground. That trap already cost this project a reward term that
-        rewarded a side shuffle for hours; test_farm pins the frame.
+        rewarded a side shuffle for hours; test_lab pins the frame.
 
         Reached through the module (not a `from … import`) so the
         importlib.reload in POST /teach keeps this binding live.
@@ -470,8 +645,10 @@ def _onnx_infer(path: Path):
 
 def _checkpoint_infer(zip_path: Path, vecnorm_path: Path):
     import pickle
+
     import torch
     from stable_baselines3 import PPO
+
     from .export_onnx import OnnxWalkPolicy
 
     model = PPO.load(str(zip_path), device="cpu")
@@ -496,6 +673,21 @@ def _run_mtime(run: Path) -> float | None:
     return None
 
 
+def _run_size(run: Path) -> int:
+    """Bytes a run dir occupies, checkpoints included — what deleting it
+    frees. The delete confirmation shows this, so a user can tell a 4 MB
+    scratch run from the 900 MB chain that is eating the disk. Unreadable
+    entries are skipped rather than failing the whole listing."""
+    total = 0
+    for f in run.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 # Curriculum-chain run names: teach-<behavior>-<hash>-sN. The palette folds
 # the stages of one chain into a single family row.
 _CHAIN_RE = re.compile(r"^(teach-.+)-s(\d+)$")
@@ -506,7 +698,9 @@ def discover_policies() -> list[dict]:
     `mtime` (epoch seconds, see _run_mtime) and are sorted newest-first —
     the user couldn't tell which run was fresh from bare name chips. Stage
     runs additionally carry `chain` (the prefix without -sN) and `stage`
-    (1-based) so the panel can group a curriculum chain as one family."""
+    (1-based) so the panel can group a curriculum chain as one family.
+    `sizeBytes` (run entries) is what deleting the run would free — the
+    palette's delete confirmation shows it."""
     out: list[dict] = []
     if POLICIES_DIR.exists():
         for p in sorted(POLICIES_DIR.glob("*.onnx")):
@@ -522,7 +716,8 @@ def discover_policies() -> list[dict]:
             if (run / "policy.onnx").exists():
                 entry = {"id": f"run:{run.name}", "label": run.name,
                          "group": "runs", "path": str(run / "policy.onnx"),
-                         "mtime": _run_mtime(run)}
+                         "mtime": _run_mtime(run),
+                         "sizeBytes": _run_size(run)}
                 m = _CHAIN_RE.match(run.name)
                 if m:
                     entry["chain"] = m.group(1)
@@ -537,6 +732,94 @@ def discover_policies() -> list[dict]:
                     ckpt_entries.append({"id": f"ckpt:{label}", "label": label,
                                          "group": "checkpoints", "path": str(z)})
     return out + run_entries + ckpt_entries
+
+
+# Run names as they arrive off the wire on DELETE /runs/{name}. Restrictive on
+# purpose (same reasoning as clip_path): the string selects a DIRECTORY TREE to
+# erase, so no separators, no leading dot, nothing that could climb out of
+# runs/.
+RUN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+
+
+def run_dir(name: str) -> Path:
+    """Path of a run directory inside RUNS_DIR, or ValueError."""
+    if not isinstance(name, str) or not RUN_NAME_RE.match(name) or ".." in name:
+        raise ValueError("run name must be 1-96 chars of letters, digits, dot, "
+                         "dash or underscore, starting alphanumeric")
+    return RUNS_DIR / name
+
+
+def chain_run_names(name: str) -> list[str]:
+    """Every EXISTING run dir belonging to chain `name`: the stage runs
+    <name>-s1, -s2, … in stage order, plus a bare <name> dir if one exists
+    (a non-curriculum job trained under the same base name). Used by
+    DELETE /runs/{name}?chain=true so a five-stage trick goes in one act
+    instead of five half-confirmed ones."""
+    if not RUNS_DIR.exists():
+        return []
+    staged: list[tuple[int, str]] = []
+    bare: list[str] = []
+    for d in RUNS_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        m = _CHAIN_RE.match(d.name)
+        if m and m.group(1) == name:
+            staged.append((int(m.group(2)), d.name))
+        elif d.name == name:
+            bare.append(d.name)
+    return bare + [n for _, n in sorted(staged)]
+
+
+def training_run_names(st: "LabState") -> set[str]:
+    """Run names the ACTIVE job owns — its current stage plus every other
+    stage of the same chain. A chain stage warm-starts from the previous
+    stage's dir, so deleting an already-finished stage mid-chain would break
+    the launch of the next one; the whole chain is off limits until the job
+    stops."""
+    job = getattr(st, "job", None)
+    if job is None or job.status != "training":
+        return set()
+    base = job._base_name
+    return {job.run_name, base} | {
+        d.name for d in ([] if not RUNS_DIR.exists() else RUNS_DIR.iterdir())
+        if d.is_dir() and (m := _CHAIN_RE.match(d.name)) and m.group(1) == base
+    }
+
+
+def delete_runs(names: list[str], st: "LabState | None" = None) -> dict:
+    """Erase run directories. All-or-nothing on the guards: if ANY target is
+    off limits (bad name, missing, still training) nothing is deleted, so a
+    chain can't end up half-gone. Returns {deleted, freedBytes}.
+
+    Deleting a run does NOT disturb ducks already running its brain — an
+    onnx session is loaded in memory and keeps stepping. They simply drop out
+    of the roster on the next lab restart (restore_ducks skips entries whose
+    file is gone)."""
+    active = training_run_names(st) if st is not None else set()
+    targets: list[Path] = []
+    for name in names:
+        d = run_dir(name)                       # raises ValueError on junk
+        if name in active:
+            raise PermissionError(
+                f"“{name}” belongs to the job training right now — stop the "
+                f"training first")
+        if not d.is_dir():
+            raise FileNotFoundError(name)
+        targets.append(d)
+    if not targets:
+        raise FileNotFoundError(", ".join(names) or "(nothing)")
+    freed = 0
+    deleted: list[str] = []
+    for d in targets:
+        freed += _run_size(d)
+        shutil.rmtree(d)
+        deleted.append(d.name)
+        # A cached infer keeps a deleted policy assignable by id — drop it so
+        # a stale palette chip fails honestly instead of resurrecting it.
+        _infer_cache.pop(f"run:{d.name}", None)
+        for key in [k for k in _infer_cache if k.startswith(f"ckpt:{d.name}@")]:
+            _infer_cache.pop(key, None)
+    return {"deleted": deleted, "freedBytes": freed}
 
 
 _infer_cache: dict[str, object] = {}
@@ -590,13 +873,13 @@ def build_ducks(args) -> list[Duck]:
             if not onnx.exists() and (p / "model.zip").exists():
                 from .export_onnx import export
                 export(p, onnx)
-                print(f"[farm] exported {onnx} on the fly")
+                print(f"[lab] exported {onnx} on the fly")
             if onnx.exists():
                 add(p.name, _onnx_infer(onnx), onnx_path=str(onnx))
             else:
-                print(f"[farm] skipping {p}: no policy.onnx / model.zip")
+                print(f"[lab] skipping {p}: no policy.onnx / model.zip")
         else:
-            print(f"[farm] skipping {spec}: not an .onnx or run dir")
+            print(f"[lab] skipping {spec}: not an .onnx or run dir")
     if not ducks:
         raise SystemExit("no ducks — pass run dirs or .onnx paths")
     return ducks
@@ -718,8 +1001,92 @@ class TrainingJob:
         self._offset = 0
         self._live_mtime = 0.0
         self._fps_points: list[tuple[float, float]] = []  # (steps, elapsed_s)
+        # Job-lifetime wall clock: elapsed_s restarts with every subprocess
+        # (stage handoffs, helper warm-restarts), so the "how long has this
+        # been training" number lives here instead. Frozen when the job
+        # leaves "training" so a finished run doesn't keep counting.
+        self._t0: float | None = time.time()
+        self._elapsed_final: float | None = None
         self.status = "training"  # training | done | stopped | failed
+        # A launched job creates the trainee/helpers, so its card owns them.
+        self.owns_preview_ducks = True
         self.proc = self._launch(init_from=launch_init)
+
+    # Does this job own the trainee/helper ducks? A LAUNCHED job creates them,
+    # so dismissing its card takes them along. An ADOPTED one (POST /teach/load,
+    # fired by merely selecting a duck) created nothing and must never sweep a
+    # roster it did not build — including the one restore_ducks just brought
+    # back after a restart.
+    #
+    # Defaults FALSE and is turned on in __init__, not the other way round:
+    # this flag guards an irreversible roster delete, so a construction path
+    # that forgets it must fail toward leaving ducks alone. (adopt() builds via
+    # cls.__new__ and hand-assigns its fields, so it never runs __init__ — it
+    # simply inherits this default.)
+    owns_preview_ducks = False
+
+    @classmethod
+    def adopt(cls, run_name: str) -> "TrainingJob":
+        """Seat a FINISHED run as the panel's current job — no subprocess.
+
+        POST /teach/load uses this so clicking a duck (or dropping a chip on
+        the teach panel) pulls that run's recipe up for refinement: the
+        payload streams in "done" state, which is exactly the state whose
+        sliders unlock and whose ✨ fine-tune targets `run_name`. Built from
+        the run's behavior.json (the weights actually trained under — written
+        so an inspected run can't show a different scorecard than it ran).
+        Always a single-run seat, even for a chain stage: fine-tuning `-s3`
+        should warm-start from THAT brain, and retrain re-runs the chain via
+        the behavior title as usual. `proc` is None; poll()/stop()/sample()
+        guard for it.
+        """
+        run = RUNS_DIR / run_name
+        meta = json.loads((run / "behavior.json").read_text())
+        behavior_id = meta.get("behavior")
+        if behavior_id not in behaviors_mod.BEHAVIORS:
+            raise ValueError(
+                f"{run_name} trained behavior {behavior_id!r}, which is no "
+                "longer in behaviors.py — nothing to refine")
+        self = cls.__new__(cls)
+        self.behavior = behaviors_mod.BEHAVIORS[behavior_id]
+        # Seated, not launched: created no preview ducks (redundant with the
+        # class default, stated here so the contract is visible at the site).
+        self.owns_preview_ducks = False
+        self.extra_env = {}
+        self.stages = ()
+        self._start_idx = 0
+        self.stage_idx = 0
+        self.run_name = run_name
+        self._base_name = run_name
+        curriculum = tuple(self.behavior.curriculum)
+        self._stage_env = dict(curriculum[-1].env) if curriculum else {}
+        self.budget = None
+        self.stage_budgets = {}
+        steps = int(meta.get("steps") or self.behavior.default_steps)
+        self.stage_steps = [steps]
+        self._stage_init_from = None
+        self.dir = run
+        self.helpers = 0
+        self.envs = BASE_ENVS
+        self.stop_requested = False
+        self.total_steps = steps
+        self.snap_steps = None
+        self.weights = self._clamp_weights(meta.get("weights") or None)
+        self.stage_weights = {}
+        self._refresh_extra_keys()
+        self.restarting = False
+        self._workers = []
+        self.progress = {"steps": 0, "total": steps}
+        self._offset = 0  # poll() replays progress.jsonl → real final numbers
+        # live.onnx here is old news, not a fresh snapshot — don't let the
+        # first poll() flag it.
+        self._live_mtime = time.time()
+        self._fps_points = []
+        self._t0 = None  # adopted after the fact — its wall clock is unknown
+        self._elapsed_final = None
+        self.status = "done"
+        self.proc = None
+        return self
 
     def _clamp_stage_budgets(self, stage_budgets: dict | None) -> dict[int, int]:
         """Explicit per-stage step counts, 1-based (JSON keys arrive as
@@ -824,9 +1191,13 @@ class TrainingJob:
         return card
 
     def stage_env(self) -> dict[str, str]:
-        """The ACTIVE stage's env knobs (spawn window/mix) — what the farm
-        mirrors onto the trainee's preview env as spawn_overrides."""
-        return dict(self._stage_env)
+        """The ACTIVE stage's env knobs — what the lab mirrors onto the
+        trainee's preview env. Includes `extra_env` (the run's MICRODUCK_CLIP)
+        because the trainer subprocess merges the same two dicts into its
+        environment (see _launch): an imitation run whose clip only rode
+        extra_env gave the preview duck the recipe's DEFAULT clip, so the
+        watched duck tracked a different motion than the one training."""
+        return {**self.extra_env, **self._stage_env}
 
     def _launch(self, init_from: Path | None) -> subprocess.Popen:
         cmd = [sys.executable, "-m", "microduck_local.train_behavior",
@@ -940,6 +1311,8 @@ class TrainingJob:
         # Held locally as well as cached: scale() runs on a worker thread, so
         # a concurrent poll() may rebind self._workers between these two
         # lines, and the fleet we are killing is the one we just named.
+        if self.proc is None:  # adopted run: no subprocess ever existed
+            return
         workers = self._snapshot_workers()
         if self.proc.poll() is None:
             self.proc.terminate()
@@ -954,7 +1327,7 @@ class TrainingJob:
     def scale(self, helpers: int) -> None:
         """Warm-restart the trainer. Blocking (SIGTERM + wait) — call it
         from a thread. Env count stays BASE_ENVS: helpers are extra
-        viewers, not extra workers (see the module comment on live-farm
+        viewers, not extra workers (see the module comment on live-lab
         steps/s). Used by /teach/weights, not by spawn_helper."""
         self.restarting = True
         try:
@@ -1008,10 +1381,12 @@ class TrainingJob:
             if m > self._live_mtime + 0.5:
                 self._live_mtime = m
                 snap = True
+        if self.proc is None:  # adopted run: nothing running, nothing to reap
+            return changed, snap
         # During scale() the old proc is dead on purpose — not a failure.
         if (self.proc.poll() is not None and self.status == "training"
                 and not self.restarting):
-            # A trainer the farm did not kill itself (OOM, a stray kill -9, a
+            # A trainer the lab did not kill itself (OOM, a stray kill -9, a
             # crash by signal) never runs multiprocessing's atexit hook, so it
             # orphans its workers exactly as an un-swept stop did. This is the
             # last moment anything knows their pids — spend the snapshot.
@@ -1028,6 +1403,8 @@ class TrainingJob:
                 self._advance_stage()
             else:
                 self.status = "done" if self.proc.returncode == 0 else "failed"
+                self.finished_clean = self.status == "done"
+                self._freeze_elapsed()
             changed = True
         else:
             self._snapshot_workers()
@@ -1060,10 +1437,11 @@ class TrainingJob:
         # process, set status="stopped", and then scale() went on to launch a
         # brand-new trainer and rebind self.proc. poll() is gated on
         # status == "training", so that trainer — plus its 16-32 fork workers —
-        # ran unreachable until the farm exited.
+        # ran unreachable until the lab exited.
         self.stop_requested = True
         self._terminate_tree(wait_s=0)
         self.status = "stopped"
+        self._freeze_elapsed()
 
     def stage_payload(self) -> dict | None:
         """The frame's `training.stage` field — null for single-run jobs.
@@ -1075,6 +1453,21 @@ class TrainingJob:
         return {"idx": self.stage_idx + 1, "count": len(self.stages),
                 "label": stage.label, "detail": stage.detail,
                 "start": self._start_idx + 1}
+
+    def _freeze_elapsed(self) -> None:
+        if self._t0 is not None and self._elapsed_final is None:
+            self._elapsed_final = time.time() - self._t0
+
+    def overall_elapsed(self) -> float | None:
+        """Wall-clock seconds the JOB has been training — across stage
+        handoffs and warm restarts, where progress.elapsed_s starts over.
+        Frozen at the moment the job stops training; None for adopted runs
+        (they finished before this lab ever saw them)."""
+        if self._t0 is None:
+            return None
+        if self._elapsed_final is not None:
+            return self._elapsed_final
+        return time.time() - self._t0
 
     def overall_progress(self) -> tuple[int, int]:
         """(steps, total) cumulative across the stages actually being RUN,
@@ -1096,7 +1489,10 @@ class TrainingJob:
             # overall* are cumulative across the stage chain (== steps/total
             # for single-run jobs).
             "progress": {**self.progress, "overallSteps": overall_steps,
-                         "overallTotal": overall_total},
+                         "overallTotal": overall_total,
+                         "overallElapsed": (
+                             None if (el := self.overall_elapsed()) is None
+                             else round(el, 1))},
             "stage": self.stage_payload(),
             # Per-stage OVERRIDES only (1-based string keys) — the panel
             # layers them over `weights` to show a stage's merged sliders.
@@ -1132,10 +1528,10 @@ class StatsSampler:
     """
 
     def __init__(self):
-        self.farm = psutil.Process()
+        self.lab = psutil.Process()
         self._tracked: dict[int, psutil.Process] = {}
         psutil.cpu_percent(interval=None)  # prime the machine-wide window
-        self.farm.cpu_percent(interval=None)
+        self.lab.cpu_percent(interval=None)
 
     def _tree(self, root_pid: int) -> tuple[float, float] | None:
         """(cpu%, rss MB) summed over a process and its live descendants — the
@@ -1163,13 +1559,13 @@ class StatsSampler:
         stats = {
             "cpu": psutil.cpu_percent(interval=None),
             "mem": psutil.virtual_memory().percent,
-            "farm": {"cpu": round(self.farm.cpu_percent(interval=None), 1),
-                     "memMb": round(self.farm.memory_info().rss / 2**20, 1)},
+            "lab": {"cpu": round(self.lab.cpu_percent(interval=None), 1),
+                     "memMb": round(self.lab.memory_info().rss / 2**20, 1)},
             "trainer": None,
             "trainFps": None,
         }
         if job is not None:
-            if job.proc.poll() is None:
+            if job.proc is not None and job.proc.poll() is None:
                 tree = self._tree(job.proc.pid)
                 if tree is not None:
                     stats["trainer"] = {"cpu": round(tree[0], 1),
@@ -1179,17 +1575,17 @@ class StatsSampler:
         return stats
 
 
-# ------------------------------------------------------------ farm persistence
+# ------------------------------------------------------------ lab persistence
 
-def farm_state_path() -> Path:
-    """Roster persistence target. FARM_STATE_PATH lets a scratch server (tests,
-    a second port) keep its hands off the real farm's file."""
-    env = os.environ.get("FARM_STATE_PATH")
-    return Path(env) if env else RUNS_DIR.parent / "farm-state.json"
+def lab_state_path() -> Path:
+    """Roster persistence target. LAB_STATE_PATH lets a scratch server (tests,
+    a second port) keep its hands off the real lab's file."""
+    env = os.environ.get("LAB_STATE_PATH")
+    return Path(env) if env else RUNS_DIR.parent / "lab-state.json"
 
 
 def teach_weights_path() -> Path:
-    return farm_state_path().with_name("teach-weights.json")
+    return lab_state_path().with_name("teach-weights.json")
 
 
 # The layers of one behavior's sticky panel settings. Everything a user
@@ -1254,7 +1650,7 @@ def save_teach_weights(w: dict[str, dict]) -> None:
     tmp.replace(path)
 
 
-def save_farm_state(ducks: list[Duck]) -> None:
+def save_lab_state(ducks: list[Duck]) -> None:
     state = {"version": 1, "ducks": [
         {"id": d.id, "label": d.label, "policy": d.policy_id,
          "onnxPath": d.onnx_path,
@@ -1262,14 +1658,14 @@ def save_farm_state(ducks: list[Duck]) -> None:
          "showcase": bool(getattr(d, "showcase", False))}
         for d in ducks
     ]}
-    path = farm_state_path()
+    path = lab_state_path()
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(path)  # atomic: a crash mid-write can't corrupt the roster
 
 
 def restore_ducks(path: Path) -> list[Duck]:
-    """Rebuild the roster from farm-state.json. Training jobs die with the
+    """Rebuild the roster from lab-state.json. Training jobs die with the
     server, so a trainee/helper comes back frozen at its last live.onnx
     snapshot; entries whose brain can't be loaded any more are skipped."""
     state = json.loads(path.read_text())
@@ -1283,7 +1679,7 @@ def restore_ducks(path: Path) -> list[Duck]:
             else:
                 raise ValueError("no brain recorded")
         except Exception as e:
-            print(f"[farm] skipping {entry.get('id')} from {path.name}: "
+            print(f"[lab] skipping {entry.get('id')} from {path.name}: "
                   f"{type(e).__name__}: {e}")
             continue
         run_path = entry.get("onnxPath")
@@ -1305,6 +1701,12 @@ def restore_ducks(path: Path) -> list[Duck]:
         duck.handoff_infer, duck.handoff_label = ho if ho else (None, None)
         ducks.append(duck)
     return ducks
+
+
+class HfTokenReq(BaseModel):
+    """POST /settings/hf body: the user's own Hugging Face access token
+    (BYOK). Needs write scope on their namespace for the Jobs API."""
+    token: str
 
 
 class TeachReq(BaseModel):
@@ -1342,6 +1744,15 @@ class StageWeightsReq(BaseModel):
     stageWeights: dict[str, dict[str, float]]
 
 
+class LoadRunReq(BaseModel):
+    """POST /teach/load — seat a FINISHED run in the teach panel without
+    starting anything: its recipe card, sliders and ✨ fine-tune target become
+    that run's (TrainingJob.adopt). `policy` is a palette id ("run:<name>",
+    "ckpt:<name>@Nk") or a bare run name under runs/. Refused while a job is
+    actively training."""
+    policy: str
+
+
 def resolve_stage_init(behavior_id: str, start_stage: int) -> Path:
     """Warm start for a chain beginning at stage N>1: the most recently
     trained run dir matching teach-<behaviorId>-*-s{N-1} (any chain hash)
@@ -1376,7 +1787,7 @@ def resolve_init_from(name: str) -> Path:
     return run
 
 
-class FarmState:
+class LabState:
     def __init__(self, ducks: list[Duck]):
         self.ducks = ducks
         self.clients: set[WebSocket] = set()
@@ -1384,7 +1795,10 @@ class FarmState:
         self.override_until = 0.0
         self.script_t = 0.0
         self.job: TrainingJob | None = None
-        self.events: list[str] = []  # one-shot toast lines for the UI
+        # Bounded: events are drained only when a client is attached, so a
+        # headless lab (a long training chain with no browser open) grew
+        # this forever while only the last few are ever sent.
+        self.events: deque[str] = deque(maxlen=200)  # one-shot toast lines for the UI
         self.scaling = False  # a spawn/remove scale is in flight — hold others
         self.stats: dict = {}
 
@@ -1411,7 +1825,7 @@ def next_helper_slot(ducks: list[Duck]) -> int:
     return n
 
 
-def spawn_helper_error(st: FarmState) -> str | None:
+def spawn_helper_error(st: LabState) -> str | None:
     """Why {"spawn_helper": true} can't be honored right now (None = go)."""
     if st.job is None or st.job.status != "training":
         return "no active training for a helper to join"
@@ -1424,10 +1838,10 @@ def spawn_helper_error(st: FarmState) -> str | None:
     return None
 
 
-MAX_DUCKS = 20  # perf guard: each duck is a live CPU-MuJoCo env in the farm loop
+MAX_DUCKS = 20  # perf guard: each duck is a live CPU-MuJoCo env in the lab loop
 
 
-def remove_duck_error(st: FarmState, duck_id: str) -> str | None:
+def remove_duck_error(st: LabState, duck_id: str) -> str | None:
     """Why {"remove_duck": ...} can't be honored (None = go). ANY duck can be
     removed (declutter: the default checkpoint roster crowds the view during a
     training run) except the trainee mid-training — it's the run's only
@@ -1442,13 +1856,25 @@ def remove_duck_error(st: FarmState, duck_id: str) -> str | None:
 
 
 def env_kwargs_for_behavior(b) -> dict:
-    """Farm-preview physics matching a behavior's training env."""
-    kw: dict = {}
+    """Lab-preview physics matching a behavior's training env.
+
+    `behavior_id` is the load-bearing key: without it `Duck._make_env` builds a
+    plain MicroduckWalkEnv, and a trick policy then runs under the WALKING
+    contract — the walk env resamples a random locomotion twist into the
+    observation (at reset and every resample window), which the lab's
+    `set_cmd(zeros)` cannot undo because the obs is already built. Measured on
+    an assigned one_leg policy: 106 falls per 1500 steps in the walk env, 0 in
+    its own env with the same weights. `standing_spawns` then holds the visible
+    contract of a plain assign — a finished trick shows off from its feet, not
+    dropped mid-roll (that is what the ✨ showcase assign is for) and not lying
+    on the floor (`stand`'s 50% ground-spawn family).
+    """
+    kw: dict = {"behavior_id": b.id, "standing_spawns": True}
     if getattr(b, "scene", "walk") == "all":
         kw["scene_xml"] = str(C.SCENE_ALL_XML)
     if not getattr(b, "terminate_on_fall", True):
         kw["terminate_on_fall"] = False
-    # Preview episodes as long as training ones — a 10 s farm default made
+    # Preview episodes as long as training ones — a 10 s lab default made
     # long-hold tricks look like they reset mid-pose.
     ep = getattr(b, "episode_s", None)
     if ep and ep > 10.0:
@@ -1486,22 +1912,41 @@ def trainee_env_kwargs(b, stage_env: dict[str, str] | None = None) -> dict:
                 "0.85" if p == max(probs) else f"{0.15 * p / rest:.3f}"
                 for p in probs)
     kw = {**env_kwargs_for_behavior(b), "behavior_id": b.id,
+          # The trainee/showcase preview mirrors the TRAINER's spawns, so it
+          # drops the standing pin a plain assign carries.
+          "standing_spawns": False,
           "spawn_overrides": overrides}
     # Trainee preview should see the same plant the trainer subprocess uses.
     # BAM cannot share a model with the rest of the roster, and _make_env
     # already falls back to a private compile when actuator is bam.
     if getattr(b, "forward_cmd", 0.0):
         kw["actuator"] = "bam"
-    if (stage_env or {}).get("MICRODUCK_CLIP"):
-        kw["clip_name"] = stage_env["MICRODUCK_CLIP"]
+    # PHYSICS knobs mirror per instance too, not just spawns. The lab process
+    # runs with MICRODUCK_ACTUATOR=bam and no current scale, so before this a
+    # stage declaring xml (the headstand ladder's training wheels) or bam@1.3
+    # trained on those servos while the watched preview duck ran honest bam —
+    # a policy that holds in training visibly crumples in the viewer, which is
+    # exactly the "am I watching the trainer?" confusion this function exists
+    # to prevent. actuator_force/bam_current_scale beat the process env.
+    act = overrides.get("MICRODUCK_ACTUATOR")
+    if act:
+        kw["actuator_force"] = act
+    cur = overrides.get("MICRODUCK_BAM_CURRENT_SCALE")
+    if cur:
+        try:
+            kw["bam_current_scale"] = float(cur)
+        except ValueError:
+            pass
+    if overrides.get("MICRODUCK_CLIP"):
+        kw["clip_name"] = overrides["MICRODUCK_CLIP"]
     return kw
 
 
-def on_stage_handoff(st: "FarmState") -> None:
+def on_stage_handoff(st: "LabState") -> None:
     """A curriculum stage just advanced: narrate it ("Training …" so the
     teach panel's event filter folds it into the chat) and re-mirror the
     trainee's preview env onto the NEW stage's spawn knobs — the trainer
-    subprocess gets them via its environment, but the farm's in-process
+    subprocess gets them via its environment, but the lab's in-process
     preview needs them per instance or it keeps rehearsing the old stage."""
     sp = st.job.stage_payload()
     st.events.append(
@@ -1553,29 +1998,11 @@ def showcase_env_kwargs(path: str | None) -> dict | None:
                                     "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0,0.0"})
         kw["spotter"] = True
         return kw
-
-
-HANDOFF_POLICY = "pollen:alpha_stand"
-
-
-def handoff_for(path: str | None):
-    """The brain a finished trick hands control to — the robot's own pattern
-    (policies hot-swap behind the shared 61-obs contract). A trick policy
-    lands in a crouch it cannot rise from; alpha_stand rises from that exact
-    pose and holds. Returns (infer, label) or None."""
-    if not path:
-        return None
-    bj = Path(path).parent / "behavior.json"
-    try:
-        b = behaviors_mod.BEHAVIORS[json.loads(bj.read_text()).get("behavior")]
-    except (OSError, KeyError, json.JSONDecodeError):
-        return None
-    if not b.curriculum:
-        return None
-    try:
-        return load_policy_infer(HANDOFF_POLICY), HANDOFF_POLICY.split(":", 1)[-1]
-    except Exception:
-        return None
+    # UNSPOTTED showcase (the headstand ladder is the first such trick: a
+    # curriculum with no spotter_fn). This tail used to sit — unreachable —
+    # after handoff_for's return, so every unspotted chain fell through to
+    # None and do_assign silently downgraded the ✨ chip to a plain standing
+    # assign with no handoff.
     env = dict(b.curriculum[-1].env)
     # Lean the spawn mix toward the trick's arc for VIEWING: the final stage
     # trains mostly from plain starts (right for training, but a policy that
@@ -1597,6 +2024,36 @@ def handoff_for(path: str | None):
     return trainee_env_kwargs(b, env)
 
 
+HANDOFF_POLICY = "pollen:alpha_stand"
+
+
+def handoff_for(path: str | None):
+    """The brain a finished trick hands control to — the robot's own pattern
+    (policies hot-swap behind the shared 61-obs contract). A trick policy
+    lands in a crouch it cannot rise from; alpha_stand rises from that exact
+    pose and holds. Returns (infer, label) or None."""
+    if not path:
+        return None
+    bj = Path(path).parent / "behavior.json"
+    try:
+        b = behaviors_mod.BEHAVIORS[json.loads(bj.read_text()).get("behavior")]
+    except (OSError, KeyError, json.JSONDecodeError):
+        return None
+    if not b.curriculum:
+        return None
+    # Only offer the hand-off if the duck can ever ASK for it. _handoff_due
+    # tests env._bf_rot, the rotation accumulator that only the flip family's
+    # state_fn advances — a headstand never sets it, so attaching alpha_stand
+    # to that chain advertised "handoff: alpha_stand" in every frame for a
+    # swap that could not happen.
+    if getattr(b, "state_fn", None) is not behaviors_mod._bf_update:
+        return None
+    try:
+        return load_policy_infer(HANDOFF_POLICY), HANDOFF_POLICY.split(":", 1)[-1]
+    except Exception:
+        return None
+
+
 def showcase_label(policy_id: str, spotted: bool = False) -> str:
     """Roster label for a showcase duck: the CHAIN's name rather than one
     stage's run name, marked ✨ so it reads as "the whole trick" next to a
@@ -1614,8 +2071,11 @@ def showcase_label(policy_id: str, spotted: bool = False) -> str:
     return f"{chain} ✨ spotter-driven" if spotted else f"{chain} ✨"
 
 
+_TRICK_DUCK_CACHE: dict[str, bool] = {}
+
+
 def is_trick_duck(d: Duck) -> bool:
-    """Trick policies trained on zero twist commands — the farm never sends
+    """Trick policies trained on zero twist commands — the lab never sends
     them drive commands, and the UI surfaces them as non-steerable (a fully
     decluttered roster of trick ducks once made WASD look broken: every
     command was correctly ignored by everyone)."""
@@ -1632,14 +2092,34 @@ def is_trick_duck(d: Duck) -> bool:
     # it trained: behavior.json {"behavior": "run", ...}. Zero commands only
     # for behaviors that actually trained on zero twist (forward_cmd == 0).
     name = pid.split(":", 1)[1]
+    # MEMOIZED: this is called once per duck per 50 Hz tick and twice more per
+    # broadcast frame, and it used to read+parse behavior.json from disk every
+    # time — ~100 synchronous file reads/second per assigned run duck, on the
+    # event loop that also runs the sim and the WS broadcast. A run's recorded
+    # behavior never changes once written, so the answer is cacheable for the
+    # life of the process (a re-trained run keeps the same behavior id).
+    cached = _TRICK_DUCK_CACHE.get(name)
+    if cached is not None:
+        return cached
+    verdict = name.startswith("teach-")   # unknown: old conservative rule
     try:
         rec = json.loads((RUNS_DIR / name / "behavior.json").read_text())
         b = behaviors_mod.BEHAVIORS.get(rec.get("behavior", ""))
         if b is not None:
-            return not bool(getattr(b, "forward_cmd", 0.0))
+            verdict = not bool(getattr(b, "forward_cmd", 0.0))
+        _TRICK_DUCK_CACHE[name] = verdict
     except (OSError, ValueError):
-        pass
-    return name.startswith("teach-")   # unknown: keep the old conservative rule
+        # Cache the name-based fallback for anything that is not "the run dir
+        # isn't there yet". A run that exists without a readable behavior.json
+        # (train-walk and distill write none; a kill mid-write can truncate
+        # one; a permission or not-a-directory error is permanent) would
+        # otherwise re-attempt the failing open() ~100x/second per duck on the
+        # event loop that also steps the sim — exactly the traffic this memo
+        # exists to remove. The cache is dropped on every recipe reload and on
+        # run deletion, which are the events that can change the answer.
+        if (RUNS_DIR / name).is_dir():
+            _TRICK_DUCK_CACHE[name] = verdict
+    return verdict
 
 
 def next_duck_slot(ducks: list[Duck]) -> int:
@@ -1652,12 +2132,12 @@ def next_duck_slot(ducks: list[Duck]) -> int:
     return n
 
 
-def spawn_duck_error(st: FarmState, policy_id: str | None) -> str | None:
+def spawn_duck_error(st: LabState, policy_id: str | None) -> str | None:
     """Why {"spawn_duck": ...} can't be honored (None = go)."""
     if not policy_id:
         return "spawn_duck needs a policy id"
     if len(st.ducks) >= MAX_DUCKS:
-        return f"farm is full ({MAX_DUCKS} ducks) — remove one first"
+        return f"lab is full ({MAX_DUCKS} ducks) — remove one first"
     return None
 
 
@@ -1838,7 +2318,7 @@ _pose_scratch: PoseScratch | None = None
 
 
 def pose_scratch() -> PoseScratch:
-    """Lazily built singleton — the editor is optional, so a farm that never
+    """Lazily built singleton — the editor is optional, so a lab that never
     opens it never pays for the extra model."""
     global _pose_scratch
     if _pose_scratch is None:
@@ -1939,7 +2419,7 @@ def save_clip(name: str, clip: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(clip, indent=2))
-    tmp.replace(path)  # atomic, like farm-state.json
+    tmp.replace(path)  # atomic, like lab-state.json
 
 
 def load_clips() -> list[dict]:
@@ -1963,17 +2443,95 @@ def load_clips() -> list[dict]:
     return out
 
 
+# --------------------------------------------------------------------------
+# 🎥 screen captures — the viewer records its canvas with MediaRecorder and
+# uploads the take here; ffmpeg (imageio-ffmpeg's bundled binary, same as
+# render_rollout) turns it into a shareable mp4 + palette gif in captures/.
+
+CAPTURE_SLUG_RE = re.compile(r"[^A-Za-z0-9_-]+")
+CAPTURE_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(mp4|gif)$")
+CAPTURE_MAX_BYTES = 300 * 1024 * 1024
+CAPTURE_GIF_WIDTH = 480
+
+
+def captures_dir() -> Path:
+    """Capture store, resolved per call (clips_dir convention) so
+    MICRODUCK_CAPTURES_DIR set after import still wins."""
+    env = os.environ.get("MICRODUCK_CAPTURES_DIR")
+    return Path(env) if env else CAPTURES_DIR
+
+
+def capture_slug(name: str) -> str:
+    """Duck names carry emoji/spaces — reduce to a safe filename stem."""
+    slug = CAPTURE_SLUG_RE.sub("-", name).strip("-").lower()[:40].strip("-")
+    # CAPTURE_FILE_RE (what GET /captures/{fname} will accept) demands an
+    # alphanumeric first character, but the slug charset keeps "_" — a duck
+    # named "_experimental" produced a file the panel's own download links
+    # then refused to serve with 422.
+    slug = slug.lstrip("_-")
+    return slug or "duck"
+
+
+def capture_base(name: str) -> str:
+    """Unique stem for a new capture: slug + timestamp (+ -2, -3… on a
+    same-second collision, so a quick retake never overwrites the last one)."""
+    stem = f"{capture_slug(name)}-{time.strftime('%Y%m%d-%H%M%S')}"
+    d = captures_dir()
+    base, n = stem, 2
+    while (d / f"{base}.mp4").exists() or (d / f"{base}.gif").exists():
+        base = f"{stem}-{n}"
+        n += 1
+    return base
+
+
+def _ffmpeg(*args: str, timeout: float = 180.0) -> None:
+    import imageio_ffmpeg
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    proc = subprocess.run([exe, "-y", "-hide_banner", "-loglevel", "error", *args],
+                          capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()[-3:]
+        raise RuntimeError("; ".join(tail) or f"ffmpeg exited {proc.returncode}")
+
+
+def convert_capture(src: Path, base: str) -> dict:
+    """Browser upload → captures/<base>.mp4 + .gif. Blocking — call it in a
+    thread. ffmpeg sniffs the container, so whatever MediaRecorder produced
+    (webm on Chrome/Firefox, mp4 on Safari) works unchanged."""
+    d = captures_dir()
+    mp4, gif = d / f"{base}.mp4", d / f"{base}.gif"
+    # h264 yuv420p rejects odd dimensions and browser canvases often are —
+    # the same trap render_rollout hit; crop-to-even instead of failing.
+    _ffmpeg("-i", str(src), "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+            "-movflags", "+faststart", str(mp4))
+    # gif from the cleaned mp4: two-pass palette at a README-friendly width.
+    # (Plain palettegen/paletteuse only — imageio-ffmpeg's bundled binary is
+    # an older build without stat_mode/diff_mode.)
+    _ffmpeg("-i", str(mp4), "-filter_complex",
+            f"[0:v] fps=15,scale={CAPTURE_GIF_WIDTH}:-1:flags=lanczos,"
+            "split [a][b];[a] palettegen [p];"
+            "[b][p] paletteuse=dither=bayer:bayer_scale=5",
+            str(gif))
+    return {
+        "name": base,
+        "mp4": f"/captures/{mp4.name}", "mp4Kb": mp4.stat().st_size // 1024,
+        "gif": f"/captures/{gif.name}", "gifKb": gif.stat().st_size // 1024,
+        "dir": str(d),
+    }
+
+
 def make_app(ducks: list[Duck]):
     scene = extract_scene()
-    st = FarmState(ducks)
+    st = LabState(ducks)
     stats = StatsSampler()
     st.stats = stats.sample(None)  # frames carry the full stats shape from #1
 
     @asynccontextmanager
     async def lifespan(_app):
-        task = asyncio.create_task(farm_loop())
+        task = asyncio.create_task(lab_loop())
         # Nothing else ever retrieves this task's exception, so before this
-        # callback a crash in farm_loop killed every duck SILENTLY: HTTP and
+        # callback a crash in lab_loop killed every duck SILENTLY: HTTP and
         # the WebSocket handshake kept working, the viewer kept its green
         # "live" badge, and zero frames arrived. That is precisely how a
         # set-mutation race in the broadcast went unnoticed. Log it loudly.
@@ -1983,8 +2541,8 @@ def make_app(ducks: list[Duck]):
             exc = t.exception()
             if exc is not None:
                 traceback.print_exception(type(exc), exc, exc.__traceback__)
-                print("[farm] FATAL: the duck loop stopped — no frames will be "
-                      "sent. Restart the farm.", flush=True)
+                print("[lab] FATAL: the duck loop stopped — no frames will be "
+                      "sent. Restart the lab.", flush=True)
 
         task.add_done_callback(_loop_died)
         yield
@@ -1992,10 +2550,35 @@ def make_app(ducks: list[Duck]):
         if st.job:
             st.job.stop()
 
-    app = FastAPI(title="Duck farm", lifespan=lifespan)
+    app = FastAPI(title="Duck lab", lifespan=lifespan)
+    app.state.lab = st  # the roster/job the handlers close over, for tests
     app.add_middleware(GZipMiddleware, minimum_size=1024)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                       allow_headers=["*"])
+    # LOCAL origins only. This was allow_origins=["*"], which was harmless
+    # while every route was a read or a duck nudge — but the lab now owns
+    # DELETE /runs/{name} (rmtree of a whole training chain) and the BYOK
+    # Hugging Face token. With a wildcard, ANY page the user browses while
+    # the lab runs could enumerate /policies and delete every run, or swap
+    # the stored token, from the user's own machine. Both of those are
+    # preflighted requests (DELETE; POST with application/json), so an
+    # origin allowlist is what actually stops them.
+    # The viewer is served from localhost (63317 by default, any port in a
+    # dev setup) and may be pointed at this lab via ?lab=host:port, so the
+    # allowlist is "any localhost origin", expressed as a regex because the
+    # port varies. Non-browser clients (curl, the CLI) are unaffected —
+    # CORS only ever constrained browsers.
+    app.add_middleware(
+        CORSMiddleware,
+        # LOOPBACK ONLY. An earlier revision also admitted RFC1918 and
+        # *.local origins so the "Network: http://192.168.x.x:63317" URL that
+        # `next dev` prints would work — on the reasoning that such an origin
+        # is the same machine. That reasoning is wrong: a page served by ANY
+        # other host on the LAN (a neighbour's laptop, a router admin UI, a
+        # captive portal) is a genuine 192.168 origin, forges nothing, and
+        # would have been handed DELETE /runs and the HF token routes. The
+        # lab binds 127.0.0.1, so loopback is the whole legitimate surface;
+        # open the viewer at http://localhost:63317, not the Network URL.
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+        allow_methods=["*"], allow_headers=["*"])
 
     @app.get("/scene")
     def get_scene() -> dict:
@@ -2004,6 +2587,136 @@ def make_app(ducks: list[Duck]):
     @app.get("/policies")
     def get_policies() -> dict:
         return {"policies": discover_policies()}
+
+    @app.delete("/runs/{name}")
+    def delete_run(name: str, chain: bool = False) -> dict:
+        """Permanently delete a training run (or a whole curriculum chain with
+        ?chain=true): policy.onnx, checkpoints, progress log, the lot. The
+        viewer confirms first — this endpoint is the point of no return."""
+        names = chain_run_names(name) if chain else [name]
+        try:
+            result = delete_runs(names, st)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        except PermissionError as e:
+            raise HTTPException(409, str(e))
+        except FileNotFoundError:
+            raise HTTPException(404, f"no run named \u201c{name}\u201d")
+        except OSError as e:
+            raise HTTPException(500, f"could not delete \u201c{name}\u201d: {e}")
+        # Drop a teach card that was showing one of these runs. A finished run
+        # seated by /teach/load is adopted as status "done", so it is NOT
+        # protected by training_run_names (nor should it be \u2014 finished runs are
+        # ordinary data): without this the panel kept streaming a card for a
+        # deleted dir, and its \u2728 fine-tune launched against nothing.
+        for gone in result["deleted"]:
+            _TRICK_DUCK_CACHE.pop(gone, None)
+        if st.job is not None and st.job.run_name in set(result["deleted"]):
+            owned = st.job.owns_preview_ducks
+            st.job = None
+            # ...and its preview ducks go with it — but ONLY if this card
+            # actually built them. A seated card (teach/load, fired by mere
+            # duck selection) may be showing run B while the trainee and
+            # helpers on the pitch belong to run A and still preview it; those
+            # must survive B's deletion. Same ownership rule teach_clear uses.
+            if owned:
+                kept = [d for d in st.ducks
+                        if d.id != "trainee" and not d.id.startswith("helper")]
+                if len(kept) != len(st.ducks):
+                    st.ducks = kept
+                    save_lab_state(st.ducks)
+        mb = result["freedBytes"] / 1e6
+        st.events.append(
+            f"\U0001f5d1 deleted {name}"
+            + (f" ({len(result['deleted'])} stages)" if chain and len(result["deleted"]) > 1 else "")
+            + f" \u2014 {mb:.0f} MB freed")
+        return result
+
+    @app.get("/runs/{name}/policy.onnx")
+    def download_policy(name: str) -> FileResponse:
+        """The deployable brain for a run, one click from the policies panel.
+
+        Serves policy.onnx (the export with the obs normalizer baked in \u2014
+        the only artifact worth handing anyone; the playbook forbids raw
+        checkpoints), falling back to the newest live.onnx snapshot while
+        the run is still training. Same restrictive name rule as DELETE:
+        the string picks a directory, so it must not be able to climb."""
+        try:
+            d = run_dir(name)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        for fname in ("policy.onnx", "live.onnx"):
+            p = d / fname
+            if p.exists():
+                return FileResponse(p, media_type="application/octet-stream",
+                                    filename=f"{name}.onnx")
+        raise HTTPException(404, f"no exported policy in \u201c{name}\u201d yet")
+
+    # ---- \u2699 settings: BYOK Hugging Face token -----------------------------
+    # The browser never sees the token again after POSTing it: GET returns a
+    # mask + the username captured at validation time, and the file sits
+    # 0600 + gitignored beside runs/. The token's job is the REAL training
+    # step \u2014 launching microduck_rl on HF Jobs GPUs under the user's account.
+
+    @app.get("/settings/hf")
+    def hf_settings() -> dict:
+        d = load_hf_token()
+        if not d:
+            return {"configured": False}
+        return {"configured": True, "username": d.get("username", ""),
+                "masked": _hf_mask(d["token"])}
+
+    @app.post("/settings/hf")
+    def hf_settings_save(req: HfTokenReq) -> dict:
+        tok = req.token.strip()
+        if not tok:
+            raise HTTPException(422, "empty token")
+        # Validate BEFORE persisting: whoami() is the cheapest call that
+        # proves the token is real, and its username is worth keeping.
+        try:
+            from huggingface_hub import HfApi
+            who = HfApi(token=tok).whoami()
+        except Exception as e:
+            raise HTTPException(401, f"Hugging Face rejected that token: {e}")
+        username = who.get("name", "") if isinstance(who, dict) else ""
+        HF_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # 0600 FROM CREATION, then atomic rename. write_text()+chmod left the
+        # token world-readable under the default umask for the window between
+        # the two calls — and permanently if the process died in between; the
+        # non-atomic write could also leave a truncated file (the same reason
+        # save_lab_state/save_teach_weights go through tmp+replace).
+        # Unique per call: FastAPI runs these sync handlers in a
+        # threadpool, so two overlapping saves sharing one fixed tmp
+        # path interleaved their json into one inode and replaced a
+        # garbled file into place (which then reads as "not configured").
+        tmp = HF_TOKEN_PATH.with_name(
+            f"{HF_TOKEN_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"token": tok, "username": username}, f)
+            tmp.replace(HF_TOKEN_PATH)
+        except BaseException:
+            # Never leave a live token lying in the scratch file: it is not the
+            # path .gitignore covers, and `git add -A` in this repo would
+            # commit it.
+            tmp.unlink(missing_ok=True)
+            raise
+        st.events.append(f"\ud83e\udd17 Hugging Face connected as {username}")
+        return {"configured": True, "username": username,
+                "masked": _hf_mask(tok)}
+
+    @app.delete("/settings/hf")
+    def hf_settings_delete() -> dict:
+        HF_TOKEN_PATH.unlink(missing_ok=True)
+        # Scratch files from interrupted saves hold the same secret. Two
+        # shapes exist: the current "<name>.<pid>.<hex>.tmp" and the fixed
+        # "<name>.tmp" an earlier build wrote — a glob with `.*.` misses the
+        # latter, and someone upgrading may still have one on disk.
+        for pat in (HF_TOKEN_PATH.name + ".tmp", HF_TOKEN_PATH.name + ".*.tmp"):
+            for stray in HF_TOKEN_PATH.parent.glob(pat):
+                stray.unlink(missing_ok=True)
+        return {"configured": False}
 
     @app.get("/behaviors")
     def get_behaviors() -> dict:
@@ -2072,6 +2785,40 @@ def make_app(ducks: list[Duck]):
         path.unlink()
         return {"deleted": name}
 
+    # ------------------------------------------------ 🎥 screen captures
+
+    @app.post("/captures")
+    async def post_capture(req: Request, name: str = "duck") -> dict:
+        data = await req.body()
+        if not data:
+            raise HTTPException(422, "empty capture upload")
+        if len(data) > CAPTURE_MAX_BYTES:
+            raise HTTPException(413, "capture too large — keep takes under a "
+                                     "few minutes")
+        d = captures_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        base = capture_base(name)
+        # Extension is cosmetic — ffmpeg sniffs the actual container.
+        src = d / f"{base}.upload"
+        src.write_bytes(data)
+        try:
+            return await asyncio.to_thread(convert_capture, src, base)
+        except Exception as e:
+            raise HTTPException(500, f"capture conversion failed: {e}")
+        finally:
+            src.unlink(missing_ok=True)
+
+    @app.get("/captures/{fname}")
+    def get_capture(fname: str) -> FileResponse:
+        if not CAPTURE_FILE_RE.match(fname):
+            raise HTTPException(422, "bad capture filename")
+        path = captures_dir() / fname
+        if not path.exists():
+            raise HTTPException(404, f"no capture named “{fname}”")
+        # filename= sets Content-Disposition, so the viewer's ⬇ buttons save
+        # straight to the user's downloads with a sensible name.
+        return FileResponse(path, filename=fname)
+
     @app.post("/teach")
     async def teach(req: TeachReq) -> dict:
         if st.job and st.job.status == "training":
@@ -2087,15 +2834,49 @@ def make_app(ducks: list[Duck]):
         # every preview duck the moment a clip method was added (the trainer
         # subprocess was fine — it imports everything fresh — so training ran
         # while the scene sat empty).
-        importlib.reload(motion_mod)
-        importlib.reload(behaviors_mod)
+        try:
+            importlib.reload(motion_mod)
+        except Exception as e:
+            # Same contract as reload_library below: an edit to the clip
+            # machinery that raises must report itself rather than 500 the
+            # panel with no message in the chat.
+            return {"matched": False,
+                    "message": f"motion.py didn't load: {e}"}
+        # behaviors is a PACKAGE now (one module per trick):
+        # reload()ing it would only re-run __init__ and keep every
+        # submodule stale — reload_library() re-imports them all in
+        # registration order and re-flattens the namespace.
+        try:
+            behaviors_mod.reload_library()
+        except Exception as e:
+            # A recipe edit that compiles but raises at import: the library
+            # rolled itself back, so say what happened in the chat instead of
+            # handing the panel a bare 500.
+            return {"matched": False,
+                    "message": f"behaviors.py didn't load: {e}"}
+        _TRICK_DUCK_CACHE.clear()   # verdicts derive from the reloaded recipes
         b = behaviors_mod.match_behavior(req.text)
         if b is None:
             return {"matched": False,
                     "message": "I don't know that trick yet. I can teach these — "
-                               "new tricks need a reward recipe added to behaviors.py:",
+                               "new tricks need a reward recipe added to the "
+                               "behaviors/ package:",
                     "behaviors": [behaviors_mod.behavior_card(x)
                                   for x in behaviors_mod.BEHAVIORS.values()]}
+        # The clip rides MICRODUCK_CLIP into the trainer AND (via stage_env)
+        # into the preview envs, where motion.load_clip joins it straight onto
+        # clips_dir() — so it gets the same restrictive validation every clip
+        # endpoint uses, and must actually exist. Unchecked, "../x" read JSON
+        # outside clips/, and a typo'd name reported a healthy job whose
+        # workers all died at env construction with FileNotFoundError.
+        if req.clip:
+            try:
+                if not clip_path(req.clip).exists():
+                    return {"matched": False,
+                            "message": f"I don't have a clip named “{req.clip}” — "
+                                       "save it in the 🎬 animate panel first."}
+            except ValueError as e:
+                return {"matched": False, "message": str(e)}
         init_from = None
         if req.initFrom:
             try:
@@ -2154,7 +2935,7 @@ def make_app(ducks: list[Duck]):
         snap = os.environ.get("TEACH_SNAP_OVERRIDE")
         st.job = TrainingJob(
             b.id,
-            # Helpers already on the farm pitch in from step one.
+            # Helpers already on the lab pitch in from step one.
             helpers=len(helper_ducks(st.ducks)),
             steps=int(steps) if steps else None,
             snap_steps=int(snap) if snap else None,
@@ -2198,12 +2979,22 @@ def make_app(ducks: list[Duck]):
             st.trainee().swap_policy(label, _zero_infer, onnx_path=live)
         for h in helper_ducks(st.ducks):
             h.rebuild_env(ekw)  # helpers mirror the stage from step one too
+            # ...and the BRAIN too, like the trainee above. Rebuilding only
+            # the env left every helper stepping the PREVIOUS job's ONNX
+            # inside the new behavior's sim (out of distribution — they fall
+            # repeatedly beside a correctly-zeroed trainee), and lab-state
+            # persisted them pointing at the old run's live.onnx.
+            # h.label, not the trainee's: apply_snapshot preserves a helper's
+            # label forever, so passing the trainee's would rename every helper
+            # to "🎓 <trick> (untrained)" permanently and erase the 🤝 identity
+            # that tells them apart in the roster.
+            h.swap_policy(h.label, _zero_infer, onnx_path=live)
         st.events.append(f"Training started: {b.emoji} {b.title}")
         sp = st.job.stage_payload()
         if sp:  # curriculum chain: name the opening stage right away
             st.events.append(
                 f"Training stage {sp['idx']}/{sp['count']} — {sp['label']}")
-        save_farm_state(st.ducks)
+        save_lab_state(st.ducks)
         return {"matched": True, "job": st.job.payload()}
 
     @app.post("/teach/stop")
@@ -2212,6 +3003,102 @@ def make_app(ducks: list[Duck]):
             st.job.stop()
             st.events.append("Training stopped")
         return {"ok": True}
+
+    @app.post("/teach/clear")
+    async def teach_clear() -> dict:
+        """Dismiss a FINISHED (or stopped/failed) training card.
+
+        The teach panel's 🗑 cleared only the chat; the finished-run card kept
+        coming back because every frame carries the job payload for as long as
+        st.job exists ("when I hit the trash can it should clear out the
+        spin"). A running job is deliberately NOT cleared — stop it first.
+        """
+        if st.job is None:
+            # Deliberately does NOT sweep trainee/helper ducks here: after a
+            # lab restart st.job is always None while restore_ducks has legit-
+            # imately brought those ducks back, and 🗑 is always rendered — so
+            # purging on this path silently deleted a restored roster. The
+            # genuine orphan case (DELETE /runs clearing a seated card) is
+            # handled where it happens, in the delete route.
+            return {"ok": True, "cleared": False}
+        if st.job.status in ("training", "restarting"):
+            return {"ok": False, "cleared": False,
+                    "message": "still training — stop it first"}
+        owned = st.job.owns_preview_ducks
+        st.job = None
+        if owned:
+            # The trainee/helper ducks are this job's artifacts; they go with
+            # it. A merely SEATED run (teach/load, which the panel fires on
+            # duck selection) owns nothing and leaves the roster alone.
+            st.ducks = [d for d in st.ducks
+                        if d.id != "trainee" and not d.id.startswith("helper")]
+            # Persist, like every other roster mutation (assign/spawn/remove).
+            save_lab_state(st.ducks)
+        st.events.append("Training card cleared")
+        return {"ok": True, "cleared": True}
+
+    @app.post("/teach/load")
+    async def teach_load(req: LoadRunReq) -> dict:
+        """Pull a finished run's recipe up in the teach panel (see LoadRunReq).
+        The viewer calls this when a duck running a teach-run policy is
+        selected, or a policy chip is dropped on the teach panel."""
+        if st.job and st.job.status == "training":
+            return {"ok": False,
+                    "message": f"Already teaching “{st.job.display_title()}” — "
+                               "stop it first."}
+        # "run:<name>" / "ckpt:<name>@123k" / bare name → the run dir name.
+        name = req.policy.split(":", 1)[-1].split("@", 1)[0]
+        # run_dir() is the ONE run-name validator (RUN_NAME_RE), shared with
+        # DELETE /runs and the .onnx download — this used to hand-roll a looser
+        # check of its own.
+        try:
+            run = run_dir(name)
+        except ValueError:
+            run = None
+        if run is None or not run.is_dir():
+            return {"ok": False,
+                    "message": f"{name or req.policy!r} isn't a training run — "
+                               "only runs under runs/ have a recipe to refine"}
+        if not (run / "behavior.json").exists():
+            return {"ok": False,
+                    "message": f"{name} predates recipe records "
+                               "(no behavior.json) — it can't be loaded"}
+        # Same freshness rule as /teach: the card must reflect behaviors.py
+        # as it is NOW, since retrain/fine-tune will train under it.
+        import importlib
+        try:
+            importlib.reload(motion_mod)
+        except Exception as e:
+            return {"ok": False, "message": f"motion.py didn't load: {e}"}
+        # behaviors is a PACKAGE now (one module per trick):
+        # reload()ing it would only re-run __init__ and keep every
+        # submodule stale — reload_library() re-imports them all in
+        # registration order and re-flattens the namespace.
+        try:
+            behaviors_mod.reload_library()
+        except Exception as e:
+            return {"ok": False, "message": f"behaviors.py didn't load: {e}"}
+        _TRICK_DUCK_CACHE.clear()
+        # Carry ownership across the swap: the OUTGOING job may have created
+        # the trainee/helpers still on the roster, and seating a different run
+        # (which the panel does on mere duck selection) must not orphan them
+        # beyond the reach of 🗑.
+        inherited = st.job is not None and st.job.owns_preview_ducks
+        try:
+            st.job = TrainingJob.adopt(name)
+            if inherited:
+                st.job.owns_preview_ducks = True
+        except ValueError as e:
+            return {"ok": False, "message": str(e)}
+        except OSError:
+            # adopt re-reads behavior.json; the run can be deleted between the
+            # exists() check above and that read (a 500 before this).
+            return {"ok": False,
+                    "message": f"{name} disappeared while loading it"}
+        st.events.append(
+            f"📋 {name} loaded in the teach panel — tweak the recipe, "
+            "then fine-tune or retrain")
+        return {"ok": True, "job": st.job.payload()}
 
     @app.post("/teach/weights")
     async def teach_stage_weights(req: StageWeightsReq) -> dict:
@@ -2321,7 +3208,7 @@ def make_app(ducks: list[Duck]):
         duck.handoff_infer, duck.handoff_label = ho if ho else (None, None)
         duck.handed = False
         st.events.append(f"{duck_id} now runs {label}")
-        save_farm_state(st.ducks)
+        save_lab_state(st.ducks)
 
     async def do_spawn_helper() -> None:
         err = spawn_helper_error(st)
@@ -2348,7 +3235,7 @@ def make_app(ducks: list[Duck]):
                                  seed=100 + n, onnx_path=onnx_path,
                                  env_kwargs=trainee_env_kwargs(
                                      job.behavior, job.stage_env())))
-            save_farm_state(st.ducks)
+            save_lab_state(st.ducks)
             # Visual only — do NOT job.scale(). A warm restart would stall
             # training for seconds and, with ENVS_PER_HELPER=0, would not
             # even change --envs. job.helpers tracks the roster for the HUD.
@@ -2368,14 +3255,14 @@ def make_app(ducks: list[Duck]):
         if not was_helper:
             # Plain roster duck: no trainer involvement, just drop and persist.
             st.ducks.remove(st.duck(duck_id))
-            save_farm_state(st.ducks)
-            st.events.append(f"{duck_id} left the farm")
+            save_lab_state(st.ducks)
+            st.events.append(f"{duck_id} left the lab")
             return
         st.ducks.remove(st.duck(duck_id))
-        save_farm_state(st.ducks)
+        save_lab_state(st.ducks)
         if st.job and st.job.status == "training":
             st.job.helpers = len(helper_ducks(st.ducks))
-        st.events.append(f"{duck_id} left the farm")
+        st.events.append(f"{duck_id} left the lab")
 
     async def do_spawn_duck(policy_id: str, showcase: bool = False) -> None:
         err = spawn_duck_error(st, policy_id)
@@ -2403,7 +3290,7 @@ def make_app(ducks: list[Duck]):
         ho = handoff_for(path) if skw is not None else None
         duck.handoff_infer, duck.handoff_label = ho if ho else (None, None)
         st.ducks.append(duck)
-        save_farm_state(st.ducks)
+        save_lab_state(st.ducks)
         st.events.append(f"spawned d{n} running {label}")
 
     async def apply_snapshot() -> None:
@@ -2444,7 +3331,7 @@ def make_app(ducks: list[Duck]):
             t -= dur
         return np.zeros(3, np.float32), "auto"
 
-    async def farm_loop():
+    async def lab_loop():
         tick = 0
         next_t = time.monotonic()
         last_regroup = next_t
@@ -2468,7 +3355,7 @@ def make_app(ducks: list[Duck]):
                 # Trick policies (trainee/helpers, and anything assigned from a
                 # teach-* run) trained on zero twist commands — drive commands
                 # are out-of-distribution noise to them and cause the "why does
-                # this trick policy keep falling in the farm" report.
+                # this trick policy keep falling in the lab" report.
                 # Zero commands are right for TRICKS (they trained on zero
                 # twist) but wrong for locomotion behaviors (forward_cmd set):
                 # zeroing those commanded the run trainee to STAND in the
@@ -2479,7 +3366,7 @@ def make_app(ducks: list[Duck]):
                 d.set_cmd(cmd if (locomotion or not is_trick_duck(d))
                           else np.zeros(3, np.float32))
                 # Helpers are visual clones. While a trainer is running they
-                # step at 25 Hz (every other 50 Hz tick) so the farm's BAM
+                # step at 25 Hz (every other 50 Hz tick) so the lab's BAM
                 # loop gives those cores back to the 16 training workers.
                 # Broadcast is already 25 Hz, so the viewer sees every pose.
                 if (training and d.id.startswith("helper")
@@ -2517,7 +3404,7 @@ def make_app(ducks: list[Duck]):
                             # feet.
                             t.rebuild_env(
                                 env_kwargs_for_behavior(st.job.behavior))
-                            save_farm_state(st.ducks)
+                            save_lab_state(st.ducks)
                         st.events.append(
                             f"training {st.job.status} — saved as {st.job.run_name}")
                 st.stats = stats.sample(st.job)
@@ -2527,10 +3414,14 @@ def make_app(ducks: list[Duck]):
                     "mode": mode,
                     "stats": st.stats,
                     "training": st.job.payload() if st.job else None,
-                    "events": st.events[-5:],
+                    "events": list(st.events)[-5:],
                     "ducks": [{
                         "id": d.id,
                         "name": d.label,
+                        # Brain provenance ("run:<name>", "ckpt:…", "pollen:…",
+                        # or null) — lets the viewer load a selected duck's
+                        # run into the teach panel (POST /teach/load).
+                        "policy": d.policy_id,
                         "falls": d.falls,
                         "steerable": not is_trick_duck(d),
                         "step": d.env.step_count,
@@ -2552,13 +3443,13 @@ def make_app(ducks: list[Duck]):
                         "bodies": d.pose_payload(),
                     } for d in st.ducks],
                 })
-                st.events = []  # one-shot toasts: deliver once, then drop
+                st.events.clear()  # one-shot toasts: deliver once, then drop
                 dead = []
                 # Snapshot: `await` inside the send suspends this task, and a
                 # browser connecting or dropping in that window mutates
                 # st.clients — "Set changed size during iteration" then killed
-                # farm_loop outright. Nothing retrieves that task's exception
-                # (make_app parks it in the lifespan frame), so the farm went
+                # lab_loop outright. Nothing retrieves that task's exception
+                # (make_app parks it in the lifespan frame), so the lab went
                 # on serving HTTP and accepting sockets while every duck froze
                 # and the scene sat empty, with no line in the log.
                 for c in list(st.clients):
@@ -2581,22 +3472,22 @@ def main() -> None:
                     help="run dir: add one duck per training checkpoint")
     ap.add_argument("--port", type=int, default=8788)
     ap.add_argument("--fresh", action="store_true",
-                    help="delete farm-state.json and seed the roster from the "
+                    help="delete lab-state.json and seed the roster from the "
                          "CLI args instead of restoring it")
     args = ap.parse_args()
 
-    state_path = farm_state_path()
+    state_path = lab_state_path()
     if args.fresh:
         state_path.unlink(missing_ok=True)
     ducks: list[Duck] = []
     if state_path.exists():
         ducks = restore_ducks(state_path)
         if ducks:
-            print(f"[farm] restored {len(ducks)} ducks from {state_path} "
+            print(f"[lab] restored {len(ducks)} ducks from {state_path} "
                   "(CLI duck args ignored — --fresh to reseed)")
     if not ducks:
         ducks = build_ducks(args)
-    print(f"[farm] {len(ducks)} ducks: {', '.join(d.label for d in ducks)}")
+    print(f"[lab] {len(ducks)} ducks: {', '.join(d.label for d in ducks)}")
 
     import uvicorn
     uvicorn.run(make_app(ducks), host="127.0.0.1", port=args.port, log_level="warning")

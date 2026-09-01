@@ -3,12 +3,12 @@ command-delay buffer, and the two invariants that matter for the rest of the
 harness — the 61-obs/14-action contract still holds under BAM, and selecting
 `actuator="xml"` leaves the old physics bit-for-bit untouched."""
 
-import numpy as np
 import mujoco
+import numpy as np
 import pytest
 
-from microduck_local import contract as C
 from microduck_local import bam_actuator as BA
+from microduck_local import contract as C
 from microduck_local.bam_actuator import BamXL330Actuator, DelayBuffer
 from microduck_local.walk_env import MicroduckWalkEnv
 

@@ -234,7 +234,7 @@ class ForkVecEnv:
 
     Step traffic is shared-memory arrays (obs/rew/done/action) with semaphore
     wake/completion signalling — no per-step pipe traffic at all. Measured at
-    32 envs (same live-farm load for both numbers): the old pickled pipe
+    32 envs (same live-lab load for both numbers): the old pickled pipe
     handshake put the no-policy vec-step floor at 1.61 ms against 0.34 ms of
     actual worker compute; semaphores took the floor to 1.08 ms. Pipes remain
     for control commands (guarded by the ctrl flag) and the rare episode-end

@@ -181,7 +181,6 @@ def test_friction_randomization_actually_varies_grip():
     slipperier, so the knob was ~71% inert and silently disabled the DR it
     looked like it implemented.
     """
-    import mujoco
     from microduck_local.walk_env import MicroduckWalkEnv
 
     env = MicroduckWalkEnv(domain_rand=True, obs_noise=False, action_delay=False,

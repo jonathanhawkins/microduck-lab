@@ -194,8 +194,19 @@ class MicroduckWalkEnv(gym.Env):
         height_termination: bool = True,  # GPU has no z-kill; run turns this off
         actuator: str = "xml",          # "xml" | "bam" — see the module docstring.
                                         # MICRODUCK_ACTUATOR hard-overrides it, so a
-                                        # trainer/farm process can switch every env
+                                        # trainer/lab process can switch every env
                                         # it spawns without touching call sites.
+        actuator_force: str | None = None,   # ...except here: an explicit
+                                        # per-instance choice that BEATS the process
+                                        # env. The lab runs with MICRODUCK_ACTUATOR=bam
+                                        # for its roster, but a curriculum stage may
+                                        # declare xml (the headstand ladder's training
+                                        # wheels) — without this the trainee preview
+                                        # silently rehearsed the wrong physics while
+                                        # the trainer subprocess used the stage's.
+        bam_current_scale: float | None = None,  # per-instance servo-strength
+                                        # ladder knob; None = read
+                                        # MICRODUCK_BAM_CURRENT_SCALE from the env.
         model: mujoco.MjModel | None = None,  # adopt an already-compiled model
                                         # instead of compiling a private ~138 MB
                                         # copy. See `shared_model_scope`.
@@ -212,7 +223,10 @@ class MicroduckWalkEnv(gym.Env):
         self.scene_path = str(scene)
         # Resolved here, before the model is chosen, because the two BAM/xml
         # variants of a scene are different compiled models (see _SHARED_MODELS).
-        self.actuator_model = os.environ.get("MICRODUCK_ACTUATOR", actuator).strip().lower()
+        self.actuator_model = (
+            actuator_force if actuator_force is not None
+            else os.environ.get("MICRODUCK_ACTUATOR", actuator)
+        ).strip().lower()
         if self.actuator_model not in ("xml", "bam"):
             raise ValueError(
                 f"actuator must be 'xml' or 'bam', got {self.actuator_model!r}"
@@ -243,7 +257,7 @@ class MicroduckWalkEnv(gym.Env):
         # Lifetime-ramped reward terms count on this. Seeded from
         # MICRODUCK_RAMP_OFFSET (exported by train_behavior BEFORE the vec-env
         # workers fork) so a warm RESTART resumes ramps at strength: without
-        # it, every farm helper add/remove reset ramped penalties to their
+        # it, every lab helper add/remove reset ramped penalties to their
         # gentle stage-0 value and then slammed them back at full strength a
         # few hundred k steps later — whiplash that collapsed a run from
         # ep_len 396 (the session's best) to 10.
@@ -363,6 +377,7 @@ class MicroduckWalkEnv(gym.Env):
                 friction_scale_range=(
                     DEFAULT_FRICTION_SCALE_RANGE if domain_rand else None
                 ),
+                current_scale=bam_current_scale,
             )
 
         self._reset_episode_state()

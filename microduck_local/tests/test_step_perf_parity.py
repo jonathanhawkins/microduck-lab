@@ -126,11 +126,16 @@ def fingerprint(env, steps=STEPS, reset_every=RESET_EVERY, seed=SEED):
 
 # Captured from the pre-optimization implementation — see module docstring.
 # fmt: off
+# 2026-08-31: no_stall was added to the headstand recipe and removed again
+# the same day (it taxed hold practice, never charged the relaxed parking
+# heap). ALL fingerprints verified bit-identical across both changes — no
+# headstand config is in this battery, and one_leg's no_stall comes from
+# the explicit weights above, not the headstand recipe.
 # backflip-*/imitate-xml recaptured 2026-08-30 after an INTENTIONAL reward
 # change (still_head term, straight_flip bound, per-episode reset of
 # _prev_tau/_prev_vz/_gp_prev_head). run/walk/stand/one_leg digests were
 # verified bit-identical across the change.
-GOLDEN = {'backflip-bam': ('8e18065271edde2339b4401ee65289e50ebd0b89db7d0f982b4cfa69c6340ad4',
+GOLDEN = {'backflip-bam': ('9ec130e649abdf289fdea677cc460cc11a9229af378564627107d18fcc254eb8',
                   {'arch_over': '0x0.0p+0',
                    'calm_landed_penalty': '0x0.0p+0',
                    'feet_under': '0x0.0p+0',
@@ -146,7 +151,7 @@ GOLDEN = {'backflip-bam': ('8e18065271edde2339b4401ee65289e50ebd0b89db7d0f982b4c
                    'neck_pushup': '0x0.0p+0',
                    'no_jaw_parking_penalty': '0x0.0p+0',
                    'no_limit_parking_penalty': '-0x1.6826786707ae1p+0',
-                   'push_off': '0x1.eda43b8e62b8fp+3',
+                   'push_off': '0x1.908ce1f7ec925p+3',
                    'save_energy_penalty': '-0x1.d747cb4d7d082p+3',
                    'smooth_moves_penalty': '-0x1.e2b164bd70a3dp+3',
                    'soft_landings_penalty': '-0x1.0c63eb80707d8p+0',
@@ -154,9 +159,9 @@ GOLDEN = {'backflip-bam': ('8e18065271edde2339b4401ee65289e50ebd0b89db7d0f982b4c
                    'stay_home_penalty': '-0x1.36b53378dca21p-1',
                    'stick_it_penalty': '0x0.0p+0',
                    'still_head_penalty': '-0x1.f7eac7cdac219p+2',
-                   'straight_flip_penalty': '-0x1.7305a2c8f6799p+4',
+                   'straight_flip_penalty': '-0x1.98f6b25946fc1p+4',
                    'tuck_ball': '0x1.3361b5f71013fp+2'}),
- 'backflip-xml': ('d500d63a45979d1598ab95ffbdd9964e9dadf01ea0076005ad84cbaed3ef7f00',
+ 'backflip-xml': ('bf392e15e84896add7b520102484da37567124c73060e157d9701dcc8a91c3be',
                   {'arch_over': '0x0.0p+0',
                    'calm_landed_penalty': '0x0.0p+0',
                    'feet_under': '0x0.0p+0',
@@ -172,7 +177,7 @@ GOLDEN = {'backflip-bam': ('8e18065271edde2339b4401ee65289e50ebd0b89db7d0f982b4c
                    'neck_pushup': '0x0.0p+0',
                    'no_jaw_parking_penalty': '-0x1.30cc2674d8d40p+4',
                    'no_limit_parking_penalty': '-0x1.76c4e46919c9bp+1',
-                   'push_off': '0x1.63182d5f69dacp+3',
+                   'push_off': '0x1.e9c9d5cbcda45p+2',
                    'save_energy_penalty': '-0x1.2190ca397ad96p+3',
                    'smooth_moves_penalty': '-0x1.e2b164bd70a3dp+3',
                    'soft_landings_penalty': '-0x1.93dfd1ed6a677p-1',
@@ -355,9 +360,14 @@ def ref_body_floor_contacts(env, heads, feet):
 def test_rewritten_pieces_match_references_over_a_contact_rich_rollout():
     """backflip on the full-collision scene: trunk/head/floor contacts of
     every kind, plus limit-parked joints under random drive."""
-    from microduck_local.behaviors import (_body_floor_contacts, _feet_body_ids,
-                                           _flat_feet, _head_bodies,
-                                           _head_on_floor, _stance_flat)
+    from microduck_local.behaviors import (
+        _body_floor_contacts,
+        _feet_body_ids,
+        _flat_feet,
+        _head_bodies,
+        _head_on_floor,
+        _stance_flat,
+    )
     env = BehaviorEnv("backflip", seed=3, domain_rand=False, random_yaw=False)
     env.reset(seed=3)
     heads, feet = _head_bodies(env), _feet_body_ids(env)

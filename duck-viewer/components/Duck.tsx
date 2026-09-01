@@ -13,8 +13,11 @@ import { useFrame } from "@react-three/fiber";
 import { Html } from "@react-three/drei";
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import type { DuckFrame, Scene, SceneGeom } from "@/lib/farm";
+import type { DuckFrame, Scene, SceneGeom } from "@/lib/lab";
 import { assignDrag } from "@/lib/assign";
+import { captureWantsCleanFrame } from "@/lib/record";
+import { getSelectedDuck } from "@/lib/select";
+import { getDuckLabels } from "@/lib/ui";
 
 // FALLBACK body-name → color, used only against servers that predate rgba
 // streaming (whole body painted one guessed color).
@@ -138,10 +141,20 @@ export function Duck({
     }
     // Drop-target highlight while a policy chip is dragged/armed: floor ring
     // under the duck + emphasized label. Driven straight off the shared store
-    // (no React state — this flips at pointer speed).
+    // (no React state — this flips at pointer speed). The same ring doubles
+    // as the click-selection marker (Delete removes the selected duck); an
+    // active assign hover wins the color so the drop target stays legible.
     const hovered = assignDrag.mode !== null && assignDrag.hoverDuck === duckId;
+    const selected = getSelectedDuck() === duckId;
+    // The ring lives IN the 3D scene, so unlike the DOM labels it would land
+    // in captured footage — hide it while a 🎥 take is framing/rolling.
+    // (📷 snapshots hide it themselves via the hideInCapture tag below.)
+    const filming = captureWantsCleanFrame();
     if (ringRef.current) {
-      ringRef.current.visible = hovered;
+      ringRef.current.visible = (hovered || selected) && !filming;
+      (ringRef.current.material as THREE.MeshBasicMaterial).color.set(
+        hovered ? "#7db8d8" : "#e8b24a"
+      );
       if (trunk) {
         tmpP.set(trunk[0], trunk[1], 0.004);
         ringRef.current.position.lerp(tmpP, alpha);
@@ -149,9 +162,12 @@ export function Duck({
     }
     if (labelDivRef.current) {
       const s = labelDivRef.current.style;
-      s.transform = hovered ? "scale(1.3)" : "none";
-      s.color = hovered ? "#9fd4f0" : "#fff";
-      s.fontWeight = hovered ? "700" : "400";
+      // HUD 🏷 toggle, applied per-frame like the rest of the label styling
+      // (a React subscription inside the Canvas tree flushed a beat late).
+      s.display = getDuckLabels() ? "" : "none";
+      s.transform = hovered ? "scale(1.3)" : selected ? "scale(1.15)" : "none";
+      s.color = hovered ? "#9fd4f0" : selected ? "#e8b24a" : "#fff";
+      s.fontWeight = hovered || selected ? "700" : "400";
     }
     // Spawn note updates straight off the stream (textContent, no React
     // churn) — it changes at every episode reset.
@@ -179,8 +195,14 @@ export function Duck({
           <group key={b} ref={(el) => void (bodyRefs.current[b] = el)} />
         )
       )}
-      {/* drop-target ring, flat on the floor (XY plane in this Z-up group) */}
-      <mesh ref={ringRef} visible={false} position={[0, 0, 0.004]}>
+      {/* drop-target ring, flat on the floor (XY plane in this Z-up group).
+          hideInCapture: 📷 snapshots hide it for their capture render. */}
+      <mesh
+        ref={ringRef}
+        visible={false}
+        position={[0, 0, 0.004]}
+        userData={{ hideInCapture: true }}
+      >
         <ringGeometry args={[0.16, 0.19, 48]} />
         <meshBasicMaterial
           color="#7db8d8"
@@ -192,7 +214,11 @@ export function Duck({
       </mesh>
       <group ref={labelRef}>
         {/* DOM label (drei Text's GPU glyph atlas was losing the WebGL
-            context in the embedded browser — keep labels off the GPU). */}
+            context in the embedded browser — keep labels off the GPU).
+            zIndexRange tops out below the overlay panels (zIndex 20) so
+            labels can never scribble over the HUD/policies/teach UI.
+            Stays mounted when labels are toggled off — the useFrame above
+            flips the inner div's display instead. */}
         <Html center zIndexRange={[10, 0]} style={{ pointerEvents: "none" }}>
           <div
             ref={labelDivRef}

@@ -201,9 +201,9 @@ def load_bam_params() -> tuple[dict[str, float], str]:
     with); falls back to the hard-coded `XL330_M6_PARAMS` table above.
     """
     try:  # pragma: no cover - depends on the environment
-        from bam.model import _resolve_json_path  # type: ignore
-
         import json
+
+        from bam.model import _resolve_json_path  # type: ignore
 
         with open(_resolve_json_path(None, "xl330", "m6")) as fh:
             data = json.load(fh)
@@ -311,6 +311,7 @@ class BamXL330Actuator:
         stiff_frictionloss: bool = True,
         friction_scale_range: tuple[float, float] | None = None,
         params: dict[str, float] | None = None,
+        current_scale: float | None = None,
     ):
         self.model = model
         self.data = data
@@ -346,7 +347,28 @@ class BamXL330Actuator:
         self.kp_fw = float(kp_fw)
         self.error_gain = XL330_ERROR_GAIN
         self.max_pwm = XL330_MAX_PWM
-        self.max_current = max_current
+        # MICRODUCK_BAM_CURRENT_SCALE: the servo-strength LADDER knob
+        # (default 1.0 = the honest XL330 firmware limit, tau <= 0.640 Nm).
+        # The xml->bam jump proved to be one giant physics cliff for
+        # from-scratch students (every 2026-08-31 scratch chain re-held at
+        # ~0.3 on bam and went flat); curriculum stages set this to 1.4 ->
+        # 1.15 -> 1.0 so servo strength descends in rungs like every other
+        # difficulty axis. >1.0 is a training device only — never evaluate
+        # or ship against a scaled limit.
+        # An explicit `current_scale=` beats the env var: envs living INSIDE
+        # the lab process (the trainee preview) must be able to mirror a
+        # curriculum stage's scale per instance, while the trainer subprocess
+        # keeps setting it process-wide through its environment.
+        scale = 1.0
+        sv = current_scale if current_scale is not None else os.environ.get(
+            "MICRODUCK_BAM_CURRENT_SCALE")
+        if sv:
+            try:
+                scale = float(np.clip(float(sv), 0.5, 2.5))
+            except (TypeError, ValueError):
+                scale = 1.0
+        self.max_current = (None if max_current is None
+                            else float(max_current) * scale)
         self.vin_min = vin_min
         self.friction_scale_range = friction_scale_range
         self.friction_scale = 1.0

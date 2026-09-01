@@ -6,7 +6,16 @@
       "cwd": "duck-viewer",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 63317
+      "port": 63317,
+      "autoPort": true
+    },
+    {
+      "name": "duck-viewer-prod",
+      "cwd": "duck-viewer",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "start"],
+      "port": 3999,
+      "autoPort": true
     }
   ]
 }

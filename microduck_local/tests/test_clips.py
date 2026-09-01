@@ -29,12 +29,12 @@ def _endpoint(app, path: str, method: str):
 
 @pytest.fixture
 def app(monkeypatch, tmp_path):
-    """A farm app with runs/, clips/ and farm-state.json all in tmp_path — a
+    """A lab app with runs/, clips/ and lab-state.json all in tmp_path — a
     test must never write into the real workspace (or the live viewer's
     palette would sprout stray runs and clips)."""
     monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setenv("MICRODUCK_CLIPS_DIR", str(tmp_path / "clips"))
-    monkeypatch.setenv("FARM_STATE_PATH", str(tmp_path / "farm-state.json"))
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
     return V.make_app([])
 
 
@@ -143,7 +143,7 @@ def test_pose_grounding_tracks_the_legs(app):
 
 
 def test_pose_does_not_disturb_a_live_duck(app):
-    """The whole point of the scratch model: a farm duck mid-episode must not
+    """The whole point of the scratch model: a lab duck mid-episode must not
     twitch because someone dragged a slider in the editor."""
     duck = V.Duck("d0", "probe", V._zero_infer, seed=3)
     for _ in range(5):
@@ -255,7 +255,7 @@ def test_clip_defaults_fill_in(app):
 
 
 def test_clips_dir_is_env_overridable(monkeypatch, tmp_path):
-    """Same convention as MICRODUCK_RUNS_DIR / FARM_STATE_PATH."""
+    """Same convention as MICRODUCK_RUNS_DIR / LAB_STATE_PATH."""
     monkeypatch.setenv("MICRODUCK_CLIPS_DIR", str(tmp_path / "elsewhere"))
     assert V.clips_dir() == tmp_path / "elsewhere"
     V.save_clip("x", V.clean_clip("x", _clip()))

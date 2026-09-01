@@ -108,11 +108,11 @@ than the 24-worker knee; the old default of 10 was 29% slower than the new 16.
 
 **It saturates, though.** 24 envs is 92% of the ~17.1k asymptote on an idle
 machine; 32 is 97%, and that is the shipped default (`viz_server.BASE_ENVS`
-and `--envs` alike). An earlier live-farm test seemed to invert the curve —
+and `--envs` alike). An earlier live-lab test seemed to invert the curve —
 16 envs held 10.0k steps/s (`teach-run-79675b`) while "26 envs" held 6.8k
 (`teach-run-be11cc`) — but the 26-env run got its extra envs from 5 helper
-ducks, i.e. five extra 50 Hz viewer sims in the farm process: a confound, not
-an inversion. Re-measured with helpers as viewers only (2026-08-30, farm +
+ducks, i.e. five extra 50 Hz viewer sims in the lab process: a confound, not
+an inversion. Re-measured with helpers as viewers only (2026-08-30, lab +
 browser live), the idle-machine ordering holds and widens: 16 → 4.7k, 24 →
 5.4k, 32 → 6.5k. At 16 envs the workers are ~11% busy — the parent's serial
 per-vec-step work is what extra envs amortize.
@@ -258,18 +258,18 @@ both. `actuator="bam"` cannot share a model *in-process* — it rewrites
 `dof_frictionloss` every physics substep — so it raises there; under `fork` it
 is fine.
 
-The farm server shares the same way: `Duck._make_env` builds every duck inside
+The lab server shares the same way: `Duck._make_env` builds every duck inside
 `shared_model_scope(exclusive=False)`, so a roster costs one compiled model per
-scene rather than one per duck. Measured on a live 6-duck farm, 1520 MiB →
+scene rather than one per duck. Measured on a live 6-duck lab, 1520 MiB →
 1037 MiB, and the marginal duck drops from ~88 MB to ~1 MB. Sharing is free of
-caveats there because the farm pins `domain_rand=False` and steps its ducks
-serially in one frame loop; a farm launched with `MICRODUCK_ACTUATOR=bam` falls
+caveats there because the lab pins `domain_rand=False` and steps its ducks
+serially in one frame loop; a lab launched with `MICRODUCK_ACTUATOR=bam` falls
 back to private models.
 
 ## Teachable behaviors (the viewer's 🎓 teach panel)
 
-`behaviors.py` is a library of trick recipes — plain-English reward terms over
-the walking env ("stand on one leg", "crouch", "spin"). The farm server matches
+The `behaviors/` package is a library of trick recipes — plain-English reward terms over
+the walking env ("stand on one leg", "crouch", "spin"). The lab server matches
 chat text to a behavior (`POST /teach`), launches `train-behavior` as a
 subprocess, tails its `progress.jsonl` into the frame stream, and hot-loads the
 `live.onnx` snapshot (exported every 150k steps) onto a 🎓 trainee duck — so
@@ -279,7 +279,7 @@ you watch the policy improve every ~15 s while it trains.
 uv run train-behavior one_leg          # standalone, same artifacts as train-walk
 ```
 
-Add a trick = add a `Behavior` to `behaviors.py` (reward fns + friendly
+Add a trick = add a `Behavior` to its module under `behaviors/` (reward fns + friendly
 strings + keywords). The sign conventions and no-jackpot rules from
 microduck_rl/AGENTS.md apply; `tests/test_behaviors.py` locks them.
 
@@ -294,7 +294,7 @@ carry `training.stage {idx, count, label}` plus cumulative
 whole chain, and an explicit `initFrom` skips it (single run, final stage's
 env).
 
-`behaviors.py` also has a **term CATALOG** — composable optional terms
+`behaviors/core.py` also has a **term CATALOG** — composable optional terms
 mirroring the official stack's reward vocabulary (`head_up`, `flat_feet`,
 `calm_body`, `no_limit_parking`, `smooth_torque`, `soft_landings`). A /teach
 `weights` key outside the recipe adopts that catalog term at the given weight
@@ -305,15 +305,30 @@ missing term, and the catalog is where it should come from.
 
 `POST /teach` also takes `"weights": {termKey: value}` (reward-slider
 overrides, clamped ≥ 0) and `"initFrom": "<run name>"` (fine-tune an existing
-run's policy under the edited recipe). Helper ducks (`{"spawn_helper": true}`
+run's policy under the edited recipe). `POST /teach/load {"policy":
+"run:<name>"}` seats a FINISHED run in the teach panel without training
+anything — its recipe (behavior + the weights recorded in the run's
+`behavior.json`) streams in "done" state, so the viewer's fine-tune button
+targets that run; the viewer calls it when a duck running a teach-run policy
+is selected or a policy chip is dropped on the teach panel. Refused while a
+job is actively training. Helper ducks (`{"spawn_helper": true}`
 over WS) are extra viewers of the same `live.onnx` snapshot — they do **not**
 add trainer workers (the trainer runs `viz_server.BASE_ENVS` workers; see
 the bench section for why helpers-as-workers measured slower and why that
-measurement was a confound). Frames carry `stats` (machine/farm/
-trainer cpu+mem, training steps/s). The roster persists to `farm-state.json`
-(`FARM_STATE_PATH` to relocate, `--fresh` to reseed from the CLI); training
+measurement was a confound). Frames carry `stats` (machine/lab/
+trainer cpu+mem, training steps/s). The roster persists to `lab-state.json`
+(`LAB_STATE_PATH` to relocate, `--fresh` to reseed from the CLI); training
 jobs do NOT survive a server restart — a restored trainee keeps its last
 `live.onnx` brain.
+
+Runs pile up fast, so `DELETE /runs/<name>` erases one run directory —
+policy, checkpoints, progress log — and `?chain=true` treats the name as a
+curriculum-chain prefix and takes every stage of it in one all-or-nothing
+call (the palette's ✕, always behind a confirmation). Any run of the job
+that is training right now is refused with 409, the whole chain included:
+a stage warm-starts from the previous stage's dir. Deleting does not disturb
+a duck already running that brain — the ONNX session is loaded in memory —
+but the duck drops out of the roster at the next lab restart.
 
 ## Layout
 
@@ -336,7 +351,7 @@ tests/              # contract locks: obs order, action semantics, DR non-accumu
 - Obs layout is the shared 61D hot-swap contract; unused command slots are
   zero-padded (tiny keep-alive sampling ranges), never removed.
 - Penalty reward terms are ≤ 0 by construction; a callback aborts training if
-  any episode penalty sum goes positive (the double-negation farm bug).
+  any episode penalty sum goes positive (the double-negation lab bug).
 - Domain randomization restores compile-time defaults before applying
   (never accumulates across resets).
 - ONNX always ships with the obs normalizer baked in — never deploy a raw

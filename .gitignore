@@ -12,11 +12,22 @@ __pycache__/
 
 # Training artifacts and runtime state (regenerated; runs/ grows to GBs)
 microduck_local/runs/
-microduck_local/farm-state.json
+microduck_local/lab-state.json
 microduck_local/teach-weights.json
+# 🤗 BYOK Hugging Face token (the viewer's ⚙ settings) — never commit
+microduck_local/hf-token.json
+microduck_local/hf-token.json.tmp
+microduck_local/hf-token.json.*.tmp
+# 🎥 viewer screen recordings (the record button) — local content, not repo
+microduck_local/captures/
 
 # Pre-monorepo scaffold history, kept aside locally
 duck-viewer/.git-scaffold-backup/
 
 # macOS
 .DS_Store
+# legacy pre-rename state file (a still-running old server may recreate it)
+microduck_local/farm-state.json
+microduck_local/farm-server.log
+# backend log (restart.sh writes it)
+microduck_local/lab-server.log

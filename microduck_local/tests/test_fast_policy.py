@@ -71,7 +71,7 @@ def test_samples_come_from_the_policy_distribution():
 
 
 def test_trainers_build_the_fast_policy():
-    """The farm path must actually get the fast class (fresh AND warm start)."""
+    """The lab path must actually get the fast class (fresh AND warm start)."""
     import inspect
 
     from microduck_local import train_behavior

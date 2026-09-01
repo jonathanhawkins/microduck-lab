@@ -21,7 +21,7 @@ Offscreen rendering uses mujoco.Renderer, which on macOS picks the bundled CGL
 backend (`mujoco.cgl`) with no MUJOCO_GL setting and no display — verified
 working on Apple Silicon. Set MUJOCO_GL=egl/osmesa only on a Linux box.
 
-The env is built exactly the way eval and the farm build it (BehaviorEnv with
+The env is built exactly the way eval and the lab build it (BehaviorEnv with
 obs_noise/domain_rand/action_delay/random_yaw off, fixed seed) so what you see
 is the policy, not the randomizers. `--env KEY=VALUE` sets the behaviors'
 per-stage knobs (MICRODUCK_BF_SPAWN_LO/HI, MICRODUCK_SPAWN_FAMILY_PROBS,
@@ -59,7 +59,7 @@ LOOKAT_Z = 0.14   # m — mid-body of a 25 cm robot; fixed (only x/y track the
 # flip's whole arc stays inside the frame.
 CAM_DISTANCE = 0.70
 
-# The farm's handoff rule, mirrored from viz_server.Duck._handoff_due: the
+# The lab's handoff rule, mirrored from viz_server.Duck._handoff_due: the
 # trick is finished and the duck is on both feet.
 HANDOFF_ROT_RAD = 5.2
 
@@ -410,7 +410,7 @@ def summarize(diags: Sequence[FrameDiag], meta: dict, probe: Probe) -> list[str]
     rots = [d.rot_deg for d in diags if d.rot_deg is not None]
     if rots:
         lines.append(f"trick rotation: max {max(rots):.0f} deg, final {rots[-1]:.0f} deg "
-                     f"(a full flip is 360; the farm hands off at 298)")
+                     f"(a full flip is 360; the lab hands off at 298)")
     # Captions budget this list to fit a tile; the summary is where the full
     # set lives, because "which part of the robot is on the ground" is the
     # difference between standing and slumping.
@@ -557,7 +557,7 @@ def sheet_footer(probe: Probe) -> list[str]:
 # ------------------------------------------------------------------------ cli
 
 def build_env(behavior_id: str, env_overrides: dict[str, str], seed: int):
-    """Exactly how eval and the farm build a behavior env: randomizers off, so
+    """Exactly how eval and the lab build a behavior env: randomizers off, so
     what the sheet shows is the policy and not the noise."""
     from .behaviors import BEHAVIORS, BehaviorEnv
 
@@ -566,7 +566,7 @@ def build_env(behavior_id: str, env_overrides: dict[str, str], seed: int):
                          f"choose from {sorted(BEHAVIORS)}")
     # Both channels: the process environment (what a trainer subprocess would
     # see, and what _spawn_knob falls back to) and per-instance overrides
-    # (what the farm's preview envs use). Set before the env is constructed —
+    # (what the lab's preview envs use). Set before the env is constructed —
     # BehaviorEnv reads MICRODUCK_EPISODE_S in __init__.
     os.environ.update(env_overrides)
     return BehaviorEnv(behavior_id, obs_noise=False, domain_rand=False,
@@ -601,7 +601,7 @@ def main() -> None:
                          "MICRODUCK_SPAWN_FAMILY_PROBS, MICRODUCK_EPISODE_S)")
     ap.add_argument("--handoff", default=None,
                     help="second .onnx that takes over once the trick completes "
-                         "and both feet are down (the farm's rule)")
+                         "and both feet are down (the lab's rule)")
     ap.add_argument("--camera", default="side", choices=sorted(CAMERAS))
     ap.add_argument("--distance", type=float, default=CAM_DISTANCE)
     ap.add_argument("--fps", type=int, default=30,

@@ -287,15 +287,6 @@ def _sweep(counts, vec: str, pinned: bool, budget: int, behavior: str,
     return points
 
 
-def best_by_envs(points) -> dict[int, Point]:
-    """Fastest measurement per env count — see the note on max-over-repeats."""
-    best: dict[int, Point] = {}
-    for p in points:
-        if p.envs not in best or p.steps_per_s > best[p.envs].steps_per_s:
-            best[p.envs] = p
-    return best
-
-
 def _best_of(counts, vec: str, pinned: bool, budget: int, behavior: str,
              seed: int, timeout: float, label: str, repeats: int,
              rng: random.Random, overlap: bool = False,

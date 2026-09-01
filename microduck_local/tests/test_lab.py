@@ -1,4 +1,4 @@
-"""Farm server units: roster persistence round-trip, helper spawn/remove guard
+"""Lab server units: roster persistence round-trip, helper spawn/remove guard
 rules, TrainingJob launch/scale argv construction, staged-curriculum chaining,
 stats payload shape, teach initFrom validation, reward-weight plumbing, the
 user-chosen practice budget, one compiled mjModel per scene across the roster.
@@ -44,7 +44,7 @@ class FakeProc:
 
 @pytest.fixture
 def fake_popen(monkeypatch, tmp_path):
-    """Record every trainer launch; keep runs/ and farm-state.json in tmp."""
+    """Record every trainer launch; keep runs/ and lab-state.json in tmp."""
     launches: list[FakeProc] = []
 
     def popen(cmd, **kwargs):
@@ -54,7 +54,7 @@ def fake_popen(monkeypatch, tmp_path):
 
     monkeypatch.setattr(V.subprocess, "Popen", popen)
     monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setenv("FARM_STATE_PATH", str(tmp_path / "farm-state.json"))
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
     return launches
 
 
@@ -187,7 +187,7 @@ def _fake_worker_tree(monkeypatch, current_proc, workers_for):
 
 
 def test_poll_sweeps_workers_a_dead_trainer_left_behind(fake_popen, monkeypatch):
-    """A trainer the farm did NOT kill — OOM, a stray kill -9, a crash by
+    """A trainer the lab did NOT kill — OOM, a stray kill -9, a crash by
     signal — never runs multiprocessing's atexit hook, so it orphans its
     workers exactly as an un-swept stop did, and under the `fork` backend they
     never see EOF on their pipe either. poll() is the only witness left, and
@@ -290,7 +290,7 @@ def test_poll_survives_scale_gap(fake_popen):
 # ------------------------------------------------------- spawn/remove guards
 
 def test_spawn_helper_guards(fake_popen):
-    st = V.FarmState([_fake_duck("d0")])
+    st = V.LabState([_fake_duck("d0")])
     assert "no active training" in V.spawn_helper_error(st)
 
     st.job = V.TrainingJob("spin", steps=1000)
@@ -314,7 +314,7 @@ def test_spawn_helper_guards(fake_popen):
 
 def test_remove_duck_guards(fake_popen):
     from types import SimpleNamespace
-    st = V.FarmState([_fake_duck("d0"), _fake_duck("trainee"),
+    st = V.LabState([_fake_duck("d0"), _fake_duck("trainee"),
                       _fake_duck("helper1")])
     # Any duck is removable now (roster declutter) …
     assert V.remove_duck_error(st, "d0") is None
@@ -333,7 +333,7 @@ def test_remove_duck_guards(fake_popen):
 
 
 def test_spawn_duck_guards_and_slots(fake_popen):
-    st = V.FarmState([_fake_duck(f"d{i}") for i in range(3)])
+    st = V.LabState([_fake_duck(f"d{i}") for i in range(3)])
     assert "needs a policy" in V.spawn_duck_error(st, None)
     assert V.spawn_duck_error(st, "pollen:alpha_stand") is None
     st.ducks = [_fake_duck(f"d{i}") for i in range(V.MAX_DUCKS)]
@@ -347,9 +347,9 @@ def test_next_helper_slot_reuses_gaps():
     assert V.next_helper_slot([_fake_duck("helper1"), _fake_duck("helper3")]) == 2
 
 
-# ------------------------------------------------------- farm-state.json
+# ------------------------------------------------------- lab-state.json
 
-def test_farm_state_round_trip(fake_popen, monkeypatch, tmp_path):
+def test_lab_state_round_trip(fake_popen, monkeypatch, tmp_path):
     live = tmp_path / "live.onnx"
     ducks = [
         _fake_duck("d0", onnx_path="/policies/alpha_walking.onnx",
@@ -357,8 +357,8 @@ def test_farm_state_round_trip(fake_popen, monkeypatch, tmp_path):
         _fake_duck("d1", policy_id="pollen:alpha_stand", label="alpha_stand"),
         _fake_duck("trainee", onnx_path=str(live), label="🎓 Spin in place @40k"),
     ]
-    V.save_farm_state(ducks)
-    data = json.loads((tmp_path / "farm-state.json").read_text())
+    V.save_lab_state(ducks)
+    data = json.loads((tmp_path / "lab-state.json").read_text())
     assert data["version"] == 1
     assert data["ducks"][0] == {"id": "d0", "label": "alpha_walking",
                                 "policy": None,
@@ -371,7 +371,7 @@ def test_farm_state_round_trip(fake_popen, monkeypatch, tmp_path):
                         lambda p: loaded_from.append(str(p)) or V._zero_infer)
     monkeypatch.setattr(V, "load_policy_infer",
                         lambda pid: loaded_from.append(pid) or V._zero_infer)
-    restored = V.restore_ducks(tmp_path / "farm-state.json")
+    restored = V.restore_ducks(tmp_path / "lab-state.json")
     assert [d.id for d in restored] == ["d0", "d1", "trainee"]
     assert [d.label for d in restored] == ["alpha_walking", "alpha_stand",
                                            "🎓 Spin in place @40k"]
@@ -390,12 +390,12 @@ def test_restore_skips_unloadable_entries(fake_popen, monkeypatch, tmp_path, cap
 
     monkeypatch.setattr(V, "load_policy_infer", only_stand)
     monkeypatch.setattr(V, "_onnx_infer", lambda p: V._zero_infer)
-    V.save_farm_state([
+    V.save_lab_state([
         _fake_duck("d0", policy_id="run:deleted-run"),   # registry entry gone
         _fake_duck("trainee"),                            # no brain recorded
         _fake_duck("d2", policy_id="pollen:alpha_stand"),
     ])
-    restored = V.restore_ducks(V.farm_state_path())
+    restored = V.restore_ducks(V.lab_state_path())
     assert [d.id for d in restored] == ["d2"]
     out = capsys.readouterr().out
     assert "skipping d0" in out and "skipping trainee" in out
@@ -406,9 +406,9 @@ def test_restore_skips_unloadable_entries(fake_popen, monkeypatch, tmp_path, cap
 def test_stats_payload_shape(fake_popen):
     sampler = V.StatsSampler()
     s = sampler.sample(None)
-    assert set(s) == {"cpu", "mem", "farm", "trainer", "trainFps"}
+    assert set(s) == {"cpu", "mem", "lab", "trainer", "trainFps"}
     assert 0.0 <= s["cpu"] <= 100.0 and 0.0 < s["mem"] <= 100.0
-    assert set(s["farm"]) == {"cpu", "memMb"} and s["farm"]["memMb"] > 0
+    assert set(s["lab"]) == {"cpu", "memMb"} and s["lab"]["memMb"] > 0
     assert s["trainer"] is None and s["trainFps"] is None
     json.dumps(s)
 
@@ -791,7 +791,7 @@ def test_roster_shares_one_compiled_model():
     """Every duck on a scene steps the SAME mjModel object.
 
     A compiled model costs ~470 MB on a process's first compile and ~90-140 MB
-    per extra copy; the mjData a duck actually owns is ~0.9 MB. A six-duck farm
+    per extra copy; the mjData a duck actually owns is ~0.9 MB. A six-duck lab
     held ~1.4 GB of identical, never-written model — Duck._make_env pins
     domain_rand=False, so there is nothing per-duck in there to keep apart.
     """
@@ -827,7 +827,7 @@ def test_scene_swap_gets_its_own_shared_model():
     assert np.isfinite(b.obs).all()
 
 
-def test_bam_farm_keeps_private_models(monkeypatch):
+def test_bam_lab_keeps_private_models(monkeypatch):
     """MICRODUCK_ACTUATOR=bam opts out of sharing instead of blowing up: the
     BAM actuator rewrites model.dof_frictionloss every physics substep, so
     siblings on one model would retune each other's servos."""
@@ -844,7 +844,7 @@ def test_bam_farm_keeps_private_models(monkeypatch):
 def test_trainee_preview_env_mirrors_stage(fake_popen):
     """The 🎓 preview env must practice what the stage practices — the
     behavior's spawn families under the ACTIVE stage's knobs, read per
-    instance (os.environ belongs to the trainer subprocess; the shared farm
+    instance (os.environ belongs to the trainer subprocess; the shared lab
     process can't use it). Before this the trainee always spawned STANDING
     and the user watched stand-then-topple during 'learning to land'."""
     b = B.BEHAVIORS["backflip"]
@@ -890,14 +890,14 @@ def test_trainee_preview_env_mirrors_stage(fake_popen):
 
 
 def test_on_stage_handoff_rebuilds_trainee(fake_popen):
-    """The farm-loop hook: a stage advance narrates the handoff and re-mirrors
+    """The lab-loop hook: a stage advance narrates the handoff and re-mirrors
     the trainee's preview env onto the NEW stage's spawn knobs."""
     rebuilt: list[dict] = []
     trainee = types.SimpleNamespace(
         id="trainee", rebuild_env=lambda kw: rebuilt.append(kw))
     helper = types.SimpleNamespace(
         id="helper1", rebuild_env=lambda kw: rebuilt.append(kw))
-    st = V.FarmState([trainee, helper])
+    st = V.LabState([trainee, helper])
     st.job = V.TrainingJob("backflip", steps=1000)
     _finish_stage(st.job, 1000)
     st.job.poll()  # now on stage 2
@@ -953,14 +953,80 @@ def test_showcase_env_kwargs_uses_final_stage_knobs(fake_popen):
     assert duck.env.spotter == (b.spotter_fn is not None)
 
 
-def test_plain_assign_env_kwargs_unchanged(fake_popen):
-    """A curriculum-stage policy assigned WITHOUT the showcase flag keeps
-    exactly today's preview: the behavior's scene/termination physics but
-    ordinary standing-start spawns (no behavior env, no overrides)."""
+def test_plain_assign_runs_the_behaviors_own_env(fake_popen):
+    """A curriculum-stage policy assigned WITHOUT the showcase flag runs the
+    behavior's OWN env — from ordinary standing starts, no stage overrides.
+
+    The env class is the load-bearing half: an assigned trick policy used to
+    land in the plain walking env, which resamples a random locomotion twist
+    into the observation the policy acts on."""
     run = _mk_teach_run("teach-backflip-abc123-s4")
     kw = V.env_kwargs_for_policy_path(str(run / "policy.onnx"))
     assert kw == V.env_kwargs_for_behavior(B.BEHAVIORS["backflip"])
-    assert "behavior_id" not in kw and "spawn_overrides" not in kw
+    assert kw["behavior_id"] == "backflip"
+    assert kw["standing_spawns"] is True and "spawn_overrides" not in kw
+    duck = V.Duck("d6", "x", V._zero_infer, seed=1, env_kwargs={})
+    duck.rebuild_env(kw)
+    assert isinstance(duck.env, B.BehaviorEnv)
+    # ...and the standing pin really beats the recipe's spawn families: a
+    # plain-assigned backflip must not start mid-roll (that is what the ✨
+    # showcase assign is for), nor a stand duck lying on the floor.
+    for _ in range(12):
+        duck.env.reset()
+        assert duck.env.last_spawn == "standing"
+
+
+def test_assigned_trick_duck_never_sees_a_drive_command(fake_popen):
+    """Regression: an assigned `run:teach-one_leg-*` duck runs one_leg's OWN
+    env, so the twist command its policy reads stays zero for the whole
+    episode — resets included.
+
+    This is the mechanism behind the reported symptom (an assigned one_leg
+    policy terminating ~5x/second, r-bar ~ -45, while the same weights held the
+    pose for a full 20 s episode standalone): in the walking env the duck
+    landed in, `_sample_commands` writes a fresh random locomotion twist into
+    obs[48:51] at every reset and every resample window, and the lab's
+    per-frame `set_cmd(zeros)` cannot take it back — the observation the policy
+    acts on is already built. A trick policy trained on pinned-zero twist then
+    gets a walk order it never trained for.
+    """
+    run = _mk_teach_run("teach-one_leg-abc123", behavior="one_leg")
+    duck = V.Duck("d7", "one_leg", V._zero_infer, seed=1,
+                  policy_id="run:teach-one_leg-abc123",
+                  env_kwargs=V.env_kwargs_for_policy_path(str(run / "policy.onnx")))
+    assert isinstance(duck.env, B.BehaviorEnv)
+    assert duck.env.behavior.id == "one_leg"
+    assert V.is_trick_duck(duck)      # ...which is why the lab sends it zeros
+    for _ in range(int(duck.env.max_steps) + 200):   # past a reset or two
+        assert np.allclose(duck.obs[48:51], 0.0), "drive command in a trick obs"
+        duck.set_cmd(np.zeros(3, np.float32))  # what lab_loop sends every frame
+        duck.tick()
+
+
+def test_assigned_trick_duck_survives_a_full_episode(fake_popen):
+    """The reported symptom itself: an assigned `run:teach-one_leg-*` duck runs
+    a full episode without terminating.
+
+    The brain is the shipped alpha_stand — a real balancing policy, since the
+    stand pose is not a passive equilibrium here (see test_env_contract) and a
+    zero brain topples on its own. Note that alpha_stand survives the walking
+    env too, so this test pins the CONTRACT (nothing in the assigned duck's env
+    kwargs may terminate a held pose) rather than reproducing the fall; the
+    mechanism is pinned by the command-slot test above.
+    """
+    onnx_path = C.MICRODUCK_RL_DIR.parent / "microduck/policies/alpha_stand.onnx"
+    if not onnx_path.exists():
+        pytest.skip("microduck repo (shipped policies) not checked out next door")
+    run = _mk_teach_run("teach-one_leg-abc123", behavior="one_leg")
+    duck = V.Duck("d8", "one_leg", V._onnx_infer(onnx_path), seed=1,
+                  policy_id="run:teach-one_leg-abc123",
+                  env_kwargs=V.env_kwargs_for_policy_path(str(run / "policy.onnx")))
+    steps = int(duck.env.max_steps) - 1
+    for _ in range(steps):
+        duck.set_cmd(np.zeros(3, np.float32))
+        duck.tick()
+    assert duck.falls == 0, f"assigned one_leg duck fell {duck.falls}x"
+    assert duck.env.step_count == steps   # one episode, never reset
 
 
 def test_showcase_is_noop_without_curriculum(fake_popen):
@@ -983,7 +1049,7 @@ def test_showcase_label_names_the_chain():
     assert V.showcase_label("run:some-run") == "some-run ✨"
 
 
-def test_farm_state_showcase_round_trip(fake_popen, monkeypatch):
+def test_lab_state_showcase_round_trip(fake_popen, monkeypatch):
     """A showcase duck comes back showcasing after a restart — otherwise its
     persisted ✨ label would promise full-arc spawns its restored env no
     longer performs."""
@@ -992,10 +1058,10 @@ def test_farm_state_showcase_round_trip(fake_popen, monkeypatch):
     d = _fake_duck("d0", policy_id="run:teach-backflip-abc123-s4",
                    label="backflip-abc123 ✨")
     d.showcase = True
-    V.save_farm_state([d])
-    data = json.loads(V.farm_state_path().read_text())
+    V.save_lab_state([d])
+    data = json.loads(V.lab_state_path().read_text())
     assert data["ducks"][0]["showcase"] is True
-    restored = V.restore_ducks(V.farm_state_path())
+    restored = V.restore_ducks(V.lab_state_path())
     assert restored[0].showcase is True
     assert isinstance(restored[0].env, B.BehaviorEnv)
     final = B.BEHAVIORS["backflip"].curriculum[-1].env
@@ -1304,6 +1370,70 @@ def test_teach_steps_override_does_not_poison_the_sticky_budget(fake_popen,
     assert V.load_teach_weights()["spin"]["steps"] == 4_000_000
 
 
+# --------------------------------------------------- teach/load (adopt)
+
+
+def _seed_finished_run(name, behavior="spin", weights=None, steps=2000):
+    run = V.RUNS_DIR / name
+    run.mkdir(parents=True)
+    (run / "behavior.json").write_text(json.dumps(
+        {"behavior": behavior, "steps": steps, "weights": weights or {}}))
+    (run / "progress.jsonl").write_text(json.dumps(
+        {"steps": steps, "total": steps, "ep_rew": 4.2, "done": True}) + "\n")
+    return run
+
+
+def test_teach_load_seats_finished_run(fake_popen, monkeypatch):
+    """POST /teach/load pulls a finished run into the panel: its payload
+    streams in "done" state (sliders unlocked, fine-tune targeting that run)
+    with NO subprocess launched — and is refused for non-runs and while a
+    job actually trains."""
+    import importlib
+    monkeypatch.setattr(importlib, "reload", lambda m: m)
+    _seed_finished_run("teach-spin-adopt1", weights={"spin_fast": 3.5})
+    app = V.make_app([])
+    load = _endpoint(app, "/teach/load", "POST")
+    teach = _endpoint(app, "/teach", "POST")
+    stop = _endpoint(app, "/teach/stop", "POST")
+
+    out = asyncio.run(load(V.LoadRunReq(policy="run:teach-spin-adopt1")))
+    assert out["ok"]
+    assert out["job"]["runName"] == "teach-spin-adopt1"
+    assert out["job"]["status"] == "done"
+    assert out["job"]["behavior"]["id"] == "spin"
+    assert out["job"]["weights"]["spin_fast"] == 3.5
+    assert fake_popen == []  # seated, not launched
+
+    # Shipped policies / unknown names have no recipe → clean refusal.
+    assert not asyncio.run(load(V.LoadRunReq(policy="pollen:alpha_stand")))["ok"]
+    # A run predating behavior.json can't be reconstructed → clean refusal.
+    (V.RUNS_DIR / "teach-spin-bare").mkdir(parents=True)
+    bare = asyncio.run(load(V.LoadRunReq(policy="run:teach-spin-bare")))
+    assert not bare["ok"] and "behavior.json" in bare["message"]
+
+    # While a job trains, loading is refused outright — never yank a live job.
+    assert asyncio.run(teach(V.TeachReq(text="spin in place")))["matched"]
+    refused = asyncio.run(load(V.LoadRunReq(policy="run:teach-spin-adopt1")))
+    assert not refused["ok"] and "stop it first" in refused["message"]
+    asyncio.run(stop())
+
+
+def test_adopted_job_survives_the_lab_poll_cycle(fake_popen):
+    """The adopted job has no subprocess: the lab loop's poll()/stop()/
+    stats.sample() must all be safe with proc=None, and poll() replays the
+    run's progress.jsonl so the panel shows its real final numbers."""
+    _seed_finished_run("teach-spin-adopt2")
+    job = V.TrainingJob.adopt("teach-spin-adopt2")
+    assert job.proc is None and job.status == "done"
+    job.poll()
+    assert job.progress["ep_rew"] == 4.2 and job.progress["done"] is True
+    assert job.train_fps() is None
+    stats = V.StatsSampler().sample(job)
+    assert stats["trainer"] is None and stats["trainFps"] is None
+    job.stop()  # lifespan shutdown stops whatever job is seated
+    assert fake_popen == []
+
+
 # --------------------------------------------------- forward-speed readout
 
 
@@ -1406,7 +1536,7 @@ def test_speed_window_clears_on_reset_and_policy_swap():
 
 
 def test_tick_records_a_speed_sample():
-    """The window is filled by the farm loop's own tick, not only by tests."""
+    """The window is filled by the lab loop's own tick, not only by tests."""
     duck = V.Duck("spd3", "x", V._zero_infer, seed=4, env_kwargs={})
     duck.speed_hist.clear()
     duck.tick()
@@ -1417,8 +1547,8 @@ def test_tick_records_a_speed_sample():
 # ------------------------------------------------ frame broadcast robustness
 
 
-def _farm_state(app):
-    """The FarmState the handlers close over. make_app keeps it in a closure
+def _lab_state(app):
+    """The LabState the handlers close over. make_app keeps it in a closure
     rather than on app.state, and reaching st.clients is the only way to drive
     the broadcast (same "no TestClient in this project" constraint that makes
     _endpoint necessary)."""
@@ -1429,8 +1559,8 @@ def _farm_state(app):
 def test_broadcast_survives_a_client_arriving_mid_send():
     """A browser connecting while the loop is suspended in `await
     send_text` mutates st.clients mid-iteration. That RuntimeError killed
-    farm_loop outright — and since nothing ever retrieves that task's
-    exception, the farm went on serving HTTP and accepting sockets while
+    lab_loop outright — and since nothing ever retrieves that task's
+    exception, the lab went on serving HTTP and accepting sockets while
     every duck froze, with no line in the log: the viewer's badge sat green
     over an empty scene. Iterate a snapshot instead.
 
@@ -1439,7 +1569,7 @@ def test_broadcast_survives_a_client_arriving_mid_send():
     walker = V.Duck("d0", "w", V._zero_infer, seed=1, env_kwargs={})
     trainee = V.Duck("trainee", "t", V._zero_infer, seed=2, env_kwargs={})
     app = V.make_app([walker, trainee])
-    st = _farm_state(app)
+    st = _lab_state(app)
 
     class Joiner:
         """A client whose send is slow enough for a second tab to connect."""
@@ -1462,7 +1592,7 @@ def test_broadcast_survives_a_client_arriving_mid_send():
 
     # Before the fix this stopped at exactly one — the first send blew the
     # loop up and nothing was ever sent again.
-    assert len(joiner.frames) > 2, "farm_loop stopped broadcasting"
+    assert len(joiner.frames) > 2, "lab_loop stopped broadcasting"
 
     ducks = json.loads(joiner.frames[-1])["ducks"]
     assert [d["id"] for d in ducks] == ["d0", "trainee"]
@@ -1481,7 +1611,7 @@ def test_scale_after_a_stop_does_not_strand_a_trainer(fake_popen, monkeypatch):
     process and set status="stopped", then scale() launched a BRAND-NEW
     trainer and rebound self.proc — and poll() is gated on
     status == "training", so that trainer plus its 16-32 fork workers ran
-    unreachable until the farm process exited.
+    unreachable until the lab process exited.
     """
     monkeypatch.setattr(V.psutil, "Process",
                         lambda pid: types.SimpleNamespace(children=lambda recursive: []))
@@ -1580,3 +1710,357 @@ def test_handoff_waits_for_the_spin_to_brake(fake_popen, monkeypatch):
     assert not duck._handoff_due(), "handed off mid-spin"
     duck.env.data.sensordata[duck.env.gyro_adr] = (0.1, 0.2, 0.1)   # braked
     assert duck._handoff_due()
+
+
+# ------------------------------------------------- deleting training data
+
+def _run_with_files(root, name, sizes=(("policy.onnx", 100),
+                                       ("checkpoints/model_1000_steps.zip", 900))):
+    d = root / name
+    for rel, n in sizes:
+        f = d / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x" * n)
+    return d
+
+
+def test_delete_run_erases_the_tree_and_reports_what_it_freed(fake_popen):
+    keep = _run_with_files(V.RUNS_DIR, "teach-spin-keepme")
+    doomed = _run_with_files(V.RUNS_DIR, "teach-spin-abc123")
+    st = V.LabState([])
+
+    res = V.delete_runs(["teach-spin-abc123"], st)
+
+    assert res == {"deleted": ["teach-spin-abc123"], "freedBytes": 1000}
+    assert not doomed.exists()
+    assert keep.exists(), "deleting one run took a neighbour with it"
+
+
+def test_delete_run_rejects_names_that_could_climb_out_of_runs(fake_popen):
+    """The name arrives off the wire and selects a directory tree to erase —
+    anything with a separator, a leading dot or .. must never resolve."""
+    st = V.LabState([])
+    for bad in ("../..", "..", "a/../../etc", "/etc", ".hidden", "a b", ""):
+        with pytest.raises(ValueError):
+            V.delete_runs([bad], st)
+
+
+def test_delete_run_404s_on_a_name_with_no_run_dir(fake_popen):
+    V.RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(FileNotFoundError):
+        V.delete_runs(["teach-spin-nothere"], V.LabState([]))
+
+
+def test_delete_refuses_any_run_of_the_job_training_right_now(fake_popen):
+    """Not just the ACTIVE stage: a chain stage warm-starts from the previous
+    stage's dir, so deleting a finished earlier stage mid-chain would break
+    the next launch."""
+    st = V.LabState([])
+    st.job = V.TrainingJob("backflip", steps=1000)
+    base = st.job._base_name
+    done_stage = _run_with_files(V.RUNS_DIR, f"{base}-s1")
+    active = st.job.dir                      # the stage training right now
+    assert st.job.status == "training"
+
+    for name in (active.name, done_stage.name):
+        with pytest.raises(PermissionError, match="training right now"):
+            V.delete_runs([name], st)
+    assert active.exists() and done_stage.exists()
+
+    # Once the job is over its runs are ordinary data again.
+    st.job.status = "done"
+    assert V.delete_runs([done_stage.name], st)["deleted"] == [done_stage.name]
+
+
+def test_deleting_a_chain_is_all_or_nothing(fake_popen):
+    """A half-deleted chain can't be resumed or fine-tuned from, so one bad
+    target has to stop the whole delete before anything is touched."""
+    st = V.LabState([])
+    st.job = V.TrainingJob("backflip", steps=1000)
+    base = st.job._base_name
+    stages = [_run_with_files(V.RUNS_DIR, f"{base}-s{i}") for i in (1, 2)]
+
+    with pytest.raises(PermissionError):
+        V.delete_runs([s.name for s in stages] + [st.job.dir.name], st)
+    assert all(s.exists() for s in stages), "a refused chain delete still bit"
+
+
+def test_chain_run_names_finds_every_stage_in_order(fake_popen):
+    for name in ("teach-backflip-abc-s2", "teach-backflip-abc-s10",
+                 "teach-backflip-abc-s1", "teach-backflip-other-s1",
+                 "teach-backflip-abc"):
+        _run_with_files(V.RUNS_DIR, name)
+    # Stage order is numeric (s10 last, not after s1), and a same-prefixed
+    # NEIGHBOUR chain is not swept in.
+    assert V.chain_run_names("teach-backflip-abc") == [
+        "teach-backflip-abc", "teach-backflip-abc-s1",
+        "teach-backflip-abc-s2", "teach-backflip-abc-s10"]
+    assert V.chain_run_names("teach-nothing") == []
+
+
+def test_chain_delete_takes_stages_that_never_exported_a_policy(fake_popen):
+    """The palette only shows stages with a policy.onnx; a chain delete must
+    still clear the stage that died before exporting, or the run dir is
+    orphaned where nothing can see it."""
+    _run_with_files(V.RUNS_DIR, "teach-backflip-abc-s1")
+    _run_with_files(V.RUNS_DIR, "teach-backflip-abc-s2",
+                    sizes=(("progress.jsonl", 40),))  # no policy.onnx
+    res = V.delete_runs(V.chain_run_names("teach-backflip-abc"), V.LabState([]))
+    assert res["deleted"] == ["teach-backflip-abc-s1", "teach-backflip-abc-s2"]
+    assert res["freedBytes"] == 1040
+    assert not (V.RUNS_DIR / "teach-backflip-abc-s2").exists()
+
+
+def test_delete_drops_the_cached_infer_so_a_stale_chip_cannot_resurrect_it(fake_popen):
+    _run_with_files(V.RUNS_DIR, "teach-spin-abc123")
+    V._infer_cache["run:teach-spin-abc123"] = V._zero_infer
+    V._infer_cache["ckpt:teach-spin-abc123@1k"] = V._zero_infer
+    V._infer_cache["run:teach-spin-keepme"] = V._zero_infer
+    try:
+        V.delete_runs(["teach-spin-abc123"], V.LabState([]))
+        assert "run:teach-spin-abc123" not in V._infer_cache
+        assert "ckpt:teach-spin-abc123@1k" not in V._infer_cache
+        assert "run:teach-spin-keepme" in V._infer_cache
+    finally:
+        V._infer_cache.pop("run:teach-spin-keepme", None)
+
+
+def test_policies_carry_the_size_a_delete_would_free(fake_popen):
+    """The confirm dialog quotes this number — it has to count checkpoints,
+    not just policy.onnx."""
+    _run_with_files(V.RUNS_DIR, "teach-spin-abc123")
+    entry = next(p for p in V.discover_policies() if p["id"] == "run:teach-spin-abc123")
+    assert entry["sizeBytes"] == 1000
+
+
+def test_hf_token_settings_roundtrip_never_leaks_the_token(fake_popen, monkeypatch, tmp_path):
+    """BYOK contract: the token is validated via whoami() BEFORE persisting,
+    lands 0600 on disk, and no response after the POST ever contains it —
+    the browser gets a mask + username only."""
+    import huggingface_hub
+    from fastapi import HTTPException
+
+    class FakeApi:
+        def __init__(self, token=None):
+            self.token = token
+
+        def whoami(self):
+            if self.token != "hf_good_token_1234567890":
+                raise RuntimeError("Invalid user token")
+            return {"name": "testduck"}
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(V, "HF_TOKEN_PATH", tmp_path / "hf-token.json")
+    app = V.make_app([])
+    get = _endpoint(app, "/settings/hf", "GET")
+    post = _endpoint(app, "/settings/hf", "POST")
+    delete = _endpoint(app, "/settings/hf", "DELETE")
+
+    assert get() == {"configured": False}
+
+    with pytest.raises(HTTPException) as e:
+        post(V.HfTokenReq(token="hf_wrong"))
+    assert e.value.status_code == 401
+    assert not (tmp_path / "hf-token.json").exists()  # rejected ≠ persisted
+
+    res = post(V.HfTokenReq(token="hf_good_token_1234567890"))
+    assert res["configured"] and res["username"] == "testduck"
+    assert "hf_good_token_1234567890" not in str(res)  # mask only
+    mode = (tmp_path / "hf-token.json").stat().st_mode & 0o777
+    assert mode == 0o600
+    shown = get()
+    assert shown["username"] == "testduck"
+    assert "hf_good_token_1234567890" not in str(shown)
+
+    assert delete() == {"configured": False}
+    assert not (tmp_path / "hf-token.json").exists()
+    assert delete() == {"configured": False}  # idempotent
+
+
+def test_showcase_env_kwargs_serves_an_unspotted_curriculum(fake_popen, tmp_path):
+    """The ✨ whole-trick chip on a curriculum WITHOUT a spotter (the headstand
+    ladder) must return real env kwargs. The non-spotter tail used to sit
+    unreachable after handoff_for's return, so showcase_env_kwargs fell through
+    to None and do_assign silently downgraded to a plain standing assign."""
+    b = V.behaviors_mod.BEHAVIORS["headstand"]
+    assert b.curriculum and b.spotter_fn is None      # the case that regressed
+    run = V.RUNS_DIR / "teach-headstand-abc-s5"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "behavior.json").write_text(json.dumps({"behavior": "headstand"}))
+    (run / "policy.onnx").write_bytes(b"x")
+    kw = V.showcase_env_kwargs(str(run / "policy.onnx"))
+    assert kw is not None and kw["behavior_id"] == "headstand"
+    assert kw["standing_spawns"] is False             # it rehearses the arc
+
+
+def test_trainee_preview_mirrors_stage_physics(fake_popen):
+    """Stage knobs are not only spawns: a stage that ladders the ACTUATOR or
+    the servo current must reach the in-process preview env too, or the watched
+    duck runs different physics than the trainer (xml stage 1 / bam@1.3)."""
+    b = V.behaviors_mod.BEHAVIORS["headstand"]
+    kw = V.trainee_env_kwargs(b, {"MICRODUCK_ACTUATOR": "xml",
+                                  "MICRODUCK_BAM_CURRENT_SCALE": "1.3"})
+    assert kw["actuator_force"] == "xml"
+    assert kw["bam_current_scale"] == 1.3
+
+
+def test_stage_env_carries_the_runs_clip(fake_popen):
+    """The clip rides extra_env into the trainer; the preview mirror reads
+    stage_env, so an imitate run's preview tracked the recipe's DEFAULT clip."""
+    job = V.TrainingJob("imitate", steps=1000,
+                        extra_env={"MICRODUCK_CLIP": "my walk"})
+    assert job.stage_env()["MICRODUCK_CLIP"] == "my walk"
+    kw = V.trainee_env_kwargs(job.behavior, job.stage_env())
+    assert kw["clip_name"] == "my walk"
+
+
+def test_seating_another_run_keeps_ownership_of_live_preview_ducks(fake_popen, monkeypatch):
+    """Ownership must survive a job REPLACEMENT. The panel fires /teach/load on
+    mere duck selection, so a finished launched job (whose trainee and helpers
+    are still on the roster) is routinely swapped for an adopted seat — and if
+    the seat disowns them, 🗑 can never sweep them again and no other path
+    will either."""
+    monkeypatch.setattr(V, "save_lab_state", lambda ducks: None)
+    app = V.make_app([])
+    st = app.state.lab
+    _run_with_files(V.RUNS_DIR, "teach-spin-other")
+    (V.RUNS_DIR / "teach-spin-other" / "behavior.json").write_text(
+        json.dumps({"behavior": "spin", "steps": 1000, "weights": {}}))
+    st.ducks = [_fake_duck("trainee"), _fake_duck("helper 1"), _fake_duck("d0")]
+
+    st.job = V.TrainingJob("spin", steps=1000)      # launched: owns the ducks
+    st.job.status = "done"
+    assert st.job.owns_preview_ducks is True
+    asyncio.run(_endpoint(app, "/teach/load", "POST")(
+        V.LoadRunReq(policy="run:teach-spin-other")))
+    assert st.job.owns_preview_ducks is True        # carried across the swap
+
+    asyncio.run(_endpoint(app, "/teach/clear", "POST")())
+    assert [d.id for d in st.ducks] == ["d0"]
+
+
+def test_teach_clear_never_sweeps_a_roster_the_card_did_not_build(fake_popen, monkeypatch):
+    """A SEATED run (POST /teach/load, which the panel fires on duck selection)
+    creates no preview ducks, so dismissing its card must leave the roster
+    alone. This has bitten twice: first by purging whenever st.job was None
+    (which is the ordinary post-restart state), then by purging for any job at
+    all — and after a restart restore_ducks has legitimately brought a trainee
+    and helpers back."""
+    saved = []
+    monkeypatch.setattr(V, "save_lab_state", lambda ducks: saved.append(list(ducks)))
+    app = V.make_app([])
+    st = app.state.lab
+    _run_with_files(V.RUNS_DIR, "teach-spin-seated")
+    (V.RUNS_DIR / "teach-spin-seated" / "behavior.json").write_text(
+        json.dumps({"behavior": "spin", "steps": 1000, "weights": {}}))
+    st.ducks = [_fake_duck("trainee"), _fake_duck("helper 1"), _fake_duck("d0")]
+
+    st.job = V.TrainingJob.adopt("teach-spin-seated")
+    assert st.job.owns_preview_ducks is False
+    asyncio.run(_endpoint(app, "/teach/clear", "POST")())
+    assert [d.id for d in st.ducks] == ["trainee", "helper 1", "d0"]
+    assert not saved                       # nothing persisted, nothing lost
+
+    # A LAUNCHED job does own them, and dismissing its card takes them along.
+    st.job = V.TrainingJob("spin", steps=1000)
+    assert st.job.owns_preview_ducks is True
+    st.job.status = "done"
+    asyncio.run(_endpoint(app, "/teach/clear", "POST")())
+    assert [d.id for d in st.ducks] == ["d0"]
+    assert saved and [d.id for d in saved[-1]] == ["d0"]
+
+
+def test_teach_clear_persists_the_roster(fake_popen, monkeypatch):
+    """Every other roster mutation saves; without this the cleared trainee and
+    helpers came back on the next lab start."""
+    saved = []
+    monkeypatch.setattr(V, "save_lab_state", lambda ducks: saved.append(list(ducks)))
+    app = V.make_app([])
+    st = app.state.lab
+    st.job = V.TrainingJob("spin", steps=1000)
+    st.job.status = "done"
+    st.ducks = [_fake_duck("trainee"), _fake_duck("helper 1"), _fake_duck("d0")]
+    asyncio.run(_endpoint(app, "/teach/clear", "POST")())
+    assert [d.id for d in st.ducks] == ["d0"]
+    assert saved and [d.id for d in saved[-1]] == ["d0"]
+
+
+def test_delete_clears_a_card_showing_that_run(fake_popen):
+    """A finished run seated by /teach/load is deletable (it is ordinary data),
+    but the card must go with it — it used to keep streaming, and ✨ fine-tune
+    pointed at an rmtree'd dir."""
+    app = V.make_app([])
+    st = app.state.lab
+    _run_with_files(V.RUNS_DIR, "teach-spin-seated")
+    (V.RUNS_DIR / "teach-spin-seated" / "behavior.json").write_text(
+        json.dumps({"behavior": "spin", "steps": 1000, "weights": {}}))
+    st.job = V.TrainingJob.adopt("teach-spin-seated")
+    assert st.job.status == "done"
+    _endpoint(app, "/runs/{name}", "DELETE")("teach-spin-seated")
+    assert st.job is None
+
+
+def test_teach_refuses_an_unknown_or_unsafe_clip(fake_popen):
+    """The clip name becomes a path in BOTH the trainer and the preview envs,
+    so it gets the same validation every clip endpoint uses — and must exist,
+    or the job reports healthy while every worker dies at env construction."""
+    app = V.make_app([])
+    teach = _endpoint(app, "/teach", "POST")
+    for bad in ("../secrets", "no-such-clip"):
+        res = asyncio.run(teach(V.TeachReq(text="imitate this", clip=bad)))
+        assert res["matched"] is False
+
+
+def test_download_route_serves_the_baked_onnx_with_live_fallback(fake_popen):
+    """GET /runs/{name}/policy.onnx hands out the DEPLOYABLE artifact: the
+    baked policy.onnx when the run finished, the live.onnx snapshot while it
+    is still training, and never a raw checkpoint. Same name guard as
+    DELETE — the string picks a directory."""
+    from fastapi import HTTPException
+    app = V.make_app([])
+    download = _endpoint(app, "/runs/{name}/policy.onnx", "GET")
+
+    for name, code in (("../etc", 422), ("teach-spin-nothere", 404)):
+        with pytest.raises(HTTPException) as e:
+            download(name)
+        assert e.value.status_code == code
+
+    # A run with only checkpoints has nothing worth handing out: 404.
+    _run_with_files(V.RUNS_DIR, "teach-spin-raw",
+                    sizes=(("checkpoints/model_1000_steps.zip", 900),))
+    with pytest.raises(HTTPException) as e:
+        download("teach-spin-raw")
+    assert e.value.status_code == 404
+
+    # Finished run: the baked export wins, served under a download filename.
+    _run_with_files(V.RUNS_DIR, "teach-spin-done",
+                    sizes=(("policy.onnx", 100), ("live.onnx", 50)))
+    res = download("teach-spin-done")
+    assert str(res.path).endswith("teach-spin-done/policy.onnx")
+    assert "teach-spin-done.onnx" in res.headers["content-disposition"]
+
+    # Mid-training run: fall back to the newest live snapshot.
+    _run_with_files(V.RUNS_DIR, "teach-spin-live",
+                    sizes=(("live.onnx", 50),))
+    assert str(download("teach-spin-live").path).endswith("teach-spin-live/live.onnx")
+
+
+def test_delete_route_maps_guards_to_status_codes_and_toasts(fake_popen):
+    from fastapi import HTTPException
+    app = V.make_app([])
+    delete = _endpoint(app, "/runs/{name}", "DELETE")
+    _run_with_files(V.RUNS_DIR, "teach-spin-abc-s1")
+    _run_with_files(V.RUNS_DIR, "teach-spin-abc-s2")
+
+    for name, kwargs, code in (("../etc", {}, 422),
+                               ("teach-spin-nothere", {}, 404)):
+        with pytest.raises(HTTPException) as e:
+            delete(name, **kwargs)
+        assert e.value.status_code == code
+
+    res = delete("teach-spin-abc", chain=True)
+    assert res["deleted"] == ["teach-spin-abc-s1", "teach-spin-abc-s2"]
+    assert not list(V.RUNS_DIR.iterdir())
+    # The lab's own event stream narrates it, so every viewer sees the delete
+    # — not just the browser that asked for it.
+    assert any("deleted teach-spin-abc" in e for e in app.state.lab.events)

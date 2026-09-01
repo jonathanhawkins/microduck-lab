@@ -1,7 +1,7 @@
 "use client";
 
 // The 🎬 preview duck: a translucent ghost that shows the pose the animation
-// editor is currently authoring. It is NOT a farm duck — no env, no policy, no
+// editor is currently authoring. It is NOT a lab duck — no env, no policy, no
 // WS stream. Its body transforms come from POST /pose (forward kinematics on
 // the server's scratch model), so previewing can never perturb a live episode.
 //
@@ -15,7 +15,8 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { Html } from "@react-three/drei";
 import * as THREE from "three";
-import type { Scene } from "@/lib/farm";
+import type { Scene } from "@/lib/lab";
+import { RIG_CONTROLS } from "@/lib/rig";
 import { buildBodyGeometries, type BodyGeometry } from "./Duck";
 import {
   animStore,
@@ -23,6 +24,7 @@ import {
   PREVIEW_OFFSET,
   ROOT_SEL,
   setSelected,
+  setSelectedRig,
   subscribeAnim,
 } from "@/lib/anim";
 
@@ -53,16 +55,19 @@ const MIN_RADIUS_PX = 18;
 const EYE: [number, number, number] = [0.8, 0.39, 0.94];
 
 interface DragState {
-  joint: number; // joint index, or ROOT_SEL
+  joint: number; // joint index, or ROOT_SEL — in rig mode, the GEAR joint
   body: number; // body whose frame carries the hinge
   lastAngle: number | null; // screen angle (rad) at the previous move
+  /** Set in rig mode: the drag's angle delta drives this control instead of
+   *  the joint directly, geared so the part under the cursor tracks 1:1. */
+  rig?: { id: string; coeff: number };
 }
 
-// --- the ⇕ squat handle: a game-rig-style gizmo floating behind the trunk ---
-/** Handle offset in the TRUNK body frame (x forward, z up): behind the duck's
- *  back, clear of the tail geometry, so it reads as a control and not a part. */
-const HANDLE_OFFSET = new THREE.Vector3(-0.105, 0, 0.03);
-/** Radians of squat per pixel of vertical drag — full crouch in ~150 px. */
+// --- the ⇕ rig handle: a game-rig-style gizmo for the ACTIVE rig control ---
+// It drives whatever rig control is selected (squat when nothing is) and
+// parks at that control's own anchor — head for look, thigh for a swing, the
+// feet for toes — so where the diamond sits tells you what a drag will move.
+/** Radians of control per pixel of vertical drag (down = +). */
 const HANDLE_GAIN = 0.005;
 const HANDLE_IDLE = new THREE.Color("#5fd0bd");
 const HANDLE_HOVER = new THREE.Color("#a9f0e4");
@@ -92,7 +97,7 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
   const labelRef = useRef<THREE.Group>(null);
   const labelDivRef = useRef<HTMLDivElement>(null);
   const drag = useRef<DragState | null>(null);
-  const rigDrag = useRef<{ lastY: number } | null>(null);
+  const rigDrag = useRef<{ lastY: number; id: string } | null>(null);
   const handleHover = useRef(false);
   const handleRef = useRef<THREE.Group>(null);
   const handleMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
@@ -129,15 +134,25 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
       const trunk = pose[1];
       if (labelRef.current && trunk)
         labelRef.current.position.set(trunk[0], trunk[1], trunk[2] + 0.24);
-      // The squat handle rides the trunk (offset in its frame) so it stays on
-      // the duck's back through a crouch, a lean, or a root-pitch drag.
-      const trunkGrp = groupRefs.current[animStore.meta?.trunkBody ?? 1];
-      if (handleRef.current && trunkGrp) {
-        handleRef.current.position
-          .copy(HANDLE_OFFSET)
-          .applyQuaternion(trunkGrp.quaternion)
-          .add(trunkGrp.position);
-        handleRef.current.quaternion.copy(trunkGrp.quaternion);
+      // The ⇕ handle parks at the ACTIVE control's anchor body (world-frame
+      // offset, world-vertical rail) — it follows the part it moves and jumps
+      // when the selection changes, which is how you see what it is armed with.
+      const meta = animStore.meta;
+      const active =
+        RIG_CONTROLS.find((c) => c.id === (animStore.selectedRig?.id ?? "squat")) ??
+        RIG_CONTROLS[0];
+      const anchorBody =
+        active.handle.joint === "root"
+          ? meta?.trunkBody
+          : meta?.joints.find((j) => j.name === active.handle.joint)?.body;
+      const anchorGrp = anchorBody != null ? groupRefs.current[anchorBody] : null;
+      if (handleRef.current && anchorGrp) {
+        const [ox, oy, oz] = active.handle.offset;
+        handleRef.current.position.set(
+          anchorGrp.position.x + ox,
+          anchorGrp.position.y + oy,
+          anchorGrp.position.z + oz
+        );
         const c = rigDrag.current ? HANDLE_DRAG : handleHover.current ? HANDLE_HOVER : HANDLE_IDLE;
         handleMatRefs.current.forEach((m) => m?.color.copy(c));
       }
@@ -146,9 +161,12 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     const selBody =
       sel == null ? -1 : animStore.meta?.joints.find((j) => j.index === sel)?.body ?? -1;
     const rootBody = sel === ROOT_SEL ? animStore.meta?.trunkBody ?? -1 : -1;
+    // A selected rig control lights up EVERY body it drives — the coupling is
+    // the thing being edited, and the highlight is how you read its extent.
+    const rigBodies = animStore.selectedRig?.bodies;
     matRefs.current.forEach((m, b) => {
       if (!m) return;
-      const isSel = b === selBody || b === rootBody;
+      const isSel = rigBodies ? rigBodies.includes(b) : b === selBody || b === rootBody;
       const isHover = !isSel && b === animStore.hoveredBody;
       m.color.copy(isSel ? SELECTED : isHover ? GHOST_HOVER : GHOST);
       m.emissive.copy(isSel ? EMIT_SELECTED : EMIT_IDLE);
@@ -218,13 +236,13 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
-      // The ⇕ handle: vertical pixels → squat radians. Down = crouch, which
-      // matches both the gesture and the sign convention in lib/rig.ts.
+      // The ⇕ handle: vertical pixels → radians of whichever control it was
+      // grabbed as (down = +, matching every control's "+ hint").
       const rd = rigDrag.current;
       if (rd) {
         const dy = e.clientY - rd.lastY;
         rd.lastY = e.clientY;
-        animStore.applyRigDelta?.("squat", dy * HANDLE_GAIN * (e.shiftKey ? 0.25 : 1));
+        animStore.applyRigDelta?.(rd.id, dy * HANDLE_GAIN * (e.shiftKey ? 0.25 : 1));
         return;
       }
       const d = drag.current;
@@ -255,7 +273,11 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
       // Screen y is down, so a positive rotation about a viewer-facing axis
       // DEcreases the pixel-space angle — hence the negation.
       const step = (-delta / k) * (e.shiftKey ? 0.25 : 1);
-      animStore.applyJointDelta?.(d.joint, step);
+      // In rig mode the gear joint's motion is coeff × the control's, so
+      // dividing the step by coeff keeps the grabbed part under the cursor
+      // while the rest of the coupling follows.
+      if (d.rig) animStore.applyRigDelta?.(d.rig.id, step / d.rig.coeff);
+      else animStore.applyJointDelta?.(d.joint, step);
     };
     const onUp = () => {
       if (!drag.current && !rigDrag.current) return;
@@ -271,7 +293,10 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     handleGestures.current = {
       down: (e) => {
         e.stopPropagation();
-        rigDrag.current = { lastY: e.nativeEvent.clientY };
+        rigDrag.current = {
+          lastY: e.nativeEvent.clientY,
+          id: animStore.selectedRig?.id ?? "squat",
+        };
         animStore.dragging = true;
         if (controls) controls.enabled = false;
         gl.domElement.style.cursor = "ns-resize";
@@ -300,11 +325,28 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
   }, [camera, gl, controls]);
 
   const onBodyDown = (b: number) => (e: ThreeEvent<PointerEvent>) => {
-    const joint = animStore.jointForBody[b];
-    if (joint == null) return; // world/static body — let the click fall through
-    e.stopPropagation();
-    setSelected(joint);
-    drag.current = { joint, body: b, lastAngle: null };
+    const meta = animStore.meta;
+    // Rig mode: the clicked part selects its mapped control, and the drag
+    // circles the gear joint's hinge but drives the whole coupling.
+    const pick = animStore.mode === "rig" ? animStore.rigForBody[b] : null;
+    if (pick && meta) {
+      e.stopPropagation();
+      setSelectedRig({ id: pick.rigId, label: pick.label, bodies: pick.bodies });
+      const gearBody =
+        pick.gearJoint === ROOT_SEL ? meta.trunkBody : meta.joints[pick.gearJoint]?.body ?? b;
+      drag.current = {
+        joint: pick.gearJoint,
+        body: gearBody,
+        lastAngle: null,
+        rig: { id: pick.rigId, coeff: pick.gearCoeff },
+      };
+    } else {
+      const joint = animStore.jointForBody[b];
+      if (joint == null) return; // world/static body — let the click fall through
+      e.stopPropagation();
+      setSelected(joint);
+      drag.current = { joint, body: b, lastAngle: null };
+    }
     animStore.dragging = true;
     // OrbitControls listens on the same canvas; disabling it for the gesture
     // is the only way to stop a pose drag from also orbiting the camera.
@@ -312,8 +354,9 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     gl.domElement.style.cursor = "grabbing";
   };
 
-  const selectedName =
-    animStore.selected == null
+  const selectedName = animStore.selectedRig
+    ? `🎮 ${animStore.selectedRig.label}`
+    : animStore.selected == null
       ? null
       : animStore.selected === ROOT_SEL
         ? "root pitch"
@@ -354,10 +397,10 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
         )
       )}
 
-      {/* The ⇕ squat handle — one main control, the way a game rig gives the
-          animator a pelvis handle: grab it, drag down, and the whole leg chain
-          (hip pitch, knee, ankle × both legs) folds with the feet flat. The
-          drag itself just moves the "squat" rig control (lib/rig.ts). */}
+      {/* The ⇕ rig handle — the way a game rig gives the animator one grabbable
+          control per track: it drives the SELECTED rig control (squat when
+          nothing is selected), parks at that control's anchor on the duck, and
+          wears its name. Grab it, drag down = +. */}
       <group
         ref={handleRef}
         onPointerDown={(e) => handleGestures.current?.down(e)}
@@ -378,6 +421,20 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
             opacity={0.6}
           />
         </mesh>
+        {/* the handle wears the name of the control it is armed with */}
+        <Html center zIndexRange={[10, 0]} position={[0, 0, -0.062]} style={{ pointerEvents: "none" }}>
+          <div
+            style={{
+              color: "#8ee6d6",
+              fontFamily: "ui-monospace, Menlo, monospace",
+              fontSize: 9,
+              whiteSpace: "nowrap",
+              textShadow: "0 1px 3px rgba(0,0,0,0.9)",
+            }}
+          >
+            ⇕ {animStore.selectedRig?.label ?? "squat"}
+          </div>
+        </Html>
       </group>
 
       {/* Locator ring — the ghost is translucent and easy to lose on a busy floor. */}

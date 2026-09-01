@@ -6,26 +6,38 @@
 // bars, helper count, and snapshot updates landing on the 🎓 trainee duck in
 // the scene. Once a run ends, the recipe becomes editable: drag the weight
 // sliders and either retrain from scratch or fine-tune the finished result.
-// Self-contained: talks to the farm server directly and reads the streamed
+// Self-contained: talks to the lab server directly and reads the streamed
 // frame via clientRef (same polling pattern as Hud).
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  FARM_HTTP,
+  LAB_HTTP,
   MAX_STEP_BUDGET,
   MIN_STEP_BUDGET,
   clampStepBudget,
+  isRunPolicy,
+  loadTeachRun,
   resolveStageSteps,
+  runNameOfPolicy,
   type BehaviorCard,
-  type FarmClient,
+  type LabClient,
   type TermCard,
   type TrainingPayload,
-} from "@/lib/farm";
+} from "@/lib/lab";
 import { loadJSON, saveJSON } from "@/lib/persist";
-import { usePolicyOpen } from "@/lib/ui";
+import { useSelectedDuck } from "@/lib/select";
+import { modalIsOpen, setTeachHeight, usePolicyOpen } from "@/lib/ui";
 
 const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
+
+// Terms arrive in recipe order, which interleaves the ones that pay points
+// with the ones that charge — a green/red zebra you have to re-read row by
+// row. Every list of them groups: earners first, then penalties, recipe
+// order preserved inside each group.
+function byPolarity<T extends { isPenalty: boolean }>(terms: T[]): T[] {
+  return [...terms.filter((t) => !t.isPenalty), ...terms.filter((t) => t.isPenalty)];
+}
 
 type Msg =
   | { kind: "user"; text: string }
@@ -41,7 +53,8 @@ const GREETING: Msg = {
 };
 const MSG_CAP = 50;
 
-const SUGGESTIONS = ["stand still", "stand on one leg", "crouch down", "spin in place"];
+const SUGGESTIONS = ["stand still", "stand on one leg", "crouch down", "spin in place",
+                     "do a headstand"];
 
 // --- instant hover tooltip ---------------------------------------------------
 // Native `title` attrs take ~1 s to appear and are easy to miss; this shows a
@@ -85,10 +98,10 @@ export function Tip({ tip, children }: { tip: React.ReactNode; children: React.R
               pointerEvents: "none",
               zIndex: 1000,
               boxShadow: "0 4px 14px rgba(0,0,0,0.45)",
-              animation: "duckfarm-tip-in 70ms ease-out",
+              animation: "ducklab-tip-in 70ms ease-out",
             }}
           >
-            <style>{"@keyframes duckfarm-tip-in { from { opacity: 0 } }"}</style>
+            <style>{"@keyframes ducklab-tip-in { from { opacity: 0 } }"}</style>
             {tip}
           </div>,
           document.body
@@ -101,7 +114,7 @@ function RecipeRows({ terms }: { terms: BehaviorCard["terms"] }) {
   const max = Math.max(...terms.map((t) => t.weight));
   return (
     <div style={{ marginTop: 6 }}>
-      {terms.map((t) => (
+      {byPolarity(terms).map((t) => (
         <Tip key={t.key} tip={t.friendly}>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 6, margin: "3px 0" }}>
             <div
@@ -169,14 +182,6 @@ function fmtSteps(n: number): string {
   if (n < 1e5) return `${Math.round(n / 1e3)}k`;
   if (n < 1e6) return `${(n / 1e6).toFixed(2).replace(/0$/, "")}M`;
   return `${(n / 1e6).toFixed(1)}M`;
-}
-
-/** The existing framing — sim time at the robot's 50 Hz control rate — but
- *  it drops to hours below a day so a 1M budget doesn't read "~0 sim-days". */
-function simTime(steps: number): string {
-  const days = steps / 50 / 3600 / 24;
-  if (days < 1) return `${Math.max(1, Math.round(days * 24))} sim-hours`;
-  return `${days < 10 ? days.toFixed(1) : Math.round(days)} sim-days`;
 }
 
 function Sparkline({ points }: { points: { x: number; y: number }[] }) {
@@ -314,6 +319,7 @@ function RecipeEditor({
   useEffect(() => {
     if (!pickerOpen) return;
     const onKey = (e: KeyboardEvent) => {
+      if (modalIsOpen()) return;   // a dialog on top owns Escape
       if (e.key === "Escape") setPickerOpen(false);
     };
     window.addEventListener("keydown", onKey);
@@ -494,8 +500,28 @@ function RecipeEditor({
         green terms pay points, red ones charge — drag to change how much each
         matters, then retrain.
       </div>
-      {t.behavior.terms.map((term) => termRow(term, false))}
-      {!live && addedTerms.map((term) => termRow(term, true))}
+      {(
+        [
+          { label: "what pays points", penalty: false },
+          { label: "what costs points", penalty: true },
+        ] as const
+      ).map(({ label, penalty }) => {
+        // Added terms join the group they belong to instead of trailing the
+        // whole list, so a freshly added penalty sits with the penalties.
+        const rows = [
+          ...t.behavior.terms.map((term) => [term, false] as const),
+          ...(live ? [] : addedTerms.map((term) => [term, true] as const)),
+        ].filter(([term]) => term.isPenalty === penalty);
+        if (rows.length === 0) return null;
+        return (
+          <div key={label} style={{ marginTop: 4 }}>
+            <div style={{ color: penalty ? "#e0a08f" : "#9fd89f", fontSize: 9, opacity: 0.7 }}>
+              {label}
+            </div>
+            {rows.map(([term, isAdded]) => termRow(term, isAdded))}
+          </div>
+        );
+      })}
       {!live && (pickable.length > 0 || pickerOpen) && (
         <div style={{ marginTop: 5 }}>
           <button
@@ -528,7 +554,7 @@ function RecipeEditor({
                   every catalog term is already in the recipe
                 </div>
               ) : (
-                pickable.map((a) => (
+                byPolarity(pickable).map((a) => (
                   <button
                     key={a.key}
                     onClick={() => setAdded((w) => ({ ...w, [a.key]: a.weight }))}
@@ -745,7 +771,7 @@ function LiveTraining({
           inspector below; the active stage is inspected by default. */}
       {stage && (
         <div style={{ margin: "2px 0 5px" }}>
-          <style>{"@keyframes duckfarm-stage-pulse { 50% { opacity: 0.35 } }"}</style>
+          <style>{"@keyframes ducklab-stage-pulse { 50% { opacity: 0.35 } }"}</style>
           <div style={{ display: "flex", gap: 3 }}>
             {Array.from({ length: stage.count }, (_, i) => (
               <div
@@ -768,7 +794,7 @@ function LiveTraining({
                           : "#262a33",
                   animation:
                     i + 1 === stage.idx && t.status === "training"
-                      ? "duckfarm-stage-pulse 1.6s ease-in-out infinite"
+                      ? "ducklab-stage-pulse 1.6s ease-in-out infinite"
                       : undefined,
                 }}
               />
@@ -867,7 +893,7 @@ function LiveTraining({
             <div style={{ color: "#8b93a3", fontSize: 10, marginTop: 4 }}>
               this stage&apos;s weights (stage overrides win over the chain sliders):
             </div>
-            {t.behavior.terms.map((term) => {
+            {byPolarity(t.behavior.terms).map((term) => {
               const def = term.weight;
               const max = def > 0 ? def * 2.5 : 1;
               const value = stageWeight(selStage, term.key);
@@ -1065,9 +1091,11 @@ function LiveTraining({
 export function TeachPanel({
   clientRef,
 }: {
-  clientRef: React.MutableRefObject<FarmClient | null>;
+  clientRef: React.MutableRefObject<LabClient | null>;
 }) {
-  const [open, setOpen] = useState(() => loadJSON("teachOpen", true));
+  // Collapsed by default, like the PolicyPanel above it — persisted after
+  // the first open.
+  const [open, setOpen] = useState(() => loadJSON("teachOpen", false));
   const [wide, setWide] = useState(() => loadJSON("teachWide", false));
   const policyOpen = usePolicyOpen();
   const [msgs, setMsgs] = useState<Msg[]>(() => {
@@ -1160,6 +1188,30 @@ export function TeachPanel({
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [msgs, training?.status]);
 
+  // Selecting a duck (stage click or HUD row) pulls ITS run up in this panel
+  // — recipe card + sliders in "done" state, ✨ fine-tune targeting that run —
+  // so "click the duck, keep refining it" is one gesture. Quiet no-op for
+  // shipped policies (nothing to refine), while actively training (never
+  // yank a live job), and when that run is already up. The server streams
+  // the loaded payload back, so the panel updates through the normal poll.
+  const selectedDuck = useSelectedDuck();
+  useEffect(() => {
+    if (!selectedDuck) return;
+    const frame = clientRef.current?.frame;
+    const pid = frame?.ducks.find((d) => d.id === selectedDuck)?.policy;
+    if (!pid || !isRunPolicy(pid)) return;
+    const t = frame?.training ?? null;
+    if (t?.status === "training" || t?.restarting) return;
+    if (t && runNameOfPolicy(pid) === t.runName) return;
+    loadTeachRun(pid)
+      .then((r) => {
+        // Refusals surface in the chat (the success toast is the server's).
+        if (!r.ok && r.message)
+          setMsgs((m) => [...m, { kind: "note", text: `⚠ ${r.message}` }]);
+      })
+      .catch(() => {});
+  }, [selectedDuck, clientRef]);
+
   /** POST /teach and fold the response into the chat. The practice budget
    *  rides along on every launch path (typed trick, suggestion, retrain,
    *  fine-tune, start-from-stage) — it's one control, so it applies to
@@ -1174,7 +1226,7 @@ export function TeachPanel({
     initFrom?: string;
   }) {
     try {
-      const res = await fetch(`${FARM_HTTP}/teach`, {
+      const res = await fetch(`${LAB_HTTP}/teach`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1214,7 +1266,7 @@ export function TeachPanel({
         ]);
       }
     } catch {
-      setMsgs((m) => [...m, { kind: "note", text: "⚠ can't reach the farm server on :8788" }]);
+      setMsgs((m) => [...m, { kind: "note", text: "⚠ can't reach the lab server on :8788" }]);
     }
   }
 
@@ -1263,7 +1315,7 @@ export function TeachPanel({
    *  merged weights changed. */
   async function applyStageWeights(stageWeights: Record<string, Record<string, number>>) {
     try {
-      const res = await fetch(`${FARM_HTTP}/teach/weights`, {
+      const res = await fetch(`${LAB_HTTP}/teach/weights`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ stageWeights }),
@@ -1281,7 +1333,7 @@ export function TeachPanel({
         },
       ]);
     } catch {
-      setMsgs((m) => [...m, { kind: "note", text: "⚠ can't reach the farm server on :8788" }]);
+      setMsgs((m) => [...m, { kind: "note", text: "⚠ can't reach the lab server on :8788" }]);
     }
   }
 
@@ -1336,8 +1388,28 @@ export function TeachPanel({
     setStagePins(cleared);
   };
 
+  // Publish this panel's measured height into the shared ui store so the
+  // PolicyPanel above can grow into the space teach isn't using. One callback
+  // ref serves both the open panel and the collapsed pill — only one of them
+  // is mounted at a time.
+  const teachRO = useRef<ResizeObserver | null>(null);
+  const teachSizeRef = useCallback((el: HTMLElement | null) => {
+    teachRO.current?.disconnect();
+    teachRO.current = null;
+    if (!el) {
+      setTeachHeight(0);
+      return;
+    }
+    const publish = () => setTeachHeight(el.getBoundingClientRect().height);
+    publish();
+    teachRO.current = new ResizeObserver(publish);
+    teachRO.current.observe(el);
+  }, []);
+
   const panel: React.CSSProperties = {
     position: "absolute",
+    // Above the ducks' floating DOM labels (drei Html, zIndexRange [10, 0]).
+    zIndex: 20,
     right: 14,
     bottom: 14,
     // Wide mode makes room for full recipe sentences beside the sliders. The
@@ -1345,9 +1417,12 @@ export function TeachPanel({
     // 118px wide, so its right edge sits at 50vw + 59px — our left edge
     // (100vw - 14px - width) stays right of it for any viewport width.
     width: wide ? "min(560px, 44vw, 50vw - 80px)" : 320,
-    // Complementary to the PolicyPanel's maxHeight (min(40vh, 380px)) plus
+    // Complementary to the PolicyPanel's NOMINAL cap (min(40vh, 380px)) plus
     // margins, so the two right-column panels can never overlap — but when
     // that panel is collapsed to its pill, reclaim the space and grow tall.
+    // Stays keyed to that constant, never to the policy panel's measured
+    // height: policies sizes itself off OUR measured height (lib/ui.ts), and
+    // measuring each other both ways would make the pair oscillate.
     maxHeight: policyOpen
       ? "calc(100vh - min(40vh, 380px) - 56px)"
       : "calc(100vh - 100px)",
@@ -1366,9 +1441,11 @@ export function TeachPanel({
   if (!open)
     return (
       <button
+        ref={teachSizeRef}
+        data-teach-ui
         onClick={() => setOpen(true)}
         style={{
-          position: "absolute", right: 14, bottom: 14,
+          position: "absolute", zIndex: 20, right: 14, bottom: 14,
           background: "rgba(14,16,20,0.86)", color: "#e8e6e1",
           border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10,
           padding: "8px 12px", fontFamily: mono, fontSize: 12, cursor: "pointer",
@@ -1380,7 +1457,9 @@ export function TeachPanel({
     );
 
   return (
-    <div style={panel}>
+    // data-teach-ui doubles as the PolicyPanel's drop target: a policy chip
+    // dropped (or armed-clicked) anywhere on this panel loads its run here.
+    <div ref={teachSizeRef} style={panel} data-teach-ui>
       <div
         style={{
           padding: "8px 12px", fontWeight: 700, fontSize: 13,
@@ -1390,8 +1469,14 @@ export function TeachPanel({
       >
         <span style={{ flex: 1 }}>🎓 teach</span>
         <button
-          onClick={() => setMsgs([GREETING])}
-          title="clear the conversation (training keeps running)"
+          onClick={() => {
+            setMsgs([GREETING]);
+            // Also dismiss a FINISHED training card — the farm keeps
+            // broadcasting the job payload until told to let go (a running
+            // job is protected server-side; stop it first).
+            fetch(`${LAB_HTTP}/teach/clear`, { method: "POST" }).catch(() => {});
+          }}
+          title="clear the conversation and any finished training card"
           style={{
             background: "none", border: "none", color: "#8b93a3",
             cursor: "pointer", fontFamily: mono, fontSize: 12, padding: "0 4px",
@@ -1476,10 +1561,9 @@ export function TeachPanel({
                 </summary>
                 <div style={{ color: "#aab3c0", marginTop: 4 }}>{m.card.howItLearns}</div>
                 <div style={{ color: "#8b93a3", marginTop: 4, fontSize: 10 }}>
-                  The sim runs ~200× faster than real life, so{" "}
-                  {fmtSteps(m.stepBudget ?? cardSteps(m.card))} practice steps (~
-                  {simTime(m.stepBudget ?? cardSteps(m.card))} of trying) take a few minutes
-                  on this Mac.
+                  The sim runs far faster than real life, so{" "}
+                  {fmtSteps(m.stepBudget ?? cardSteps(m.card))} practice steps run on this
+                  Mac without you waiting on a real robot.
                 </div>
               </details>
               <div style={{ color: "#8b93a3", fontSize: 10, marginTop: 2 }}>
@@ -1500,7 +1584,7 @@ export function TeachPanel({
             onPinStage={(stage, steps) =>
               setStagePins((p) => ({ ...p, [stage]: steps }))
             }
-            onStop={() => fetch(`${FARM_HTTP}/teach/stop`, { method: "POST" })}
+            onStop={() => fetch(`${LAB_HTTP}/teach/stop`, { method: "POST" })}
             onRecipeSubmit={submitRecipe}
             onStageWeights={applyStageWeights}
             onStartStage={startFromStage}
@@ -1585,7 +1669,7 @@ export function TeachPanel({
           </div>
           <div style={{ color: "#8b93a3", fontSize: 10, marginTop: 2 }}>
             {planTotal > 0
-              ? `${fmtSteps(planTotal)} in total ≈ ${simTime(planTotal)} of trying`
+              ? `${fmtSteps(planTotal)} practice steps in total`
               : "each trick practices for as long as its own recipe says — set a number to change that"}
           </div>
           {plan.length > 1 && (

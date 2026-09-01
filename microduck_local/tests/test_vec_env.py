@@ -11,10 +11,19 @@ import numpy as np
 import pytest
 
 from microduck_local import contract as C
-from microduck_local.vec_env import (BACKENDS, DEFAULT_BACKEND, ENV_VAR,
-                                     make_vec_env, resolve_backend)
-from microduck_local.walk_env import (MicroduckWalkEnv, clear_shared_models,
-                                      shared_model, shared_model_scope)
+from microduck_local.vec_env import (
+    BACKENDS,
+    DEFAULT_BACKEND,
+    ENV_VAR,
+    make_vec_env,
+    resolve_backend,
+)
+from microduck_local.walk_env import (
+    MicroduckWalkEnv,
+    clear_shared_models,
+    shared_model,
+    shared_model_scope,
+)
 
 ACTION = np.linspace(-0.3, 0.3, C.NUM_JOINTS).astype(np.float32)
 
@@ -379,7 +388,6 @@ print("OK")
 def test_envs_per_worker_batching_matches_one_per_worker():
     """envs_per_worker=2 must be invisible to the caller: same obs/rew/done
     stream, same per-env attrs, same episode-end infos as the 1:1 layout."""
-    import os
 
     from microduck_local.train_behavior import make_env
     from microduck_local.vec_env import ForkVecEnv, _SharedModelEnvFn

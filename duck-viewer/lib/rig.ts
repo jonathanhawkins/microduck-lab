@@ -29,6 +29,19 @@ export interface RigControl {
   title: string;
   /** joint name (or "root" for rootPitch) → coefficient along the control. */
   parts: Record<string, number>;
+  /** Joint names whose BODIES select this control when the scene is in rig
+   *  mode — clicking that body part picks this control and dragging drives
+   *  it. A picked joint with a nonzero coefficient also gears the drag (the
+   *  part under the cursor tracks it 1:1); a zero-coefficient pick (e.g. the
+   *  head-yaw body selecting "look") gears through the control's first
+   *  driven joint instead. */
+  pick: string[];
+  /** Where the ⇕ drag handle parks while this control is active: anchored to
+   *  a body (by the joint that drives it; "root" = trunk) plus a MuJoCo-frame
+   *  offset (x fwd, y left, z up) from that body's origin — so the handle
+   *  sits AT the thing it moves and relocating it shows which control is
+   *  armed. Dragging the handle down always increases the control. */
+  handle: { joint: string; offset: [number, number, number] };
 }
 
 /** One unit of "squat" is one radian of thigh-from-vertical: the thigh pitches
@@ -37,9 +50,11 @@ export interface RigControl {
 export const RIG_CONTROLS: RigControl[] = [
   {
     id: "squat",
+    handle: { joint: "root", offset: [-0.105, 0, 0.03] },
+    pick: ["left_knee", "right_knee"],
     label: "squat",
     hint: "+ crouch",
-    title: "fold both legs symmetrically, feet flat, trunk upright — the ⇕ handle on the duck drags this",
+    title: "fold both legs symmetrically, feet flat, trunk upright — the ⇕ handle drags this when no other control is selected",
     parts: {
       left_hip_pitch: -1, left_knee: -2, left_ankle: -1,
       right_hip_pitch: 1, right_knee: 2, right_ankle: 1,
@@ -47,13 +62,49 @@ export const RIG_CONTROLS: RigControl[] = [
   },
   {
     id: "lean",
+    handle: { joint: "root", offset: [-0.105, 0, 0.115] },
+    pick: ["root"],
     label: "lean",
     hint: "+ fwd",
-    title: "hinge at the hips: the trunk pitches while the legs (and feet) stay put",
-    parts: { root: 1, left_hip_pitch: -1, right_hip_pitch: 1 },
+    title: "the trunk pitches while the legs counterbalance, feet flat",
+    // The counter-pitch is spread evenly over hip/knee/ankle (−⅓ world each)
+    // rather than taken at the hip alone: that makes this direction exactly
+    // ORTHOGONAL to squat in joint space, so squatting never moves the lean
+    // slider and vice versa. Every control pair here is orthogonal — rig
+    // sliders read 0 until you actually use them.
+    parts: {
+      root: 1,
+      left_hip_pitch: -1 / 3, left_knee: 1 / 3, left_ankle: -1 / 3,
+      right_hip_pitch: 1 / 3, right_knee: -1 / 3, right_ankle: 1 / 3,
+    },
+  },
+  // Per-leg stride: the whole leg swings about the hip while the ankle
+  // unwinds to keep the foot level — key one forward and the other back for a
+  // run stride, and the slider ends ARE the leg's max extensions (whichever
+  // of the hip or ankle servo runs out of travel first). Orthogonal to squat
+  // and lean, so a stride keyed over a crouch keeps the crouch.
+  {
+    id: "swingL",
+    handle: { joint: "left_hip_pitch", offset: [0, 0.07, 0] },
+    pick: ["left_hip_pitch"],
+    label: "L swing",
+    hint: "+ fwd",
+    title: "swing the whole left leg forward/back about the hip, foot kept level — pair with R swing for a stride",
+    parts: { left_hip_pitch: -1, left_ankle: 1 },
+  },
+  {
+    id: "swingR",
+    handle: { joint: "right_hip_pitch", offset: [0, -0.07, 0] },
+    pick: ["right_hip_pitch"],
+    label: "R swing",
+    hint: "+ fwd",
+    title: "swing the whole right leg forward/back about the hip, foot kept level — pair with L swing for a stride",
+    parts: { right_hip_pitch: 1, right_ankle: -1 },
   },
   {
     id: "sway",
+    handle: { joint: "root", offset: [0, 0.115, 0.01] },
+    pick: ["left_hip_roll", "right_hip_roll"],
     label: "sway",
     hint: "hips ±",
     title: "both hip rolls together — swing the legs sideways under the trunk",
@@ -61,6 +112,8 @@ export const RIG_CONTROLS: RigControl[] = [
   },
   {
     id: "stance",
+    handle: { joint: "root", offset: [0, -0.115, 0.01] },
+    pick: [],
     label: "stance",
     hint: "+ wide",
     title: "hip rolls apart — widen or narrow the stance",
@@ -68,6 +121,8 @@ export const RIG_CONTROLS: RigControl[] = [
   },
   {
     id: "twist",
+    handle: { joint: "root", offset: [-0.145, 0, -0.025] },
+    pick: ["left_hip_yaw", "right_hip_yaw"],
     label: "twist",
     hint: "hips ±",
     title: "both hip yaws together — pivot the hips against the feet",
@@ -75,6 +130,8 @@ export const RIG_CONTROLS: RigControl[] = [
   },
   {
     id: "toes",
+    handle: { joint: "left_ankle", offset: [0.075, 0, 0.015] },
+    pick: ["left_ankle", "right_ankle"],
     label: "toes",
     hint: "+ out",
     title: "hip yaws apart — duck-foot or pigeon-toe the stance",
@@ -82,6 +139,8 @@ export const RIG_CONTROLS: RigControl[] = [
   },
   {
     id: "look",
+    handle: { joint: "head_pitch", offset: [-0.02, 0, 0.115] },
+    pick: ["neck_pitch", "head_pitch", "head_yaw", "head_roll"],
     label: "look",
     hint: "+ down",
     title: "neck and head pitch share the motion — one radian of control is one radian of gaze",
@@ -90,7 +149,7 @@ export const RIG_CONTROLS: RigControl[] = [
 ];
 
 /** Resolved (index, coefficient, limits, default) per part — ROOT_SEL carries
- *  rootPitch. Null when a joint name is missing from the farm's metadata. */
+ *  rootPitch. Null when a joint name is missing from the lab's metadata. */
 export interface RigVector {
   ctrl: RigControl;
   parts: { index: number; name: string; coeff: number; min: number; max: number; def: number }[];
@@ -109,7 +168,7 @@ export function rigVector(meta: JointsMeta, ctrl: RigControl): RigVector | null 
       });
     } else {
       const j = meta.joints.find((x) => x.name === name);
-      if (!j) return null; // farm model without this joint — hide the control
+      if (!j) return null; // lab model without this joint — hide the control
       parts.push({ index: j.index, name, coeff, min: j.min, max: j.max, def: j.default });
     }
     norm2 += coeff * coeff;
@@ -152,6 +211,60 @@ export function rigRange(v: RigVector, pose: Pose): RigRange {
     if (val + dHi < hi) { hi = val + dHi; maxBy = p.name; }
   }
   return { min: lo, max: hi, minBy, maxBy };
+}
+
+/** What a body part means in rig mode: which control a click on it selects,
+ *  and how a drag of it gears into that control. */
+export interface RigBodyPick {
+  rigId: string;
+  label: string;
+  /** Every body the control drives — all highlighted while it is selected. */
+  bodies: number[];
+  /** The joint whose hinge anchors the 3D drag (ROOT_SEL = trunk pitch):
+   *  circling the cursor around this hinge moves the control so the part
+   *  under the cursor tracks 1:1. */
+  gearJoint: number;
+  gearCoeff: number;
+}
+
+const bodyOfPart = (meta: JointsMeta, index: number) =>
+  index === ROOT_SEL ? meta.trunkBody : meta.joints[index]?.body ?? -1;
+
+/** Every body a control drives — what lights up while it is selected. */
+export function rigBodies(meta: JointsMeta, v: RigVector): number[] {
+  return [
+    ...new Set(v.parts.filter((p) => p.coeff !== 0).map((p) => bodyOfPart(meta, p.index))),
+  ];
+}
+
+/** body index → rig pick, from each control's `pick` list. Bodies no control
+ *  claims stay null (clicks on them fall back to plain joint editing). */
+export function rigBodyMap(meta: JointsMeta, vectors: RigVector[]): (RigBodyPick | null)[] {
+  const map: (RigBodyPick | null)[] = new Array(meta.bodies.length).fill(null);
+  for (const v of vectors) {
+    const driven = v.parts.filter((p) => p.coeff !== 0);
+    const bodies = rigBodies(meta, v);
+    for (const name of v.ctrl.pick) {
+      const index = name === "root" ? ROOT_SEL : meta.joints.find((j) => j.name === name)?.index;
+      if (index === undefined) continue;
+      // Gear preference: the picked joint itself, else a driven joint on the
+      // same side (right foot → right hip yaw), else whatever drives at all.
+      const side = name.startsWith("left_") ? "left_" : name.startsWith("right_") ? "right_" : null;
+      const gear =
+        driven.find((p) => p.index === index) ??
+        (side ? driven.find((p) => p.name.startsWith(side)) : undefined) ??
+        driven[0];
+      if (!gear) continue;
+      map[bodyOfPart(meta, index)] = {
+        rigId: v.ctrl.id,
+        label: v.ctrl.label,
+        bodies,
+        gearJoint: gear.index,
+        gearCoeff: gear.coeff,
+      };
+    }
+  }
+  return map;
 }
 
 /** Slide the pose along the control to `value` (clamped to the rig range);

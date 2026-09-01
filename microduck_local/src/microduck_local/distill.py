@@ -37,7 +37,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from . import contract as C
 from .train import RUNS_DIR
 
 
@@ -89,8 +88,8 @@ def fit(obs: np.ndarray, act: np.ndarray, out: Path, epochs: int = 40,
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
     from .symmetry import SymmetryPPO
-    from .walk_env import MicroduckWalkEnv
     from .train_behavior import LR_END, LR_START, linear_decay
+    from .walk_env import MicroduckWalkEnv
 
     venv = DummyVecEnv([lambda: MicroduckWalkEnv(seed=seed)])
     venv = VecNormalize(venv, norm_obs=True, norm_reward=False, clip_obs=100.0)

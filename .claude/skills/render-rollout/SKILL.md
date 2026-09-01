@@ -42,7 +42,7 @@ Use it **before** stating what a policy does — not after. Specifically:
   actually settled into, and the gap between that and the intent is the term
   you are missing.
 
-Do **not** start or restart training, and do **not** restart `duck-farm`, to
+Do **not** start or restart training, and do **not** restart `duck-lab`, to
 look at a policy — rendering is a separate read-only process.
 
 ## How to run it
@@ -82,38 +82,39 @@ is running.
 ### Rendering one phase of a staged trick
 
 The behaviors read per-stage knobs from the environment, so `--env` picks the
-phase you want to see. From `behaviors.py`'s backflip curriculum:
+phase you want to see. From the backflip curriculum in `behaviors/backflip.py`:
 
 ```bash
 # just the landing rehearsal: always spawn already-landed
-uv run render-rollout --policy runs/teach-backflip-402439-s5/policy.onnx \
+uv run render-rollout --policy runs/<your-backflip-run>/policy.onnx \
     --env MICRODUCK_SPAWN_FAMILY_PROBS=1.0,0.0 --out /tmp/rr-landing
 
 # just the mid-roll carry, in a narrow rotation window
-uv run render-rollout --policy runs/teach-backflip-402439-s5/policy.onnx \
+uv run render-rollout --policy runs/<your-backflip-run>/policy.onnx \
     --env MICRODUCK_SPAWN_FAMILY_PROBS=0.0,1.0 \
     --env MICRODUCK_BF_SPAWN_LO=2.6 --env MICRODUCK_BF_SPAWN_HI=5.0 \
     --out /tmp/rr-carry
 
 # the honest whole-trick attempt: plain standing starts only
-uv run render-rollout --policy runs/teach-backflip-402439-s5/policy.onnx \
+uv run render-rollout --policy runs/<your-backflip-run>/policy.onnx \
     --env MICRODUCK_SPAWN_FAMILY_PROBS=0.0,0.0 --out /tmp/rr-entry
 ```
 
 Read the knob names off the behavior's `curriculum` stages in
-`src/microduck_local/behaviors.py` — never guess them. A human may be editing
-`behaviors.py` at the same time as you: re-read it before editing rather than
+`src/microduck_local/behaviors/` (one module per trick) — never guess them. A
+human may be editing those files at the same time as you: re-read before
+editing rather than
 working from memory.
 
 ### Handoff
 
-`--handoff <onnx>` mirrors the farm's rule (`viz_server.Duck._handoff_due`):
+`--handoff <onnx>` mirrors the lab's rule (`viz_server.Duck._handoff_due`):
 once `env._bf_rot >= 5.2` **and** both feet are in contact, the second policy
 drives. Frames after the switch are annotated — amber border and amber caption,
 with `drv=<handoff label>`.
 
 ```bash
-uv run render-rollout --policy runs/teach-backflip-402439-s5/policy.onnx \
+uv run render-rollout --policy runs/<your-backflip-run>/policy.onnx \
     --handoff ../microduck/policies/alpha_stand.onnx --out /tmp/rr-handoff
 ```
 
@@ -165,7 +166,7 @@ uv run render-rollout --policy limp --behavior backflip \
 
 If the limp duck produces the same rotation, landing, or "pose", the policy is
 not what caused it — the spawn pose, gravity, or an assist is. Note that the
-`spotter_fn` assist torque in `behaviors.py` is a **showcase-only** feature and
+`spotter_fn` assist torque in `behaviors/backflip.py` is a **showcase-only** feature and
 `render-rollout` never enables it, so anything you see here is the policy plus
 the spawn. Check `spawn=` in the header: a `spawn=landed` or `spawn=mid-roll
 246°` episode was *handed* most of the trick by the reverse curriculum. To see
@@ -195,7 +196,7 @@ reward.
 - **Header**: `outcome: FELL (terminated)` vs `completed (truncated)`, plus
   `spawn=…` (which reverse-curriculum family this episode got).
 - **Summary**: `trunk_z min/max/final`, `trick rotation max/final`
-  (360 = a full flip; the farm hands off at 298), `both feet NN%`,
+  (360 = a full flip; the lab hands off at 298), `both feet NN%`,
   `airborne NN%`.
 - **Frame #00** is the spawn. If the interesting thing already happened by
   #01, the spawn family did it, not the policy.
@@ -210,7 +211,7 @@ reward.
 ```bash
 cd microduck_local
 nice -n 10 uv run render-rollout \
-    --policy runs/teach-backflip-402439-s5/policy.onnx \
+    --policy runs/<your-backflip-run>/policy.onnx \
     --episodes 2 --seconds 8 --out /tmp/rr-bf402439
 # then: Read /tmp/rr-bf402439/ep0_sheet.png  and  ep1_sheet.png
 ```
@@ -228,16 +229,26 @@ That difference is invisible in the reward sums and obvious in the sheet.
 
 ## Notes
 
+- **Match the actuator to the training run.** The env default is the strong
+  `xml` phantom actuator; the farm trains under `MICRODUCK_ACTUATOR=bam`
+  (restart.sh exports it). A BAM-trained policy rendered without
+  `--env MICRODUCK_ACTUATOR=bam` runs on stronger servos than it ever
+  trained with — a whole afternoon of renders carried this flattery
+  (2026-08-31) before it was caught. Always pass it for lab/teach runs — EXCEPT when the run's own
+  curriculum stage declares `MICRODUCK_ACTUATOR` (the headstand ladder's
+  stage 1 trains on `xml` training wheels); mirror the stage's env dict
+  instead of forcing bam, or the drill stage reads as a failure.
+
 - Offscreen rendering uses `mujoco.Renderer`; on this Mac it picks the bundled
   **CGL** backend (`mujoco.cgl`) with no `MUJOCO_GL` set and no display. The tool
   prints the backend it used. On a Linux box set `MUJOCO_GL=egl` (or `osmesa`).
-- The env is built the way training and the farm build it —
+- The env is built the way training and the lab build it —
   `BehaviorEnv(behavior_id, obs_noise=False, domain_rand=False,
   action_delay=False, random_yaw=False, seed=…)` — so what you see is the
   policy, not the randomizers. That also means it is *not* a robustness test;
   use `uv run eval-walk` for noise/DR survival.
 - It renders **behavior** envs (`BehaviorEnv`), so `--behavior` must name a
-  behavior from `behaviors.py`. To look at a plain walking policy, give it a
+  behavior from the `behaviors/` package. To look at a plain walking policy, give it a
   behavior whose env is the walking scene (e.g. `--behavior stand`) and read
   the sheet knowing the twist command is pinned to zero.
 - Implementation: `microduck_local/src/microduck_local/render_rollout.py`;

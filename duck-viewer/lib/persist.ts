@@ -1,7 +1,7 @@
-// Tiny localStorage JSON helpers, all keys under the "duckfarm." prefix.
+// Tiny localStorage JSON helpers, all keys under the "ducklab." prefix.
 // Guarded so storage failures (quota, private mode, SSR) never break the UI.
 
-const PREFIX = "duckfarm.";
+const PREFIX = "ducklab.";
 
 export function loadJSON<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;

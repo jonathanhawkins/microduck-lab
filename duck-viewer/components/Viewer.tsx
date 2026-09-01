@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
-import { duckRowKeys, FarmClient, fetchScene, type DuckFrame, type Scene } from "@/lib/farm";
+import { duckRowKeys, LabClient, fetchScene, type DuckFrame, type Scene } from "@/lib/lab";
 import { assignDrag, nearestDuck, type AssignTarget } from "@/lib/assign";
 import {
   cameraKeyDown,
@@ -22,12 +22,21 @@ import {
   truckImpulse,
 } from "@/lib/camera";
 import { loadJSON, saveJSON } from "@/lib/persist";
+import {
+  getCapture,
+  pumpCaptureFrame,
+  setCaptureCanvas,
+  setSnapshotFn,
+} from "@/lib/record";
+import { getSelectedDuck, setSelectedDuck } from "@/lib/select";
+import { modalIsOpen } from "@/lib/ui";
 import { buildBodyGeometries, Duck } from "./Duck";
 import { Hud } from "./Hud";
 import { PolicyPanel } from "./PolicyPanel";
 import { TeachPanel } from "./TeachPanel";
 import { pushToast, Toasts } from "./Toasts";
 import { AnimPanel } from "./AnimPanel";
+import { RecordPanel } from "./RecordPanel";
 import { PoseDuck } from "./PoseDuck";
 
 function gridOffsets(n: number, spacing = 0.65): [number, number][] {
@@ -38,12 +47,12 @@ function gridOffsets(n: number, spacing = 0.65): [number, number][] {
   ]);
 }
 
-function Ducks({ scene, client }: { scene: Scene; client: FarmClient }) {
+function Ducks({ scene, client }: { scene: Scene; client: LabClient }) {
   const bodies = useMemo(() => buildBodyGeometries(scene), [scene]);
   // Roster keyed by the STABLE stream id — a policy assign renames a duck,
   // which must update its label without remounting (and re-lerping) it.
   // (`key` is the id dedup-qualified by duckRowKeys: a roster with duplicate
-  // ids — seen with legacy farm-state restores — must not collide React keys.)
+  // ids — seen with legacy lab-state restores — must not collide React keys.)
   const [roster, setRoster] = useState<{ id: string; name: string; key: string }[]>([]);
   const rosterSig = useRef("");
   const duckRefs = useRef(new Map<string, React.MutableRefObject<DuckFrame | null>>());
@@ -57,6 +66,10 @@ function Ducks({ scene, client }: { scene: Scene; client: FarmClient }) {
       rosterSig.current = sig;
       const keys = duckRowKeys(f.ducks);
       setRoster(f.ducks.map((d, i) => ({ id: d.id, name: d.name, key: keys[i] })));
+      // A removed duck must not stay "selected" — the Delete key would then
+      // fire remove_duck at a ghost id forever.
+      const sel = getSelectedDuck();
+      if (sel && !f.ducks.some((d) => d.id === sel)) setSelectedDuck(null);
     }
     f.ducks.forEach((d) => {
       const r = duckRefs.current.get(d.id);
@@ -117,6 +130,7 @@ function loadSavedCamera(): SavedCamera | null {
 // Structural slice of drei/three-stdlib OrbitControls — enough to subscribe to
 // the "end" gesture event without importing its concrete class type.
 interface ControlsLike {
+  enabled: boolean;
   target: THREE.Vector3;
   addEventListener: (type: "end", cb: () => void) => void;
   removeEventListener: (type: "end", cb: () => void) => void;
@@ -139,6 +153,13 @@ function CameraKeys() {
     // burst can never pool up and teleport the view later — idle stays idle.
     const swipePx = takeTruckImpulse();
     if (!controls) return;
+    // A live capture owns the camera — drop queued resets and held motions so
+    // nothing yanks the shot (RecordCamera flies it for the duration).
+    const capPhase = getCapture().phase;
+    if (capPhase === "framing" || capPhase === "recording") {
+      takeReset();
+      return;
+    }
     if (takeReset()) {
       camera.position.set(...HOME_CAM.p);
       controls.target.set(...HOME_CAM.t);
@@ -220,7 +241,143 @@ function CameraPersistence() {
   return null;
 }
 
-function AssignTargets({ client }: { client: FarmClient }) {
+// 🎥 follow-cam shot parameters: ¾ front view (±az off the duck's heading),
+// distance/height sized so a 25 cm duck fills about half the frame at the
+// stage's 40° fov, plus a very slow azimuth drift so long takes stay alive.
+const SHOT = { az: 0.61, dist: 0.78, height: 0.34, drift: 0.05 };
+
+const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+
+/** Inside-the-Canvas helper for the 🎥 record flow: registers the WebGL
+ *  canvas for MediaRecorder, and while a capture is framing/recording flies
+ *  the camera to a ¾ front view of the target duck and keeps it centered.
+ *  OrbitControls is paused for the duration (CameraKeys pauses itself), and
+ *  the camera simply stays where the take ended. The azimuth is chosen ONCE
+ *  per take — the duck's heading rotated ±SHOT.az toward whichever side the
+ *  camera already sits — not tracked per frame: a backflipping duck's heading
+ *  whips 180° mid-roll and would slingshot the camera around it. */
+function RecordCamera({ client }: { client: LabClient }) {
+  const controls = useThree((s) => s.controls) as unknown as ControlsLike | null;
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    setCaptureCanvas(gl.domElement);
+    return () => setCaptureCanvas(null);
+  }, [gl]);
+  // Never leave the user without controls (unmount mid-take).
+  useEffect(() => {
+    return () => {
+      if (controls) controls.enabled = true;
+    };
+  }, [controls]);
+
+  const shot = useRef<{ epoch: number; az: number; t0: number } | null>(null);
+  const paused = useRef(false);
+  const aim = useMemo(() => new THREE.Vector3(), []);
+  const desired = useMemo(() => new THREE.Vector3(), []);
+  const fwd = useMemo(() => new THREE.Vector3(), []);
+  const q = useMemo(() => new THREE.Quaternion(), []);
+
+  useFrame((st, dtRaw) => {
+    const cap = getCapture();
+    // One captured video frame per rendered frame (no-op unless recording).
+    pumpCaptureFrame();
+    const active = cap.phase === "framing" || cap.phase === "recording";
+    if (!active) {
+      if (paused.current && controls) controls.enabled = true;
+      paused.current = false;
+      shot.current = null;
+      return;
+    }
+    if (controls && !paused.current) {
+      controls.enabled = false;
+      paused.current = true;
+    }
+    const f = client.frame;
+    const idx = f ? f.ducks.findIndex((d) => d.id === cap.duckId) : -1;
+    const trunk = idx >= 0 ? f!.ducks[idx].bodies[1] : undefined;
+    if (!f || !trunk) return; // duck vanished mid-take — hold the last shot
+    const off = gridOffsets(f.ducks.length)[idx];
+    // MuJoCo (x, y, z) → three world (x, z, -y), plus the duck's grid offset.
+    aim.set(trunk[0] + off[0], trunk[2] + 0.02, -(trunk[1] + off[1]));
+
+    const now = st.clock.elapsedTime;
+    if (!shot.current || shot.current.epoch !== cap.epoch) {
+      // Duck heading on the floor, as a three-world azimuth (atan2(x, z)).
+      q.set(trunk[4], trunk[5], trunk[6], trunk[3]); // wxyz → xyzw
+      fwd.set(1, 0, 0).applyQuaternion(q); // trunk +x = forward, MuJoCo frame
+      const headingAz = Math.atan2(fwd.x, -fwd.y);
+      const camAz = Math.atan2(
+        camera.position.x - aim.x,
+        camera.position.z - aim.z
+      );
+      // ¾ view on whichever side needs the shorter glide.
+      const side =
+        Math.abs(wrapAngle(headingAz + SHOT.az - camAz)) <=
+        Math.abs(wrapAngle(headingAz - SHOT.az - camAz))
+          ? 1
+          : -1;
+      shot.current = {
+        epoch: cap.epoch,
+        az: wrapAngle(headingAz + side * SHOT.az),
+        t0: now,
+      };
+    }
+    const az = shot.current.az + SHOT.drift * (now - shot.current.t0);
+    desired.set(
+      aim.x + Math.sin(az) * SHOT.dist,
+      aim.y + SHOT.height,
+      aim.z + Math.cos(az) * SHOT.dist
+    );
+
+    const dt = Math.min(dtRaw, 0.1); // tab-stall guard, like CameraKeys
+    camera.position.lerp(desired, 1 - Math.exp(-3.5 * dt));
+    if (controls) {
+      controls.target.lerp(aim, 1 - Math.exp(-6 * dt));
+      camera.lookAt(controls.target);
+      controls.update?.();
+    } else {
+      camera.lookAt(aim);
+    }
+  });
+  return null;
+}
+
+/** 📷 snapshot: registers the synchronous take-a-PNG implementation (see
+ *  lib/record.ts for why it must be synchronous — the download has to stay
+ *  inside the button's user gesture or Chrome drops it as "automatic").
+ *  The WebGL buffer (preserveDrawingBuffer:false) is only readable in the
+ *  same task as a render, so this re-renders, reads with toDataURL (sync),
+ *  and restores. Objects tagged `userData.hideInCapture` (selection rings)
+ *  are hidden for the capture render only. */
+function Snapshotter() {
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+  const scene3 = useThree((s) => s.scene);
+  useEffect(() => {
+    setSnapshotFn((name) => {
+      const hidden: THREE.Object3D[] = [];
+      scene3.traverse((o) => {
+        if (o.visible && o.userData.hideInCapture) {
+          o.visible = false;
+          hidden.push(o);
+        }
+      });
+      gl.render(scene3, camera);
+      const dataUrl = gl.domElement.toDataURL("image/png");
+      hidden.forEach((o) => (o.visible = true));
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = `${name}.png`;
+      a.click();
+      pushToast(`📷 ${name}.png → downloads`);
+    });
+    return () => setSnapshotFn(null);
+  }, [camera, gl, scene3]);
+  return null;
+}
+
+function AssignTargets({ client }: { client: LabClient }) {
   const { camera, gl } = useThree();
   const v = useMemo(() => new THREE.Vector3(), []);
 
@@ -260,11 +417,11 @@ export default function Viewer() {
   const [error, setError] = useState<string | null>(null);
   // Read once on mount (this component is ssr:false, so storage is available).
   const [savedCam] = useState(loadSavedCamera);
-  const clientRef = useRef<FarmClient | null>(null);
+  const clientRef = useRef<LabClient | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const client = new FarmClient(setConnected);
+    const client = new LabClient(setConnected);
     clientRef.current = client;
     const load = () =>
       fetchScene()
@@ -273,7 +430,7 @@ export default function Viewer() {
           setError(null);
         })
         .catch(() => {
-          setError("duck-farm server not reachable on :8788 — start it with `uv run duck-farm …`");
+          setError("duck-lab server not reachable on :8788 — start it with `uv run duck-lab …`");
           setTimeout(load, 2000);
         });
     load();
@@ -317,12 +474,45 @@ export default function Viewer() {
     // starts its episode at the same moment. The view reset yields to Shift+R.
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // A dialog owns the keyboard while it is open. isTyping() is not enough:
+      // a dialog that focuses a button (both of ours do) would still let
+      // Backspace remove the selected duck and `r` reset every episode behind
+      // the overlay. The dialog cannot stop us from its own listener — two
+      // window/capture listeners cannot suppress each other — so the scene
+      // stands down voluntarily.
+      if (modalIsOpen()) return;
       if (isTyping(e.target)) return;
       const arrow = e.key.startsWith("Arrow");
       if (arrow && arrowsBelongToTarget(e.target)) return; // slider keeps its arrows
+      // Delete/Backspace removes the SELECTED duck (click a duck to select).
+      // Backspace must be claimed too — un-prevented it can navigate back.
+      if (e.key === "Delete" || e.key === "Backspace") {
+        const sel = getSelectedDuck();
+        if (!sel) return;
+        e.preventDefault();
+        if (e.repeat) return;
+        const training = clientRef.current?.frame?.training;
+        // Mirror the HUD-row rules: the server refuses these anyway, but a
+        // keypress that silently does nothing reads as broken.
+        if (sel === "trainee" && (training?.status === "training" || training?.restarting)) {
+          pushToast("🎓 the trainee can't be removed while training");
+          return;
+        }
+        if (sel.startsWith("helper") && training?.restarting) {
+          pushToast("⏳ trainer restarting — try removing the helper again in a moment");
+          return;
+        }
+        clientRef.current?.sendRemoveDuck(sel);
+        setSelectedDuck(null);
+        return;
+      }
+      if (e.key === "Escape") {
+        setSelectedDuck(null);
+        return;
+      }
       if (!e.shiftKey && e.key.toLowerCase() === "r") {
         e.preventDefault();
-        if (e.repeat) return; // a leaned-on key must not machine-gun the farm
+        if (e.repeat) return; // a leaned-on key must not machine-gun the lab
         clientRef.current?.sendReset();
         // The server resets silently (no `events` line back), so the only
         // confirmation the user gets is this local toast.
@@ -407,10 +597,31 @@ export default function Viewer() {
 
   // Clicking the stage re-grabs focus for the wrapper; clicks on real
   // interactive elements (pad buttons, future chat input) keep their focus.
+  // The pointer-down is also remembered for the click-to-select handler below:
+  // position (to tell a click from an orbit drag) and whether an assign
+  // gesture was live (armed chips assign on pointerdown, so by click time
+  // assignDrag.mode is already cleared — snapshot it here instead).
+  const downAt = useRef<{ x: number; y: number; assigning: boolean }>({
+    x: 0,
+    y: 0,
+    assigning: false,
+  });
   const refocus = (e: React.PointerEvent<HTMLDivElement>) => {
+    downAt.current = { x: e.clientX, y: e.clientY, assigning: assignDrag.mode !== null };
     const t = e.target as HTMLElement | null;
     if (t?.closest("button, input, textarea, select, a, [contenteditable]")) return;
     rootRef.current?.focus({ preventScroll: true });
+  };
+
+  // Click a duck to select it (nearest projected duck within the same screen
+  // radius the assign flow uses); click empty floor to deselect. Orbit drags
+  // and armed-assign clicks don't count.
+  const selectAt = (e: React.MouseEvent<HTMLDivElement>) => {
+    const t = e.target as HTMLElement | null;
+    if (t?.tagName !== "CANVAS") return; // panel/button clicks aren't stage clicks
+    if (downAt.current.assigning) return;
+    if (Math.hypot(e.clientX - downAt.current.x, e.clientY - downAt.current.y) > 5) return;
+    setSelectedDuck(nearestDuck(e.clientX, e.clientY));
   };
 
   return (
@@ -418,6 +629,7 @@ export default function Viewer() {
       ref={rootRef}
       tabIndex={0}
       onPointerDown={refocus}
+      onClick={selectAt}
       style={{ position: "fixed", inset: 0, background: "#101216", outline: "none" }}
     >
       <Canvas
@@ -452,6 +664,7 @@ export default function Viewer() {
           {scene && <PoseDuck scene={scene} />}
         </group>
         {clientRef.current && <AssignTargets client={clientRef.current} />}
+        {clientRef.current && <RecordCamera client={clientRef.current} />}
 
         <OrbitControls
           makeDefault
@@ -465,8 +678,10 @@ export default function Viewer() {
         />
         <CameraPersistence />
         <CameraKeys />
+        <Snapshotter />
       </Canvas>
       <Hud clientRef={clientRef} connected={connected} error={error} />
+      <RecordPanel clientRef={clientRef} />
       <PolicyPanel clientRef={clientRef} />
       <TeachPanel clientRef={clientRef} />
       <AnimPanel />

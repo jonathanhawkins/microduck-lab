@@ -11,8 +11,8 @@ original).
 
 from __future__ import annotations
 
-import numpy as np
 import mujoco
+import numpy as np
 import pytest
 import torch
 

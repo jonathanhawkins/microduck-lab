@@ -1,12 +1,12 @@
 "use client";
 
-// Bottom-center toast lines: one-shot "events" drained from the farm stream
-// (FarmClient buffers them — each event lives in a single 25 Hz frame) plus
+// Bottom-center toast lines: one-shot "events" drained from the lab stream
+// (LabClient buffers them — each event lives in a single 25 Hz frame) plus
 // local lines pushed via pushToast(). Each toast shows for ~3 s; event lines
 // are deduped so a re-broadcast never shows twice.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FarmClient } from "@/lib/farm";
+import type { LabClient } from "@/lib/lab";
 
 const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -25,7 +25,7 @@ interface Toast {
 export function Toasts({
   clientRef,
 }: {
-  clientRef: React.MutableRefObject<FarmClient | null>;
+  clientRef: React.MutableRefObject<LabClient | null>;
 }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const seenEvents = useRef<Set<string>>(new Set());

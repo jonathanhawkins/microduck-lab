@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Duck Farm",
+  title: "Microduck Lab",
   description: "Live Three.js viewer for Microduck training runs",
 };
 

@@ -139,7 +139,7 @@ def test_count_reversals_separates_a_hold_from_cycling():
     assert count_reversals([], 0.015) == 0
 
 
-def test_handoff_due_mirrors_the_farm_rule():
+def test_handoff_due_mirrors_the_lab_rule():
     """viz_server.Duck._handoff_due: rotation past 5.2 rad, both feet down,
     AND the spin braked — an early handoff pivots on landing (the "lands then
     turns to the side" bug)."""

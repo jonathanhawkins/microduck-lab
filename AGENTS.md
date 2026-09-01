@@ -10,8 +10,8 @@ two upstream Pollen repos are cloned next to them (they are in `.gitignore`):
 
 | Repo | What it is | Stack |
 |---|---|---|
-| `microduck_local/` | **This repo.** Local CPU-MuJoCo + Stable Baselines 3 PPO prototyping harness — same 61-obs contract and MJCF as microduck_rl. Includes `duck-farm`, the streaming backend for duck-viewer, and the 🎓 teach-a-trick training loop. | Python 3.12 / uv |
-| `duck-viewer/` | **This repo.** Next.js + react-three-fiber browser viewer — many policies/checkpoints walking side by side, live over WebSocket from `duck-farm`. | Next.js / TS |
+| `microduck_local/` | **This repo.** Local CPU-MuJoCo + Stable Baselines 3 PPO prototyping harness — same 61-obs contract and MJCF as microduck_rl. Includes `duck-lab`, the streaming backend for duck-viewer, and the 🎓 teach-a-trick training loop. | Python 3.12 / uv |
+| `duck-viewer/` | **This repo.** Next.js + react-three-fiber browser viewer — many policies/checkpoints walking side by side, live over WebSocket from `duck-lab`. | Next.js / TS |
 | `microduck/` | Upstream: the robot's onboard software, shipped ONNX policies, docs. Clone from `pollen-robotics/microduck`. | Rust workspace |
 | `microduck_rl/` | Upstream: the official GPU training stack (MuJoCo Warp + mjlab + PPO), BAM actuator sim2real recipe, ONNX export. Clone from `pollen-robotics/microduck_rl`. **This is the sim2real recipe; this repo is the prototyping loop.** | Python 3.12 / uv |
 
@@ -46,7 +46,7 @@ cd ../duck-viewer && npm install
 
 - **Any Mac (tuned on Apple Silicon), CPU-only:** everything in this repo —
   training (`train-walk`, `train-behavior`), eval, ONNX export, rendering,
-  the farm + viewer. Linux works too (set `MUJOCO_GL=egl` for offscreen
+  the lab + viewer. Linux works too (set `MUJOCO_GL=egl` for offscreen
   rendering); the MPS update path is Mac-only and auto-disables elsewhere.
 - **Needs a CUDA GPU:** the upstream `microduck_rl` MuJoCo Warp training —
   the final sim2real step once a behavior prototyped here is worth it.
@@ -61,10 +61,10 @@ cd ../duck-viewer && npm install
 uv run --with pytest pytest tests/            # contract tests — run before training
 uv run train-walk --envs 32 --steps 3_000_000 --run-name my-run
 uv run export-walk runs/my-run && uv run eval-walk runs/my-run/policy.onnx
-uv run train-behavior one_leg                 # teachable tricks (behaviors.py)
+uv run train-behavior one_leg                 # teachable tricks (behaviors/)
 uv run render-rollout --policy runs/my-run/policy.onnx --behavior stand --out /tmp/rr
 uv run bench-envs                             # the right --envs for THIS machine
-uv run duck-farm --checkpoints runs/my-run    # + viewer below → watch it in the browser
+uv run duck-lab --checkpoints runs/my-run    # + viewer below → watch it in the browser
 
 # --- duck-viewer (run from duck-viewer/) ---
 npm run dev                                   # then open the printed localhost URL
@@ -86,3 +86,7 @@ uv run scripts/infer_policy.py --walking ../microduck_local/runs/my-run/policy.o
   not for the policy you put on hardware.
 - Before claiming anything about a trained policy, **render it and look**
   (`render-rollout`) — reward curves and eval sums have repeatedly lied here.
+- If rollouts never contain the skill you're paying for, **fix the physics
+  curriculum, not the reward** — an unsampled state's value is never learned.
+  The full lesson (and the servo-ladder pattern that solved it) is in
+  `microduck_local/AGENTS.md` under "Reward design rules".

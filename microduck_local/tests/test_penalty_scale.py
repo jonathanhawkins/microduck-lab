@@ -12,12 +12,24 @@ import numpy as np
 import pytest
 
 from microduck_local import contract as C
-from microduck_local.behaviors import _RUN_STAGE_SCALE  # noqa: F401
 from microduck_local.behaviors import (
-    QVEL2_MAX, TAU2_MAX, BehaviorEnv, _joint_vel_pen, _run_air_time, _run_speed,
-    _run_action_rate_pen, _run_action_rate_weight, _run_cmd_speed,
-    _run_standing_frac, _tau2_max, _torque_pen, _RUN_AIR_MIN, _RUN_AIR_MAX,
-    _RUN_TRACK_STD2, _RUN_UPRIGHT_STD2,
+    _RUN_AIR_MAX,
+    _RUN_AIR_MIN,
+    _RUN_STAGE_SCALE,  # noqa: F401
+    _RUN_TRACK_STD2,
+    _RUN_UPRIGHT_STD2,
+    QVEL2_MAX,
+    TAU2_MAX,
+    BehaviorEnv,
+    _joint_vel_pen,
+    _run_action_rate_pen,
+    _run_action_rate_weight,
+    _run_air_time,
+    _run_cmd_speed,
+    _run_speed,
+    _run_standing_frac,
+    _tau2_max,
+    _torque_pen,
 )
 
 
@@ -339,7 +351,7 @@ def test_pinned_run_cmd_overrides_the_mix(monkeypatch):
 def test_ramp_offset_survives_a_warm_restart(monkeypatch):
     """The lifetime ramp must resume at strength after a trainer restart.
 
-    The counter lives on env objects, so every warm restart (the farm does one
+    The counter lives on env objects, so every warm restart (the lab does one
     per helper add/remove) silently reset ramped penalties to stage-0: the
     policy loosened into jerk, then the ramp came back at full strength and
     crushed it — ep_len 396 (the session's best) collapsed to 10 and the peak

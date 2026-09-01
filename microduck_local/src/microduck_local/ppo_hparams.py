@@ -41,7 +41,7 @@ def ppo_batch_size(n_steps: int, n_envs: int, target: int = TARGET_BATCH,
     """A minibatch size that divides the rollout buffer.
 
     SB3 warns and truncates when `batch_size` does not divide `n_steps * n_envs`.
-    Farm helpers change the env count at runtime (16, 18, 20, …), so this has
+    Lab helpers change the env count at runtime (16, 18, 20, …), so this has
     to be computed, not hardcoded.
 
     Two regimes, so adding helpers buys rollout rather than a longer update:

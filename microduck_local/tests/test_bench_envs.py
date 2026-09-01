@@ -4,10 +4,8 @@ no PPO, so these run in milliseconds while the sweep itself takes minutes."""
 
 import pytest
 
-from microduck_local.bench_envs import (KNEE_TOLERANCE, Point, format_table,
-                                        recommend, speedup_table)
-from microduck_local.ppo_hparams import (N_MINI_BATCHES, N_STEPS, TARGET_BATCH,
-                                        ppo_batch_size)
+from microduck_local.bench_envs import KNEE_TOLERANCE, Point, format_table, recommend, speedup_table
+from microduck_local.ppo_hparams import N_MINI_BATCHES, N_STEPS, TARGET_BATCH, ppo_batch_size
 
 
 def _pts(pairs, vec="subproc", pinned=True):
@@ -17,7 +15,7 @@ def _pts(pairs, vec="subproc", pinned=True):
 
 
 def test_ppo_batch_size_always_divides_the_rollout_buffer():
-    """Farm helpers walk the env count through 16, 18, 20, … — 18 * 256 is
+    """Lab helpers walk the env count through 16, 18, 20, … — 18 * 256 is
     not divisible by 1024, which is the SB3 truncated-minibatch warning."""
     for n_envs in range(1, 65):
         b = ppo_batch_size(N_STEPS, n_envs)
@@ -40,7 +38,7 @@ def test_ppo_batch_size_always_divides_the_rollout_buffer():
 
 def test_recommends_the_knee_not_the_peak():
     """The classic saturating curve: 16 envs wins by 1%, but 12 already has
-    98% of it — and the 4 cores that buys back are what keeps the farm server
+    98% of it — and the 4 cores that buys back are what keeps the lab server
     and the browser responsive during a run."""
     points = _pts([(4, 3000), (8, 5000), (12, 5900), (16, 6000), (24, 5950)])
     assert recommend(points) == 12

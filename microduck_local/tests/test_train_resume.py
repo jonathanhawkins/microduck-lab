@@ -9,8 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 PROJECT = Path(__file__).resolve().parents[1]
 
 
@@ -100,8 +98,8 @@ def test_export_ships_the_final_policy(tmp_path):
     assert (run_dir / "policy.onnx").exists()
     assert not (run_dir / "best_model.zip").exists(), "best-selection is gone"
 
-    done = [json.loads(l) for l in (run_dir / "progress.jsonl").read_text().splitlines()
-            if l.strip()][-1]
+    done = [json.loads(ln) for ln in (run_dir / "progress.jsonl").read_text().splitlines()
+            if ln.strip()][-1]
     assert done.get("done") is True
     final = PPO.load(str(run_dir / "model"), device="cpu")
     assert final.num_timesteps >= 12000

@@ -2,7 +2,7 @@
 // (which owns the pointer gestures) and the r3f helper inside the Canvas
 // (which projects duck positions to screen space). Plain module-level object
 // mutated outside React — consumers read it per-frame, so no events or
-// re-renders are involved (same philosophy as FarmClient.frame).
+// re-renders are involved (same philosophy as LabClient.frame).
 
 /** One duck's projected screen position, refreshed every rendered frame. */
 export interface AssignTarget {

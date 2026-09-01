@@ -126,7 +126,6 @@ def test_collect_matches_stock_sb3_bitwise():
     a, b = _model(), _model()  # identical seeds -> identical weights/RNG
     a._setup_learn(N_STEPS * N_ENVS, None)
     b._setup_learn(N_STEPS * N_ENVS, None)
-    from stable_baselines3.common.callbacks import ConvertCallback
     cb_a = a._init_callback(None)
     cb_b = b._init_callback(None)
     torch.manual_seed(123)

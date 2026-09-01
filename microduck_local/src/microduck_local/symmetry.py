@@ -96,8 +96,7 @@ from stable_baselines3.common.utils import explained_variance
 from torch.nn import functional as F
 
 from . import contract as C
-from .ppo_hparams import (DEFAULT_DESIRED_KL, DEFAULT_SYMMETRY_COEF,
-                          UPSTREAM_DESIRED_KL)
+from .ppo_hparams import DEFAULT_DESIRED_KL, DEFAULT_SYMMETRY_COEF, UPSTREAM_DESIRED_KL
 
 __all__ = [
     "JOINT_PERM", "JOINT_SIGN", "OBS_PERM", "OBS_SIGN",
@@ -268,8 +267,7 @@ class FastActorCriticPolicy(ActorCriticPolicy):
     """
 
     def forward(self, obs: torch.Tensor, deterministic: bool = False):
-        from stable_baselines3.common.distributions import (
-            DiagGaussianDistribution)
+        from stable_baselines3.common.distributions import DiagGaussianDistribution
         if (self.use_sde or not self.share_features_extractor
                 or not isinstance(self.action_dist, DiagGaussianDistribution)):
             return super().forward(obs, deterministic)

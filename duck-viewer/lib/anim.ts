@@ -1,4 +1,4 @@
-// Keyframe animation editor: types, clip math, farm client, and the shared
+// Keyframe animation editor: types, clip math, lab client, and the shared
 // store that bridges the DOM panel (AnimPanel) to the in-Canvas preview duck
 // (PoseDuck) — same module-level-mutable-object philosophy as lib/assign.ts,
 // because a pose drag must update at pointer speed, not at React speed.
@@ -7,7 +7,7 @@
 // clip at 50 Hz and rewards the policy for tracking it) — see viz_server.py's
 // docstring. Anything here that touches `Clip` must keep that shape.
 
-import { FARM_HTTP } from "./farm";
+import { LAB_HTTP } from "./lab";
 
 // ---------------------------------------------------------------- joint meta
 
@@ -156,7 +156,7 @@ export function clipProblem(clip: Clip): string | null {
   return null;
 }
 
-// ------------------------------------------------------------- farm requests
+// ------------------------------------------------------------- lab requests
 
 async function jsonOrThrow(res: Response) {
   if (!res.ok) {
@@ -172,7 +172,7 @@ async function jsonOrThrow(res: Response) {
 }
 
 export async function fetchJoints(): Promise<JointsMeta> {
-  return jsonOrThrow(await fetch(`${FARM_HTTP}/joints`));
+  return jsonOrThrow(await fetch(`${LAB_HTTP}/joints`));
 }
 
 export interface PoseResult {
@@ -183,7 +183,7 @@ export interface PoseResult {
 
 export async function fetchPose(pose: Pose, signal?: AbortSignal): Promise<PoseResult> {
   return jsonOrThrow(
-    await fetch(`${FARM_HTTP}/pose`, {
+    await fetch(`${LAB_HTTP}/pose`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ joints: pose.joints, rootPitch: pose.rootPitch }),
@@ -193,17 +193,17 @@ export async function fetchPose(pose: Pose, signal?: AbortSignal): Promise<PoseR
 }
 
 export async function listClips(): Promise<StoredClip[]> {
-  const data = await jsonOrThrow(await fetch(`${FARM_HTTP}/clips`));
+  const data = await jsonOrThrow(await fetch(`${LAB_HTTP}/clips`));
   return data.clips ?? [];
 }
 
 export async function loadClip(name: string): Promise<Clip> {
-  return jsonOrThrow(await fetch(`${FARM_HTTP}/clips/${encodeURIComponent(name)}`));
+  return jsonOrThrow(await fetch(`${LAB_HTTP}/clips/${encodeURIComponent(name)}`));
 }
 
 export async function putClip(clip: Clip): Promise<StoredClip> {
   return jsonOrThrow(
-    await fetch(`${FARM_HTTP}/clips/${encodeURIComponent(clip.name)}`, {
+    await fetch(`${LAB_HTTP}/clips/${encodeURIComponent(clip.name)}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(clip),
@@ -213,7 +213,7 @@ export async function putClip(clip: Clip): Promise<StoredClip> {
 
 export async function removeClip(name: string): Promise<void> {
   await jsonOrThrow(
-    await fetch(`${FARM_HTTP}/clips/${encodeURIComponent(name)}`, { method: "DELETE" })
+    await fetch(`${LAB_HTTP}/clips/${encodeURIComponent(name)}`, { method: "DELETE" })
   );
 }
 
@@ -257,13 +257,31 @@ export class PoseStreamer {
 
 // ----------------------------------------------------------- the shared store
 
+export type AnimMode = "joints" | "rig";
+
+/** The rig selection PoseDuck needs for highlighting/labeling — a mirror of
+ *  lib/rig.ts's RigBodyPick essentials, kept here to avoid an import cycle. */
+export interface RigSelection {
+  id: string;
+  label: string;
+  bodies: number[];
+}
+
 export interface AnimStore {
   /** Preview duck visible + interactive (the panel is open). */
   visible: boolean;
   /** Latest body poses from POST /pose — read per-frame by PoseDuck. */
   bodies: number[][] | null;
+  /** What a 3D click/drag edits: one servo, or the rig control mapped to the
+   *  clicked body part. Owned (and persisted) by the panel's mode toggle. */
+  mode: AnimMode;
   /** Selected joint index, ROOT_SEL for the trunk, or null. */
   selected: number | null;
+  /** Selected rig control (mutually exclusive with `selected`). */
+  selectedRig: RigSelection | null;
+  /** body index → rig-mode pick (control id, gearing) — built by the panel
+   *  from lib/rig.ts once the joint metadata is known. */
+  rigForBody: ({ rigId: string; label: string; bodies: number[]; gearJoint: number; gearCoeff: number } | null)[];
   /** Body under the cursor in the 3D scene (highlight only). */
   hoveredBody: number | null;
   /** True while a 3D joint drag is in progress (suppresses OrbitControls). */
@@ -288,7 +306,10 @@ export interface AnimStore {
 export const animStore: AnimStore = {
   visible: false,
   bodies: null,
+  mode: "joints",
   selected: null,
+  selectedRig: null,
+  rigForBody: [],
   hoveredBody: null,
   dragging: false,
   jointForBody: [],
@@ -321,8 +342,22 @@ export function animVersion() {
 }
 
 export function setSelected(sel: number | null) {
-  if (animStore.selected === sel) return;
+  if (animStore.selected === sel && animStore.selectedRig === null) return;
   animStore.selected = sel;
+  animStore.selectedRig = null; // one selection at a time — joint XOR rig
+  animNotify();
+}
+
+export function setSelectedRig(sel: RigSelection | null) {
+  if (animStore.selectedRig?.id === sel?.id && animStore.selected === null) return;
+  animStore.selectedRig = sel;
+  animStore.selected = null;
+  animNotify();
+}
+
+export function setAnimMode(mode: AnimMode) {
+  if (animStore.mode === mode) return;
+  animStore.mode = mode;
   animNotify();
 }
 
@@ -341,6 +376,6 @@ export function setAnimMeta(meta: JointsMeta) {
   animNotify();
 }
 
-/** Where the preview duck stands, in MuJoCo XY. Clear of the farm grid, which
+/** Where the preview duck stands, in MuJoCo XY. Clear of the lab grid, which
  *  starts at y = 0 and grows toward +y (see Viewer's gridOffsets). */
 export const PREVIEW_OFFSET: [number, number] = [0, -1.05];

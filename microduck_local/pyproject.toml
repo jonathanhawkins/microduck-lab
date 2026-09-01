@@ -18,10 +18,13 @@ dependencies = [
     "onnxruntime>=1.20",
     "numpy",
     "tensorboard",
-    # duck-farm web viewer backend (streams poses to ../duck-viewer).
+    # duck-lab web viewer backend (streams poses to ../duck-viewer).
     "fastapi>=0.115",
+    # BYOK Hugging Face access: token validation now, and the Jobs API
+    # (run_job/inspect_job, >=0.34) for the real GPU training step.
+    "huggingface_hub>=0.34",
     "uvicorn[standard]>=0.32",
-    # System/trainer stats in the farm's frame stream.
+    # System/trainer stats in the lab's frame stream.
     "psutil>=6.0",
     # render-rollout: offscreen frames -> mp4 (imageio-ffmpeg ships the binary,
     # so a machine without a system ffmpeg still writes video) + contact sheets.
@@ -38,6 +41,23 @@ eval-walk = "microduck_local.eval_onnx:main"
 eval-run = "microduck_local.eval_onnx:main"
 bench-walk = "microduck_local.bench:main"
 bench-envs = "microduck_local.bench_envs:main"
-duck-farm = "microduck_local.viz_server:main"
+duck-lab = "microduck_local.viz_server:main"
 train-behavior = "microduck_local.train_behavior:main"
 render-rollout = "microduck_local.render_rollout:main"
+
+[tool.ruff]
+# Keep lint minimal and uncontroversial: pyflakes correctness + import order.
+# (Style rules are left to taste — this repo's comments and layout are its
+# documentation, not a formatting exercise.)
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# The behaviors package deliberately cascades each trick module's
+# namespace into the next via star imports, mirroring the original
+# flat file's definition order (see behaviors/__init__.py) — F403/405
+# are the design, not an accident.
+"src/microduck_local/behaviors/*" = ["F403", "F405"]
+

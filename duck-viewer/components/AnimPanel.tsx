@@ -11,7 +11,7 @@
 // the resampler does).
 //
 // Every pose shown here is forward kinematics from POST /pose on the server's
-// scratch model — the farm ducks and their WS stream are untouched.
+// scratch model — the lab ducks and their WS stream are untouched.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
@@ -33,20 +33,25 @@ import {
   round3,
   sampleClip,
   setAnimMeta,
+  setAnimMode,
   setAnimVisible,
   setSelected,
+  setSelectedRig,
   subscribeAnim,
+  type AnimMode,
   withKey,
   type Clip,
   type JointsMeta,
   type Pose,
   type StoredClip,
 } from "@/lib/anim";
-import { FARM_HTTP } from "@/lib/farm";
+import { LAB_HTTP } from "@/lib/lab";
 import { loadJSON, saveJSON } from "@/lib/persist";
 import {
   RIG_CONTROLS,
   rigApply,
+  rigBodies,
+  rigBodyMap,
   rigMeasure,
   rigRange,
   rigVector,
@@ -135,7 +140,7 @@ export function AnimPanel() {
   useEffect(() => saveJSON("animOpen", open), [open]);
   useEffect(() => saveJSON("animClip", clip), [clip]);
   // The ghost duck only exists once we know the joint layout — with an
-  // unreachable /joints (a farm older than these endpoints) the panel shows
+  // unreachable /joints (a lab older than these endpoints) the panel shows
   // its error and the scene stays exactly as it was.
   useEffect(() => {
     setAnimVisible(open && !!meta);
@@ -220,6 +225,30 @@ export function AnimPanel() {
   // meta; measure/range are re-read from the live pose every render.
   const rigVectors = useMemo<RigVector[]>(
     () => (meta ? RIG_CONTROLS.map((c) => rigVector(meta, c)).filter((v): v is RigVector => !!v) : []),
+    [meta]
+  );
+
+  // What a 3D click edits: one servo (joints) or the mapped rig control.
+  // Persisted like the other panel toggles; PoseDuck reads it off the store.
+  const [mode, setMode] = useState<AnimMode>(() => loadJSON<AnimMode>("animMode", "joints"));
+  useEffect(() => {
+    saveJSON("animMode", mode);
+    setAnimMode(mode);
+  }, [mode]);
+  // body → rig-control map for rig-mode picking in the scene.
+  useEffect(() => {
+    animStore.rigForBody = meta ? rigBodyMap(meta, rigVectors) : [];
+  }, [meta, rigVectors]);
+
+  /** Select a rig control (row click or 3D pick lands here via the store):
+   *  highlights its bodies on the duck and flips the scene to rig mode, so
+   *  the next 3D drag drives THIS control. */
+  const selectRig = useCallback(
+    (v: RigVector) => {
+      if (!meta) return;
+      setMode("rig");
+      setSelectedRig({ id: v.ctrl.id, label: v.ctrl.label, bodies: rigBodies(meta, v) });
+    },
     [meta]
   );
   const rigVectorsRef = useRef(rigVectors);
@@ -336,14 +365,14 @@ export function AnimPanel() {
    *  trainer subprocess loads it from clips/, so it must be saved first). */
   const trainClip = async (name: string) => {
     try {
-      const res = await fetch(`${FARM_HTTP}/teach`, {
+      const res = await fetch(`${LAB_HTTP}/teach`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: "copy the animation", clip: name }),
       });
       const data = await res.json();
       if (!data.matched) {
-        pushToast(`⚠ ${data.message ?? "the farm wouldn't start that run"}`);
+        pushToast(`⚠ ${data.message ?? "the lab wouldn't start that run"}`);
         return;
       }
       setBrowsing(false);
@@ -485,6 +514,10 @@ export function AnimPanel() {
         // ◎ focus frames the duck above this panel — it needs the real rect.
         animStore.panelEl = el;
       }}
+      // Armed-chip guard: nearestDuck projects screen positions with an 80px
+      // radius, so a click in this panel would otherwise assign to a duck
+      // behind it.
+      data-policy-ui
       style={{
         position: "absolute",
         bottom: 14,
@@ -556,7 +589,7 @@ export function AnimPanel() {
 
       {metaErr && (
         <div style={{ color: "#e07a5f", padding: "6px 12px" }}>
-          ⚠ can&apos;t reach the farm&apos;s /joints on :8788 — {metaErr}
+          ⚠ can&apos;t reach the lab&apos;s /joints on :8788 — {metaErr}
         </div>
       )}
 
@@ -816,6 +849,47 @@ export function AnimPanel() {
         </div>
       </div>
 
+      {/* ---- scene-drag mode: what clicking the duck edits ---- */}
+      {meta && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "0 12px 7px",
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ color: "#8b93a3", fontSize: 10 }}>clicking the duck edits</span>
+          <button
+            style={{
+              ...btn,
+              // Full `border` shorthand, not borderColor: toggling a partial
+              // override on and off makes React warn about conflicting styles.
+              ...(mode === "joints"
+                ? { color: "#ffd166", border: "1px solid rgba(255,209,102,0.55)", background: "#2a2612" }
+                : {}),
+            }}
+            title="a click selects one servo; dragging rotates just that hinge"
+            onClick={() => setMode("joints")}
+          >
+            🦴 joints
+          </button>
+          <button
+            style={{
+              ...btn,
+              ...(mode === "rig"
+                ? { color: "#8ee6d6", border: "1px solid rgba(95,208,189,0.55)", background: "#0e2a26" }
+                : {}),
+            }}
+            title="a click selects the rig control for that part (feet → toes, thigh → swing, shin → squat, trunk → lean, head → look, hip sides → sway/twist); dragging drives the whole coupling"
+            onClick={() => setMode("rig")}
+          >
+            🎮 rig
+          </button>
+        </div>
+      )}
+
       {/* ---- joints ---- */}
       <div style={{ overflowY: "auto", padding: "0 12px 8px" }}>
         {!meta && !metaErr && (
@@ -832,7 +906,14 @@ export function AnimPanel() {
                   🎮 rig
                 </div>
                 {rigVectors.map((v) => (
-                  <RigRow key={v.ctrl.id} v={v} pose={pose} onChange={(x) => setRig(v, x)} />
+                  <RigRow
+                    key={v.ctrl.id}
+                    v={v}
+                    pose={pose}
+                    selected={animStore.selectedRig?.id === v.ctrl.id}
+                    onSelect={() => selectRig(v)}
+                    onChange={(x) => setRig(v, x)}
+                  />
                 ))}
               </>
             )}
@@ -845,7 +926,10 @@ export function AnimPanel() {
               value={pose.rootPitch}
               def={0}
               selected={selected === ROOT_SEL}
-              onSelect={() => setSelected(ROOT_SEL)}
+              onSelect={() => {
+                setMode("joints"); // symmetric with rig rows: row click sets the scene mode
+                setSelected(ROOT_SEL);
+              }}
               onChange={(v) => setJoint(ROOT_SEL, v)}
             />
             {GROUPS.map((g) => (
@@ -860,7 +944,10 @@ export function AnimPanel() {
                     value={pose.joints[j.index] ?? 0}
                     def={j.default}
                     selected={selected === j.index}
-                    onSelect={() => setSelected(j.index)}
+                    onSelect={() => {
+                      setMode("joints");
+                      setSelected(j.index);
+                    }}
                     onChange={(v) => setJoint(j.index, v)}
                   />
                 ))}
@@ -892,15 +979,87 @@ export function AnimPanel() {
           </>
         )}
         <div style={{ color: "#566072", fontSize: 9, marginTop: 8, lineHeight: 1.45 }}>
-          click a body part in the scene to select its joint · drag to rotate it
-          (shift = fine) · drag the ⇕ handle behind the duck to squat · rig
-          sliders end where a servo hits its limit — hover one to see which ·
-          keys interpolate linearly and the RL side resamples the saved clip at
-          50 Hz
+          click a body part to edit it — 🦴 drags one servo, 🎮 drags that
+          part&apos;s rig control (feet→toes, thigh→swing, shin→squat,
+          trunk→lean, head→look, shift = fine) · the ⇕ handle drags the
+          selected rig control (squat when none) and parks on the part it
+          moves ·
+          rig sliders end where a servo hits its limit — hover one to see
+          which · keys interpolate linearly and the RL side resamples the
+          saved clip at 50 Hz
           {poseErr && <span style={{ color: "#e07a5f" }}> · preview: {poseErr}</span>}
         </div>
       </div>
     </div>
+  );
+}
+
+/** Typed exact-value entry, shared by joint and rig rows: exact values (0
+ *  above all) are what an animator reaches for, and nudging a slider onto one
+ *  is a fight. Local draft while focused so a half-typed "-" or "0." isn't
+ *  parsed and snapped out from under the cursor; commit on Enter or blur,
+ *  Escape reverts, and the value is clamped into [min, max] on the way in. */
+function ValueField({
+  value,
+  min,
+  max,
+  color,
+  title,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  color: string;
+  title?: string;
+  onChange: (v: number) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commitDraft = () => {
+    if (draft == null) return;
+    const n = Number(draft.trim());
+    if (draft.trim() !== "" && Number.isFinite(n))
+      onChange(round3(Math.max(min, Math.min(max, n))));
+  };
+  return (
+    <input
+      value={draft ?? value.toFixed(3)}
+      onClick={(e) => e.stopPropagation()}
+      onFocus={(e) => {
+        setDraft(value.toFixed(3));
+        e.currentTarget.select();
+      }}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        commitDraft();
+        setDraft(null);
+      }}
+      onKeyDown={(e) => {
+        e.stopPropagation();   // R restarts the sim; don't while typing
+        if (e.key === "Enter") {
+          commitDraft();
+          e.currentTarget.blur();
+        } else if (e.key === "Escape") {
+          setDraft(null);
+          e.currentTarget.blur();
+        }
+      }}
+      title={title ?? `type an exact value (${min.toFixed(2)} … ${max.toFixed(2)} rad)`}
+      style={{
+        width: 52,
+        flexShrink: 0,
+        textAlign: "right",
+        fontSize: 10,
+        fontFamily: mono,
+        color,
+        background: draft != null ? "rgba(255,255,255,0.08)" : "transparent",
+        border: "1px solid",
+        borderColor: draft != null ? "rgba(255,209,102,0.5)" : "transparent",
+        borderRadius: 4,
+        padding: "1px 3px",
+        outline: "none",
+      }}
+    />
   );
 }
 
@@ -911,13 +1070,20 @@ export function AnimPanel() {
 function RigRow({
   v,
   pose,
+  selected,
+  onSelect,
   onChange,
 }: {
   v: RigVector;
   pose: Pose;
+  selected: boolean;
+  onSelect: () => void;
   onChange: (value: number) => void;
 }) {
   const value = rigMeasure(v, pose);
+  // round3(…) || 0 folds the projection's float dust (and −0) into true zero
+  // so the readout never says “−0.000”.
+  const shown = round3(value) || 0;
   const r = rigRange(v, pose);
   // A degenerate range (some servo already pinned by a raw-joint edit) still
   // renders — the slider just has nowhere to go, which is itself the answer.
@@ -926,9 +1092,22 @@ function RigRow({
   const atLimit = value <= r.min + 1e-4 || value >= r.max - 1e-4;
   const joints = v.parts.map((p) => p.name.replace(/^(left|right)_/, (m) => m[0] === "l" ? "L " : "R ")).join(", ");
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, height: 21, padding: "0 4px", margin: "0 -4px" }}>
+    <div
+      onPointerDown={onSelect}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        height: 21,
+        padding: "0 4px",
+        margin: "0 -4px",
+        borderRadius: 5,
+        background: selected ? "rgba(95,208,189,0.13)" : "transparent",
+        cursor: "pointer",
+      }}
+    >
       <span
-        style={{ width: 74, flexShrink: 0, fontSize: 10, color: "#8ee6d6", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+        style={{ width: 74, flexShrink: 0, fontSize: 10, color: selected ? "#8ee6d6" : "#6fbfae", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         title={`${v.ctrl.title}\ndrives: ${joints}`}
       >
         {v.ctrl.label}
@@ -940,15 +1119,21 @@ function RigRow({
         step={0.005}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        title={`${value.toFixed(3)} rad · − end: ${r.minBy} at its limit · + end: ${r.maxBy} at its limit`}
-        style={{ flex: 1, minWidth: 60, height: 12, accentColor: "#5fd0bd" }}
+        title={`${shown.toFixed(3)} rad · − end: ${r.minBy} at its limit · + end: ${r.maxBy} at its limit`}
+        style={{ flex: 1, minWidth: 60, height: 12, accentColor: selected ? "#8ee6d6" : "#5fd0bd" }}
       />
-      <span
-        style={{ width: 52, flexShrink: 0, textAlign: "right", fontSize: 10, fontFamily: mono, color: atLimit ? "#e8b24a" : "#e8e6e1", padding: "1px 3px" }}
-        title={atLimit ? `at the rig limit — ${value <= r.min + 1e-4 ? r.minBy : r.maxBy} has no travel left` : undefined}
-      >
-        {value.toFixed(3)}
-      </span>
+      <ValueField
+        value={shown}
+        min={r.min}
+        max={r.max}
+        color={atLimit ? "#e8b24a" : "#e8e6e1"}
+        title={
+          atLimit
+            ? `at the rig limit — ${value <= r.min + 1e-4 ? r.minBy : r.maxBy} has no travel left`
+            : undefined
+        }
+        onChange={onChange}
+      />
       <span
         style={{ width: 78, flexShrink: 0, textAlign: "right", fontSize: 9, color: "#566072" }}
         title={`travel from here: ${r.min.toFixed(2)} … ${r.max.toFixed(2)} rad (ends at ${r.minBy} / ${r.maxBy})`}
@@ -992,14 +1177,6 @@ function JointRow({
   onChange: (v: number) => void;
 }) {
   const atLimit = value <= min + 1e-4 || value >= max - 1e-4;
-  // The typed field's in-progress text (null = not being edited).
-  const [draft, setDraft] = useState<string | null>(null);
-  const commitDraft = () => {
-    if (draft == null) return;
-    const n = Number(draft.trim());
-    if (draft.trim() !== "" && Number.isFinite(n))
-      onChange(round3(Math.max(min, Math.min(max, n))));
-  };
   return (
     <div
       onPointerDown={onSelect}
@@ -1043,49 +1220,12 @@ function JointRow({
           accentColor: selected ? "#ffd166" : "#7db8d8",
         }}
       />
-      {/* Typed entry, not just the slider: exact values (0 above all) are
-          what an animator reaches for, and nudging a slider onto one is a
-          fight. Local draft while focused so a half-typed "-" or "0." isn't
-          parsed and snapped out from under the cursor; commit on Enter or
-          blur, Escape reverts, and the value is clamped to the joint's real
-          limits on the way in. */}
-      <input
-        value={draft ?? value.toFixed(3)}
-        onClick={(e) => e.stopPropagation()}
-        onFocus={(e) => {
-          setDraft(value.toFixed(3));
-          e.currentTarget.select();
-        }}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => {
-          commitDraft();
-          setDraft(null);
-        }}
-        onKeyDown={(e) => {
-          e.stopPropagation();   // R restarts the sim; don't while typing
-          if (e.key === "Enter") {
-            commitDraft();
-            e.currentTarget.blur();
-          } else if (e.key === "Escape") {
-            setDraft(null);
-            e.currentTarget.blur();
-          }
-        }}
-        title={`type an exact value (${min.toFixed(2)} … ${max.toFixed(2)} rad)`}
-        style={{
-          width: 52,
-          flexShrink: 0,
-          textAlign: "right",
-          fontSize: 10,
-          fontFamily: mono,
-          color: atLimit ? "#e8b24a" : "#e8e6e1",
-          background: draft != null ? "rgba(255,255,255,0.08)" : "transparent",
-          border: "1px solid",
-          borderColor: draft != null ? "rgba(255,209,102,0.5)" : "transparent",
-          borderRadius: 4,
-          padding: "1px 3px",
-          outline: "none",
-        }}
+      <ValueField
+        value={value}
+        min={min}
+        max={max}
+        color={atLimit ? "#e8b24a" : "#e8e6e1"}
+        onChange={onChange}
       />
       <span
         style={{ width: 78, flexShrink: 0, textAlign: "right", fontSize: 9, color: "#566072" }}

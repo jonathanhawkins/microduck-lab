@@ -23,7 +23,7 @@ from .ppo_hparams import N_STEPS, VF_COEF, configure_torch_cpu, ppo_batch_size
 from .vec_env import as_sb3_vec_env, make_vec_env
 from .walk_env import MicroduckWalkEnv
 
-# Overridable so tests and scratch farm servers write somewhere disposable —
+# Overridable so tests and scratch lab servers write somewhere disposable —
 # discover_policies() scans this dir, so stray test runs would otherwise show
 # up in the live viewer's palette.
 RUNS_DIR = Path(os.environ.get("MICRODUCK_RUNS_DIR")

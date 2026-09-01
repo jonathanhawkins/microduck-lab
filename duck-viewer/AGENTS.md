@@ -7,7 +7,7 @@ before changing rendering or protocol code.
 
 Rules of the road:
 
-- The farm (`microduck_local`'s `duck-farm`) owns all simulation truth; this
+- The lab (`microduck_local`'s `duck-lab`) owns all simulation truth; this
   app only renders frames and sends `{"cmd"}/{"reset"}/teach` messages. Don't
   put physics or reward logic here.
 - Rendering is deliberately light (merged geoms per body, no shadow maps, DOM
@@ -19,9 +19,9 @@ Rules of the road:
   (`MATERIAL_FIX`).
 - Panel states, chat history, and the camera persist in `localStorage`; the
   duck roster persists server-side. Keep both working when you touch state.
-- `?farm=host:port` overrides the default farm address (`127.0.0.1:8788`) —
-  useful for pointing a dev viewer at a scratch farm.
-- Verify with `npm run build` (type checks) and by driving a real farm; the
+- `?lab=host:port` overrides the default lab address (`127.0.0.1:8788`) —
+  useful for pointing a dev viewer at a scratch lab.
+- Verify with `npm run build` (type checks) and by driving a real lab; the
   HUD's live numbers make protocol regressions obvious.
 
 The block below is maintained automatically by `next dev` — leave it in place.

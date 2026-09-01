@@ -4,7 +4,7 @@
 
 Writes into runs/<run-name>/:
   progress.jsonl   one line per PPO rollout: steps, ep_rew, ep_len, per-term means
-  live.onnx        refreshed every --snap-steps (atomic replace) — the farm
+  live.onnx        refreshed every --snap-steps (atomic replace) — the lab
                    hot-loads it onto the trainee duck so you can watch the
                    policy improve
   model.zip + vecnormalize.pkl   refreshed with every snapshot (atomic replace),
@@ -38,19 +38,24 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import tempfile
 import time
 from pathlib import Path
 
 import numpy as np
 
 from .behaviors import BEHAVIORS, Behavior, BehaviorEnv, is_symmetric
-from .ppo_hparams import (DEFAULT_DESIRED_KL, DEFAULT_SYMMETRY_COEF, N_STEPS,
-                          UPSTREAM_DESIRED_KL, VF_COEF, configure_torch_cpu,
-                          ppo_batch_size)
+from .ppo_hparams import (
+    DEFAULT_DESIRED_KL,
+    DEFAULT_SYMMETRY_COEF,
+    N_STEPS,
+    UPSTREAM_DESIRED_KL,
+    VF_COEF,
+    configure_torch_cpu,
+    ppo_batch_size,
+)
 from .train import RUNS_DIR
 from .vec_env import as_sb3_vec_env, make_vec_env
+
 
 # Linear learning-rate decay. EVERY run so far has peaked and then come
 # apart — ep_rew 354->223, 177->29, 157->77, and the from-scratch BAM run
@@ -63,7 +68,7 @@ from .vec_env import as_sb3_vec_env, make_vec_env
 # default because upstream's 0.01 KL target is unreachable at our batch size
 # and pins the rate to its floor. A plain linear decay needs no calibration
 # against batch size — it just stops the late thrash.
-# Env-overridable (MICRODUCK_LR_START/END): the farm's /teach endpoint has no
+# Env-overridable (MICRODUCK_LR_START/END): the lab's /teach endpoint has no
 # lr parameters, and a warm continuation of an unstable run needs a cooler
 # rate than a fresh run — measured: at ~5.5e-4 a near-converged policy
 # boom-busted three times in one leg (ep_len 396->10, 42->12).
@@ -85,6 +90,12 @@ def linear_decay(start: float, end: float):
 
 
 SNAP_STEPS = 150_000  # export a live snapshot roughly every ~15 s of wall time
+# Hard cap on the policy's per-dim action log_std (std <= ~0.6). Past ~std 1
+# the clipped Gaussian degenerates into bang-bang sampling that the entropy
+# bonus loves and the DETERMINISTIC export can't reproduce — see the clamp
+# sites for the measured 2fca3a failure. Warm starts inherit log_std, so the
+# cap must bind on load AND every rollout.
+LOG_STD_MAX = -0.5
 
 
 def make_env(behavior_id: str, rank: int, seed: int,
@@ -151,6 +162,7 @@ def _progress_callback_cls(BaseCallback):
 
         def _snapshot(self) -> None:
             import torch
+
             from .export_onnx import OnnxWalkPolicy
             wrapper = OnnxWalkPolicy(
                 self.model.policy, self.venv.obs_rms.mean, self.venv.obs_rms.var,
@@ -172,6 +184,12 @@ def _progress_callback_cls(BaseCallback):
             self.snapshots += 1
 
         def _on_rollout_end(self) -> None:
+            # Re-assert the action-std cap every rollout: the entropy bonus
+            # pushes log_std up between clamps, and past ~std 1 the clipped
+            # Gaussian goes bang-bang (see the warm-start clamp's comment).
+            import torch
+            with torch.no_grad():
+                self.model.policy.log_std.data.clamp_(max=LOG_STD_MAX)
             ep_rew = self.model.ep_info_buffer
             rew = float(np.mean([e["r"] for e in ep_rew])) if ep_rew else 0.0
             length = float(np.mean([e["l"] for e in ep_rew])) if ep_rew else 0.0
@@ -253,9 +271,9 @@ def build_parser() -> argparse.ArgumentParser:
     # take turns, so extra workers fill the cores the serial phases leave
     # idle — at 16 envs the workers are only ~11% busy). Idle sweep
     # 2026-08-30: 16 → 14.3k steps/s, 24 → 15.6k, 32 → 16.5k, ~17.1k
-    # asymptote; with the farm + browser live the same ordering holds and the
+    # asymptote; with the lab + browser live the same ordering holds and the
     # margin widens. See viz_server.BASE_ENVS, which mirrors this and records
-    # why the old 16 (a confounded live-farm test) was wrong.
+    # why the old 16 (a confounded live-lab test) was wrong.
     ap.add_argument("--envs", type=int, default=32)
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--run-name", default=None)
@@ -288,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "runs in a background thread (SymmetryPPO.learn). "
                          "Data trains one update stale — A/B'd, see README. "
                          "Also enabled by MICRODUCK_OVERLAP=1, which is how "
-                         "farm-launched runs opt in (viz_server passes no "
+                         "lab-launched runs opt in (viz_server passes no "
                          "flags)")
     ap.add_argument("--update-device",
                     default=os.environ.get("MICRODUCK_UPDATE_DEVICE", "auto"),
@@ -344,7 +362,7 @@ def main() -> None:
         prog = Path(args.init_from) / "progress.jsonl"
         if (Path(args.init_from).resolve() == out.resolve()) and prog.exists():
             try:
-                last = [json.loads(l) for l in prog.read_text().splitlines() if l.strip()]
+                last = [json.loads(ln) for ln in prog.read_text().splitlines() if ln.strip()]
                 ramp_offset = int(last[-1].get("steps", 0)) // max(args.envs, 1)
             except Exception:
                 ramp_offset = 0
@@ -382,6 +400,12 @@ def main() -> None:
     resume = False
     if args.init_from:
         prev = Path(args.init_from)
+        # Decided HERE, before anything reads it: the learning-rate choice
+        # below used to run ~30 lines ahead of this assignment, so it always
+        # saw the `resume = False` initializer and every same-dir warm RESTART
+        # (viz_server's env-count rescale, a live weight edit) silently
+        # continued on the cool fine-tune schedule instead of resuming its own.
+        resume = prev.resolve() == out.resolve()
         venv = VecNormalize.load(str(prev / "vecnormalize.pkl"), venv)
         # custom_objects: adopt the lean rollout forward even for checkpoints
         # saved before FastActorCriticPolicy existed (identical parameters —
@@ -422,6 +446,16 @@ def main() -> None:
         model.ent_anneal = True
         if getattr(model, "_ent0", None) is None:
             model._ent0 = 0.01
+        # Cap the INHERITED action std. Every --init-from reloads the previous
+        # run's log_std, and tonight's long headstand chain ratcheted the leg
+        # dims to log_std ~3.2 (std 21-26 in an action space clipped far
+        # narrower): sampled actions became bang-bang slams whose direction
+        # bias — not the mean — carried the behavior. Measured 2026-09-01 on
+        # 2fca3a: stochastic episodes survive 6.9 s, the DETERMINISTIC mean
+        # falls in 0.5 s on every seed — and the exported .onnx ships the
+        # mean. The cap forces the mean to carry the skill.
+        with torch.no_grad():
+            model.policy.log_std.data.clamp_(max=LOG_STD_MAX)
         if getattr(model, "_adaptive_lr", None) is None:
             model._adaptive_lr = None
         # Same-dir init-from is viz_server's env-count rescale: the step counter
@@ -429,7 +463,6 @@ def main() -> None:
         # dir is a fine-tune warm start (e.g. retrain a finished policy under an
         # edited scorecard): weights carry over, the counter starts fresh so
         # --steps is a full new budget.
-        resume = prev.resolve() == out.resolve()
         print(f"warm-started from {prev} at {model.num_timesteps} steps, "
               f"{args.envs} envs ({'resuming' if resume else 'fine-tuning'})")
     else:

@@ -41,10 +41,29 @@ does; this file covers how not to fool yourself.
 - **No jackpots.** Dense, bounded shaping beats sparse windfalls; a term a
   policy can spike once and farm will get farmed. (Inherited from upstream
   `microduck_rl/AGENTS.md`, which is worth reading in full.)
-- Composable extras belong in the **term catalog** in `behaviors.py`
+- Composable extras belong in the **term catalog** in `behaviors/core.py`
   (`head_up`, `flat_feet`, `calm_body`, `smooth_torque`, …) so the viewer's
   teach panel can offer them as sliders. A trick that "looks wrong" usually
   needs a catalog term, not a new bespoke one.
+- **Reward design cannot fix an exploration gap.** If rollouts never contain
+  the target skill — not even transiently, not even stochastically — no term,
+  weight, gate, or ramp will teach it: the value of a state that is never
+  sampled is never learned. This cost a full night on the headstand: five
+  recipe variants (extended pay ramps, persistence bonuses, 3× gradient on
+  the missing motion, penalty/terminal removal, still spawns) all converged
+  to the same easy local pose, because a held *extended* headstand is not
+  samplable under honest BAM servos from random behavior. The fix was never
+  in the reward: ladder the **physics** — a strong-servo (`xml`) drill stage
+  with ~80% dropped-in spawns made the skill appear in rollouts within
+  minutes, then the servos step back down to honest BAM. Diagnose with one
+  question before touching terms: "does ANY rollout ever do the thing?" If
+  no, change the world, not the pay.
+- **Curriculum stages may ladder only physics, spawns, and strictness —
+  never the reward.** The first staged era failed because rungs carried
+  their own term edits and every rung grew its own exploit to nap in. The
+  headstand ladder keeps the identical sealed term set in every stage
+  (a test enforces the stage-env knob allowlist), so a stage can make the
+  world easier or the judging stricter, but never change what is paid.
 
 ## Verification discipline — the rules that exist because of false reports
 
@@ -67,18 +86,30 @@ does; this file covers how not to fool yourself.
    was chased as a PPO tuning problem for a day; the cause was an unlearnable
    reward term. Check what you're asking for before re-tuning how hard to
    ask.
+6. **Warm-start chains silently ratchet the action std into bang-bang.**
+   Every `--init-from` reloads the previous run's `log_std`, and the entropy
+   bonus pushes it up each generation; one long chain reached std 21–26 in a
+   ±4 action space. At that point the *clipped noise distribution* carries
+   the behavior (stochastic episodes survived 6.9 s) while the exported
+   deterministic mean is saturated garbage (fell in 0.5 s) — and telemetry
+   cannot tell the difference. `LOG_STD_MAX` in `train_behavior.py` caps it
+   on load and every rollout; a mean-poisoned lineage cannot be consolidated
+   and must be restarted from scratch. Probe `live.onnx` deterministically
+   at every checkpoint — that is the policy that ships.
 
 ## Adding a behavior (the main community extension point)
 
-1. Add a `Behavior` to `src/microduck_local/behaviors.py`: reward terms
+1. Add a `Behavior` to the trick module it belongs in under
+   `src/microduck_local/behaviors/` (one file per trick family; shared
+   helpers and the catalog live in `core.py`): reward terms
    (signed per the rules above), friendly strings, chat keywords, optional
    `curriculum` stages for hard tricks (see `backflip` for the pattern —
    reverse curriculum via spawn-family env knobs, staged `--init-from`
    chaining).
 2. Lock it: extend `tests/test_behaviors.py` (term signs, keyword matching).
-3. Train it: `uv run train-behavior <id>` — or better, through the farm
+3. Train it: `uv run train-behavior <id>` — or better, through the lab
    (`POST /teach` or the viewer's 🎓 panel) so you and anyone watching the
-   browser see live snapshots every ~15 s. Prefer the farm path when a human
+   browser see live snapshots every ~15 s. Prefer the lab path when a human
    is in the loop; CLI runs are invisible to the viewer.
 4. Verify per the discipline above, including from plain standing starts
    (`--env MICRODUCK_SPAWN_FAMILY_PROBS=0.0,0.0` for spawn-curriculum tricks).
