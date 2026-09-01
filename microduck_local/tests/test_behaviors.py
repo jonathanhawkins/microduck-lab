@@ -346,14 +346,25 @@ def test_headstand_slope_terms_pay_progress_not_state():
     for _ in range(25):
         env.step(hold)
     sums = env.reward_sums
-    # body_lifted is deliberately excluded: it is a per-step SALARY for the
-    # tall stack (see the recipe) — the anti-farming contract covers the
-    # three shepherd slope terms, which pay progress only.
-    slope = sum(sums.get(k, 0.0) for k in
-                ("upside_down", "head_low", "nose_down", "neck_tuck",
-                 "feet_rise"))
+    # body_lifted, feet_up and neck_tuck are deliberately excluded: they are
+    # per-step SALARIES for the stacked pose (see the recipe), and the
+    # anti-farming contract covers only the shepherds, which pay progress.
+    #
+    # sums[k], not sums.get(k, 0.0): this summed "head_low" and "nose_down"
+    # too, which are _hs_update POTENTIALS that were never registered as
+    # reward terms. get() scored both 0.0 forever, so the assertion silently
+    # covered two fewer terms than it named while reading as if it covered
+    # five — and it also carried neck_tuck, a salary whose legitimate
+    # per-step income ate the budget meant for detecting an annuity. Indexing
+    # makes a rename fail loudly instead of hollowing the test out again.
+    shepherds = ("upside_down", "feet_rise")
+    missing = [k for k in shepherds if k not in sums]
+    assert not missing, f"shepherd terms renamed or dropped: {missing}"
+    slope = sum(sums[k] for k in shepherds)
     # Tiny settle-in drift is fine; a per-step annuity over 25 steps is not
-    # (state pay measured ~2.9/step here — 25 steps would be ~70).
+    # (state pay measured ~2.9/step here — 25 steps would be ~70). Parking
+    # measures about -49: symmetric shaping makes a settling duck GIVE BACK
+    # potential, so only the positive direction is the farming signal.
     assert slope < 12.0, f"slope terms paid {slope:.1f} for sitting still"
 
 
@@ -400,6 +411,141 @@ def test_reload_library_rolls_back_a_failing_recipe_edit(monkeypatch):
     # exactly what makes this test safe to run mid-suite — assert that.
     assert B.BEHAVIORS["headstand"] is before_behaviors["headstand"]
     assert sorted(B.CATALOG) == before_catalog_keys
+
+
+def test_reload_modules_restores_a_module_that_raises_mid_exec(tmp_path,
+                                                              monkeypatch):
+    """`importlib.reload` re-executes a module in its LIVE dict, so an edit
+    that compiles but raises part-way leaves it HALF-NEW: names bound before
+    the raise hold the new values while everything after is stale. The lab hit
+    this on motion.py, which /teach reloads before the behaviors package —
+    it then served a Frankenstein clip module the trainer subprocess (always a
+    fresh import) would never run. Uses a throwaway module rather than the
+    real motion so no live class is rebound mid-suite."""
+    import importlib
+    import sys
+
+    from microduck_local import motion
+
+    src = tmp_path / "torn_reload_probe.py"
+    src.write_text('BEFORE = "v1"\nDELETED = "v1"\n'
+                   'def fn():\n    return "v1"\n')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+    mod = importlib.import_module("torn_reload_probe")
+    try:
+        # The edit: rebinds BEFORE, drops DELETED, would rewrite fn — and
+        # raises in between, the way a NameError in a fresh recipe line does.
+        src.write_text('BEFORE = "v2"\nraise RuntimeError("half-applied edit")\n'
+                       'def fn():\n    return "v2"\n')
+        importlib.invalidate_caches()
+        with pytest.raises(RuntimeError):
+            motion.reload_modules([mod])
+        assert mod.BEFORE == "v1", "kept a value from the edit that failed"
+        assert mod.fn() == "v1"
+        # The rollback has to REFILL the namespace it emptied, not just stop.
+        assert mod.DELETED == "v1"
+
+        # The tear itself, so this guarantee cannot quietly degrade back into
+        # a plain reload: same module, same edit, torn.
+        with pytest.raises(RuntimeError):
+            importlib.reload(mod)
+        assert mod.BEFORE == "v2" and mod.fn() == "v1"
+    finally:
+        sys.modules.pop("torn_reload_probe", None)
+
+
+def test_motion_reload_self_targets_the_live_motion_module(monkeypatch):
+    """viz_server's /teach reloads motion before the behaviors package; the
+    fix is for it to call motion.reload_self() instead of importlib.reload.
+    Deliberately does NOT reload for real — that rebinds Clip/load_clip on
+    fresh objects for every test that imported them at module scope, the same
+    hazard test_reload_library_rolls_back_a_failing_recipe_edit avoids."""
+    import sys
+
+    from microduck_local import motion
+
+    seen = []
+    monkeypatch.setattr(motion, "reload_modules",
+                        lambda mods, after=None: seen.append(list(mods)))
+    motion.reload_self()
+    assert seen == [[sys.modules["microduck_local.motion"]]]
+
+
+def test_flatten_reports_a_recipe_name_that_collides_with_the_package():
+    """`from . import core as _core` pins the BARE name `core` on the package
+    too, so all eight submodule names sit in _RESERVED beside the real
+    machinery — and _flatten used to skip a reserved name in silence. A recipe
+    author adding a module-level `env = ...` (or `core`, or `locomotion`) to
+    headstand.py had it dropped with no error and no log, and
+    `from microduck_local.behaviors import env` answered with the SUBMODULE.
+    Now it says so, and says nothing else has changed."""
+    import microduck_local.behaviors as B
+
+    env_module, machinery = B.env, B._SUBMODULES
+    headstand = B.BEHAVIORS["headstand"]
+
+    # An ordinary new recipe constant still flattens, and still un-flattens.
+    B._headstand._A_BRAND_NEW_KNOB = 1.23
+    B._flatten()
+    assert B._A_BRAND_NEW_KNOB == 1.23
+    del B._headstand._A_BRAND_NEW_KNOB
+    B._flatten()
+    assert not hasattr(B, "_A_BRAND_NEW_KNOB")
+
+    for module, name in ((B._headstand, "env"),        # a submodule's name
+                         (B._poses, "_SUBMODULES"),    # package machinery
+                         (B._poses, "vars")):          # a builtin _flatten calls
+        setattr(module, name, 0.3)
+        try:
+            with pytest.raises(NameError, match=name):
+                B._flatten()
+        finally:
+            delattr(module, name)
+
+    # Nothing was mutated on the way to any of those errors.
+    assert B.env is env_module and B._SUBMODULES is machinery
+    assert B.BEHAVIORS is B._core.BEHAVIORS
+    assert B.BEHAVIORS["headstand"] is headstand
+    B._flatten()          # leave the package as the rest of the suite found it
+    assert B.match_behavior("do a headstand").id == "headstand"
+
+
+def test_reload_library_rolls_back_when_a_reloaded_recipe_shadows_the_package(
+        monkeypatch):
+    """The re-flatten is part of "the reload succeeded", so a name clash found
+    there has to roll the MODULES back as well. Left reloaded, core's dict —
+    which every helper closes over — would hold the new registry while the
+    package namespace still showed the old one: `match_behavior` denying
+    tricks the catalog lists, the split brain the all-module rollback exists
+    to prevent. Same no-live-reload discipline as the rollback test above: the
+    rollback is what makes this safe to run mid-suite, so assert it."""
+    import importlib
+
+    import microduck_local.behaviors as B
+
+    before_behaviors = dict(B.BEHAVIORS)
+    core_registry = B._core.BEHAVIORS
+    real_reload = importlib.reload
+
+    def reload_and_shadow(m):
+        new = real_reload(m)
+        if new.__name__ == B._headstand.__name__:
+            new.env = 0.3     # the plausible recipe constant, post-exec
+        return new
+
+    monkeypatch.setattr(B._importlib, "reload", reload_and_shadow)
+    with pytest.raises(NameError, match="env"):
+        B.reload_library()
+    monkeypatch.undo()
+
+    assert B.BEHAVIORS["headstand"] is before_behaviors["headstand"]
+    assert B.BEHAVIORS["backflip"] is before_behaviors["backflip"]
+    assert B._core.BEHAVIORS is core_registry
+    assert B.BEHAVIORS is B._core.BEHAVIORS
+    assert not hasattr(B._headstand, "env")
+    assert B.match_behavior("do a headstand").id == "headstand"
+    assert B.match_behavior("do a backflip").id == "backflip"
 
 
 def test_headstand_ladder_carries_no_reward_edits():

@@ -164,7 +164,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-# Imported AS A MODULE so /teach can importlib.reload it: recipe edits in
+# Imported AS A MODULE so /teach can hot-reload it (behaviors.reload_library /
+# motion.reload_self — all-or-nothing, never bare importlib.reload): recipe edits in
 # behaviors.py are picked up by the training SUBPROCESS (fresh import) but
 # were invisible to this long-running server — the teach panel then showed a
 # stale scorecard missing new terms (bit the user twice: head_up, head_up_pull).
@@ -605,8 +606,8 @@ class Duck:
         ground. That trap already cost this project a reward term that
         rewarded a side shuffle for hours; test_lab pins the frame.
 
-        Reached through the module (not a `from … import`) so the
-        importlib.reload in POST /teach keeps this binding live.
+        Reached through the module (not a `from … import`) so the hot
+        reload in POST /teach keeps this binding live.
         """
         self.speed_hist.append(float(behaviors_mod._base_vel(self.env)[0]))
 
@@ -742,8 +743,13 @@ RUN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 
 def run_dir(name: str) -> Path:
-    """Path of a run directory inside RUNS_DIR, or ValueError."""
-    if not isinstance(name, str) or not RUN_NAME_RE.match(name) or ".." in name:
+    """Path of a run directory inside RUNS_DIR, or ValueError.
+
+    fullmatch, not match: `$` also matches before a trailing newline, so
+    `.match()` waved through "my-run\\n" — and this name reaches a spawned
+    trainer's --init-from. No real run name ends in one (all 373 on disk
+    validate identically either way), so this only ever rejects more."""
+    if not isinstance(name, str) or not RUN_NAME_RE.fullmatch(name) or ".." in name:
         raise ValueError("run name must be 1-96 chars of letters, digits, dot, "
                          "dash or underscore, starting alphanumeric")
     return RUNS_DIR / name
@@ -1642,12 +1648,36 @@ def _sticky_int(v) -> int | None:
     return n if n > 0 else None
 
 
+def _atomic_write_json(path: Path, obj, mode: int = 0o644) -> None:
+    """The ONE json writer for every file this server persists (roster, sticky
+    teach weights, clips, the HF token).
+
+    tmp+replace so a crash mid-write cannot leave a truncated file in place,
+    and the tmp name carries pid+uuid because a FIXED one is not per-writer:
+    FastAPI runs sync handlers in a threadpool and the sim loop saves the
+    roster too, so two overlapping saves interleaved their json into ONE inode
+    and renamed the garbled result into place (lab-state.json then fails to
+    parse; hf-token.json then reads as "not configured"). Creation mode is
+    explicit rather than a chmod afterwards — a secret must never be
+    world-readable for even the window between the two calls — and the scratch
+    file is removed on any failure, since for the token it holds the secret and
+    sits at a path .gitignore does not cover.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, indent=2)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def save_teach_weights(w: dict[str, dict]) -> None:
     """Callers pass the normalized shape load_teach_weights returns."""
-    path = teach_weights_path()
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(w, indent=2))
-    tmp.replace(path)
+    _atomic_write_json(teach_weights_path(), w)
 
 
 def save_lab_state(ducks: list[Duck]) -> None:
@@ -1658,10 +1688,9 @@ def save_lab_state(ducks: list[Duck]) -> None:
          "showcase": bool(getattr(d, "showcase", False))}
         for d in ducks
     ]}
-    path = lab_state_path()
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.replace(path)  # atomic: a crash mid-write can't corrupt the roster
+    # ~11 call sites, one of them inside the sim loop — the writer that most
+    # needs _atomic_write_json's per-call tmp name.
+    _atomic_write_json(lab_state_path(), state)
 
 
 def restore_ducks(path: Path) -> list[Duck]:
@@ -1774,9 +1803,16 @@ def resolve_stage_init(behavior_id: str, start_stage: int) -> Path:
 def resolve_init_from(name: str) -> Path:
     """Validate a /teach initFrom run name into a warm-startable run dir.
     Raises ValueError with a client-facing message."""
-    if not name or Path(name).name != name:
-        raise ValueError(f"initFrom must be a plain run name under runs/, not {name!r}")
-    run = RUNS_DIR / name
+    # run_dir() is the ONE run-name validator (RUN_NAME_RE), shared with
+    # DELETE /runs, /teach/load and the .onnx download. The hand-rolled
+    # `Path(name).name != name` this used to do is strictly looser — it waved
+    # through leading dots, spaces and unbounded length — and this name goes
+    # straight onto a spawned trainer's --init-from.
+    try:
+        run = run_dir(name)
+    except ValueError as e:
+        raise ValueError(f"initFrom must be a plain run name under runs/, "
+                         f"not {name!r} ({e})") from None
     if not run.is_dir():
         raise ValueError(f"initFrom run {name!r} does not exist under runs/")
     missing = [f for f in ("model.zip", "vecnormalize.pkl")
@@ -2415,11 +2451,7 @@ def clip_path(name: str) -> Path:
 
 
 def save_clip(name: str, clip: dict) -> None:
-    path = clip_path(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(clip, indent=2))
-    tmp.replace(path)  # atomic, like lab-state.json
+    _atomic_write_json(clip_path(name), clip)
 
 
 def load_clips() -> list[dict]:
@@ -2521,6 +2553,40 @@ def convert_capture(src: Path, base: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------
+# Front-door origin policy — ONE definition, three enforcement points.
+#
+# The lab binds 127.0.0.1, so "same machine" is the whole legitimate surface
+# and every legitimate browser origin is a loopback one (the viewer is served
+# from localhost on a dev port that varies, and may be pointed at this lab via
+# ?lab=host:port). Non-browser clients — curl, the CLI, the tests — send no
+# Origin at all; that is not a forgeable state, so it passes.
+LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
+
+# CORS-safelisted request content types. A cross-origin POST carrying one of
+# these is a "simple" request: the browser dispatches it with NO preflight, so
+# CORSMiddleware never gets the chance to refuse it and the side effect lands
+# even though the response is opaque to the attacker.
+CORS_SIMPLE_CONTENT_TYPES = frozenset({
+    "text/plain", "application/x-www-form-urlencoded", "multipart/form-data",
+})
+
+
+def origin_allowed(origin: str | None) -> bool:
+    """May a request carrying this Origin act on the lab? Absent = a
+    non-browser client (curl/python/the CLI), which keeps working; browsers
+    always stamp Origin on a WebSocket handshake and on any cross-origin
+    fetch, so an absent header cannot be a forged cross-site request.
+
+    fullmatch, not match, because sharing LOCAL_ORIGIN_RE is not by itself
+    enough to keep this in step with CORSMiddleware: Starlette calls
+    fullmatch, and Python's `$` also matches just BEFORE a trailing newline,
+    so `.match()` here accepted "http://localhost\\n" where the middleware
+    refused it. One pattern, two verdicts — the drift the shared constant
+    was meant to prevent, hiding in the call instead of the regex."""
+    return origin is None or bool(LOCAL_ORIGIN_RE.fullmatch(origin))
+
+
 def make_app(ducks: list[Duck]):
     scene = extract_scene()
     st = LabState(ducks)
@@ -2577,7 +2643,10 @@ def make_app(ducks: list[Duck]):
         # would have been handed DELETE /runs and the HF token routes. The
         # lab binds 127.0.0.1, so loopback is the whole legitimate surface;
         # open the viewer at http://localhost:63317, not the Network URL.
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+        # The pattern is LOCAL_ORIGIN_RE, not a copy: /ws and POST /captures
+        # enforce the same rule outside CORS, and a second literal here would
+        # let the two drift apart on the next port-scheme change.
+        allow_origin_regex=LOCAL_ORIGIN_RE.pattern,
         allow_methods=["*"], allow_headers=["*"])
 
     @app.get("/scene")
@@ -2679,29 +2748,15 @@ def make_app(ducks: list[Duck]):
         except Exception as e:
             raise HTTPException(401, f"Hugging Face rejected that token: {e}")
         username = who.get("name", "") if isinstance(who, dict) else ""
-        HF_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # 0600 FROM CREATION, then atomic rename. write_text()+chmod left the
-        # token world-readable under the default umask for the window between
-        # the two calls — and permanently if the process died in between; the
-        # non-atomic write could also leave a truncated file (the same reason
-        # save_lab_state/save_teach_weights go through tmp+replace).
-        # Unique per call: FastAPI runs these sync handlers in a
-        # threadpool, so two overlapping saves sharing one fixed tmp
-        # path interleaved their json into one inode and replaced a
-        # garbled file into place (which then reads as "not configured").
-        tmp = HF_TOKEN_PATH.with_name(
-            f"{HF_TOKEN_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                json.dump({"token": tok, "username": username}, f)
-            tmp.replace(HF_TOKEN_PATH)
-        except BaseException:
-            # Never leave a live token lying in the scratch file: it is not the
-            # path .gitignore covers, and `git add -A` in this repo would
-            # commit it.
-            tmp.unlink(missing_ok=True)
-            raise
+        # 0600 FROM CREATION, not write_text()+chmod: that left the token
+        # world-readable under the default umask for the window between the
+        # two calls — and permanently if the process died in between. The rest
+        # of the write (per-call tmp name, atomic rename, and the unlink that
+        # keeps a live token out of a stray scratch file at a path .gitignore
+        # does not cover) is _atomic_write_json's job, shared with the roster,
+        # the sticky weights and the clips.
+        _atomic_write_json(HF_TOKEN_PATH, {"token": tok, "username": username},
+                           mode=0o600)
         st.events.append(f"\ud83e\udd17 Hugging Face connected as {username}")
         return {"configured": True, "username": username,
                 "masked": _hf_mask(tok)}
@@ -2789,6 +2844,23 @@ def make_app(ducks: list[Duck]):
 
     @app.post("/captures")
     async def post_capture(req: Request, name: str = "duck") -> dict:
+        # This is the one route that reads a raw body with no schema, and it
+        # writes up to CAPTURE_MAX_BYTES to disk and spawns ffmpeg. With a
+        # `Content-Type: text/plain` body it was a CORS-SIMPLE request: sent
+        # cross-origin with no preflight at all, so CORSMiddleware never got a
+        # veto and the side effect landed — the attacker cannot read the
+        # opaque reply, but the disk fills and the process spawns anyway.
+        # Two doors, because neither covers the other: Origin catches a
+        # typeless blob (also un-preflighted), and the content-type rule holds
+        # even if a client somehow suppresses Origin.
+        if not origin_allowed(req.headers.get("origin")):
+            raise HTTPException(403, "capture uploads are local-only")
+        ctype = req.headers.get("content-type", "").split(";")[0].strip().lower()
+        if ctype in CORS_SIMPLE_CONTENT_TYPES:
+            # The viewer posts the MediaRecorder blob itself, so fetch stamps
+            # video/webm (Chrome/Firefox) or video/mp4 (Safari); curl and the
+            # tests send no Content-Type. Neither shape is refused here.
+            raise HTTPException(415, f"upload the recording as a video blob, not {ctype}")
         data = await req.body()
         if not data:
             raise HTTPException(422, "empty capture upload")
@@ -2828,14 +2900,17 @@ def make_app(ducks: list[Duck]):
         # Pick up recipe edits without a server restart: the training
         # subprocess always imports behaviors.py fresh, so reloading here keeps
         # the card/sliders in step with what the run will actually train.
-        import importlib
         # Reload the modules behaviors.py DEPENDS on first: reloading only
         # behaviors leaves it calling into a stale `motion`, which crashed
         # every preview duck the moment a clip method was added (the trainer
         # subprocess was fine — it imports everything fresh — so training ran
         # while the scene sat empty).
+        # reload_self(), not importlib.reload: the latter re-executes in the
+        # LIVE dict, so a clip edit that compiles but raises part-way left the
+        # lab holding half of each version with no error anywhere. Same
+        # all-or-nothing machinery reload_library uses.
         try:
-            importlib.reload(motion_mod)
+            motion_mod.reload_self()
         except Exception as e:
             # Same contract as reload_library below: an edit to the clip
             # machinery that raises must report itself rather than 500 the
@@ -3065,9 +3140,9 @@ def make_app(ducks: list[Duck]):
                                "(no behavior.json) — it can't be loaded"}
         # Same freshness rule as /teach: the card must reflect behaviors.py
         # as it is NOW, since retrain/fine-tune will train under it.
-        import importlib
+        # reload_self(), not importlib.reload — see the note in POST /teach.
         try:
-            importlib.reload(motion_mod)
+            motion_mod.reload_self()
         except Exception as e:
             return {"ok": False, "message": f"motion.py didn't load: {e}"}
         # behaviors is a PACKAGE now (one module per trick):
@@ -3141,6 +3216,16 @@ def make_app(ducks: list[Duck]):
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
+        # A WebSocket handshake is NOT a CORS request: no preflight is sent,
+        # CORSMiddleware never sees it, and same-origin policy does not apply.
+        # So the allowlist above bought this socket nothing, while the socket
+        # itself takes `assign`, `spawn_duck`, `remove_duck` and `reset` — any
+        # page the user happened to be browsing while the lab runs could open
+        # ws://127.0.0.1:8788/ws and wipe the roster. Close BEFORE accept()
+        # (Starlette turns that into a rejected handshake, not a live socket).
+        if not origin_allowed(sock.headers.get("origin")):
+            await sock.close(code=1008)   # 1008 = policy violation
+            return
         await sock.accept()
         st.clients.add(sock)
         try:

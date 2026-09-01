@@ -26,7 +26,7 @@ import {
 } from "@/lib/lab";
 import { assignDrag, clearAssignDrag, isCanvasAt, nearestDuck } from "@/lib/assign";
 import { loadJSON, saveJSON } from "@/lib/persist";
-import { modalIsOpen, pushModal, setPolicyOpen, useTeachHeight } from "@/lib/ui";
+import { modalIsOpen, setPolicyOpen, useTeachHeight } from "@/lib/ui";
 import { Tip } from "./TeachPanel";
 import { pushToast } from "./Toasts";
 
@@ -296,22 +296,19 @@ function DeleteDialog({
   onConfirm: () => void;
 }) {
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  // Focus and the keyboard claim run ONCE per dialog: their effect must not
-  // depend on onCancel, which the parent passes as an inline arrow and so
-  // re-creates on every render — that re-ran this body continuously and
-  // snapped focus back to Cancel while the user was tabbing to Delete.
+  // Focus runs ONCE per dialog: this effect must not depend on onCancel, which
+  // the parent passes as an inline arrow and so re-creates on every render —
+  // that re-ran this body continuously and snapped focus back to Cancel while
+  // the user was tabbing to Delete.
   useEffect(() => {
     cancelRef.current?.focus();
-    // Claim the keyboard: the scene's shortcuts are on window/capture too and
-    // registered first, so stopPropagation here cannot stop them — Backspace
-    // would still delete the selected duck behind this dialog.
-    return pushModal();
   }, []);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       // No stopPropagation: it cannot reach the scene's listener (same
-      // element, registered earlier), and the modal gate above already made
-      // the scene stand down — including its own Escape-deselects handler.
+      // element, registered earlier), and the data-modal backdrop below
+      // already made the scene stand down — including its own
+      // Escape-deselects handler.
       if (e.key === "Escape") onCancel();
     };
     window.addEventListener("keydown", key, true);
@@ -331,8 +328,14 @@ function DeleteDialog({
     // data-policy-ui: the armed-chip global pointerdown handler skips panel
     // UI — without it, clicking this dialog while a chip is armed would
     // assign/spawn a duck behind the modal.
+    //
+    // data-modal: the whole-keyboard gate the scene reads (lib/ui.ts). It has
+    // to sit on a node that exists only while this dialog does, so it can never
+    // be left armed or disarmed by mistake — Backspace would otherwise still
+    // delete the selected duck behind this dialog.
     <div
       data-policy-ui
+      data-modal
       role="dialog"
       aria-modal="true"
       aria-label={`delete ${target.name}`}

@@ -1,7 +1,8 @@
 """Lab server units: roster persistence round-trip, helper spawn/remove guard
 rules, TrainingJob launch/scale argv construction, staged-curriculum chaining,
 stats payload shape, teach initFrom validation, reward-weight plumbing, the
-user-chosen practice budget, one compiled mjModel per scene across the roster.
+user-chosen practice budget, one compiled mjModel per scene across the roster,
+and the front door — who may open the WebSocket or upload a capture.
 The training subprocess is faked throughout — the real --init-from
 continuation lives in test_train_resume.py."""
 
@@ -2064,3 +2065,262 @@ def test_delete_route_maps_guards_to_status_codes_and_toasts(fake_popen):
     # The lab's own event stream narrates it, so every viewer sees the delete
     # — not just the browser that asked for it.
     assert any("deleted teach-spin-abc" in e for e in app.state.lab.events)
+
+
+# ------------------------------------------------- the front door (origins)
+
+class _FakeSock:
+    """Enough WebSocket for the /ws handler: an Origin header in, accept/close
+    out, then queued messages before the client goes away."""
+
+    def __init__(self, origin=None, msgs=()):
+        self.headers = {} if origin is None else {"origin": origin}
+        self.msgs = list(msgs)
+        self.accepted = False
+        self.closed = None
+        self.reads = 0
+
+    async def accept(self):
+        self.accepted = True
+
+    async def close(self, code=1000):
+        self.closed = code
+
+    async def receive_text(self):
+        self.reads += 1
+        if self.msgs:
+            return json.dumps(self.msgs.pop(0))
+        raise V.WebSocketDisconnect(1000)
+
+
+def _ws_endpoint(app, path: str = "/ws"):
+    """WebSocket routes carry no .methods, so _endpoint cannot find them."""
+    for r in app.routes:
+        if getattr(r, "path", None) == path and not getattr(r, "methods", None):
+            return r.endpoint
+    raise AssertionError(f"no WebSocket {path} route")
+
+
+class _FakeReq:
+    """Enough Request for POST /captures: headers, and a body that records
+    whether the guards let anyone reach it."""
+
+    def __init__(self, headers=None, body=b"not-really-a-webm"):
+        self.headers = headers or {}
+        self._body = body
+        self.reads = 0
+
+    async def body(self):
+        self.reads += 1
+        return self._body
+
+
+def test_ws_handshake_refuses_a_non_loopback_origin(fake_popen):
+    """A WebSocket handshake is NOT a CORS request: no preflight is sent and
+    CORSMiddleware never sees it, so the allowlist bought this socket nothing
+    while the socket itself takes assign/spawn_duck/remove_duck/reset. Any page
+    the user was browsing while the lab ran could open ws://127.0.0.1:8788/ws
+    and wipe the roster.
+    """
+    app = V.make_app([])
+    ws = _ws_endpoint(app)
+    st = app.state.lab
+
+    # None = curl / the CLI / these tests: browsers always stamp Origin on a
+    # handshake, so an absent header cannot be a forged cross-site request.
+    for origin in (None, "http://localhost:63317", "http://127.0.0.1:8788",
+                   "https://localhost", "http://[::1]:63317"):
+        sock = _FakeSock(origin, msgs=[{"cmd": [0.1, 0.0, 0.0]}])
+        asyncio.run(ws(sock))
+        assert sock.accepted, f"{origin!r} is a legitimate local client"
+        assert sock.closed is None
+        assert sock.reads == 2, "the command loop never ran"
+
+    # "localhost.evil.example" and "127.0.0.1.evil.example" are the reason the
+    # rule is an anchored regex and not a substring/startswith test.
+    for origin in ("http://evil.example", "http://localhost.evil.example",
+                   "http://127.0.0.1.evil.example", "http://192.168.1.5:63317",
+                   "https://duck-lab.example:8788", "null", "file://"):
+        sock = _FakeSock(origin, msgs=[{"remove_duck": "walker"}])
+        asyncio.run(ws(sock))
+        assert not sock.accepted, f"{origin!r} was handed a live socket"
+        assert sock.closed == 1008          # policy violation
+        assert sock.reads == 0, f"{origin!r} reached the command loop"
+        assert sock not in st.clients
+
+
+def test_cors_and_ws_enforce_one_shared_origin_rule(fake_popen):
+    """Two enforcement points, one regex. A second literal in the middleware
+    would drift from the socket's check the next time the allowlist changes —
+    which is exactly how /ws ended up with no check at all."""
+    app = V.make_app([])
+    cors = [m for m in app.user_middleware if m.cls is V.CORSMiddleware]
+    assert cors, "the CORS middleware is gone"
+    assert cors[0].kwargs["allow_origin_regex"] == V.LOCAL_ORIGIN_RE.pattern
+
+    # Sharing the PATTERN is not enough, and asserting only that was how the
+    # first version of this test passed over a real split: Starlette calls
+    # fullmatch, origin_allowed called match, and Python's `$` also matches
+    # just before a trailing newline — so one regex produced two verdicts on
+    # "http://localhost\n". Lock the ANSWERS, not the source text.
+    for origin in ("http://localhost:63317", "http://127.0.0.1:8788",
+                   "https://localhost", "http://[::1]:63317",
+                   "http://evil.example", "http://localhost.evil.example",
+                   "null", "file://", "http://localhost\n",
+                   "http://localhost:63317\nX-Injected: 1"):
+        assert V.origin_allowed(origin) is bool(
+            V.LOCAL_ORIGIN_RE.fullmatch(origin)), (
+                f"{origin!r}: the socket and the middleware disagree")
+
+
+def test_capture_upload_refuses_forgeable_cross_origin_posts(fake_popen, monkeypatch,
+                                                             tmp_path):
+    """POST /captures reads a raw body with no schema, writes up to
+    CAPTURE_MAX_BYTES to disk and spawns ffmpeg. Sent as
+    `Content-Type: text/plain` it was a CORS-SIMPLE request — dispatched
+    cross-origin with NO preflight, so CORSMiddleware never got a veto and the
+    side effect landed even though the reply was opaque to the attacker.
+    """
+    from fastapi import HTTPException
+
+    caps = tmp_path / "captures"
+    monkeypatch.setenv("MICRODUCK_CAPTURES_DIR", str(caps))
+    converted = []
+
+    def fake_convert(src, base):
+        converted.append(base)
+        return {"name": base, "mp4": f"/captures/{base}.mp4"}
+
+    monkeypatch.setattr(V, "convert_capture", fake_convert)
+    app = V.make_app([])
+    post = _endpoint(app, "/captures", "POST")
+
+    # Every safelisted content type, including one with a charset parameter —
+    # the guard must compare the bare type, not the whole header.
+    for ctype in ("text/plain", "text/plain;charset=UTF-8", "TEXT/PLAIN",
+                  "application/x-www-form-urlencoded", "multipart/form-data"):
+        req = _FakeReq({"content-type": ctype, "origin": "http://localhost:63317"})
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(post(req, name="duck"))
+        assert e.value.status_code == 415
+        assert req.reads == 0, "the body was read before the guard ran"
+
+    # A typeless Blob sends no Content-Type at all, which is simple too — the
+    # Origin door is what stops that one.
+    req = _FakeReq({"origin": "http://evil.example"})
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(post(req, name="duck"))
+    assert e.value.status_code == 403
+    assert req.reads == 0
+
+    assert converted == [], "a refused upload still spawned the converter"
+    assert not caps.exists(), "a refused upload still touched the disk"
+
+    # The real viewer: RecordPanel posts the MediaRecorder Blob itself, so
+    # fetch stamps video/webm (Chrome/Firefox) or video/mp4 (Safari).
+    for ctype in ("video/webm;codecs=vp9", "video/mp4"):
+        req = _FakeReq({"content-type": ctype, "origin": "http://localhost:63317"})
+        assert asyncio.run(post(req, name="🎓 trainee"))["name"].startswith("trainee-")
+    # curl / the CLI: no Origin, no Content-Type.
+    req = _FakeReq()
+    assert asyncio.run(post(req, name="duck"))["name"].startswith("duck-")
+    assert len(converted) == 3
+    assert not list(caps.glob("*.upload")), "the scratch upload was left behind"
+
+
+# ------------------------------------------------- atomic json persistence
+
+def test_overlapping_saves_never_share_one_scratch_file(fake_popen, monkeypatch,
+                                                        tmp_path):
+    """save_teach_weights / save_lab_state / save_clip each wrote through ONE
+    fixed "<name>.tmp". FastAPI runs sync handlers in a threadpool and the sim
+    loop saves the roster too, so two overlapping saves poured their json into
+    one inode and renamed the garbled result into place.
+
+    Force the overlap deterministically: save A is suspended with its scratch
+    file written but not yet renamed, and save B of the SAME path runs start to
+    finish inside that window. With a shared scratch name B rewrites and then
+    renames away the file A is still holding, and A's own rename explodes.
+    """
+    path = tmp_path / "lab-state.json"
+    real_replace = V.Path.replace
+    scratch, reentered = [], []
+
+    def replace(self, target):
+        scratch.append(self)
+        if not reentered:
+            reentered.append(True)
+            V._atomic_write_json(path, {"who": "B"})
+        return real_replace(self, target)
+
+    monkeypatch.setattr(V.Path, "replace", replace)
+    V._atomic_write_json(path, {"who": "A"})
+    monkeypatch.undo()
+
+    assert len(scratch) == 2
+    assert scratch[0] != scratch[1], "both saves wrote through one scratch path"
+    # A renamed last, so A wins — the point is that the survivor PARSES and is
+    # exactly one payload rather than a splice of both.
+    assert json.loads(path.read_text()) == {"who": "A"}
+    assert not list(tmp_path.glob("*.tmp")), "a scratch file was left behind"
+
+
+def test_atomic_write_cleans_up_after_a_failed_serialization(tmp_path):
+    """The scratch file must never outlive a failed save: for hf-token.json it
+    holds a live token, at a path .gitignore does not cover."""
+    path = tmp_path / "hf-token.json"
+    with pytest.raises(TypeError):
+        V._atomic_write_json(path, {"token": object()}, mode=0o600)
+    assert not path.exists()
+    assert not list(tmp_path.iterdir()), "a scratch file survived the failure"
+
+
+def test_every_json_writer_goes_through_the_atomic_helper(fake_popen, monkeypatch,
+                                                          tmp_path):
+    """The repeated failure mode here is fixing one site and missing its
+    siblings, and the fixed-tmp write had FOUR. Route check: no writer may roll
+    its own tmp+replace, and the token keeps its 0600-from-creation mode."""
+    import huggingface_hub
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def whoami(self):
+            return {"name": "testduck"}
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(V, "HF_TOKEN_PATH", tmp_path / "hf-token.json")
+    monkeypatch.setenv("MICRODUCK_CLIPS_DIR", str(tmp_path / "clips"))
+    calls = []
+    monkeypatch.setattr(V, "_atomic_write_json",
+                        lambda path, obj, mode=0o644: calls.append((path.name, mode)))
+    app = V.make_app([])
+
+    V.save_teach_weights({})
+    V.save_lab_state([])
+    V.save_clip("demo", {"version": V.CLIP_VERSION, "name": "demo", "keys": []})
+    _endpoint(app, "/settings/hf", "POST")(V.HfTokenReq(token="hf_good_token"))
+
+    assert calls == [("teach-weights.json", 0o644), ("lab-state.json", 0o644),
+                     ("demo.json", 0o644), ("hf-token.json", 0o600)]
+
+
+# ------------------------------------------------- run-name validation
+
+def test_init_from_uses_the_one_run_name_validator(fake_popen):
+    """initFrom hand-rolled `Path(name).name != name`, strictly looser than
+    run_dir()/RUN_NAME_RE: it waved through leading dots, spaces and unbounded
+    length, and the value goes straight onto a spawned trainer's --init-from."""
+    for bad in ("../../etc", ".ssh", ".hidden", "a b", "-dash", "x" * 200, ""):
+        with pytest.raises(ValueError, match="plain run name"):
+            V.resolve_init_from(bad)
+
+    # …and a name RUN_NAME_RE accepts still has to be a warm-startable run.
+    with pytest.raises(ValueError, match="does not exist"):
+        V.resolve_init_from("teach-spin-nothere")
+    run = V.RUNS_DIR / "teach-spin-abc123"
+    run.mkdir(parents=True)
+    (run / "model.zip").touch()
+    (run / "vecnormalize.pkl").touch()
+    assert V.resolve_init_from("teach-spin-abc123") == run

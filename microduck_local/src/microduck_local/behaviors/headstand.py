@@ -121,7 +121,12 @@ def _jaw_bid(env) -> int:
 
 def _head_low(env) -> float:
     """Head shell near the floor (target measured off the model: resting jaw
-    center ~6 cm; standing is 23 cm — wide std keeps the slope alive)."""
+    center ~6 cm; standing is 23 cm — wide std keeps the slope alive).
+
+    UNWIRED: no term reads this. It was a shepherd in the five-potential era;
+    headstand_hold now judges the whole stack, which subsumes it. Kept as a
+    building block — measured against the real model, so it is worth more
+    than a re-derivation — but it costs nothing until something wires it."""
     z = float(env.data.xpos[_jaw_bid(env)][2])
     return float(np.exp(-((z - 0.06) ** 2) / 0.12 ** 2))
 
@@ -262,7 +267,12 @@ def _nose_down(env) -> float:
     legs over the head. Pays for leaning nose-DOWN (gravity acquiring +x in
     the trunk frame). gz is symmetric and can't tell a front headstand from a
     backbend, so without this the policy went over backwards (user caught it
-    on video comparison)."""
+    on video comparison).
+
+    UNWIRED: no term reads this. The wrong_way PENALTY took over the job of
+    stopping the backwards entry — a charge for going the wrong way, rather
+    than pay for going the right way, so there is no direction annuity to
+    farm. Kept because the lesson it records outlives the term."""
     return max(0.0, min(1.0, float(env._projected_gravity()[0])))
 
 
@@ -540,9 +550,15 @@ def _hs_feet_height(env) -> float:
     return min(1.0, min(zl, zr) / 0.30)
 
 
-_HS_POTENTIALS = (("upside_down", _inverted), ("head_low", _head_low),
-                  ("nose_down", _nose_down), ("feet_rise", _hs_feet_height),
-                  ("neck_tuck", _neck_tuck))
+# EXACTLY the potentials some registered term reads back through
+# _hs_gain_term. head_low, nose_down and neck_tuck used to sit here too, left
+# over from the five-shepherd era: _hs_update evaluated all five every step
+# and the reward read two, so three were pure hot-loop cost. They also read as
+# live terms — the anti-parking test summed "head_low" and "nose_down" out of
+# this tuple for a reward key that never existed, scoring 0.0 forever and
+# quietly covering less than it claimed. Keep this tuple and the registered
+# gain terms in one-to-one correspondence.
+_HS_POTENTIALS = (("upside_down", _inverted), ("feet_rise", _hs_feet_height))
 
 
 def _hs_update(env) -> None:

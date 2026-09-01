@@ -17,7 +17,7 @@ import {
 } from "@/lib/lab";
 import { loadJSON, saveJSON } from "@/lib/persist";
 import { setSelectedDuck, useSelectedDuck } from "@/lib/select";
-import { pushModal, setDuckLabels, setHudRight } from "@/lib/ui";
+import { setDuckLabels, setHudRight } from "@/lib/ui";
 
 const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -32,22 +32,18 @@ function HfSettingsModal({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Only Escape. The rest of the keyboard is claimed by the data-modal marker
+  // on the backdrop below: stopPropagation CANNOT do it from here, because the
+  // scene's shortcut listener is on window/capture too and registered first,
+  // and stopPropagation never affects same-element listeners — the earlier
+  // attempt let Backspace delete the duck behind the modal anyway, while
+  // blocking React's own onKeyDown (Enter-to-save) on the way down.
   useEffect(() => {
-    // Claim the keyboard while this is open. stopPropagation CANNOT do this:
-    // the scene's shortcut listener is on window/capture too and registered
-    // first, and stopPropagation never affects same-element listeners — so the
-    // earlier attempt let Backspace delete the duck behind the modal anyway,
-    // while blocking React's own onKeyDown (Enter-to-save) on the way down.
-    // The scene stands down via the shared gate instead.
-    const release = pushModal();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
-    return () => {
-      release();
-      window.removeEventListener("keydown", onKey);
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   useEffect(() => {
@@ -93,6 +89,10 @@ function HfSettingsModal({ onClose }: { onClose: () => void }) {
       // assigns that policy to whichever duck sits behind the overlay
       // (nearestDuck projects screen positions; it can't see the modal).
       data-policy-ui
+      // data-modal: the whole-keyboard gate the scene reads (lib/ui.ts). It has
+      // to sit on a node that exists only while this dialog does, so it can
+      // never be left armed or disarmed by mistake.
+      data-modal
       style={{
         position: "fixed",
         inset: 0,

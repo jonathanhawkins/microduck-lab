@@ -64,6 +64,12 @@ does; this file covers how not to fool yourself.
   headstand ladder keeps the identical sealed term set in every stage
   (a test enforces the stage-env knob allowlist), so a stage can make the
   world easier or the judging stricter, but never change what is paid.
+  The viewer's per-stage weight sliders (`/teach` `stageWeights`) are the
+  deliberate exception, and the asymmetry is the point: a human watching a
+  rung stall can re-price it live, but what they produce is an experiment,
+  not a recipe. `CurriculumStage` has no weights field to persist one into,
+  so a stage tuning that works has to earn its way back as a term or a
+  physics knob before it can ship.
 
 ## Verification discipline — the rules that exist because of false reports
 

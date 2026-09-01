@@ -97,21 +97,25 @@ export function getDuckLabels(): boolean {
 // (stopPropagation only affects OTHER elements; stopImmediatePropagation only
 // affects listeners registered LATER), and the scene's listener is registered
 // first — so a dialog can only be protected by the scene AGREEING to stand
-// down. Dialogs increment on mount and decrement on unmount; a counter, not a
-// boolean, so two dialogs open at once can't un-gate each other.
-let modalDepth = 0;
-
-export function pushModal(): () => void {
-  modalDepth += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    modalDepth = Math.max(0, modalDepth - 1);
-  };
-}
+// down.
+//
+// Derived from the DOM rather than from a mount/unmount counter, because a
+// counter is module state and Fast Refresh re-evaluates this file whenever it
+// or its refresh chain is edited: the count came back 0 with a dialog still on
+// screen and nothing left to re-arm it, so Backspace deleted the duck behind
+// the open dialog and `r` reset every episode — during `npm run dev`, i.e. the
+// normal workflow. A dropped release() failed the other way and left the whole
+// scene keyboard (WASD, camera, R, Backspace, Escape) dead for the rest of the
+// session with no way to recover it. A mounted backdrop cannot lie in either
+// direction: it exists exactly while its dialog is on screen.
+//
+// The marker lives on the two dialog backdrops — HfSettingsModal (Hud.tsx) and
+// DeleteDialog (PolicyPanel.tsx). Deliberately not data-policy-ui: the HUD,
+// record, animate and teach panels carry that one too and are not modal.
+const MODAL_SELECTOR = "[data-modal]";
 
 /** Read per-event inside key handlers — not a hook, so no re-render coupling. */
 export function modalIsOpen(): boolean {
-  return modalDepth > 0;
+  if (typeof document === "undefined") return false;
+  return document.querySelector(MODAL_SELECTOR) !== null;
 }
