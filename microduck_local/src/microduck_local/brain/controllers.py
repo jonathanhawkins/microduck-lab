@@ -418,6 +418,17 @@ class ChaseParams:
     kick_deflect_right: float = 0.0
     lineup_range: float = 0.6      # a ball seen inside this is worth lining up on
     refresh_min: float = 0.35      # …and the spot is re-planned from sightings down to this range, then walked blind
+    # The line-up is two stages (traced: with the spot 8 cm behind the
+    # ball, the walk-in's last steering steps and the square-up's turn in
+    # place pushed the ball 5-50 cm before the kick - the ball moved 15 cm
+    # on average between the last sighting and the kick, more than the
+    # 7 cm the sighting was off by). Stage one goes to a pre-spot
+    # `approach_back` behind the kick spot on the kick line and squares up
+    # THERE, the ball 30 cm from the feet; stage two walks straight in
+    # along the line at `approach_speed` and stops on the spot.
+    approach_back: float = 0.22
+    approach_speed: float = 0.25
+    approach_tol: float = 0.04
     lineup_tol: float = 0.03       # trunk within this of the kicking spot: kick
     lineup_s: float = 4.0          # give up a line-up after this long
     settle_s: float = 0.4          # stand this long on the spot before the kick (robotd kicks at standing tuning)
@@ -544,6 +555,7 @@ class Chase:
         self._senses: Senses | None = None
         self.last = (0.0, 0.0, 0.0)
         self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"
+        self.lined = False                      # stage two of the line-up: on the line, walking straight in
         self.t_state = 0.0
         self._yield_t0 = -9.0
         self._yield_end = -9.0
@@ -721,10 +733,34 @@ class Chase:
             # Refresh the spot while the ball is in view and not too close
             # (see refresh_min), then walk the rest blind.
             if fresh and self.state != "settle" and p.refresh_min <= ball.range < p.head_range:
-                self.spot = self._plan(odom, ball)
+                new = self._plan(odom, ball)
+                if self.lined and math.hypot(new[0] - self.spot[0], new[1] - self.spot[1]) > 0.05:
+                    self.lined = False                          # the ball is not where the line was laid: lay it again
+                self.spot = new
             sx, sy, foot, u, mode = self.spot
-            vx, wz, dist, bearing = self._servo(odom, (sx, sy), cold, p.lineup_tol)
             heading_err = _wrap(u - odom[2])
+            if mode == "kick" and not self.lined:
+                # Stage one: the pre-spot behind the kick spot on the line;
+                # square up there, where a turn in place cannot touch the ball.
+                px, py = sx - p.approach_back * math.cos(u), sy - p.approach_back * math.sin(u)
+                vx, wz, pdist, bearing = self._servo(odom, (px, py), cold, p.approach_tol)
+                if pdist <= p.approach_tol + 0.02 and abs(heading_err) <= p.aim_tol:
+                    self.lined = True
+                elif pdist <= p.approach_tol + 0.02:
+                    vx, _, wz = turn(heading_err, cold)
+                dist = pdist + p.approach_back                 # nowhere near the spot yet
+            else:
+                vx, wz, dist, bearing = self._servo(odom, (sx, sy), cold, p.lineup_tol)
+                if mode == "kick" and self.state != "settle":
+                    # Stage two: straight in along the line (the walker holds
+                    # its yaw on a pure forward command), stop on the spot -
+                    # by the distance left along the line, not the servo's radius.
+                    along = (sx - odom[0]) * math.cos(u) + (sy - odom[1]) * math.sin(u)
+                    if along > p.lineup_tol:
+                        vx, wz = p.approach_speed, 0.0
+                        dist = along
+                    else:
+                        vx, wz, dist = 0.0, 0.0, 0.0
             # Hysteresis on both: a settling duck wobbles a centimetre and a
             # few hundredths of a radian, which flipped it between the
             # square-up and the settle at the tolerance (measured: 22 s
@@ -772,6 +808,7 @@ class Chase:
                 self.last_seen_t = t
             if fresh and ball.range < p.lineup_range and abs(ball.bearing) < 0.5:
                 self.spot = self._plan(odom, ball)
+                self.lined = False
                 self.state = "lineup"
                 self.t_state = t
                 vx, wz = p.speed, float(np.clip(p.k_turn * ball.bearing, -1.0, 1.0))

@@ -181,3 +181,29 @@ def test_a_supporter_keeps_its_spot_inside_the_boards_and_stands_beside_a_teamma
     b.tracker.tracks.clear()
     vx, wz = b._support((0.0, 0.0, 0.0), None, False, True)
     assert wz != 0.0
+
+
+def test_the_line_up_squares_up_behind_the_ball_then_walks_straight_in():
+    """Two stages: from the pre-spot (approach_back behind the kick spot on
+    the kick line) a duck off the line is sent there and squared up first -
+    a turn in place 30 cm from the ball - and only then walks straight in
+    along the line with no steering, stopping by the distance left."""
+    p = ChaseParams()
+    b = Chase(p, goal=(3.0, 0.0))
+    b._senses = Senses(t=1.0)
+    b.state, b.t_state = "lineup", 0.0
+    b.spot = (0.5, 0.06, "kick_right", 0.0, "kick")            # kick spot, line along +x
+    # Well behind and beside: stage one heads for the pre-spot, not the spot.
+    it = b.step(Senses(t=1.0, odom=(0.0, 0.3, 0.0)))
+    assert not b.lined and it.twist[0] > 0
+    # At the pre-spot but facing 0.5 rad off: turn in place, not a step.
+    it = b.step(Senses(t=1.1, odom=(0.5 - p.approach_back, 0.06, 0.5)))
+    assert not b.lined and it.twist[0] <= 0.2 and it.twist[2] != 0.0
+    # At the pre-spot, facing the line: lined; the next decisions walk straight (wz 0) at approach_speed.
+    it = b.step(Senses(t=1.2, odom=(0.5 - p.approach_back, 0.06, 0.0)))
+    assert b.lined
+    it = b.step(Senses(t=1.3, odom=(0.5 - p.approach_back + 0.05, 0.06, 0.0)))
+    assert it.twist == (p.approach_speed, 0.0, 0.0) and b.state == "lineup"
+    # On the spot: stop and settle.
+    it = b.step(Senses(t=1.4, odom=(0.5, 0.06, 0.0)))
+    assert it.twist[0] == 0.0 and b.state == "settle"
