@@ -174,6 +174,16 @@ records almost nothing in a throttled tab. Keep the tab visible while
 recording. A take where the scene never rendered gets refused with a message
 instead of saved as a 0.1 s "video".
 
+## Where this is going: `/sim`
+
+[docs/sim-roadmap.md](docs/sim-roadmap.md) is the plan for the next chapter:
+simulate the robot's other senses (the head's 8×8 ToF depth matrix, the NPU
+duck detector, microphones, speaker, BLE proximity, odometry), add a brain
+layer that turns them into the robot's own `robot.move` / `robot.head`
+intents, and open a `/sim` page where ducks follow people, map rooms, and
+play soccer against each other. It ranks the work, explains what each piece
+teaches, and covers Windows support.
+
 ## Working with AI assistants
 
 This repo is set up for agentic coding tools:
