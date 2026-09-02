@@ -377,15 +377,28 @@ its current intent live.
   bit-for-bit. follow-v2 is v2, trained on the pinned 2026-09 model
   (400k decisions, then 400k more warm-started).
 
+  **A person is seen by its legs.** The detector reports the part of a
+  tall target that is inside its 48° vertical frustum: from a 24 cm-high
+  camera a person's middle leaves the frustum at 1.2 m, and until this
+  the follow band (0.7 m) sat inside the range where the person was
+  invisible — every brain's "in sight" fell as it closed in, and the
+  scripted one coasted and searched with the person a metre ahead. A
+  point-like target (a ball) is unchanged. Every row below moved with
+  it (in sight 0.75 → 0.99 for `follow-v2`), so the table is the new
+  world; the brains were not retrained on it.
+
   Measured on identical follow-me episodes (12, the pinned model), in
   band / in sight under the datasheet and hostile presets:
 
   | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
   |---|---|---|---|---|
-  | `follow-v2` + reflex tier | **0.80 / 0.75** | 0.63 / 0.61 | 0.66 / 0.77 | 0.61 / 0.59 |
-  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.71 / 0.68 | 0.63 / 0.57 | **0.68** / 0.65 | 0.61 / 0.60 |
-  | `follow-v1` (version-1 observation, no reflex tier) | 0.73 / 0.85 | 0.60 / 0.75 | 0.64 / 0.78 | 0.57 / 0.70 |
-  | scripted `follow` + reflex tier | 0.46 / 0.53 | 0.42 / 0.40 | | |
+  | `follow-v2` + reflex tier | **0.77 / 0.99** | **0.69** / 0.88 | **0.74** / 0.94 | **0.69** / 0.89 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.72 / 0.94 | 0.61 / 0.75 | **0.74** / 0.92 | **0.69** / 0.82 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.70 / 0.93 | 0.60 / 0.91 | 0.62 / 0.88 | 0.59 / 0.91 |
+  | scripted `follow` + reflex tier | 0.49 / 0.86 | 0.43 / 0.72 | 0.48 / 0.75 | 0.42 / 0.68 |
+
+  (Before the legs: 0.80 / 0.75, 0.63 / 0.61; 0.71 / 0.68, 0.63 / 0.57;
+  0.73 / 0.85, 0.60 / 0.75; 0.46 / 0.53, 0.42 / 0.40.)
 
   The **reflex tier** is the thing that moved: under a version-2 brain
   the env yaws the head toward the tracked target (0.8 × the body
@@ -407,6 +420,30 @@ its current intent live.
   v3 the one to keep training. Bumps stay at 14–27 an episode for every
   learned brain: the person walks through the duck as often as the duck
   walks into the person, and a reflex stop cannot help with the first.
+
+  **Getting out of the way** (`brain/controllers.ClosingWatch`, `eval-brain
+  --charge S --avoid`): the case where the person — or another duck —
+  walks straight at the follower. `--charge 6` makes the person's next
+  waypoint a point past the duck every 6 s, so it walks through the
+  duck's spot; the benchmark then reports contact seconds (truth: the
+  capsule against the body) and dodges. The watch reads the ToF's
+  clearance ahead (body-height returns): it shrinks at the duck's own
+  speed when it walks at a wall and faster when something comes at it,
+  and the difference, fitted over 0.4 s, is the closing rate. Past
+  0.12 m/s inside 1.2 m the manoeuvre is a turn toward the freer side,
+  then a walk. It ships OFF, with the numbers: the walker cannot clear a
+  person (measured from a standstill it sidesteps 1 cm in its first
+  second and 6 cm in two at the largest lateral command; a turn-and-walk
+  moves it 0.1 m off the line in 1.8 s; walking diagonally 0.13 m in
+  2 s — and the person arrives in 2–5 s). On the charge case (datasheet,
+  12 episodes) the scripted follow's contact is 5.3 s an episode without
+  the dodge and 4.9 with it, falls 0.17 → 0.08; `follow-v3` under the
+  reflex dodge 3.4 s either way, falls 0.50 → 0.25 — within the noise of
+  12 episodes. In ordinary following the dodge fires on a person who is
+  merely walking toward the duck and loses it: in band 0.49 → 0.39, in
+  sight 0.86 → 0.57 (lazier triggers, 0.8 m / 0.2 m/s and 0.6 m / 0.3
+  m/s, cost less and buy the same nothing). The mechanism and the flag
+  stay for the robot, where a person does not walk through it.
 
   Why the scripted one loses: a probe of both on the same episodes showed
   the learned brain sidestepping ±0.23 the whole time and holding the
@@ -497,6 +534,25 @@ down. Re-measured over 4 seeds × 300 s: **1v1 2.00 goals, 8.2 kicks,
 0.50 falls a run** — one kick in four scores where one in ten did, since
 every goal is followed by a clean approach from the spawns instead of a
 scramble at the wall.
+
+**The kick map** (a standing duck, the ball swept over ahead × side of
+the trunk, `kick_left`; the right kick checked mirrored): the ball
+leaves at an angle to the BODY heading that depends on the side offset —
+15°/cm near 2 cm, 4.5°/cm around 4–8 cm — and at the shipped spot
+(8 cm ahead, 6 cm to the side) it is +21.6° for the left foot (2.1 m)
+and −11° for the right (1.9 m), the same whichever way the body is
+yawed; 12 cm ahead the kick dies, 2 cm to the wrong side it barely
+moves. The sweet spot is 6–10 cm ahead and 4–8 cm to the side. Standing
+the body rotated by the deflection so a sweet-spot kick flies along the
+line to the goal (`kick_deflect_left` / `_right`) was built and measured
+OFF: in play the ball is 2–3 cm off the sweet spot when the kick fires
+— the line-up, not the map, scatters the shots (a 12-spot lone-shot
+probe: 35° mean absolute direction error without it, 28° with it, both
+noise-dominated) — and the rotated stance scored **1.38 goals a run
+against 2.00 without it** over 8 seeds × 300 s (10.4 vs 8.4 kicks). So
+the map's lesson that ships is where the next goals are: line-up
+precision at the spot (the stop lands 2–5 cm long, the aim tolerance is
+0.25 rad), not the aim.
 
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where

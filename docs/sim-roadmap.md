@@ -30,7 +30,11 @@ the tree, and Track 12 has its first working loop:
   kickoff after every goal (ball to the centre spot, ducks to their
   spawns, a 1 s hold, brains and team boards reset): 1v1 2.00 goals, 8.2
   kicks, 0.50 falls a run over 4 seeds — one kick in four scores where one
-  in ten did — and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
+  in ten did — a kick map (the shipped kick leaves +21.6° / −11° off the
+  body heading for the left / right foot from the sweet spot, 4.5–15°/cm
+  of side offset; compensating it in the stance measured 1.38 goals
+  against 2.00 over 8 seeds and ships off: the line-up's 2–3 cm, not the
+  map, scatters the shots) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
   2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 0.75 / 5.2 / 4.75 —
   falls per duck climb with the roster. Dribbling, a walk-round and
   close-range re-planning were built, measured worse, and ship off with
@@ -44,18 +48,30 @@ the tree, and Track 12 has its first working loop:
   for two ducks with maps streaming (physics 1.6, sensors 0.6 — the whole
   loop is ~7% of a core), so JSON holds until rosters of four or more
   ducks make the encode the largest term. **Measured:** on identical
-  follow-me episodes (12, the pinned model) the learned brains hold the
-  distance band 0.80 / 0.63 (`follow-v2` under the reflex tier — the env
-  yaws the head toward the tracked target and refuses to walk into
-  something 0.25 m ahead; 0.69 / 0.68 without it), 0.71 / 0.63
-  (`follow-v3`, trained with the reflex tier and variety: boxes and a
-  wandering duck; best on the variety benchmark at 0.68) and 0.73 / 0.60
-  (`follow-v1`, version-1 observation, scored in the world it was trained
-  in) under the datasheet / hostile presets against the scripted
-  controller's 0.46 / 0.42; in sight 0.75 / 0.61, 0.68 / 0.57, 0.85 / 0.75
-  vs 0.53 / 0.40. The scripted one loses because it stands still and goes
-  cold; an idle sidestep took it from 0.36 to 0.51 in sight, the head gaze
-  to 0.53, and the rest of the gap is the learned brain's continuous motion.
+  follow-me episodes (12, the pinned model, the detector seeing a person
+  by its legs — its middle leaves the 48° frustum at 1.2 m, inside the
+  follow band, which had every brain losing sight as it closed in) the
+  learned brains hold the distance band 0.77 / 0.69 (`follow-v2` under
+  the reflex tier — the env yaws the head toward the tracked target and
+  refuses to walk into something 0.25 m ahead), 0.72 / 0.61 (`follow-v3`,
+  trained with the reflex tier and variety: boxes and a wandering duck;
+  0.74 on the variety benchmark) and 0.70 / 0.60 (`follow-v1`,
+  version-1 observation, scored in the world it was trained in) under
+  the datasheet / hostile presets against the scripted controller's
+  0.49 / 0.43; in sight 0.99 / 0.88, 0.94 / 0.75, 0.93 / 0.91 vs 0.86 /
+  0.72. The scripted one loses because it stands still and goes cold; an
+  idle sidestep took it from 0.36 to 0.51 in sight, the head gaze to
+  0.53, and the rest of the gap is the learned brain's continuous motion.
+  A dodge for a person walking at the duck (`ClosingWatch`: the ToF
+  clearance closing faster than the duck's own walk → turn to the freer
+  side, walk) was built, measured on a charge case (the person walks
+  through the duck every 6 s) and ships off: the walker cannot clear a
+  person in the 2–5 s it has (1 cm of sidestep in its first second),
+  contact time is the same either way (4.9 vs 5.3 s an episode) and in
+  ordinary following it fires on a person merely walking toward the duck
+  (in band 0.49 → 0.39). The page's camera inset (V) shows what the head
+  camera sees at the detector's field of view, from the pose the frame
+  was captured at, with the detections as boxes.
 - Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
   a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
   12.13), the tether toggle (12.10: `--tether-ms`, `POST /world/tether`).

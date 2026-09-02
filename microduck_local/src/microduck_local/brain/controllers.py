@@ -404,10 +404,18 @@ class ChaseParams:
     # offset - 15 deg/cm near 2 cm, 4.5 deg/cm around 4-8 cm, where the
     # shipped spot sits - and at the spot it is +21.6 deg for the left foot
     # (2.1 m) and -11 deg for the right (1.9 m), the same whichever way the
-    # body is yawed. The line-up stands the body rotated by this so the
-    # kick itself flies along the line to the goal.
-    kick_deflect_left: float = 0.377
-    kick_deflect_right: float = -0.19
+    # body is yawed. Set, the line-up stands the body rotated by this so a
+    # kick from the sweet spot flies along the line to the goal. OFF
+    # (measured): in play the ball is 2-3 cm off the sweet spot when the
+    # kick fires - the line-up, not the map, is what scatters shots - and
+    # the rotated stance scored 1.38 goals a run against 2.00 without it
+    # (8 seeds x 300 s, 10.4 vs 8.4 kicks); on a 12-spot lone-shot probe
+    # the direction error was 28 vs 35 deg mean absolute, noise-dominated
+    # either way. The map's lesson that ships: line-up precision is the
+    # next lever for goals, and the sweet spot is 6-10 cm ahead, 4-8 cm
+    # to the side.
+    kick_deflect_left: float = 0.0
+    kick_deflect_right: float = 0.0
     lineup_range: float = 0.6      # a ball seen inside this is worth lining up on
     refresh_min: float = 0.35      # …and the spot is re-planned from sightings down to this range, then walked blind
     lineup_tol: float = 0.03       # trunk within this of the kicking spot: kick
