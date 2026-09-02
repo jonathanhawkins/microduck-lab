@@ -21,8 +21,6 @@ import {
   fetchWorld,
   frameEvents,
   loadWorld,
-  PICKABLE_COLORS,
-  PICKABLE_SIZES,
   saveRecording,
   SimClient,
   detectionRay,
@@ -30,7 +28,6 @@ import {
   TOF_PRESETS,
   type FrameEvent,
   type SimFrame,
-  type Scenario,
   type ScenarioListing,
   type SimDuck,
   type TofPreset,
@@ -38,6 +35,7 @@ import {
 } from "@/lib/sim";
 import { buildBodyGeometries, Duck } from "./Duck";
 import { applyFloorClick, emptyDraft, SimEditor, type EditorState } from "./SimEditor";
+import { Dynamics, StageEnvironment, Statics } from "./SimStage";
 
 const BG = "#101216";
 const PANEL: React.CSSProperties = {
@@ -106,147 +104,6 @@ function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
         return <Duck key={d.id} duckId={d.id} bodies={bodies} frameRef={ref} offset={[0, 0]} label={d.name} />;
       })}
     </>
-  );
-}
-
-/** Walls, static boxes and the floor from the loaded scenario (Z-up group). */
-function Statics({ scenario }: { scenario: Scenario | null }) {
-  if (!scenario) return null;
-  const [fx, fy] = scenario.floor.size;
-  return (
-    <group>
-      <mesh position={[0, 0, -0.001]}>
-        <planeGeometry args={[fx, fy]} />
-        <meshStandardMaterial color="#1c2026" roughness={0.95} />
-      </mesh>
-      {scenario.walls.map((w, i) => {
-        const dx = w.to[0] - w.from[0];
-        const dy = w.to[1] - w.from[1];
-        const len = Math.hypot(dx, dy);
-        return (
-          <mesh
-            key={`w${i}`}
-            position={[(w.from[0] + w.to[0]) / 2, (w.from[1] + w.to[1]) / 2, w.height / 2]}
-            rotation={[0, 0, Math.atan2(dy, dx)]}
-          >
-            <boxGeometry args={[len, w.thickness, w.height]} />
-            <meshStandardMaterial color="#cfcac2" roughness={0.9} />
-          </mesh>
-        );
-      })}
-      {scenario.basket && (
-        <group position={[scenario.basket.pos[0], scenario.basket.pos[1], 0]}>
-          <mesh position={[0, 0, 0.006]}>
-            <boxGeometry args={[scenario.basket.size[0], scenario.basket.size[1], 0.012]} />
-            <meshStandardMaterial color="#8c6b40" roughness={0.9} />
-          </mesh>
-          {[
-            [0, -scenario.basket.size[1] / 2, scenario.basket.size[0], 0.012],
-            [0, scenario.basket.size[1] / 2, scenario.basket.size[0], 0.012],
-            [-scenario.basket.size[0] / 2, 0, 0.012, scenario.basket.size[1]],
-            [scenario.basket.size[0] / 2, 0, 0.012, scenario.basket.size[1]],
-          ].map(([x, y, sx, sy], i) => (
-            <mesh key={i} position={[x, y, scenario.basket!.rim / 2]}>
-              <boxGeometry args={[sx, sy, scenario.basket!.rim]} />
-              <meshStandardMaterial color="#99784d" roughness={0.9} />
-            </mesh>
-          ))}
-        </group>
-      )}
-      {scenario.boxes.map((b, i) =>
-        b.mass > 0 ? null : (
-          <mesh key={`b${i}`} position={b.pos} rotation={[0, 0, b.yaw]}>
-            <boxGeometry args={b.size} />
-            <meshStandardMaterial color={new THREE.Color(b.rgba[0], b.rgba[1], b.rgba[2])} roughness={0.85} />
-          </mesh>
-        )
-      )}
-    </group>
-  );
-}
-
-/** Free objects (balls, boxes with mass) posed from the frame stream. */
-function Dynamics({ scenario, client }: { scenario: Scenario | null; client: SimClient }) {
-  const refs = useRef(new Map<string, THREE.Group>());
-  const tmpP = useMemo(() => new THREE.Vector3(), []);
-  const tmpQ = useMemo(() => new THREE.Quaternion(), []);
-  useFrame((_, dt) => {
-    const f = client.frame;
-    if (!f) return;
-    const a = 1 - Math.exp(-16 * Math.min(dt, 0.1));
-    for (const o of f.objects) {
-      const g = refs.current.get(o.id);
-      if (!g) continue;
-      tmpP.set(o.pose[0], o.pose[1], o.pose[2]);
-      tmpQ.set(o.pose[4], o.pose[5], o.pose[6], o.pose[3]);
-      g.position.lerp(tmpP, a);
-      g.quaternion.slerp(tmpQ, a);
-    }
-  });
-  if (!scenario) return null;
-  const freeBoxes = scenario.boxes.map((b, i) => ({ b, i })).filter(({ b }) => b.mass > 0);
-  const persons = scenario.persons ?? [];
-  const toys = scenario.pickables ?? [];
-  return (
-    <group>
-      {toys.map((t) => (
-        <group
-          key={t.id}
-          ref={(el) => {
-            if (el) refs.current.set(t.id, el);
-          }}
-        >
-          <mesh>
-            <boxGeometry args={PICKABLE_SIZES[t.kind] ?? [0.03, 0.03, 0.03]} />
-            <meshStandardMaterial color={PICKABLE_COLORS[t.kind] ?? "#cccccc"} roughness={0.7} />
-          </mesh>
-        </group>
-      ))}
-      {persons.map((q) => (
-        <group
-          key={q.id}
-          ref={(el) => {
-            if (el) refs.current.set(q.id, el);
-          }}
-        >
-          {/* a capsule standing on the floor; the nose cone shows its heading */}
-          <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <capsuleGeometry args={[q.radius, Math.max(q.height - 2 * q.radius, 0.02), 6, 16]} />
-            <meshStandardMaterial color="#5a8dd6" roughness={0.8} transparent opacity={0.85} />
-          </mesh>
-          <mesh position={[q.radius + 0.03, 0, 0]} rotation={[0, 0, -Math.PI / 2]}>
-            <coneGeometry args={[0.04, 0.08, 10]} />
-            <meshStandardMaterial color="#9cc2ff" />
-          </mesh>
-        </group>
-      ))}
-      {scenario.balls.map((ball, i) => (
-        <group
-          key={`ball${i}`}
-          ref={(el) => {
-            if (el) refs.current.set(`ball${i}`, el);
-          }}
-        >
-          <mesh>
-            <sphereGeometry args={[ball.radius, 24, 16]} />
-            <meshStandardMaterial color="#ff8c00" roughness={0.6} />
-          </mesh>
-        </group>
-      ))}
-      {freeBoxes.map(({ b, i }) => (
-        <group
-          key={`box${i}`}
-          ref={(el) => {
-            if (el) refs.current.set(`box${i}`, el);
-          }}
-        >
-          <mesh>
-            <boxGeometry args={b.size} />
-            <meshStandardMaterial color={new THREE.Color(b.rgba[0], b.rgba[1], b.rgba[2])} roughness={0.85} />
-          </mesh>
-        </group>
-      ))}
-    </group>
   );
 }
 
@@ -879,9 +736,13 @@ export default function SimViewer() {
       >
         <color attach="background" args={[BG]} />
         <fog attach="fog" args={[BG, 6, 14]} />
-        <hemisphereLight intensity={0.65} groundColor="#2a2c33" color="#dfe6f0" />
-        <directionalLight position={[2.5, 4, 2]} intensity={1.9} />
-        <directionalLight position={[-2, 2.5, -1.5]} intensity={0.4} color="#8fa3c7" />
+        {/* The stage (SimStage.tsx) paints its own floors, walls and contact
+            blobs; the lights stay simple and shadow-free — a warm key, a cool
+            fill, and a procedural environment map for highlights. */}
+        <StageEnvironment />
+        <hemisphereLight intensity={0.55} groundColor="#2a2c33" color="#dfe6f0" />
+        <directionalLight position={[2.5, 4, 2]} intensity={1.7} color="#fff3e2" />
+        <directionalLight position={[-2, 2.5, -1.5]} intensity={0.45} color="#8fa3c7" />
         <gridHelper args={[18, 72, "#3a4150", "#262a33"]} position={[0, -0.003, 0]} />
         <group rotation={[-Math.PI / 2, 0, 0]}>
           <Statics scenario={shown} />

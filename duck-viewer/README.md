@@ -176,9 +176,34 @@ page's picker). One room, many ducks, and what each duck senses:
   and scrub, or save the buffer as a recording.
 - Protocol: `lib/sim.ts` (`/ws/sim` frames, `/scenarios`, `/world`).
 
-The stage is the same as the main page (merged geoms per body, DOM labels,
-no shadows); the `Duck` renderer is reused unchanged, which is why world
-frames carry the world body first, as `GET /scene` lists bodies.
+The ducks are rendered by the main page's `Duck` component unchanged (merged
+geoms per body, DOM labels), which is why world frames carry the world body
+first, as `GET /scene` lists bodies. Everything else in the room is
+`components/SimStage.tsx`, which dresses the scenario JSON without changing
+what the lab simulates:
+
+- **Pitch** (`goal_width > 0`): a mown grass floor with the markings sized to
+  the room — touchlines, halfway line, centre circle, goal areas, penalty
+  spots, corner arcs — a dark apron outside white rink boards with an amber
+  stripe, and goal frames with nets on both short walls exactly where
+  `World` counts a goal. The ball wears a 32-panel skin so you can see it
+  roll.
+- **Rooms** (`living-room`, `playroom`, `follow-me`, anything you draw in the
+  editor): oak planks, plaster walls with a baseboard and a cap, a rug in the
+  middle of the room, bevelled furniture on soft footprint shadows, a wicker
+  basket with a bound rim, studded bricks / bevelled blocks / rolled socks.
+- **Grounding without shadow maps**: one instanced mesh of multiply-blended
+  contact blobs follows every duck, ball, toy, box and person (fading and
+  spreading as the thing lifts off the floor), and a darkening strip runs
+  along every wall base. A procedural `RoomEnvironment` PMREM on
+  `scene.environment` gives the shells and the ball their highlights.
+- Every texture is painted on a canvas at load (no image assets, no
+  fetches); the scenario-sized ones are rebuilt only when the floor, the
+  walls' extent or the goal width change, not on every edit click.
+
+![the pitch](../docs/media/sim-pitch.jpg)
+![the living room](../docs/media/sim-living-room.jpg)
+![the playroom](../docs/media/sim-playroom.jpg)
 
 ## Notes for future work
 
@@ -190,7 +215,12 @@ frames carry the world body first, as `GET /scene` lists bodies.
   duck), no shadow maps, DOM labels. The first version (560 shadow-casting
   meshes + drei `Text` GPU glyph atlases) lost the WebGL context in the
   embedded browser — keep an eye on `THREE.WebGLRenderer: Context Lost` if you
-  add GPU-heavy effects back.
+  add GPU-heavy effects back. The `/sim` stage's fidelity (SimStage.tsx) is
+  all canvas textures, one PMREM and one instanced blob mesh for that reason:
+  a room costs a few dozen draw calls regardless of how many ducks are in it.
+  Two three.js gotchas met on the way: `MultiplyBlending` needs
+  `premultipliedAlpha` on the material, and `mergeGeometries` refuses a mix
+  of indexed and non-indexed parts (flatten with `toNonIndexed()` first).
 - Duck colors are the MJCF material rgba streamed per geom, carried through the
   per-body merge as a vertex-color channel (so per-part color costs zero extra
   draw calls). `Duck.tsx` keeps a by-name override table (`MATERIAL_FIX`)

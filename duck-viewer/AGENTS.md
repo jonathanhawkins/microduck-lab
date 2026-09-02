@@ -13,7 +13,11 @@ Rules of the road:
 - Rendering is deliberately light (merged geoms per body, no shadow maps, DOM
   labels). The first version lost the WebGL context in embedded browsers from
   560 shadow-casting meshes and GPU glyph atlases — watch for
-  `THREE.WebGLRenderer: Context Lost` before adding GPU-heavy effects.
+  `THREE.WebGLRenderer: Context Lost` before adding GPU-heavy effects. The
+  `/sim` room's looks live in `components/SimStage.tsx`: canvas-painted
+  textures, one environment map, one instanced mesh of contact blobs —
+  add fidelity there in that spirit (no shadow maps, no per-frame React
+  state, no fetched assets), and smoke-test it with `sim-smoke`.
 - Duck colors come from MJCF material rgba streamed per geom; `Duck.tsx` has
   a by-name override table (`MATERIAL_FIX`) for materials an export gets
   wrong — empty since the 2026-09 upstream re-export fixed the colours.

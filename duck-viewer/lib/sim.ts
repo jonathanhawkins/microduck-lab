@@ -33,6 +33,8 @@ export interface Scenario {
   persons?: ScenarioPerson[];
   pickables?: ScenarioPickable[];
   basket?: ScenarioBasket | null;
+  /** > 0: a pitch — goals this wide centred on both short walls (the World counts them). */
+  goal_width?: number;
   collision: "walk" | "all";
 }
 export interface ScenarioListing { name: string; builtin: boolean; ducks: number; objects: number; modified: number | null }
