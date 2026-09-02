@@ -188,7 +188,7 @@ def test_the_line_up_squares_up_behind_the_ball_then_walks_straight_in():
     the kick line) a duck off the line is sent there and squared up first -
     a turn in place 30 cm from the ball - and only then walks straight in
     along the line with no steering, stopping by the distance left."""
-    p = ChaseParams()
+    p = ChaseParams(two_stage=True)
     b = Chase(p, goal=(3.0, 0.0))
     b._senses = Senses(t=1.0)
     b.state, b.t_state = "lineup", 0.0
@@ -213,7 +213,7 @@ def test_after_a_kick_the_duck_looks_then_hunts_the_kick_line_then_searches():
     """A kicked ball rolls off along the kick line: after the look finds
     nothing the duck WALKS that line for `hunt_s` (head level, the ball in
     view from 0.3 m out) before the standing search."""
-    p = ChaseParams()
+    p = ChaseParams(hunt_s=3.0)
     b = Chase(p, goal=(3.0, 0.0))
     # A settle that fires the kick: on the spot, squared, settled.
     b._senses = Senses(t=0.0)

@@ -548,9 +548,17 @@ from the heap at the goal mouth. `World.goal_seq` says a goal happened;
 brain keeps its kick tally) and wipes the team boards; the lab loop and
 `eval-pitch` both do this, and the page's score panel counts the kickoff
 down. Re-measured over 4 seeds × 300 s: **1v1 2.00 goals, 8.2 kicks,
-0.50 falls a run** — one kick in four scores where one in ten did, since
-every goal is followed by a clean approach from the spawns instead of a
-scramble at the wall.
+0.50 falls a run** (1.12 / 11.8 / 0.50 before), since every goal is
+followed by a clean approach from the spawns instead of a scramble at
+the wall.
+
+**Which goals are kicks.** `eval-pitch` now attributes a goal to a kick
+within 4 s of it, else to a bump: one run scored four goals from one
+kick. Over 8 seeds × 300 s of 1v1 the shipped brain scores **0.75
+kicked and 1.25 bumped goals a run from 8.4 kicks** — a chase at
+0.45 m/s sends a walked-into ball rolling about as far as a kick does
+on this floor, and most goals are that. "One kick in four" above was
+this: read it as one goal per four kicks, most of them not the kick's.
 
 **The kick map** (a standing duck, the ball swept over ahead × side of
 the trunk, `kick_left`; the right kick checked mirrored): the ball
@@ -570,6 +578,33 @@ against 2.00 without it** over 8 seeds × 300 s (10.4 vs 8.4 kicks). So
 the map's lesson that ships is where the next goals are: line-up
 precision at the spot (the stop lands 2–5 cm long, the aim tolerance is
 0.25 rad), not the aim.
+
+**Line-up precision, measured and shipped off** (`ChaseParams.two_stage`).
+A landing probe (12 lone shots: where the ball is in the body frame when
+the kick fires) said the ball was 9 ± 11 cm further ahead and 5 ± 11 cm
+further to the side than planned, with the heading 11° off; a second
+probe split that into 7 cm of sighting error and **15 cm of ball motion
+between the last sighting and the kick** — the walk-in's last steering
+steps and the square-up's turn in place, 8 cm from the ball, pushed it.
+Tightening the aim tolerance to 0.12 or 0.06 rad changed nothing. A
+two-stage line-up — square up at a pre-spot 22 cm behind the kick spot
+on the kick line, then walk in steering onto the line (on a pure forward
+command the walker holds its yaw but crabs 9 cm sideways), and back off
+rather than turn in place when the ball is at the feet or the heading is
+missed on the spot — puts the ball on the sweet spot: side error 3 cm,
+heading 4°, the ball moving 2 cm, **4 goals from 11 lone shots against 1
+from 12**. On the pitch it kicks **3.5 times a run against 8.4** and
+those kicks scored 0.00 kicked goals a run against 0.75 (bumped 1.25
+either way; falls 0.25 against 0.50), so it ships off: with this walker
+the kick that happens beats the kick that is placed. The kick-map
+deflection on top of it scored 1.88 goals a run, all but 0.4 of them
+bumps. A search that walks after 3 s and a **hunt** (walk the line a
+lost ball rolled off along — the kick's, or the duck's own heading —
+before the standing search; state histograms said half of every run is
+search) were measured with it: the hunt found the ball (2.00 bumped
+goals a run) and walked into the other duck (1.50 falls a run); aiming
+every kick at the goal cut kicks to 0.6 a run. All three ship off
+behind their parameters with the numbers next to them.
 
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where

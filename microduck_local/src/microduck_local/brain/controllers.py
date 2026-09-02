@@ -426,6 +426,15 @@ class ChaseParams:
     # `approach_back` behind the kick spot on the kick line and squares up
     # THERE, the ball 30 cm from the feet; stage two walks straight in
     # along the line at `approach_speed` and stops on the spot.
+    # OFF (measured over 8 seeds x 300 s of 1v1, goals attributed to a
+    # kick within 4 s or to a bump): the two-stage line-up puts the ball
+    # on the sweet spot (side error 3 cm, heading 4 deg, the ball moving
+    # 2 cm before the kick, 4 goals from 11 lone shots against 1 from
+    # 12) but kicks 3.5 times a run against 8.4, and those kicks scored
+    # 0.00 against 0.75 kicked goals a run; bumped goals were 1.25 either
+    # way. With this walker the kick that happens beats the kick that is
+    # placed. `two_stage` switches it on.
+    two_stage: bool = False
     approach_back: float = 0.22
     approach_speed: float = 0.25
     approach_tol: float = 0.04
@@ -446,7 +455,7 @@ class ChaseParams:
     # it (a standing turn barely turns): after `search_walk_after` with
     # no sighting, walk `search_walk_s` to change the view.
     backoff_range: float = 0.35
-    search_walk_after: float = 3.0
+    search_walk_after: float = 0.0     # 0: off (measured with the two-stage line-up, see above)
     search_walk_s: float = 1.0
     lineup_tol: float = 0.03       # trunk within this of the kicking spot: kick
     lineup_s: float = 4.0          # give up a line-up after this long
@@ -479,7 +488,11 @@ class ChaseParams:
     # or the duck's own heading), is looked for by WALKING that line for
     # `hunt_s` with the head level (a floor ball is in view from 0.3 m out
     # to the camera's range) before the standing search begins.
-    hunt_s: float = 3.0
+    # OFF (0): measured over 8 seeds it found the ball (kicked goals 0.38,
+    # bumped 2.00 a run) and walked into things - falls 1.50 a run against
+    # 0.25 - a line walked at speed with the head level is a line walked
+    # into the other duck.
+    hunt_s: float = 0.0
     hunt_lost_range: float = 0.6
     search_dip_every: float = 1.5
     search_dip_s: float = 0.6
@@ -726,7 +739,7 @@ class Chase:
             self._last_range = None
         if self.state == "look" and not looking and not fresh and self._hunt_u is not None:
             self._hunt_t0 = t                                   # the look after the kick found nothing: hunt the line
-        hunting = t - self._hunt_t0 < p.hunt_s and not seen and self._hunt_u is not None
+        hunting = p.hunt_s > 0 and t - self._hunt_t0 < p.hunt_s and not seen and self._hunt_u is not None
         if senses.skill is not None:
             vx, wz = 0.0, 0.0                                   # the kick owns the reflex tier
             self.state = "kick"
@@ -777,7 +790,7 @@ class Chase:
                 self.spot = new
             sx, sy, foot, u, mode = self.spot
             heading_err = _wrap(u - odom[2])
-            if mode == "kick" and not self.lined:
+            if mode == "kick" and p.two_stage and not self.lined:
                 # Stage one: the pre-spot behind the kick spot on the line;
                 # square up there, where a turn in place cannot touch the ball.
                 px, py = sx - p.approach_back * math.cos(u), sy - p.approach_back * math.sin(u)
@@ -800,7 +813,7 @@ class Chase:
                 dist = pdist + p.approach_back if self.spot is not None else 9.0   # nowhere near the spot yet
             else:
                 vx, wz, dist, bearing = self._servo(odom, (sx, sy), cold, p.lineup_tol)
-                if mode == "kick" and self.state != "settle":
+                if mode == "kick" and p.two_stage and self.state != "settle":
                     # Stage two: in along the line, steering onto it (the
                     # walker crabs on a pure forward command), stop on the
                     # spot by the distance left along the line.
@@ -821,7 +834,7 @@ class Chase:
             squared = abs(heading_err) <= p.aim_tol + (0.15 if settling else 0.0)
             if self.spot is None:
                 pass                                            # backing off (above)
-            elif on_spot and not squared and mode == "kick":
+            elif on_spot and not squared and mode == "kick" and p.two_stage:
                 # On the spot but off the heading: a turn in place here is a
                 # turn against the ball (traced: 14 s of it). Back off and
                 # lay the line again from further out.
@@ -888,8 +901,8 @@ class Chase:
             vx, wz = p.speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -1.0, 1.0))
             self.state = "hunt"
         else:
-            if self._hunt_u is not None and self.state not in ("search", "hunt", "look") and self._last_range is None \
-                    and t - self._hunt_t0 >= p.hunt_s:
+            if p.hunt_s > 0 and self._hunt_u is not None and self.state not in ("search", "hunt", "look") \
+                    and self._last_range is None and t - self._hunt_t0 >= p.hunt_s:
                 self._hunt_t0 = t                               # lost while walking into it: hunt before searching
                 vx, wz = p.speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -1.0, 1.0))
                 self.state = "hunt"
@@ -902,7 +915,7 @@ class Chase:
                 if since % p.search_dip_every < p.search_dip_s:
                     vx, wz = 0.0, 0.0                           # a standing look down: a near ball is below the level camera
                     gaze_at = p.dip_range
-                elif since > p.search_walk_after and (since - p.search_walk_after) % (p.search_walk_after) < p.search_walk_s:
+                elif p.search_walk_after and since > p.search_walk_after and (since - p.search_walk_after) % (p.search_walk_after) < p.search_walk_s:
                     vx, wz = p.speed, 0.0                       # a standing turn barely turns: move to see from elsewhere
         # A wall beside us: no turn in place toward it (measured: a line-up
         # turning against the boards tipped over). Turn toward the side
