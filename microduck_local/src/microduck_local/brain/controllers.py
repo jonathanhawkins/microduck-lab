@@ -473,6 +473,14 @@ class ChaseParams:
     # ahead). A search dips the head every `search_dip_every`.
     look_s: float = 0.8
     look_range: float = 0.3
+    # Hunt: a ball lost right after a kick, or after being walked into
+    # inside `hunt_lost_range` (the histograms: half a run is search, and
+    # the ball leaves the view rolling off along a known line - the kick's,
+    # or the duck's own heading), is looked for by WALKING that line for
+    # `hunt_s` with the head level (a floor ball is in view from 0.3 m out
+    # to the camera's range) before the standing search begins.
+    hunt_s: float = 3.0
+    hunt_lost_range: float = 0.6
     search_dip_every: float = 1.5
     search_dip_s: float = 0.6
     dip_range: float = 0.22
@@ -582,6 +590,9 @@ class Chase:
         self._retreat_t0 = -9.0
         self._retreat_sign = 1.0
         self._look_t0 = -9.0
+        self._hunt_t0 = -9.0
+        self._hunt_u: float | None = None           # the line to walk (odometry heading)
+        self._last_range: float | None = None
         self._search_t0: float | None = None
         self._prev_skill = None
         self.tracker.reset()
@@ -708,6 +719,14 @@ class Chase:
             self._look_t0 = t                                   # the kick window just ended: look for the ball ahead
         self._prev_skill = senses.skill
         looking = t - self._look_t0 < p.look_s and not fresh
+        if seen:
+            self._last_range = ball.range
+        elif self._last_range is not None and self._last_range < p.hunt_lost_range and self.state in ("chase", "lineup", "turn"):
+            self._hunt_u = odom[2]                              # walked into it: it rolled off ahead
+            self._last_range = None
+        if self.state == "look" and not looking and not fresh and self._hunt_u is not None:
+            self._hunt_t0 = t                                   # the look after the kick found nothing: hunt the line
+        hunting = t - self._hunt_t0 < p.hunt_s and not seen and self._hunt_u is not None
         if senses.skill is not None:
             vx, wz = 0.0, 0.0                                   # the kick owns the reflex tier
             self.state = "kick"
@@ -837,6 +856,7 @@ class Chase:
                         self.kicks += 1
                         self.spot = None
                         self.state = "kick"
+                        self._hunt_u = u                        # where the ball is going
             elif self.state == "lineup" and t - self.t_state > p.lineup_s:
                 self.spot = None
                 self.state = "search"
@@ -864,17 +884,26 @@ class Chase:
                 self.state = "chase"
                 if fresh and ball.range < p.head_range:
                     gaze_at = ball.range
+        elif hunting:
+            vx, wz = p.speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -1.0, 1.0))
+            self.state = "hunt"
         else:
-            if self.state != "search" or self._search_t0 is None:
-                self._search_t0 = t
-            vx, _, wz = turn(1.0, cold)
-            self.state = "search"
-            since = t - self._search_t0
-            if since % p.search_dip_every < p.search_dip_s:
-                vx, wz = 0.0, 0.0                               # a standing look down: a near ball is below the level camera
-                gaze_at = p.dip_range
-            elif since > p.search_walk_after and (since - p.search_walk_after) % (p.search_walk_after) < p.search_walk_s:
-                vx, wz = p.speed, 0.0                           # a standing turn barely turns: move to see from elsewhere
+            if self._hunt_u is not None and self.state not in ("search", "hunt", "look") and self._last_range is None \
+                    and t - self._hunt_t0 >= p.hunt_s:
+                self._hunt_t0 = t                               # lost while walking into it: hunt before searching
+                vx, wz = p.speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -1.0, 1.0))
+                self.state = "hunt"
+            else:
+                if self.state != "search" or self._search_t0 is None:
+                    self._search_t0 = t
+                vx, _, wz = turn(1.0, cold)
+                self.state = "search"
+                since = t - self._search_t0
+                if since % p.search_dip_every < p.search_dip_s:
+                    vx, wz = 0.0, 0.0                           # a standing look down: a near ball is below the level camera
+                    gaze_at = p.dip_range
+                elif since > p.search_walk_after and (since - p.search_walk_after) % (p.search_walk_after) < p.search_walk_s:
+                    vx, wz = p.speed, 0.0                       # a standing turn barely turns: move to see from elsewhere
         # A wall beside us: no turn in place toward it (measured: a line-up
         # turning against the boards tipped over). Turn toward the side
         # with more room — in a corner that is still a turn, the one move

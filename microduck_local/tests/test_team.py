@@ -207,3 +207,27 @@ def test_the_line_up_squares_up_behind_the_ball_then_walks_straight_in():
     # On the spot: stop and settle.
     it = b.step(Senses(t=1.4, odom=(0.5, 0.06, 0.0)))
     assert it.twist[0] == 0.0 and b.state == "settle"
+
+
+def test_after_a_kick_the_duck_looks_then_hunts_the_kick_line_then_searches():
+    """A kicked ball rolls off along the kick line: after the look finds
+    nothing the duck WALKS that line for `hunt_s` (head level, the ball in
+    view from 0.3 m out) before the standing search."""
+    p = ChaseParams()
+    b = Chase(p, goal=(3.0, 0.0))
+    # A settle that fires the kick: on the spot, squared, settled.
+    b._senses = Senses(t=0.0)
+    b.state, b.t_state, b.lined = "settle", 0.0, True
+    b.spot = (0.0, 0.06, "kick_right", 0.3, "kick")
+    it = b.step(Senses(t=p.settle_s + 0.01, odom=(0.0, 0.06, 0.3)))
+    assert it.skill == "kick_right" and b._hunt_u == 0.3
+    # The kick window runs (skill set), then ends: look for look_s...
+    b.step(Senses(t=1.0, odom=(0.0, 0.06, 0.3), skill="kick_right"))
+    it = b.step(Senses(t=1.1, odom=(0.0, 0.06, 0.3)))
+    assert it.note == "look" and it.twist[0] == 0.0
+    # ...then hunt: walk the kick line at speed, steering onto its heading.
+    it = b.step(Senses(t=1.1 + p.look_s + 0.05, odom=(0.0, 0.06, 0.2)))
+    assert it.note == "hunt" and it.twist[0] == p.speed and it.twist[2] > 0
+    # ...and only then the standing search.
+    it = b.step(Senses(t=1.1 + p.look_s + p.hunt_s + 0.1, odom=(1.0, 0.3, 0.3)))
+    assert it.note == "search"
