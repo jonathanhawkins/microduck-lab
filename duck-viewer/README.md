@@ -130,6 +130,31 @@ Panel states, chat history, and the camera persist in localStorage; the duck
 roster itself persists server-side (`microduck_local/lab-state.json`) across
 lab restarts.
 
+## `/sim`: the world page
+
+`http://localhost:63317/sim` renders the lab's **world mode** (start the lab
+with `uv run duck-lab --world living-room`, or load a scenario from the
+page's picker). One room, many ducks, and what each duck senses:
+
+- **Scenario picker + load** (top bar): built-ins and anything saved under
+  `microduck_local/scenarios/`. Walls, static boxes and the floor come from
+  the scenario JSON; balls and free boxes stream their poses at 25 Hz.
+- **ToF overlay** (`T`): one dot per zone of each duck's 8×8 depth matrix,
+  at the depth the sensor *reports*, colored near→far amber→teal, plus the
+  four corner rays from the aperture. Select a duck (click, or `1`–`9`) to
+  see only its fan.
+- **Inspector** (right): the selected duck's heatmap painted straight off the
+  stream, frame age (amber when stale), a noise preset select (`ideal` /
+  `datasheet` / `hostile`, applied live), and which brain is steering it.
+- **Drive** (`P`, then WASD/arrows, Q/E strafe): every duck takes your twist
+  for 6 s after the last key; otherwise ToF-equipped ducks wander on the
+  lab's `Wander` brain and blind ducks follow a demo script. `R` restarts.
+- Protocol: `lib/sim.ts` (`/ws/sim` frames, `/scenarios`, `/world`).
+
+The stage is the same as the main page (merged geoms per body, DOM labels,
+no shadows); the `Duck` renderer is reused unchanged, which is why world
+frames carry the world body first, as `GET /scene` lists bodies.
+
 ## Notes for future work
 
 - The scene payload is ~20 MB raw (gzipped over the wire, one-time). If it ever

@@ -8,8 +8,11 @@ microphones and the speaker, BLE proximity, odometry), give the ducks a
 viewer where people build worlds, watch what each duck senses, and train ducks
 to follow, map, tidy a playroom, and play soccer against each other.
 
-This document is a brainstorm and a plan. Nothing in it is built yet. It was
-written after reading this repo (both checkouts), upstream
+This document is a brainstorm and a plan. **Status:** Phase 1 is in the
+tree — `world/` (0.1–0.3), `sensors/` (1.1, 1.2, 1.8, 1.9), `world_server.py`
++ the viewer's `/sim` route (0.4, 7.1–7.3 in first form), and `brain/Wander`
+(2.3's `avoid`) — see the READMEs of `microduck_local` and `duck-viewer`.
+Everything else below is still a plan. It was written after reading this repo (both checkouts), upstream
 `pollen-robotics/microduck` (the onboard Rust daemons and their design docs),
 `pollen-robotics/microduck_rl` (the official training stack), and the public
 Hugging Face and press material. Facts about the robot below cite where they

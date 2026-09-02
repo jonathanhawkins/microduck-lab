@@ -266,6 +266,39 @@ caveats there because the lab pins `domain_rand=False` and steps its ducks
 serially in one frame loop; a lab launched with `MICRODUCK_ACTUATOR=bam` falls
 back to private models.
 
+## World mode: rooms, sensors, brains (the viewer's `/sim` page)
+
+The roster above gives every duck a private env. **World mode** composes a
+whole room into ONE MuJoCo model — walls, boxes, a ball, N ducks — so the
+ducks can bump into each other and a sensor on one can see another
+(`world/compose.py`, MjSpec attaching the upstream robot MJCF once per duck
+under an id prefix; `world/arena.py` steps every duck's reflex policy in one
+`mj_step`). It is the base for everything in `docs/sim-roadmap.md`.
+
+```bash
+uv run duck-lab --world living-room          # no roster needed; built-ins:
+                                             # empty-floor, wall-test, living-room
+# then open the viewer's /sim page
+```
+
+What a duck senses lives in `sensors/`: `TofSensor` is the head's 8×8
+time-of-flight matrix on the MJCF's `tof` site (45° FOV, 4 m, 15 Hz on a
+fixed grid, uint16 mm frames shaped like the robot's `tof.stream`, with
+`ideal` / `datasheet` / `hostile` noise presets you can flip live from the
+inspector). It never reaches the policy: `brain/` is where senses become
+intents. `Wander` is the first brain — it reads the middle columns of the
+depth matrix and emits only a twist, the same `robot.move` the real robot
+takes — and it drives every ToF-equipped duck in auto mode; press **P** on
+the page to take the wheel yourself.
+
+Scenarios are JSON in `scenarios/` (`world/scenario.py` is the contract and
+validator; `make_room(seed)` generates one). `GET/PUT/DELETE /scenarios/{n}`,
+`POST /world/load`, `POST /world/noise` and the `/ws/sim` socket are
+documented in `world_server.py`. Invariants worth knowing: a one-duck world
+reproduces `MicroduckWalkEnv` step for step (`tests/test_arena.py`), and the
+world never runs rewards or domain randomization — reflex training keeps its
+own env.
+
 ## Teachable behaviors (the viewer's 🎓 teach panel)
 
 The `behaviors/` package is a library of trick recipes — plain-English reward terms over
@@ -341,7 +374,11 @@ src/microduck_local/
 ├── export_onnx.py  # bake normalizer → ONNX obs[1,61]->actions[1,14]
 ├── eval_onnx.py    # headless eval battery (fall rate, tracking error)
 ├── render_rollout.py  # offscreen rollout → mp4 + captioned contact sheet
-└── bench.py        # steps/sec benchmark
+├── bench.py        # steps/sec benchmark
+├── world/          # scenario contract, MjSpec composition, World (N ducks, one mjData)
+├── sensors/        # ray rig on mj_multiRay, the 8×8 ToF at the device's own rate
+├── brain/          # controllers over senses → intents (Wander is the first)
+└── world_server.py # the /sim page's backend: /scenarios, /world, /ws/sim
 tests/              # contract locks: obs order, action semantics, DR non-accumulation,
                     # penalty signs, shipped-alpha-survives regression test
 ```
