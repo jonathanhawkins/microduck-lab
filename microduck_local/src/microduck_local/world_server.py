@@ -424,17 +424,28 @@ def preset_name(noise: TofNoise) -> str:
 
 
 def tof_payload(w: World, d) -> dict | None:
-    if d.tof is None or d.tof.last is None:
-        return None
-    f = d.tof.last
-    # No world points here: the page reconstructs each zone's point from the
-    # head pose it already has plus the fixed zone directions (lib/sim.ts
-    # `tofZonePoints`), which cut a 2-duck stream from 145 to ~45 kB/s.
-    return {"tof": {
-        "t": round(f.t, 4),
-        "mm": f.depth_mm.reshape(-1).tolist(),
-        "age": round(w.t - f.t, 4),
-    }}
+    """A duck's senses for the frame: the ToF matrix and the detector's
+    frame (the page draws the detection rays and the head-camera inset's
+    boxes from it - bearing, elevation, apparent width, and the field of
+    view they sit in)."""
+    out: dict = {}
+    if d.tof is not None and d.tof.last is not None:
+        f = d.tof.last
+        # No world points here: the page reconstructs each zone's point from the
+        # head pose it already has plus the fixed zone directions (lib/sim.ts
+        # `tofZonePoints`), which cut a 2-duck stream from 145 to ~45 kB/s.
+        out["tof"] = {
+            "t": round(f.t, 4),
+            "mm": f.depth_mm.reshape(-1).tolist(),
+            "age": round(w.t - f.t, 4),
+        }
+    if d.detector is not None and d.detector.last is not None:
+        f = d.detector.last
+        out["det"] = {"t": round(f.t, 4), "age": round(w.t - f.t, 4),
+                      "fov": [d.detector.spec.fov_h_deg, d.detector.spec.fov_v_deg],
+                      "cam": [round(v, 4) for v in f.cam_pose],
+                      "items": [x.as_payload() for x in f.detections]}
+    return out or None
 
 
 # -- requests --------------------------------------------------------------------

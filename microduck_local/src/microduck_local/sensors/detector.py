@@ -119,6 +119,11 @@ class DetectionFrame:
     cam_z: float = 0.0
     cam_pitch: float = 0.0
     cam_yaw: float = 0.0      # camera yaw relative to the BODY heading (rad): bearings are camera-frame, add this for body-frame
+    # The camera's full world pose at capture (x, y, z, qw, qx, qy, qz; site
+    # frame, x forward): what the /sim page renders the camera inset from,
+    # so the boxes sit on what the detector saw - by the time a frame is
+    # available the walking head has moved up to a fifth of the picture.
+    cam_pose: tuple[float, ...] = ()
 
 
 NOMINAL_RADIUS = {"duck": 0.10, "person": 0.20, "ball": 0.035, "marker": 0.05, "toy": 0.02, "basket": 0.12}
@@ -213,9 +218,12 @@ class Detector:
                                  NOMINAL_RADIUS[cls] / np.tan(width / 2), float(self.rng.uniform(0.2, 0.5))))
         Rb = data.xmat[self.own_root].reshape(3, 3)
         cam_yaw = float(np.arctan2(R[1, 0], R[0, 0]) - np.arctan2(Rb[1, 0], Rb[0, 0]))
+        quat = np.empty(4)
+        mujoco.mju_mat2Quat(quat, np.ascontiguousarray(R).reshape(-1))
         return DetectionFrame(t=float(t), detections=out, cam_z=float(origin[2]),
                               cam_pitch=float(-np.arcsin(np.clip(R[2, 0], -1.0, 1.0))),
-                              cam_yaw=float(np.arctan2(np.sin(cam_yaw), np.cos(cam_yaw))))
+                              cam_yaw=float(np.arctan2(np.sin(cam_yaw), np.cos(cam_yaw))),
+                              cam_pose=tuple(float(v) for v in (*origin, *quat)))
 
     def sample(self, data: mujoco.MjData, t: float) -> DetectionFrame | None:
         """Rate-limited capture with latency: a frame captured at t becomes

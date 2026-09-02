@@ -146,6 +146,20 @@ page's picker). One room, many ducks, and what each duck senses:
 - **Inspector** (right): the selected duck's heatmap painted straight off the
   stream, frame age (amber when stale), a noise preset select (`ideal` /
   `datasheet` / `hostile`, applied live), and which brain is steering it.
+- **Cam** (`V`): under the inspector, what the selected duck's head camera
+  sees, rendered from the `head_camera` site at the detector's field of view
+  (62°×48°), with the detector's output drawn over it as boxes — a bearing,
+  an elevation and an apparent width per thing it found, and nothing else
+  about the picture. That is what a brain gets, and why a floor ball
+  vanishes from the frame in the last 0.3 m unless the head pitches down.
+  The inset is rendered from the camera pose the frame was *captured* from
+  (the stream carries it), not from where the head is now: at 10 Hz plus
+  latency the walking head moves the picture by up to a fifth of its width
+  before a brain gets the frame — measured, and the lag a brain acts on.
+  It is a second, scissored pass of the same scene in the same canvas (a
+  priority-1 `useFrame` takes the render loop over), not a render target and
+  a readback; the sensor drawings (ToF dots, rays, map) sit on a layer the
+  head camera does not see.
 - **Drive** (`P`, then WASD/arrows, Q/E strafe): every duck takes your twist
   for 6 s after the last key; otherwise ToF-equipped ducks wander on the
   lab's `Wander` brain and blind ducks follow a demo script. `R` restarts.

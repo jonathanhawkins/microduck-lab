@@ -714,6 +714,7 @@ class World:
         if d.detector is not None and d.detector.last is not None:
             f = d.detector.last
             out["det"] = {"t": round(f.t, 4), "age": round(self.t - f.t, 4),
+                          "fov": [d.detector.spec.fov_h_deg, d.detector.spec.fov_v_deg],
                           "items": [x.as_payload() for x in f.detections]}
         return out or None
 

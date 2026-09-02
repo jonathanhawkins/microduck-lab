@@ -150,6 +150,11 @@ def test_follow_me_scenario_persons_brains_and_possess(app):
             d = frame["ducks"][0]
             assert d["brain"]["kind"] == "follow" and "inputs" in d["brain"]
             assert d["brain"]["inputs"]["det"]["max"] > 0 and d["headApplied"] is False
+            # The frame carries the detector's output for the page's rays and
+            # camera inset: the frustum and each detection's three numbers.
+            det = d["sensors"]["det"]
+            assert det["fov"] == [62.0, 48.0] and det["age"] >= 0
+            assert all({"cls", "bearing", "elevation", "width", "range"} <= set(it) for it in det["items"])
             persons = [o for o in frame["objects"] if o["kind"] == "person"]
             assert persons and persons[0]["id"] == "p0" and persons[0]["possessed"] is False
             assert frame["possessed"] is None

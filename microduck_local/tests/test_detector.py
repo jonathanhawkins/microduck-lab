@@ -130,6 +130,11 @@ def test_frames_carry_the_camera_pose_and_toys_do_not_occlude():
     d = w.ducks["d0"]
     fr = d.detector.capture(w.data, 0.0)
     assert 0.15 < fr.cam_z < 0.3 and -0.1 < fr.cam_pitch < 0.5     # head height; level at the spawn pose
+    # The full capture pose: the site's position, and a quaternion whose x is the optical axis.
+    assert len(fr.cam_pose) == 7 and abs(fr.cam_pose[2] - fr.cam_z) < 1e-9
+    qw, qx, qy, qz = fr.cam_pose[3:]
+    fwd = np.array([1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy + qw * qz), 2 * (qx * qz - qw * qy)])
+    assert abs(-np.arcsin(fwd[2]) - fr.cam_pitch) < 1e-6 and abs(np.linalg.norm(fwd) - 1) < 1e-6
     classes = set()
     for _ in range(20):                                             # a 2 cm toy at 0.6 m is found ~9 frames in 10
         classes |= {x.cls for x in d.detector.capture(w.data, 0.0).detections}

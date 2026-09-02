@@ -24,8 +24,12 @@ import {
   loadWorld,
   saveRecording,
   SimClient,
+  capturePose,
+  detectionBox,
   detectionRay,
+  headCameraPose,
   tofZonePoints,
+  CAM_FOV_DEG,
   TOF_PRESETS,
   type FrameEvent,
   type SimFrame,
@@ -110,6 +114,165 @@ function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
 
 const MAX_DOTS = 64 * 12;
 const CORNER_ZONES = [0, 7, 56, 63];
+// Overlays (ToF dots, detection rays, the map) live on this layer: the orbit
+// camera sees it, the head-camera inset does not - a duck does not see its
+// own sensor drawings.
+const OVERLAY_LAYER = 1;
+// The DOM box the head-camera inset renders into (CamInset owns the element,
+// InsetRender reads its rectangle every frame). Module state on purpose: no
+// React state per frame.
+const camInset: { el: HTMLDivElement | null; duckId: string | null } = { el: null, duckId: null };
+
+/** The duck whose senses the inspector shows: the selected one, else the first with a detector. */
+function sensedDuck(f: SimFrame | null, duckId: string | null): SimDuck | undefined {
+  return f?.ducks.find((x) => x.id === duckId) ?? f?.ducks.find((x) => x.sensors?.det) ?? f?.ducks.find((x) => x.sensors);
+}
+
+/** Renders the frame twice: the orbit view, then - inside the CamInset
+ *  box's rectangle - the selected duck's head camera, at the detector's
+ *  field of view. Taking the render loop over (priority 1) is what makes
+ *  a scissored second pass possible without a render target and a
+ *  readback: the inset is pixels in the same canvas, the DOM box over it
+ *  is just a border and the detection boxes. */
+function InsetRender({ scene, client, enabled }: { scene: Scene; client: SimClient; enabled: boolean }) {
+  const { gl, scene: three, camera, size } = useThree();
+  const jawIdx = useMemo(() => scene.bodies.indexOf("jaw_soft"), [scene]);
+  const cam = useMemo(() => new THREE.PerspectiveCamera(CAM_FOV_DEG[1], 1.35, 0.03, 20), []);
+  useEffect(() => {
+    camera.layers.enable(OVERLAY_LAYER);
+  }, [camera]);
+  useFrame(() => {
+    gl.setScissorTest(false);
+    gl.render(three, camera);
+    const el = camInset.el;
+    const f = client.frame;
+    if (!enabled || !el || !f || jawIdx < 0) return;
+    const d = sensedDuck(f, camInset.duckId);
+    const jaw = d?.bodies[jawIdx];
+    if (!d || !jaw) return;
+    const r = el.getBoundingClientRect();
+    const cr = gl.domElement.getBoundingClientRect();
+    const pr = gl.getPixelRatio();
+    const x = Math.round((r.left - cr.left) * pr), y = Math.round((cr.bottom - r.bottom) * pr);
+    const w = Math.round(r.width * pr), h = Math.round(r.height * pr);
+    if (w < 8 || h < 8) return;
+    const det = d.sensors?.det;
+    const fov = det?.fov ?? CAM_FOV_DEG;
+    // The pose the detector's frame was captured from, when there is one:
+    // the boxes then sit on what it saw. By the time a frame is available
+    // (10 Hz, plus latency) the walking head has moved the picture by up to
+    // a fifth of its width - measured, and exactly the lag a brain acts on.
+    const { origin, forward, up } = det?.cam && det.cam.length === 7 ? capturePose(det.cam) : headCameraPose(jaw);
+    // MuJoCo z-up -> three y-up (the stage group is rotated -90 deg about x).
+    cam.position.set(origin[0], origin[2], -origin[1]);
+    cam.up.set(up[0], up[2], -up[1]);
+    cam.lookAt(origin[0] + forward[0], origin[2] + forward[2], -(origin[1] + forward[1]));
+    cam.fov = fov[1];
+    cam.aspect = w / h;
+    cam.updateProjectionMatrix();
+    gl.setScissorTest(true);
+    gl.setScissor(x, y, w, h);
+    gl.setViewport(x, y, w, h);
+    gl.render(three, cam);
+    gl.setScissorTest(false);
+    gl.setViewport(0, 0, Math.round(size.width * pr), Math.round(size.height * pr));
+  }, 1);
+  return null;
+}
+
+const MAX_BOXES = 12;
+
+/** The head-camera inset: a bordered box under the inspector that the
+ *  canvas renders the camera view into (InsetRender), with the detector's
+ *  boxes drawn over it from bearing, elevation and apparent width - the
+ *  three numbers a brain gets per detection, and nothing more. */
+function CamInset({ client, duckId, panelRef, enabled }: { client: SimClient; duckId: string | null; panelRef: React.RefObject<HTMLDivElement | null>; enabled: boolean }) {
+  const box = useRef<HTMLDivElement>(null);
+  const boxes = useRef<(HTMLDivElement | null)[]>([]);
+  const meta = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    camInset.el = enabled ? box.current : null;
+    camInset.duckId = duckId;
+    return () => {
+      camInset.el = null;
+    };
+  }, [enabled, duckId]);
+  useEffect(() => {
+    if (!enabled) return;
+    let raf = 0;
+    const aspect = Math.tan((CAM_FOV_DEG[0] * Math.PI) / 360) / Math.tan((CAM_FOV_DEG[1] * Math.PI) / 360);   // a pinhole's width/height
+    const paint = () => {
+      raf = requestAnimationFrame(paint);
+      const el = box.current;
+      const panel = panelRef.current;
+      if (!el || !panel) return;
+      const pr = panel.getBoundingClientRect();
+      el.style.top = `${Math.round(pr.bottom + 6)}px`;
+      el.style.right = `${Math.round(window.innerWidth - pr.right)}px`;
+      const width = Math.round(pr.width);
+      el.style.width = `${width}px`;
+      el.style.height = `${Math.round(width / aspect)}px`;
+      const f = client.frame;
+      const d = sensedDuck(f, duckId);
+      const det = d?.sensors?.det;
+      el.style.display = d ? "block" : "none";
+      const fov = det?.fov ?? CAM_FOV_DEG;
+      let n = 0;
+      if (det) {
+        for (const it of det.items) {
+          const b = boxes.current[n];
+          if (!b || n >= MAX_BOXES) break;
+          const { u, v, w, h } = detectionBox(it, fov);
+          b.style.display = "block";
+          b.style.left = `${((u - w / 2) * 100).toFixed(2)}%`;
+          b.style.top = `${((v - h / 2) * 100).toFixed(2)}%`;
+          b.style.width = `${(w * 100).toFixed(2)}%`;
+          b.style.height = `${(h * 100).toFixed(2)}%`;
+          const color = !it.name ? "#8a8f98" : it.cls === "person" ? "#5a8dd6" : it.cls === "ball" ? "#ff8c00" : it.cls === "duck" ? "#f2b632" : "#43c2b8";
+          b.style.borderColor = color;
+          b.style.borderStyle = it.name ? "solid" : "dashed";
+          const label = b.firstChild as HTMLElement | null;
+          if (label) {
+            label.textContent = `${it.name ? it.cls : "ghost"} ${it.range.toFixed(2)} m`;
+            label.style.background = color;
+          }
+          n++;
+        }
+      }
+      for (let i = n; i < MAX_BOXES; i++) {
+        const b = boxes.current[i];
+        if (b) b.style.display = "none";
+      }
+      if (meta.current) {
+        if (!d) meta.current.textContent = "";
+        else if (!det) meta.current.textContent = `${d.id} · head camera · no detector`;
+        else {
+          const ageMs = Math.round(det.age * 1000);
+          meta.current.textContent = `${d.id} · head camera ${fov[0]}°×${fov[1]}° · ${det.items.length} det · frame ${ageMs} ms old`;
+          meta.current.style.color = ageMs > 250 ? "#f2b632" : "#9aa5b1";
+        }
+      }
+    };
+    raf = requestAnimationFrame(paint);
+    return () => cancelAnimationFrame(raf);
+  }, [client, duckId, panelRef, enabled]);
+  if (!enabled) return null;
+  return (
+    <div
+      ref={box}
+      title="what the head camera sees, at the detector's field of view; boxes are the detections (bearing, elevation, apparent width) - all a brain gets"
+      style={{ position: "absolute", top: 0, right: 10, width: 220, height: 170, border: "1px solid #2b313b", borderRadius: 6, boxSizing: "border-box", zIndex: 20, overflow: "hidden", pointerEvents: "none", display: "none" }}
+    >
+      <div style={{ position: "absolute", left: "50%", top: "50%", width: 10, height: 10, marginLeft: -5, marginTop: -5, border: "1px solid rgba(233,237,241,0.5)", borderRadius: "50%" }} />
+      {Array.from({ length: MAX_BOXES }, (_, i) => (
+        <div key={i} ref={(el) => { boxes.current[i] = el; }} style={{ position: "absolute", display: "none", border: "1.5px solid #fff", borderRadius: 2, boxSizing: "border-box" }}>
+          <span style={{ position: "absolute", left: -1.5, top: -14, fontSize: 9, lineHeight: "12px", padding: "0 3px", color: "#101216", fontFamily: "ui-monospace, Menlo, monospace", whiteSpace: "nowrap", borderRadius: 2 }} />
+        </div>
+      ))}
+      <div ref={meta} style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: "2px 6px", fontSize: 10, fontFamily: "ui-monospace, Menlo, monospace", color: "#9aa5b1", background: "rgba(16,18,22,0.7)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} />
+    </div>
+  );
+}
 
 /** ToF overlay: one dot per zone at the reported depth, colored by range,
  *  plus the frustum's four corner rays from the aperture. All ducks with a
@@ -117,6 +280,10 @@ const CORNER_ZONES = [0, 7, 56, 63];
 function TofOverlay({ scene, client, enabled }: { scene: Scene; client: SimClient; enabled: boolean }) {
   const inst = useRef<THREE.InstancedMesh>(null);
   const lines = useRef<THREE.LineSegments>(null);
+  useEffect(() => {
+    inst.current?.layers.set(OVERLAY_LAYER);
+    lines.current?.layers.set(OVERLAY_LAYER);
+  }, []);
   const jawIdx = useMemo(() => scene.bodies.indexOf("jaw_soft"), [scene]);
   const m = useMemo(() => new THREE.Matrix4(), []);
   const col = useMemo(() => new THREE.Color(), []);
@@ -227,6 +394,9 @@ const MAX_DET = 12 * 16;
  *  orange, ghost grey); a small ring at its end. */
 function DetOverlay({ scene, client, enabled }: { scene: Scene; client: SimClient; enabled: boolean }) {
   const lines = useRef<THREE.LineSegments>(null);
+  useEffect(() => {
+    lines.current?.layers.set(OVERLAY_LAYER);
+  }, []);
   const jawIdx = useMemo(() => scene.bodies.indexOf("jaw_soft"), [scene]);
   const pos = useMemo(() => new Float32Array(MAX_DET * 2 * 3), []);
   const colors = useMemo(() => new Float32Array(MAX_DET * 2 * 3), []);
@@ -311,6 +481,9 @@ function MapOverlay({ client, duckId, enabled }: { client: SimClient; duckId: st
     return t;
   }, [canvas]);
   const meshRef = useRef<THREE.Mesh>(null);
+  useEffect(() => {
+    meshRef.current?.layers.set(OVERLAY_LAYER);
+  }, []);
   const last = useRef<{ frames: number; id: string | null }>({ frames: -1, id: null });
   useFrame(() => {
     const m = meshRef.current;
@@ -557,6 +730,8 @@ export default function SimViewer() {
   const [driving, setDriving] = useState(false);
   const [showTof, setShowTof] = useState(true);
   const [showMap, setShowMap] = useState(true);
+  const [showCam, setShowCam] = useState(() => loadJSON("simCam", true));
+  const inspectorRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [possessed, setPossessed] = useState<string | null>(null);
@@ -583,6 +758,7 @@ export default function SimViewer() {
   drivingRef.current = driving;
 
   useEffect(() => saveJSON("simLessonOpen", lessonOpen), [lessonOpen]);
+  useEffect(() => saveJSON("simCam", showCam), [showCam]);
 
   useEffect(() => {
     const client = new SimClient(setConnected);
@@ -653,6 +829,10 @@ export default function SimViewer() {
       }
       if (k === "t") {
         if (!e.repeat) setShowTof((v) => !v);
+        return;
+      }
+      if (k === "v") {
+        if (!e.repeat) setShowCam((v) => !v);
         return;
       }
       if (k === "e") {
@@ -758,6 +938,7 @@ export default function SimViewer() {
           {scene && client && <TofOverlay scene={scene} client={client} enabled={showTof} />}
           {scene && client && <DetOverlay scene={scene} client={client} enabled={showTof} />}
           {client && <MapOverlay client={client} duckId={selected} enabled={showMap} />}
+          {scene && client && <InsetRender scene={scene} client={client} enabled={showCam} />}
         </group>
         {client && <SimTargets client={client} />}
         <OrbitControls
@@ -821,6 +1002,9 @@ export default function SimViewer() {
         <button style={{ ...BTN, borderColor: showTof ? "#43c2b8" : "#2b313b" }} onClick={() => setShowTof((v) => !v)} title="T">
           ToF overlay
         </button>
+        <button style={{ ...BTN, borderColor: showCam ? "#43c2b8" : "#2b313b" }} onClick={() => setShowCam((v) => !v)} title="V: the selected duck's head camera, with the detector's boxes">
+          cam
+        </button>
         <button
           style={{ ...BTN, borderColor: editor ? "#f2b632" : "#2b313b" }}
           onClick={() => setEditor((st) => (st ? null : { draft: emptyDraft(scenario), tool: null, wallStart: null }))}
@@ -840,7 +1024,7 @@ export default function SimViewer() {
       </div>
 
       {/* inspector */}
-      <div style={{ ...PANEL, top: 56, right: 10, width: 220 }}>
+      <div ref={inspectorRef} style={{ ...PANEL, top: 56, right: 10, width: 220 }}>
         <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10, marginBottom: 6 }}>
           Inspector · sensors
         </div>
@@ -958,6 +1142,7 @@ export default function SimViewer() {
         )}
         {client && <Heatmap client={client} duckId={selected} />}
       </div>
+      {client && <CamInset client={client} duckId={selected} panelRef={inspectorRef} enabled={showCam} />}
 
       {/* lesson / keys — collapsible: it is reference text sitting over the room */}
       {lessonOpen ? (
@@ -976,10 +1161,12 @@ export default function SimViewer() {
           </div>
           The walking policy is blind: 61 numbers about its own body, none about the room. The 8×8 time-of-flight
           matrix on its head is what a brain gets instead: 64 distances, 15 times a second, ~45° wide. Dots are
-          where the sensor <i>claims</i> a surface is. In auto mode a tiny wander brain reads the middle columns
+          where the sensor <i>claims</i> a surface is. The inset under the inspector is the head camera&apos;s view;
+          the boxes on it are the detector&apos;s output - a bearing, an elevation and an apparent width per thing it
+          found, and nothing else about the picture. In auto mode a tiny wander brain reads the middle columns
           and steers toward the open side; it emits only a twist, the same command the real robot takes.
           <div style={{ marginTop: 6, color: "#9aa5b1" }}>
-            R restart · P drive (WASD/arrows, Q/E strafe) · T ToF · E edit · 1–9 select · Esc · space scrub
+            R restart · P drive (WASD/arrows, Q/E strafe) · T ToF · V cam · E edit · 1–9 select · Esc · space scrub
           </div>
         </div>
       ) : (

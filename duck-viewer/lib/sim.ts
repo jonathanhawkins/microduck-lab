@@ -105,7 +105,10 @@ export function tofZonePoints(jaw: number[], mm: number[]): { origin: [number, n
   return { origin, pts };
 }
 export interface DetectionItem { cls: string; name: string; bearing: number; elevation: number; width: number; range: number; conf: number }
-export interface DetPayload { t: number; age: number; items: DetectionItem[] }
+/** A detector frame: captured at `t`, `age` old now, the frustum it saw
+ *  through, the camera's world pose at capture (x y z, w x y z quaternion of
+ *  the site frame, x forward) and what it found. */
+export interface DetPayload { t: number; age: number; fov?: [number, number]; cam?: number[]; items: DetectionItem[] }
 export interface BrainInputs {
   tof?: { age: number | null; stale: boolean; max: number };
   det?: { age: number | null; stale: boolean; max: number; n: number };
@@ -186,6 +189,48 @@ export interface WorldInfo {
 // The head camera: the MJCF `head_camera` site, x-forward, on jaw_soft.
 export const CAM_SITE_POS: [number, number, number] = [0.0155, -0.0000913778, -0.0733];
 export const CAM_SITE_QUAT_WXYZ: [number, number, number, number] = [0.707107, 0, 0.707107, 0];
+
+// The detector's frustum (sensors/detector.py DetectorSpec): horizontal, vertical degrees.
+// The stream carries the live values in det.fov; this is the fallback.
+export const CAM_FOV_DEG: [number, number] = [62, 48];
+
+/** The head camera's world-frame pose from the jaw pose: where it is, the
+ *  axis it looks down (site x) and its up (site z). What the /sim page's
+ *  camera inset renders from. */
+export function headCameraPose(jaw: number[]): { origin: [number, number, number]; forward: [number, number, number]; up: [number, number, number] } {
+  const jq = [jaw[3], jaw[4], jaw[5], jaw[6]];
+  const off = quatRotate(jq, CAM_SITE_POS);
+  const sq = quatMul(jq, CAM_SITE_QUAT_WXYZ);
+  return {
+    origin: [jaw[0] + off[0], jaw[1] + off[1], jaw[2] + off[2]],
+    forward: quatRotate(sq, [1, 0, 0]),
+    up: quatRotate(sq, [0, 0, 1]),
+  };
+}
+
+/** The camera pose a detector frame was captured from (`det.cam`, the site
+ *  frame: x forward, z up), in the same shape as headCameraPose. */
+export function capturePose(cam: number[]): { origin: [number, number, number]; forward: [number, number, number]; up: [number, number, number] } {
+  const q = [cam[3], cam[4], cam[5], cam[6]];
+  return { origin: [cam[0], cam[1], cam[2]], forward: quatRotate(q, [1, 0, 0]), up: quatRotate(q, [0, 0, 1]) };
+}
+
+/** Where a detection lands in the camera's image, as fractions of the frame
+ *  (u right, v down, 0..1), with the box's size: the pinhole projection of
+ *  the bearing (+left), elevation (+up) and apparent width the detector
+ *  reports, at the given field of view. Boxes are as wide as the target
+ *  looks; a person's is as tall as a person at that range. */
+export function detectionBox(d: DetectionItem, fovDeg: [number, number] = CAM_FOV_DEG): { u: number; v: number; w: number; h: number } {
+  const halfH = Math.tan((fovDeg[0] * Math.PI) / 360);
+  const halfV = Math.tan((fovDeg[1] * Math.PI) / 360);
+  const u = 0.5 - Math.tan(d.bearing) / (2 * halfH);
+  const v = 0.5 - Math.tan(d.elevation) / (2 * halfV);
+  const w = Math.tan(d.width / 2) / halfH;
+  const widthM = 2 * d.range * Math.tan(d.width / 2);
+  const heightM = d.cls === "person" ? 1.5 : d.cls === "duck" ? 0.2 : widthM;
+  const h = Math.min(1.5, (heightM / Math.max(d.range, 0.05)) / (2 * halfV));
+  return { u, v, w, h };
+}
 
 /** World-frame ray for one detection (origin + unit direction) from the jaw pose. */
 export function detectionRay(jaw: number[], d: DetectionItem): { origin: [number, number, number]; dir: [number, number, number] } {
