@@ -61,6 +61,64 @@ def tof_clearance_3d(frame, zmin: float = 0.08, zmax: float = 0.6) -> np.ndarray
     return np.where(ok, d, np.inf).min(axis=0)
 
 
+@dataclass(frozen=True)
+class ClosingParams:
+    range_m: float = 0.7           # something inside this, ahead...
+    rate: float = 0.15             # ...closing on me faster than my own walk by this (m/s)
+    window_s: float = 0.4          # over this much ToF history (6 frames at 15 Hz)
+    step_s: float = 1.0            # sidestep this long, then look again
+    vy: float = 0.3                # the sidestep (the walker's lateral command)
+
+
+class ClosingWatch:
+    """Something walking at me. The ToF's clearance ahead (the middle
+    columns, body-height returns only) shrinks at my own speed when I walk
+    at a wall and faster when a person or a duck comes at me; the
+    difference, fitted over a short window, is the closing rate. Past
+    `rate` inside `range_m`, the answer is a sidestep to the freer side
+    (the columns with more clearance) for `step_s` - out of its path, which
+    a stop alone is not. Nothing here needs more than the robot's ToF and
+    its own commanded speed."""
+
+    def __init__(self, p: ClosingParams = ClosingParams()):
+        self.p = p
+        self.reset()
+
+    def reset(self) -> None:
+        self._hist: list[tuple[float, float]] = []      # (t, clearance ahead)
+        self._last_t: float | None = None
+        self.closing = 0.0                               # m/s toward me beyond my own walk (last estimate)
+        self.side = 0.0
+        self.until = -1.0
+
+    def step(self, frame, t: float, speed: float) -> float:
+        """Fold the newest ToF frame; returns the lateral command to hold
+        now (0.0: none)."""
+        p = self.p
+        if frame is not None and frame.t != self._last_t:
+            self._last_t = frame.t
+            cols = tof_clearance_3d(frame)
+            ahead = float(cols[3:5].min())
+            if np.isfinite(ahead):
+                self._hist.append((frame.t, ahead))
+            else:
+                self._hist.clear()
+            self._hist = [h for h in self._hist if frame.t - h[0] <= p.window_s]
+            if len(self._hist) >= 3 and self._hist[-1][0] > self._hist[0][0]:
+                ts = np.array([h[0] for h in self._hist])
+                ds = np.array([h[1] for h in self._hist])
+                slope = float(np.polyfit(ts - ts[0], ds, 1)[0])          # m/s, negative = shrinking
+                self.closing = -slope - max(float(speed), 0.0)
+            else:
+                self.closing = 0.0
+            if ahead < p.range_m and self.closing > p.rate and t >= self.until:
+                left = float(np.mean(np.minimum(cols[0:3], 4.0)))
+                right = float(np.mean(np.minimum(cols[5:8], 4.0)))
+                self.side = 1.0 if left >= right else -1.0
+                self.until = t + p.step_s
+        return self.side * p.vy if t < self.until else 0.0
+
+
 def wander_from_tof(depth_mm: np.ndarray, valid: np.ndarray | None = None,
                     p: WanderParams = WanderParams(),
                     prefer_left: bool | None = None) -> tuple[float, float, float]:
@@ -177,6 +235,7 @@ class FollowParams:
     search_wz: float = 1.0             # the shipped walker barely turns in place below 1.0
     tof_stop: float = 0.35         # never walk into what the ToF says is right there
     head_yaw_gain: float = 0.8     # look toward the target (the robot's own gaze intent)
+    avoid: bool = True             # sidestep out of the path of whatever walks at me (ClosingWatch)
 
 
 class Follow:
@@ -198,6 +257,7 @@ class Follow:
     def __init__(self, p: FollowParams = FollowParams(), tracker: TrackerParams = TrackerParams()):
         self.p = p
         self.tracker = Tracker(tracker)
+        self.closing = ClosingWatch()
         self.gait = GaitWatch()
         self.reset()
 
@@ -212,6 +272,7 @@ class Follow:
         self.last = (0.0, 0.0, 0.0)
         self.tracker.reset()
         self.gait.reset()
+        self.closing.reset()
 
     def inputs(self) -> dict:
         if self._senses is None:
@@ -221,6 +282,7 @@ class Follow:
             "bearing": round(self.last_bearing, 3), "range": _r(self.last_range),
             "since": round(self._senses.t - self.last_seen_t, 2), "track": self.track_id}
         out["tracks"] = self.tracker.payload(self._senses.t)
+        out["closing"] = round(self.closing.closing, 2)
         return out
 
     def step(self, senses: Senses) -> Intent:
@@ -287,6 +349,13 @@ class Follow:
                 wz = 1.0
             else:
                 self.state = "blocked"
+        # Something walking at me - the person turning back, another duck -
+        # gets a sidestep out of its path (after the bumper: this one is
+        # meant to move with something right there).
+        side = self.closing.step(tof, senses.t, senses.speed) if p.avoid else 0.0
+        if side:
+            vx, vy = 0.0, side
+            self.state = "sidestep"
         head_yaw = float(np.clip(p.head_yaw_gain * self.last_bearing, -0.6, 0.6)) if self.last_seen_t else 0.0
         self.last = (vx, vy, wz)
         return Intent(twist=self.last, head=(0.0, 0.0, head_yaw, 0.0), note=self.state)

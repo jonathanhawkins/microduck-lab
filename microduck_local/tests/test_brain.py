@@ -202,3 +202,58 @@ def test_follow_lead_term_turns_toward_where_the_target_is_going():
     assert plain[-1].note == "approach" and lead[-1].note == "approach"
     assert 0 < plain[-1].twist[2] < 1.0                           # bearing ~0.2 rad: not saturated
     assert lead[-1].twist[2] > plain[-1].twist[2] + 0.1           # …moving +0.5 rad/s: turn ahead of it
+
+
+def test_closing_watch_sidesteps_out_of_the_path_of_what_walks_at_it():
+    """The ToF clearance ahead shrinking faster than the duck's own walk is
+    something coming at it: a sidestep to the freer side for a while. A
+    wall approached at the walking speed is not."""
+    from microduck_local.brain.controllers import ClosingParams, ClosingWatch
+    from microduck_local.sensors.tof import TofFrame
+
+    def tof(t, ahead_mm, right_mm=4000, left_mm=4000):
+        f = np.full((8, 8), 4000, np.uint16)
+        f[2:5, 3:5] = ahead_mm
+        f[2:5, 0:3] = left_mm
+        f[2:5, 5:8] = right_mm
+        return TofFrame(t=t, depth_mm=f, valid=np.ones((8, 8), bool))
+    # A person at 1.0 m walking in at 0.5 m/s while the duck stands.
+    w = ClosingWatch(ClosingParams())
+    out = [w.step(tof(0.066 * k, int(1000 - 500 * 0.066 * k)), 0.066 * k, 0.0) for k in range(16)]
+    assert out[0] == 0.0 and w.closing > 0.4
+    assert any(v > 0 for v in out) and all(v >= 0 for v in out)      # both sides open: left, never right
+    w2 = ClosingWatch(ClosingParams())
+    out2 = [w2.step(tof(0.066 * k, int(1000 - 500 * 0.066 * k), left_mm=300), 0.066 * k, 0.0) for k in range(16)]
+    assert any(v < 0 for v in out2) and all(v <= 0 for v in out2)    # left blocked: step right
+    # The duck walking at a wall at 0.3 m/s: the clearance shrinks at its own speed - no sidestep.
+    w3 = ClosingWatch(ClosingParams())
+    out3 = [w3.step(tof(0.066 * k, int(1000 - 300 * 0.066 * k)), 0.066 * k, 0.3) for k in range(16)]
+    assert all(v == 0.0 for v in out3) and abs(w3.closing) < 0.1
+    # The sidestep lasts step_s, then it looks again.
+    assert sum(1 for v in out if v) <= int(ClosingParams().step_s / 0.066) + 1
+
+
+def test_follow_sidesteps_when_the_person_walks_at_it():
+    """The scripted follow holds the band with a stop alone; with the
+    person closing on it the closing watch turns that into a sidestep."""
+    from microduck_local.brain import Follow, FollowParams, Senses
+    from microduck_local.sensors.detector import Detection, DetectionFrame
+    from microduck_local.sensors.tof import TofFrame
+
+    def run(avoid):
+        b = Follow(FollowParams(avoid=avoid))
+        notes = []
+        for k in range(16):
+            t = 0.066 * k
+            rng = 1.0 - 0.5 * t
+            f = np.full((8, 8), 4000, np.uint16)
+            f[2:5, 3:5] = int(rng * 1000)
+            det = DetectionFrame(t, [Detection("person", "p0", 0.0, 0.0, 0.3, rng, 0.9)])
+            it = b.step(Senses(t=t, tof=TofFrame(t=t, depth_mm=f, valid=np.ones((8, 8), bool)), tof_age=0.0,
+                               det=det, det_age=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
+            notes.append((it.note, it.twist))
+        return notes
+    with_ = run(True)
+    assert any(n == "sidestep" and tw[0] == 0.0 and tw[1] != 0.0 for n, tw in with_)
+    without = run(False)
+    assert not any(n == "sidestep" for n, _ in without)

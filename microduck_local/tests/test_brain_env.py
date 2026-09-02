@@ -184,3 +184,25 @@ def test_eval_runs_a_brain_in_its_own_observation_version():
         assert obs_version_of(REGISTRY.make("learned:follow-v1")) == 1
     if (brains_dir() / "follow-v2" / "brain.onnx").exists():
         assert obs_version_of(REGISTRY.make("learned:follow-v2")) == 2
+
+
+def test_charge_sends_the_person_through_the_duck_and_avoid_is_a_reflex():
+    """`charge`: every so many seconds the person's next waypoint is past the
+    duck on the line from where it is - it walks at the duck. `avoid` puts
+    the closing-watch sidestep under the brain."""
+    from microduck_local.brain.brain_env import BrainEnv, FollowTask
+    env = BrainEnv(FollowTask(charge=0.5, avoid=True), seed=5, fixed_preset="ideal")
+    env.reset(seed=5)
+    p, d = env.person, env.duck
+    for _ in range(12):                                   # 12 decisions = 1.2 s: two charges
+        env.step(np.zeros(3, np.float32))
+    assert env.charges >= 2
+    pos = d.trunk_pos(env.world.data)
+    wp = p.spec.path[p.wp]
+    # The waypoint the person is walking to lies beyond the duck, on the person->duck line.
+    dx, dy = pos[0] - p.x, pos[1] - p.y
+    wx, wy = wp[0] - p.x, wp[1] - p.y
+    n1, n2 = np.hypot(dx, dy), np.hypot(wx, wy)
+    assert n2 > n1 and (dx * wx + dy * wy) / (n1 * n2) > 0.99
+    assert env._closing is not None and env.task.avoid
+    env.close()

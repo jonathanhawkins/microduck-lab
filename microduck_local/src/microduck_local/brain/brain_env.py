@@ -35,6 +35,7 @@ from ..sensors import DetectorNoise, TofNoise
 from ..world import Box, Duck, Person, Scenario, World
 from ..world.scenario import TOF_PRESETS
 from .runtime import Senses
+from .controllers import ClosingWatch
 from .tracker import Tracker
 
 POLICIES_DIR = C.MICRODUCK_RL_DIR.parent / "microduck" / "policies"
@@ -176,6 +177,13 @@ class FollowTask:
     # second duck walking a slow circle as a moving non-target.
     furniture: int = 0
     distractor: bool = False
+    # The person turns and walks straight at the duck every `charge` s (0:
+    # never) - through where it stands, not to it. The case the sidestep
+    # reflex is for: `avoid` gives the brain the same ClosingWatch the
+    # scripted Follow carries (a sidestep out of the path of whatever
+    # closes on the duck faster than its own walk), version-2 only.
+    charge: float = 0.0
+    avoid: bool = False
 
 
 class BrainEnv(gym.Env):
@@ -200,6 +208,9 @@ class BrainEnv(gym.Env):
         self.action_space = gym.spaces.Box(ACT_LOW, ACT_HIGH, dtype=np.float32)
         self.world: World | None = None
         self._last_action = np.zeros(3, np.float32)
+        self._closing = ClosingWatch()
+        self._last_charge = 0.0
+        self.charges = 0
         self._last_seen_t: float | None = None
         self._steps = 0
         self.max_decisions = int(round(task.episode_s / C.CTRL_DT / self.decide_every))
@@ -278,8 +289,22 @@ class BrainEnv(gym.Env):
         self._last_action[:] = 0.0
         self._last_seen_t = None
         self._builder.reset()
+        self._closing.reset()
+        self._last_charge = self.world.t
         self._steps = 0
         return self._obs(), {}
+
+    def _charge(self) -> None:
+        """The person's next waypoint: 0.4 m past the duck on the line from
+        where the person is - it walks through the duck's spot."""
+        w, d, p = self.world, self.duck, self.person
+        pos = d.trunk_pos(w.data)
+        dx, dy = float(pos[0] - p.x), float(pos[1] - p.y)
+        n = math.hypot(dx, dy)
+        if n < 1e-6:
+            return
+        p.spec.path.insert(p.wp, (float(pos[0] + 0.4 * dx / n), float(pos[1] + 0.4 * dy / n)))
+        self.charges += 1
 
     def senses(self) -> Senses:
         w, d = self.world, self.duck
@@ -322,7 +347,15 @@ class BrainEnv(gym.Env):
             if (mid[(mid > 0)] < t.bump_stop * 1000).any() and a[0] > 0:
                 a = a.copy()
                 a[0] = 0.0                                  # the reflex tier refuses to walk into it
+        if t.avoid and d.tof is not None and self._builder.tracker is not None:
+            side = self._closing.step(d.tof.last, w.t, d.heading_speed(w.data))
+            if side:
+                a = a.copy()
+                a[0], a[1] = 0.0, side                      # the reflex tier steps out of its path
         d.set_cmd(w.data, a, (0.0, 0.0, self.gaze(), 0.0))
+        if t.charge and w.t - self._last_charge >= t.charge:
+            self._last_charge = w.t
+            self._charge()
         if self.distractor is not None:
             self.distractor.set_cmd(w.data, (0.25, 0.0, 0.6))    # a slow circle (below 0.2 the walker stands)
         bumped = False
