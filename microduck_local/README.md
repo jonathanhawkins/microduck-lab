@@ -505,24 +505,27 @@ What is real and what is a model here, so nobody mistakes one for the other:
 **Measured** (`eval-tidy --seeds 8 --toys 6 --seconds 300 --jobs 2`,
 datasheet sensor noise, upstream models at the pinned shas):
 
-| odometry | tether | tidied (mean of 8 seeds) | falls / run |
+| odometry | tether | tidied (mean of 16 seeds) | falls / run |
 |---|---|---|---|
-| ideal | onboard | **0.94** (5, 5, 6, 6, 6, 6, 6, 6 of 6) | 0.50 |
-| datasheet drift | onboard | 0.88 | 0.50 |
-| hostile drift | onboard | 0.62 | 0.75 |
-| ideal | 250 ms round trip | 0.79 | 1.50 |
+| ideal | onboard | **0.89** | 0.31 |
+| datasheet drift | onboard | 0.84 | 0.56 |
+| hostile drift | onboard | 0.79 | 0.75 |
+| ideal | 250 ms round trip | 0.76 | 2.19 |
 
 All four rows are on the 2026-09 CAD re-export (microduck_rl badc4e7),
-with the staged approach for rim toys, the sidestep-then-turn back-off
-and the slower last leg. Before those, on the same model: 0.88 / 0.38
-ideal, 0.81 / 0.25 datasheet, 0.81 / 1.12 hostile, 0.90 / 3.25 tethered
-(the drift and tether rows had only ever been measured on the previous
-export, where they read 0.88 / 0.12, 0.79 / 0.50 and 0.79 / 1.88). Eight
-seeds of six toys is a coarse instrument: one toy is 0.02 and a seed's
-whole trajectory diverges after any change (the hostile row moved
-0.81 → 0.79 → 0.62 across three runs of the same brain with different
-back-offs), so read differences under 0.05 as noise. A model bump is a
-re-measure, not a merge.
+with the staged approach for rim toys, the sidestep-then-turn back-off,
+the slower last leg, and the brain steering by its own loop-closed pose
+(`loop_closure`, the wall-line matcher of `brain/mapping.py` folded
+into the tidy brain; `eval-tidy --no-loop-closure` steers by raw
+odometry). Sixteen seeds now (`--seeds` default), each its own toy
+layout: eight seeds of six toys moved the hostile row 0.81 → 0.79 →
+0.62 across three runs of the same brain with different back-offs, so a
+difference under 0.05 is noise even here. The 8-seed rows before the
+loop-closed pose read 0.94 / 0.50 ideal, 0.88 / 0.50 datasheet, 0.62 /
+0.75 hostile, 0.79 / 1.50 tethered; before the rim staging 0.88 / 0.38
+ideal; on the previous export 0.88 / 0.12, 0.79 / 0.50 and 0.79 / 1.88
+for the drift and tether rows. A model bump is a re-measure, not a
+merge.
 
 The tether row is roadmap 12.10's answer in one line: a laptop brain over
 Wi-Fi keeps most of the tidying but trips at the rim three times as

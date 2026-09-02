@@ -28,7 +28,7 @@ from .world import World, make_playroom
 
 
 def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str = "ideal",
-            tether_ms: float = 0.0) -> dict:
+            tether_ms: float = 0.0, loop_closure: bool = True) -> dict:
     """`tether_ms` (roadmap 12.10): the brain runs somewhere else — a laptop
     over Wi-Fi, a cloud model — and its intent lands on the robot this much
     after the senses it was decided from. 0 = onboard."""
@@ -39,7 +39,8 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
     delay = tether_ms / 1000.0
     w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=seed)
     d = w.ducks["d0"]
-    brain = REGISTRY.make("tidy")
+    from .brain.tidy import TidyParams
+    brain = REGISTRY.make("tidy", p=TidyParams(loop_closure=loop_closure))
     t0 = time.time()
     states = []
     while w.t < seconds:
@@ -62,7 +63,8 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
         if brain.state == "done":
             break
     score = w.tidy_score()
-    return {"seed": seed, "toys": toys, "odom": odom, "tetherMs": tether_ms, "inBasket": score["inBasket"], "picked": brain.picked,
+    return {"seed": seed, "toys": toys, "odom": odom, "tetherMs": tether_ms, "loopClosure": loop_closure,
+            "inBasket": score["inBasket"], "picked": brain.picked,
             "delivered": brain.delivered, "falls": d.falls, "attempts": d.grasp_attempts,
             "grasps": d.grasp_successes, "givenUp": sorted(brain.given_up),
             "simSeconds": round(w.t, 1), "wallSeconds": round(time.time() - t0, 1),
@@ -82,6 +84,8 @@ def main() -> None:
                     help="odometry drift preset the brain has to live with (roadmap 1.7)")
     ap.add_argument("--tether-ms", type=float, default=0.0,
                     help="brain round-trip latency: senses out, intent back (12.10; 0 = onboard)")
+    ap.add_argument("--no-loop-closure", action="store_true",
+                    help="steer by raw odometry instead of the brain's own loop-closed pose (5.5)")
     args = ap.parse_args()
     seeds = [args.seed0 + k for k in range(args.seeds)]
     if args.jobs > 1 and len(seeds) > 1:
@@ -89,10 +93,11 @@ def main() -> None:
         # spawn/forkserver: no forked ONNX runtime or MuJoCo state (the Windows-safe rule).
         ctx = mp.get_context("forkserver" if hasattr(mp, "get_context") and "forkserver" in mp.get_all_start_methods() else "spawn")
         with ctx.Pool(min(args.jobs, len(seeds))) as pool:
-            rows = pool.starmap(run_one, [(sd, args.toys, args.seconds, True, args.odom, args.tether_ms) for sd in seeds])
+            rows = pool.starmap(run_one, [(sd, args.toys, args.seconds, True, args.odom, args.tether_ms,
+                                           not args.no_loop_closure) for sd in seeds])
     else:
-        rows = [run_one(sd, args.toys, args.seconds, quiet=not args.verbose, odom=args.odom, tether_ms=args.tether_ms)
-                for sd in seeds]
+        rows = [run_one(sd, args.toys, args.seconds, quiet=not args.verbose, odom=args.odom, tether_ms=args.tether_ms,
+                        loop_closure=not args.no_loop_closure) for sd in seeds]
     if args.json:
         print(json.dumps(rows))
         return
