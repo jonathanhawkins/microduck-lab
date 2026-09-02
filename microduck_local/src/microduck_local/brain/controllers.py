@@ -475,6 +475,18 @@ class ChaseParams:
     support_back: float = 0.7
     support_side: float = 0.45
     support_min: float = 0.45
+    # Traced over 3 seeds x 300 s of 3v3: 10 of 14 falls were supporters
+    # turning in place with a teammate 5-28 cm away or against the boards
+    # - a body beside the duck is outside the camera's 62 deg and the ToF's
+    # 45 deg, so neither the avoid rule nor the wall rule saw it. Two
+    # answers: the support spot stays `support_margin` inside the pitch
+    # (`bounds`, from make_pitch), and a supporter with any duck track
+    # inside `beside_m` (however stale within `beside_s`: the track's
+    # bearing turns with the body, so a duck seen a second ago still says
+    # where it is) stands instead of turning in place.
+    support_margin: float = 0.35
+    beside_m: float = 0.3
+    beside_s: float = 1.5
     # Yielding to a duck that clearly has the ball: OFF by default. Measured
     # over 8 seeds × 300 s: off 1.50 goals / 8.5 kicks / 2.12 falls a run,
     # on (0.5 m) 1.12 / 7.0 / 2.12 — it costs play and saves nothing.
@@ -505,9 +517,10 @@ class Chase:
     TOF_MAX_AGE = 0.25
 
     def __init__(self, p: ChaseParams = ChaseParams(), goal: tuple[float, float] | None = None,
-                 team=None, duck_id: str = ""):
+                 team=None, duck_id: str = "", bounds: tuple[float, float] | None = None):
         self.p = p
         self.goal = None if goal is None else (float(goal[0]), float(goal[1]))
+        self.bounds = None if bounds is None else (float(bounds[0]), float(bounds[1]))   # the pitch's half-extents inside the boards
         self.team = team
         self.duck_id = duck_id
         self.tracker = Tracker()
@@ -835,14 +848,26 @@ class Chase:
         rank = self.team.rank(self.duck_id, t) if self.team is not None else 0
         side = p.support_side * ((rank + 1) // 2) * (1 if rank % 2 == 0 else -1)
         target = (bxy[0] + p.support_back * ux - side * uy, bxy[1] + p.support_back * uy + side * ux)
+        if self.bounds is not None:                         # never a spot in the boards
+            m = p.support_margin
+            target = (float(np.clip(target[0], -self.bounds[0] + m, self.bounds[0] - m)),
+                      float(np.clip(target[1], -self.bounds[1] + m, self.bounds[1] - m)))
         vx, wz, dist, _ = self._servo(odom, target, cold, 0.12)
         if math.hypot(bxy[0] - odom[0], bxy[1] - odom[1]) < p.support_min and vx > 0:
             vx = 0.0                                        # the attacker's room
         if dist <= 0.12:
             b = _wrap(math.atan2(bxy[1] - odom[1], bxy[0] - odom[0]) - odom[2])
             vx, wz = (0.0, 0.0) if abs(b) < 0.3 else turn(b, cold)[::2]
+        if vx <= TURN_KICK and wz != 0.0 and self._beside(t):
+            vx, wz = 0.0, 0.0                               # a body beside us: no turning in place
         self.state = "support"
         return vx, wz
+
+    def _beside(self, t: float) -> bool:
+        """Any duck track inside `beside_m`, at any bearing, within `beside_s`."""
+        p = self.p
+        return any(tr.cls == "duck" and tr.range < p.beside_m and tr.age(t) <= p.beside_s
+                   for tr in self.tracker.tracks)
 
 
 def _r(v) -> float | None:

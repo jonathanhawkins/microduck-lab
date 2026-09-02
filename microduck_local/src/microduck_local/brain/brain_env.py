@@ -184,6 +184,10 @@ class FollowTask:
     # closes on the duck faster than its own walk), version-2 only.
     charge: float = 0.0
     avoid: bool = False
+    # A polite person stops this far short of the duck in its way and steps
+    # on to its next waypoint after 2.5 s, instead of walking through it
+    # (a mocap capsule does). 0: walks through.
+    polite: float = 0.0
 
 
 class BrainEnv(gym.Env):
@@ -231,7 +235,7 @@ class BrainEnv(gym.Env):
         boxes = [Box((2.0 + 0.5 * i, -1.5, 0.15), (0.3, 0.3, 0.3), mass=3.0) for i in range(t.furniture)]
         sc = Scenario(name="brain-follow", floor=t.room, ducks=ducks, boxes=boxes,
                       persons=[Person("p0", (1.0, 0.0), 0.0, path=self._random_path(),
-                                      speed=float(self.rng.uniform(*t.person_speed)))])
+                                      speed=float(self.rng.uniform(*t.person_speed)), yield_m=t.polite)])
         infer = {"d0": self._infer}
         if t.distractor:
             infer["d1"] = self._infer

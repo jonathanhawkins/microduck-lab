@@ -15,6 +15,7 @@ from microduck_local.world import (
     Ball,
     Box,
     Duck,
+    Person,
     Scenario,
     Wall,
     compose,
@@ -281,3 +282,28 @@ def test_kick_window_runs_at_the_standing_gain_and_hands_it_back():
     w.reset_duck("d0")
     assert d0.skill is None and d0.gain_ratio == 1.0
     np.testing.assert_array_equal(w.model.actuator_gainprm[d0.adr.actuators, 0], kp0)
+
+
+def test_a_polite_person_stops_short_of_a_duck_and_steps_around():
+    """`Person.yield_m`: a walker with a duck inside that range on its way
+    stands, then after 2.5 s gives the waypoint up; without it the mocap
+    capsule walks straight through the duck."""
+    from microduck_local.world import World
+
+    def run(yield_m):
+        sc = Scenario(name="p", floor=(6, 6), ducks=[Duck("d0", (0.0, 0.0, 0.0))],
+                      persons=[Person("p0", (1.0, 0.0), math.pi, path=[(-1.0, 0.0), (1.0, 1.0)], speed=0.5, yield_m=yield_m)])
+        assert validate_scenario(sc.to_dict()) == sc
+        w = World(sc)
+        p = w.persons["p0"]
+        nearest, waited = 9.0, 0.0
+        for _ in range(int(6.0 / C.CTRL_DT)):
+            w.step()
+            nearest = min(nearest, math.hypot(p.x, p.y))
+            waited = max(waited, p.waiting)
+        return nearest, waited, p.yields
+    through = run(0.0)
+    assert through[0] < 0.1 and through[2] == 0                    # walked through the duck's spot
+    polite = run(0.4)
+    assert 0.3 < polite[0] < 0.45 and polite[2] == 1               # stopped short, then gave the waypoint up
+    assert polite[1] >= 2.4

@@ -69,7 +69,7 @@ def run(brain_kind: str, preset: str | None, episodes: int, seed: int, task: Fol
     keys = ("return", "in_band", "dist_err", "seen", "bumps", "contact", "falls", "dodges")
     summary = {k: float(np.mean([r[k] for r in rows])) for k in keys}
     return {"brain": brain_kind, "preset": preset or "random", "episodes": episodes,
-            "variety": bool(task.furniture or task.distractor), "charge": task.charge,
+            "variety": bool(task.furniture or task.distractor), "charge": task.charge, "polite": task.polite,
             "avoid": bool(task.avoid or avoid),
             "charges": int(getattr(env, "charges", 0)),
             "reflex": bool((task.gaze_gain or task.bump_stop) and env.obs_version >= 2),
@@ -87,16 +87,18 @@ def main() -> None:
     ap.add_argument("--no-reflex", action="store_true", help="no gaze and no bump stop under the brain")
     ap.add_argument("--charge", type=float, default=0.0, metavar="S", help="the person walks straight at the duck every S seconds")
     ap.add_argument("--avoid", action="store_true", help="the dodge (ClosingWatch): the scripted follow's own, or the reflex tier's under a learned brain")
+    ap.add_argument("--polite", type=float, default=0.0, metavar="M", help="the person stops M m short of the duck in its way and steps around after 2.5 s")
     args = ap.parse_args()
     task = FollowTask(furniture=2 if args.variety else 0, distractor=args.variety,
                       gaze_gain=0.0 if args.no_reflex else 0.8, bump_stop=0.0 if args.no_reflex else 0.25,
-                      charge=args.charge, avoid=args.avoid and not args.brain == "follow")
+                      charge=args.charge, avoid=args.avoid and not args.brain == "follow", polite=args.polite)
     res = run(args.brain, args.preset, args.episodes, args.seed, task, avoid=args.avoid)
     if args.json:
         print(json.dumps(res))
     else:
         tags = (" +variety" if res["variety"] else "") + ("" if res["reflex"] else " no-reflex") \
-            + (f" +charge {res['charge']:g}s" if res["charge"] else "") + (" +avoid" if res["avoid"] else "")
+            + (f" +charge {res['charge']:g}s" if res["charge"] else "") + (f" +polite {res['polite']:g}m" if res.get("polite") else "") \
+            + (" +avoid" if res["avoid"] else "")
         print(f"{res['brain']} @ {res['preset']}{tags}: in-band {res['in_band']:.2f} · |err| {res['dist_err']:.2f} m · "
               f"seen {res['seen']:.2f} · bumps {res['bumps']:.1f}/ep · contact {res['contact']:.1f} s/ep · dodges {res['dodges']:.1f}/ep · "
               f"falls {res['falls']:.2f}/ep · return {res['return']:.1f}")

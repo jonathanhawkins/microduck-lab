@@ -91,7 +91,8 @@ def brain_kwargs(duck_spec, world, teams: dict[str, "Team"]) -> dict:
     team = None
     if duck_spec.team:
         team = teams.setdefault(duck_spec.team, Team(duck_spec.team))
-    return {"goal": world.goal_for(d), "team": team, "duck_id": duck_spec.id}
+    hx, hy = world.scenario.floor[0] / 2 - 0.25, world.scenario.floor[1] / 2 - 0.25   # the boards sit 0.25 m in
+    return {"goal": world.goal_for(d), "team": team, "duck_id": duck_spec.id, "bounds": (hx, hy)}
 
 
 def kickoff_brains(brains: dict, teams: dict[str, "Team"]) -> None:

@@ -11,7 +11,7 @@ Format v1 (JSON, saved under microduck_local/scenarios/<name>.json):
      "ducks": [{"id": "d0", "spawn": [x, y, yaw], "policy": "pollen:alpha_walking",
                 "tof": "datasheet", "detector": "datasheet", "brain": "follow"}],
      "persons": [{"id": "p0", "pos": [x, y], "yaw": 0.0, "path": [[x, y], ...],
-                  "speed": 0.3, "radius": 0.2, "height": 1.0}],  # kinematic walkers
+                  "speed": 0.3, "radius": 0.2, "height": 1.0, "yield_m": 0.0}],  # kinematic walkers
      "pickables": [{"id": "t0", "kind": "brick"|"block"|"sock", "pos": [x, y], "yaw": 0.0}],
      "basket": {"pos": [x, y], "size": [0.3, 0.3], "rim": 0.06} | null,   # the tidy target
      "collision": "walk"}                               # "walk" | "all" robot MJCF
@@ -91,6 +91,10 @@ class Person:
     speed: float = 0.3
     radius: float = 0.2
     height: float = 1.0
+    # A polite walker: with a duck inside `yield_m` ahead on its way it
+    # stops, and after a wait steps on to its next waypoint instead of
+    # walking through the duck (a mocap capsule would). 0: walks through.
+    yield_m: float = 0.0
 
 
 # What a duck can pick up: full extents (m), mass (kg), colour. Sizes are
@@ -273,7 +277,8 @@ def validate_scenario(raw: dict) -> Scenario:
             path,
             _num(q.get("speed", 0.3), f"persons[{i}].speed", 0.0, 1.5),
             _num(q.get("radius", 0.2), f"persons[{i}].radius", 0.05, 0.5),
-            _num(q.get("height", 1.0), f"persons[{i}].height", 0.2, 2.0)))
+            _num(q.get("height", 1.0), f"persons[{i}].height", 0.2, 2.0),
+            _num(q.get("yield_m", 0.0), f"persons[{i}].yield_m", 0.0, 2.0)))
     if len(persons) > MAX_PERSONS:
         raise ScenarioError(f"more than {MAX_PERSONS} persons")
     pickables = []

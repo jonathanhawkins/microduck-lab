@@ -154,3 +154,30 @@ def test_kickoff_forgets_the_plan_and_keeps_the_tally():
     other = Plain()
     kickoff_brains({"x": other}, {})
     assert other.resets == 1
+
+
+def test_a_supporter_keeps_its_spot_inside_the_boards_and_stands_beside_a_teammate():
+    """3v3 falls were supporters turning in place against a teammate or the
+    boards: the support spot is clamped inside the pitch, and a duck track
+    inside `beside_m` - stale or not - means no turn in place."""
+    from microduck_local.brain.tracker import Track
+    p = ChaseParams()
+    tm = Team("left")
+    b = Chase(p, goal=(1.5, 0.0), team=tm, duck_id="d1", bounds=(1.5, 1.25))
+    tm.claim("d0", 10.0, 0.2, (1.3, 1.1))          # d0 attacks a ball in the corner
+    tm.claim("d1", 10.0, 2.0, None)
+    b._senses = Senses(t=10.0)
+    # Sitting at the clamped spot: the raw spot (0.7 m behind the ball toward our goal) would be
+    # inside the boards' margin in y; the clamped one is not, and a supporter there just faces the ball.
+    odom = (0.6, 0.9, 0.5)
+    b.state = "support"
+    vx, wz = b._support(odom, None, False, False)
+    assert abs(vx) < 0.3                                             # not a full walk into the boards
+    # Beside a teammate (a track at 0.2 m, 90 deg off the nose, seen a second ago): no turn in place.
+    b.tracker.tracks.append(Track(id=9, cls="duck", bearing=1.5, elevation=0.0, width=0.5, range=0.2, conf=0.9, born_t=8.0, last_t=9.0))
+    b._senses = Senses(t=10.0)
+    vx, wz = b._support((0.0, 0.0, 0.0), None, False, True)         # nobody has the ball: it would turn to look
+    assert vx == 0.0 and wz == 0.0
+    b.tracker.tracks.clear()
+    vx, wz = b._support((0.0, 0.0, 0.0), None, False, True)
+    assert wz != 0.0

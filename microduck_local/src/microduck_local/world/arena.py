@@ -210,18 +210,36 @@ class WorldPerson:
         self.wp = 0
         self.cmd: np.ndarray | None = None      # possessed: heading-frame twist
         self.possessed = False
+        self.waiting = 0.0                       # s stood behind a duck in the way (polite walkers)
+        self.yields = 0                          # waypoints given up on
+    WAIT_S = 2.5                                 # ...before stepping on to the next waypoint
 
     def reset(self, data: mujoco.MjData) -> None:
         self.x, self.y, self.yaw = self.spec.pos[0], self.spec.pos[1], self.spec.yaw
         self.wp = 0
         self.cmd = None
+        self.waiting = 0.0
+        self.yields = 0
         self.write(data)
 
     def write(self, data: mujoco.MjData) -> None:
         data.mocap_pos[self.mocap] = [self.x, self.y, self.spec.height / 2]
         data.mocap_quat[self.mocap] = [np.cos(self.yaw / 2), 0.0, 0.0, np.sin(self.yaw / 2)]
 
-    def step(self, data: mujoco.MjData, dt: float) -> None:
+    def blocked_by(self, blockers, target_yaw: float) -> bool:
+        """A polite walker's rule: something (a duck's trunk) inside
+        `yield_m` and within 70 degrees of the way it is about to walk."""
+        r = self.spec.yield_m
+        if r <= 0:
+            return False
+        for bx, by in blockers:
+            dx, dy = bx - self.x, by - self.y
+            if np.hypot(dx, dy) < r and abs(np.arctan2(np.sin(np.arctan2(dy, dx) - target_yaw),
+                                                          np.cos(np.arctan2(dy, dx) - target_yaw))) < 1.22:
+                return True
+        return False
+
+    def step(self, data: mujoco.MjData, dt: float, blockers=()) -> None:
         if self.possessed and self.cmd is not None:
             vx, vy, wz = (float(v) for v in self.cmd)
             self.yaw += wz * dt
@@ -237,6 +255,29 @@ class WorldPerson:
             else:
                 target_yaw = float(np.arctan2(dy, dx))
                 err = float(np.arctan2(np.sin(target_yaw - self.yaw), np.cos(target_yaw - self.yaw)))
+                if self.spec.yield_m > 0 and abs(err) > 1.0:
+                    # A polite walker turns in place toward a new waypoint
+                    # before stepping (a mocap walker arcs, through whatever
+                    # is beside it).
+                    self.yaw += float(np.clip(err, -1.5 * dt, 1.5 * dt))
+                    self.write(data)
+                    return
+                if self.blocked_by(blockers, target_yaw) or self.blocked_by(blockers, self.yaw):
+                    # Stand (facing the way it wants to go); give the
+                    # waypoint up after a while - a person steps around.
+                    self.yaw += float(np.clip(err, -1.5 * dt, 1.5 * dt))
+                    self.waiting += dt
+                    if self.waiting >= self.WAIT_S:
+                        self.waiting = 0.0
+                        self.yields += 1
+                        if len(self.spec.path) > 1:
+                            self.spec.path.pop(self.wp)
+                            self.wp %= len(self.spec.path)
+                        else:
+                            self.wp = (self.wp + 1) % len(self.spec.path)
+                    self.write(data)
+                    return
+                self.waiting = 0.0
                 self.yaw += float(np.clip(err, -1.5 * dt, 1.5 * dt))
                 step = min(self.spec.speed * dt, dist)
                 self.x += step * np.cos(self.yaw)
@@ -244,7 +285,7 @@ class WorldPerson:
         self.write(data)
 
     def payload(self) -> dict:
-        return {"id": self.id, "kind": "person",
+        return {"id": self.id, "kind": "person", "waiting": self.waiting > 0,
                 "pose": [round(self.x, 4), round(self.y, 4), round(self.spec.height / 2, 4),
                          round(float(np.cos(self.yaw / 2)), 4), 0.0, 0.0, round(float(np.sin(self.yaw / 2)), 4)],
                 "possessed": self.possessed}
@@ -652,8 +693,10 @@ class World:
             raw = np.asarray((skill or d.infer)(obs), np.float32)
             d.last_action = raw.copy()
             data.ctrl[d.adr.actuators] = C.DEFAULT_POSE + raw.clip(-4.0, 4.0)
+        blockers = [tuple(d.trunk_pos(data)[:2]) for d in self.ducks.values()] if any(
+            p.spec.yield_m > 0 for p in self.persons.values()) else ()
         for p in self.persons.values():
-            p.step(data, C.CTRL_DT)
+            p.step(data, C.CTRL_DT, blockers)
         for _ in range(C.DECIMATION):
             mujoco.mj_step(m, data)
         self.t += C.CTRL_DT
