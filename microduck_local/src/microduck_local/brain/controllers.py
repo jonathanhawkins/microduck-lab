@@ -249,7 +249,16 @@ class FollowParams:
     search_wz: float = 1.0             # the shipped walker barely turns in place below 1.0
     tof_stop: float = 0.35         # never walk into what the ToF says is right there
     head_yaw_gain: float = 0.8     # look toward the target (the robot's own gaze intent)
-    avoid: bool = True             # get out of the path of whatever walks at me (ClosingWatch)
+    # Get out of the path of whatever walks at me (ClosingWatch): OFF.
+    # Measured over 12 episodes: the walker cannot clear a person walking
+    # at it (it sidesteps 1 cm in its first second; a turn-and-walk moves
+    # it 0.1 m off the line in 1.8 s, and the person arrives in 2-5 s), so
+    # the charge case's contact time is the same either way (4.9 vs 5.3
+    # s/ep) while in ordinary following the dodge fires on a person who is
+    # merely walking toward the duck and loses it (in band 0.49 -> 0.39,
+    # in sight 0.86 -> 0.57). It halves falls in the charge case (0.17 ->
+    # 0.08/ep), within the noise. `eval-brain --avoid` measures it.
+    avoid: bool = False
 
 
 class Follow:

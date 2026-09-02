@@ -31,11 +31,11 @@ def obs_version_of(brain) -> int:
 
 
 def run(brain_kind: str, preset: str | None, episodes: int, seed: int, task: FollowTask = FollowTask(),
-        avoid: bool = True) -> dict:
+        avoid: bool = False) -> dict:
     brain = REGISTRY.make(brain_kind)
-    if not avoid and hasattr(brain, "p") and hasattr(brain.p, "avoid"):
+    if hasattr(brain, "p") and hasattr(brain.p, "avoid"):
         from dataclasses import replace
-        brain.p = replace(brain.p, avoid=False)
+        brain.p = replace(brain.p, avoid=avoid)          # the scripted follow's own dodge
     env = BrainEnv(task, seed=seed, fixed_preset=preset, sense_dr=preset is None, obs_version=obs_version_of(brain))
     rows = []
     for ep in range(episodes):
@@ -70,7 +70,7 @@ def run(brain_kind: str, preset: str | None, episodes: int, seed: int, task: Fol
     summary = {k: float(np.mean([r[k] for r in rows])) for k in keys}
     return {"brain": brain_kind, "preset": preset or "random", "episodes": episodes,
             "variety": bool(task.furniture or task.distractor), "charge": task.charge,
-            "avoid": bool(task.avoid or (avoid and hasattr(getattr(brain, "p", None), "avoid"))),
+            "avoid": bool(task.avoid or avoid),
             "charges": int(getattr(env, "charges", 0)),
             "reflex": bool((task.gaze_gain or task.bump_stop) and env.obs_version >= 2),
             **summary, "rows": rows}
@@ -86,13 +86,12 @@ def main() -> None:
     ap.add_argument("--variety", action="store_true", help="two free boxes re-scattered each episode + a duck walking a circle")
     ap.add_argument("--no-reflex", action="store_true", help="no gaze and no bump stop under the brain")
     ap.add_argument("--charge", type=float, default=0.0, metavar="S", help="the person walks straight at the duck every S seconds")
-    ap.add_argument("--avoid", action="store_true", help="the reflex tier sidesteps whatever closes on the duck (the scripted follow always does unless --no-avoid)")
-    ap.add_argument("--no-avoid", action="store_true", help="turn the scripted follow's sidestep off")
+    ap.add_argument("--avoid", action="store_true", help="the dodge (ClosingWatch): the scripted follow's own, or the reflex tier's under a learned brain")
     args = ap.parse_args()
     task = FollowTask(furniture=2 if args.variety else 0, distractor=args.variety,
                       gaze_gain=0.0 if args.no_reflex else 0.8, bump_stop=0.0 if args.no_reflex else 0.25,
-                      charge=args.charge, avoid=args.avoid and not args.no_avoid)
-    res = run(args.brain, args.preset, args.episodes, args.seed, task, avoid=not args.no_avoid)
+                      charge=args.charge, avoid=args.avoid and not args.brain == "follow")
+    res = run(args.brain, args.preset, args.episodes, args.seed, task, avoid=args.avoid)
     if args.json:
         print(json.dumps(res))
     else:
