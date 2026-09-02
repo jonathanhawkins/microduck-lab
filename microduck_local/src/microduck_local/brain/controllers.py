@@ -494,6 +494,17 @@ class ChaseParams:
     # into the other duck.
     hunt_s: float = 0.0
     hunt_lost_range: float = 0.6
+    # The hunt's own stops (traced: it walked at 0.45 m/s turning at full
+    # rate into the boards, where the ToF returns nothing inside 3 cm, and
+    # into the other duck beside it, outside the camera's cone and the
+    # ToF's middle columns). Slower, a capped turn, and it ends - not
+    # alternates with "blocked" - when anything is inside `hunt_stop`
+    # ahead, a duck track is beside it, or the boards are `hunt_margin`
+    # ahead in odometry.
+    hunt_speed: float = 0.3
+    hunt_wz: float = 0.5
+    hunt_stop: float = 0.45
+    hunt_margin: float = 0.35
     search_dip_every: float = 1.5
     search_dip_s: float = 0.6
     dip_range: float = 0.22
@@ -740,6 +751,10 @@ class Chase:
         if self.state == "look" and not looking and not fresh and self._hunt_u is not None:
             self._hunt_t0 = t                                   # the look after the kick found nothing: hunt the line
         hunting = p.hunt_s > 0 and t - self._hunt_t0 < p.hunt_s and not seen and self._hunt_u is not None
+        if hunting and (ahead < p.hunt_stop or self._beside(t) or self._boards_ahead(odom, p.hunt_margin)):
+            hunting = False                                     # the hunt ends here; the search takes over
+            self._hunt_t0 = -1e9
+            self._hunt_u = None
         if senses.skill is not None:
             vx, wz = 0.0, 0.0                                   # the kick owns the reflex tier
             self.state = "kick"
@@ -898,13 +913,14 @@ class Chase:
                 if fresh and ball.range < p.head_range:
                     gaze_at = ball.range
         elif hunting:
-            vx, wz = p.speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -1.0, 1.0))
+            vx, wz = p.hunt_speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -p.hunt_wz, p.hunt_wz))
             self.state = "hunt"
         else:
             if p.hunt_s > 0 and self._hunt_u is not None and self.state not in ("search", "hunt", "look") \
-                    and self._last_range is None and t - self._hunt_t0 >= p.hunt_s:
+                    and self._last_range is None and t - self._hunt_t0 >= p.hunt_s \
+                    and ahead >= p.hunt_stop and not self._beside(t) and not self._boards_ahead(odom, p.hunt_margin):
                 self._hunt_t0 = t                               # lost while walking into it: hunt before searching
-                vx, wz = p.speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -1.0, 1.0))
+                vx, wz = p.hunt_speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -p.hunt_wz, p.hunt_wz))
                 self.state = "hunt"
             else:
                 if self.state != "search" or self._search_t0 is None:
@@ -987,6 +1003,13 @@ class Chase:
             vx, wz = 0.0, 0.0                               # a body beside us: no turning in place
         self.state = "support"
         return vx, wz
+
+    def _boards_ahead(self, odom, margin: float) -> bool:
+        """The point `margin` ahead in odometry lies outside the pitch's bounds (None off a pitch: never)."""
+        if self.bounds is None:
+            return False
+        x, y = odom[0] + margin * math.cos(odom[2]), odom[1] + margin * math.sin(odom[2])
+        return abs(x) > self.bounds[0] or abs(y) > self.bounds[1]
 
     def _beside(self, t: float) -> bool:
         """Any duck track inside `beside_m`, at any bearing, within `beside_s`."""

@@ -227,7 +227,40 @@ def test_after_a_kick_the_duck_looks_then_hunts_the_kick_line_then_searches():
     assert it.note == "look" and it.twist[0] == 0.0
     # ...then hunt: walk the kick line at speed, steering onto its heading.
     it = b.step(Senses(t=1.1 + p.look_s + 0.05, odom=(0.0, 0.06, 0.2)))
-    assert it.note == "hunt" and it.twist[0] == p.speed and it.twist[2] > 0
+    assert it.note == "hunt" and it.twist[0] == p.hunt_speed and it.twist[2] > 0
     # ...and only then the standing search.
     it = b.step(Senses(t=1.1 + p.look_s + p.hunt_s + 0.1, odom=(1.0, 0.3, 0.3)))
     assert it.note == "search"
+
+
+def test_the_hunt_ends_for_the_tof_a_duck_beside_and_the_boards():
+    """The hunt (traced into the boards and into the other duck) is slow,
+    turns gently, and ends the moment the ToF has something inside
+    hunt_stop, a duck track is beside, or the boards are ahead."""
+    from microduck_local.brain.tracker import Track
+    p = ChaseParams(hunt_s=3.0)
+
+    def hunting_duck(**kw):
+        b = Chase(p, goal=(3.0, 0.0), bounds=(1.5, 1.25), **kw)
+        b._senses = Senses(t=0.0)
+        b._hunt_u, b._hunt_t0 = 0.0, 0.0
+        return b
+    # Clear ahead: hunts at hunt_speed with a capped turn toward the line.
+    b = hunting_duck()
+    it = b.step(Senses(t=0.5, odom=(0.0, 0.0, 0.6)))
+    assert it.note == "hunt" and it.twist[0] == p.hunt_speed and abs(it.twist[2]) <= p.hunt_wz
+    # Something 0.4 m ahead on the ToF: not a hunt any more.
+    depth = np.full((8, 8), 2000, np.uint16)
+    depth[2:5, 3:5] = 400
+    b = hunting_duck()
+    it = b.step(Senses(t=0.5, odom=(0.0, 0.0, 0.0), tof=TofFrame(t=0.5, depth_mm=depth, valid=np.ones((8, 8), bool)), tof_age=0.0))
+    assert it.note != "hunt" and b._hunt_u is None
+    # A duck track beside: no hunt.
+    b = hunting_duck()
+    b.tracker.tracks.append(Track(id=3, cls="duck", bearing=1.8, elevation=0.0, width=0.5, range=0.15, conf=0.9, born_t=0.0, last_t=0.4))
+    it = b.step(Senses(t=0.5, odom=(0.0, 0.0, 0.0)))
+    assert it.note != "hunt"
+    # The boards 0.3 m ahead in odometry: no hunt.
+    b = hunting_duck()
+    it = b.step(Senses(t=0.5, odom=(1.3, 0.0, 0.0)))
+    assert it.note != "hunt"
