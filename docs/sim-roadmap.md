@@ -6,7 +6,7 @@ microphones and the speaker, BLE proximity, odometry), give the ducks a
 **brain layer** that turns those senses into the same `robot.move` /
 `robot.head` intents the real robot takes, and open a new `/sim` page in the
 viewer where people build worlds, watch what each duck senses, and train ducks
-to follow, map, and play soccer against each other.
+to follow, map, tidy a playroom, and play soccer against each other.
 
 This document is a brainstorm and a plan. Nothing in it is built yet. It was
 written after reading this repo (both checkouts), upstream
@@ -353,6 +353,101 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 11.3 | **Hub round-trip** | Import `pollen-robotics/microduck-policies` into the palette; publish brains and scenario results to the user's Hub account with the existing BYOK token. | M | ★★★ |
 | 11.4 | **Detector dataset export** | Sim frames + labels (ducks, ball, person) as a Hub dataset for training the NPU detector classes the robot does not have yet. | M | ★★★ |
 
+### Track 12: Tidy the playroom (pick up, carry, deliver to a bin)
+
+The request: bring the duck into a room full of scattered toys (bricks,
+socks, blocks), point at a low basket, say "tidy", and have it find each
+pickable object, pick it up with its beak, carry it to the basket, drop it,
+and repeat until the floor is clear. Upstream already ships a ground-pick
+policy; this track is everything around it.
+
+**What upstream gives us, precisely.** The ground-pick policy is a *blind,
+phase-driven* 4-second cycle: the command slots carry `[cos 2πφ, sin 2πφ, 0]`
+and the reward walks the mouth tip to the floor (descent 0–1.5 s), holds
+briefly, then rises with a simulated 10–40 g payload pulling on `mouth_tip`.
+The MJCF has no actuated jaw ("the passive jaw joints are no longer part of
+the articulation"); on the robot the beak is motor slot 9 of 15, driven outside
+the policy and undocumented. So the real primitive is "crouch until the beak
+touches the floor under the head, then rise", and the operator aims the robot
+so the object is under the beak. Everything else in the loop is a *brain*
+problem, which is exactly what the rest of this roadmap builds.
+
+**Where the computation should live.** Three tiers, chosen by rate:
+
+| Rate | What | Where | Why |
+|---|---|---|---|
+| 50 Hz | Walk, carry-walk, ground-pick, stand (reflex ONNX) | Onboard `robotd` | Already true by architecture; `robotd` never blocks on another service. |
+| 5–15 Hz | Detector (objects, basket, duck), ToF, odometry, the tidy FSM, visual-servo approach | Onboard (NPU + CPU) **or** tethered Mac during development | A 320 px INT8 YOLO at ~26 ms is what the NPU already does for ducks; adding classes is a retrain, not a new capability. The FSM is trivial. A tether adds 100–300 ms, fine at these rates. |
+| ≤ 1 Hz | Open-vocabulary designation ("the blue bin", "everything that is a toy"), map memory, planning, data logging | Tethered Mac or cloud | Where a VLM earns its keep: one call per scan, results cached in the map. |
+
+A full **end-to-end VLA** (pixels and language in, 14 joint targets out at
+50 Hz) is the wrong tool here: the deployment contract is *intents*, not
+joints; `robotd` is authoritative on safety; a 1 GB RK3566 cannot host one;
+and the duck has no joint-level teleop to collect the demonstrations a VLA
+needs. What fits is a **VLA over skills**: a language/vision model at the
+brain tier whose actions are `goto(object)`, `pick`, `carry_to(bin)`,
+`release`, with the skills below doing the physics. In the lab this is 2.6
+plus a skill vocabulary. For the first version, a detector plus the scripted
+FSM does the whole loop without any language model, and the lab should prove
+that first; the VLM is an upgrade for designation and open-vocabulary
+"pickable", not a prerequisite.
+
+**The honest hard parts.**
+
+- *Grasp physics.* A beak grasp of a brick or a sock is a contact problem the
+  sim cannot cheaply model (deformables, jaw servo, friction). Plan: model
+  grasp as an **attachment event**: when the beak is closed with the mouth tip
+  within a tolerance of an object's grasp point, a weld constraint attaches
+  it, with success probability as a function of alignment error and object
+  class. Those probabilities are a *dataset* to learn from real attempts
+  (12.8), not a physics claim. The UI labels it as such.
+- *Alignment.* Ground-pick is blind; the approach must put the object under
+  the beak to ±2 cm. That is a visual-servo controller over the detector
+  bearing + ToF floor blob, then a final blind dead-reckoned step, exactly the
+  kick task's "±2 cm placement noise" in reverse.
+- *Carrying while walking.* The walker never trained with a payload in the
+  mouth or the head pitched to hold one. Needs a carry-walk reflex (a
+  `train-walk` variant with a mouth payload DR and a held head pose; ports to
+  an mjlab cfg), plus a check that walking with the head down does not tip the
+  gait. Bricks (2–10 g) are easy; a sock is a pendulum.
+- *Finding the basket again.* Odometry drifts, so "return home" is not enough
+  across a room. The basket needs a re-acquirable signature: a printed marker
+  the NPU can detect, a distinct colour/shape class in the detector, or the
+  spot the duck was NFC-tapped at, refined visually on approach. The rim must
+  sit below the beak (roughly ≤ 10 cm for a 25 cm duck standing), so "short
+  basket" means a tray or a cut-down bin, and the release is "head over rim,
+  open beak".
+- *Pickable or not.* Size class from bbox + ToF distance, on the floor plane,
+  not attached to anything, not the duck; plus a learned graspability score
+  from attempts. Bricks yes, a plush yes, a book no.
+- *Coverage.* The mapping track (5.x) turns "scan the room" into a frontier
+  sweep with remembered object positions in the grid, which becomes the work
+  queue; objects that keep failing get demoted to the end of it.
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 12.1 | **Playroom scenario** | Clutter generator (bricks, blocks, socks, balls, a plush), a low-rim basket with a marker, spawn slots, tidy score = objects in basket / total plus time and drops. | M | ★★★★★ |
+| 12.2 | **Beak grasp as attachment** | Closed-beak intent + mouth-tip tolerance ⇒ weld to the object; release intent breaks it; per-class success curve vs alignment error; payload mass rides along for the carry-walk. Labelled as a model, not physics. | M | ★★★★★ |
+| 12.3 | **Ground-pick in the lab** | Run upstream's ground-pick ONNX (or a lab-trained one via `train-behavior`) as a reflex skill with its 4 s phase in the command slots; verify the return with the payload. | S | ★★★★ |
+| 12.4 | **Visual-servo approach** | Detector bearing + ToF blob ⇒ align the object under the beak; final blind step; success measured against the ±2 cm window. Scripted first, then RL over approach offsets (3.1-style). | M | ★★★★★ |
+| 12.5 | **Carry-walk reflex** | `train-walk` variant with mouth payload DR (10–40 g, matching upstream) and a held head pose; eval: falls per metre while carrying. Ports to an mjlab cfg. | M | ★★★★ |
+| 12.6 | **Deliver and release** | Go-to basket with visual re-acquisition (marker / class), align, head over rim, open beak, verify the object left (payload gone, detector sees it in the bin). | M | ★★★★ |
+| 12.7 | **Tidy FSM** | Scan → Select → Approach → Pick → Verify → Carry → Deliver → Release → repeat; retry budgets, give-up rules, a work queue in the map; the brain inspector shows it. | M | ★★★★★ |
+| 12.8 | **Graspability learning** | Log every attempt (features → success) in sim and, later, on hardware; train a small classifier; feed it back into Select and into 12.2's curves. | M | ★★★ |
+| 12.9 | **Basket designation UX** | Three ways, all in sim: click it in `/sim`; NFC-tap "home" (the robot has two antennas); a printed marker. On the tether: tap it on the live video. | S | ★★★★ |
+| 12.10 | **Compute placement toggle** | Run the brain onboard (in the lab process) or "tethered" with simulated 100–300 ms link latency and dropouts from the noise console; the inspector shows the latency budget per tier. The lesson is *where should this run?* | S | ★★★★ |
+| 12.11 | **Detector classes + export** | Add brick / sock / toy / basket / marker to the geometric detector; render a sim dataset plus real photos; the same INT8 320 px recipe upstream used for ducks, so it runs on the NPU. | M | ★★★★ |
+| 12.12 | **VLM designation (optional)** | One call per scan labels pickables and the bin from a frame ("everything that is a toy, into the blue bin"); tethered or cloud; cached in the map; 2.6's skill vocabulary underneath. | M | ★★★ |
+| 12.13 | **Tidy benchmark** | N objects, time to clear, success rate, drops, collisions; a 10.3 challenge with a leaderboard. | S | ★★★★ |
+
+**Order inside the track:** 12.1 → 12.2 → 12.3 → 12.4 (first pick in sim)
+→ 12.6 + 12.7 (first full loop, one object) → 12.5 (carry properly) →
+12.9 + 12.10 → 12.11 (hardware path) → 12.8, 12.12, 12.13. The first
+screenshot is a duck walking one brick to a tray. Everything through 12.7 is
+a brain over existing reflexes plus one attachment trick, which is why this
+track slots in right after follow-me in the phase plan: it reuses 1.2, 1.3,
+2.1, 2.3, 3.1 and 5.1 and adds only the grasp model and the carry gait.
+
 ## 5. What to build first, and why
 
 Ranked by leverage. Each phase ends in a demo somebody can screenshot.
@@ -375,6 +470,12 @@ replay timeline lands here because the first "why did it lose me?" question
 needs it. Demo: *possess the person, walk around, the duck follows; flip the
 noise to "hostile" and watch the scripted controller fail where the trained
 brain copes*.
+
+**Phase 2b: tidy the playroom (Track 12).**
+The first *useful* behavior, and the one most people asked for once they saw
+the beak. It is follow-me's brain pointed at a brick plus one honest trick
+(grasp as an attachment event) and one reflex variant (carry-walk). Demo:
+*point at a tray, scatter five bricks, watch the duck clear them*.
 
 **Phase 3: many ducks and soccer (Track 4).**
 Highest wow and the strongest community pull, but only worth doing once
