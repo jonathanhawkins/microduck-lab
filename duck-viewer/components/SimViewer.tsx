@@ -14,6 +14,7 @@ import * as THREE from "three";
 import { fetchScene, type DuckFrame, type Scene } from "@/lib/lab";
 import { assignDrag, nearestDuck, type AssignTarget } from "@/lib/assign";
 import { getSelectedDuck, setSelectedDuck } from "@/lib/select";
+import { loadJSON, saveJSON } from "@/lib/persist";
 import {
   depthColor,
   fetchRing,
@@ -559,6 +560,9 @@ export default function SimViewer() {
   const [selected, setSelected] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [possessed, setPossessed] = useState<string | null>(null);
+  // The bottom-left lesson panel folds into a pill, like the lab HUD's
+  // 🎥 controls bar — it is reference text, and it sits over the room.
+  const [lessonOpen, setLessonOpen] = useState(() => loadJSON("simLessonOpen", true));
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
   const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: { left: number; right: number } | null }>({
@@ -577,6 +581,8 @@ export default function SimViewer() {
   const held = useRef<Held>(new Set());
   const drivingRef = useRef(driving);
   drivingRef.current = driving;
+
+  useEffect(() => saveJSON("simLessonOpen", lessonOpen), [lessonOpen]);
 
   useEffect(() => {
     const client = new SimClient(setConnected);
@@ -953,19 +959,38 @@ export default function SimViewer() {
         {client && <Heatmap client={client} duckId={selected} />}
       </div>
 
-      {/* lesson / keys */}
-      <div style={{ ...PANEL, bottom: 10, left: 10, width: 300, color: "#c9d0d8" }}>
-        <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10, marginBottom: 4 }}>
-          What the duck sees
+      {/* lesson / keys — collapsible: it is reference text sitting over the room */}
+      {lessonOpen ? (
+        <div style={{ ...PANEL, bottom: 10, left: 10, width: 300, color: "#c9d0d8" }}>
+          <div style={{ display: "flex", alignItems: "flex-start" }}>
+            <div style={{ flex: 1, color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10, marginBottom: 4 }}>
+              What the duck sees
+            </div>
+            <button
+              onClick={() => setLessonOpen(false)}
+              title="collapse"
+              style={{ background: "none", border: "none", color: "#9aa5b1", cursor: "pointer", fontFamily: "inherit", fontSize: 12, padding: "0 4px", marginLeft: 10, lineHeight: 1 }}
+            >
+              —
+            </button>
+          </div>
+          The walking policy is blind: 61 numbers about its own body, none about the room. The 8×8 time-of-flight
+          matrix on its head is what a brain gets instead: 64 distances, 15 times a second, ~45° wide. Dots are
+          where the sensor <i>claims</i> a surface is. In auto mode a tiny wander brain reads the middle columns
+          and steers toward the open side; it emits only a twist, the same command the real robot takes.
+          <div style={{ marginTop: 6, color: "#9aa5b1" }}>
+            R restart · P drive (WASD/arrows, Q/E strafe) · T ToF · E edit · 1–9 select · Esc · space scrub
+          </div>
         </div>
-        The walking policy is blind: 61 numbers about its own body, none about the room. The 8×8 time-of-flight
-        matrix on its head is what a brain gets instead: 64 distances, 15 times a second, ~45° wide. Dots are
-        where the sensor <i>claims</i> a surface is. In auto mode a tiny wander brain reads the middle columns
-        and steers toward the open side; it emits only a twist, the same command the real robot takes.
-        <div style={{ marginTop: 6, color: "#9aa5b1" }}>
-          R restart · P drive (WASD/arrows, Q/E strafe) · T ToF · E edit · 1–9 select · Esc · space scrub
-        </div>
-      </div>
+      ) : (
+        <button
+          onClick={() => setLessonOpen(true)}
+          title="what the duck sees · keys"
+          style={{ ...PANEL, bottom: 10, left: 10, color: "#c9d0d8", cursor: "pointer" }}
+        >
+          👁 what the duck sees
+        </button>
+      )}
 
       {editor && (
         <SimEditor
