@@ -706,7 +706,8 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                 if w is not None:                      # what the loop spends on the wire, not the sim
                     w.perf["encodeMs"] += 0.05 * ((time.perf_counter() - t_enc) * 1e3 - w.perf.get("encodeMs", 0.0))
                 st.events.clear()
-                st.ring.append(frame)
+                if w is not None:            # a ring of "no world" frames is nothing to save (and a race in the tests)
+                    st.ring.append(frame)
                 dead = []
                 for c in list(st.clients):
                     try:
