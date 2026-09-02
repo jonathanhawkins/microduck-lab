@@ -9,7 +9,9 @@ Format v1 (JSON, saved under microduck_local/scenarios/<name>.json):
                 "mass": 0.0, "rgba": [r, g, b, a]}],     # mass 0 = static scenery
      "balls": [{"pos": [x, y], "radius": 0.035, "mass": 0.015}],
      "ducks": [{"id": "d0", "spawn": [x, y, yaw], "policy": "pollen:alpha_walking",
-                "tof": "datasheet"}],                   # tof: noise preset or null
+                "tof": "datasheet", "detector": "datasheet", "brain": "follow"}],
+     "persons": [{"id": "p0", "pos": [x, y], "yaw": 0.0, "path": [[x, y], ...],
+                  "speed": 0.3, "radius": 0.2, "height": 1.0}],  # kinematic walkers
      "collision": "walk"}                               # "walk" | "all" robot MJCF
 
 Everything is metres, radians, world frame, z up. Validation is strict on
@@ -30,6 +32,7 @@ SCENARIO_VERSION = 1
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 DUCK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
 MAX_DUCKS = 12
+MAX_PERSONS = 4
 MAX_OBJECTS = 200
 MAX_FLOOR_M = 20.0
 MAX_WALL_HEIGHT_M = 2.0
@@ -70,6 +73,20 @@ class Duck:
     spawn: tuple[float, float, float]  # x, y, yaw
     policy: str | None = None          # palette id; None = zero-action stand
     tof: str | None = "datasheet"      # ToF noise preset, None = no sensor
+    detector: str | None = "datasheet" # camera+NPU detector preset, None = none
+    brain: str | None = None           # brain kind in auto mode; None = wander if ToF else script
+
+
+@dataclass
+class Person:
+    """A kinematic walker (a mocap capsule): what a duck follows."""
+    id: str
+    pos: tuple[float, float]
+    yaw: float = 0.0
+    path: list[tuple[float, float]] = field(default_factory=list)   # waypoints, looped
+    speed: float = 0.3
+    radius: float = 0.2
+    height: float = 1.0
 
 
 @dataclass
@@ -81,6 +98,7 @@ class Scenario:
     boxes: list[Box] = field(default_factory=list)
     balls: list[Ball] = field(default_factory=list)
     ducks: list[Duck] = field(default_factory=list)
+    persons: list[Person] = field(default_factory=list)
     collision: str = "walk"
     version: int = SCENARIO_VERSION
 
@@ -185,14 +203,39 @@ def validate_scenario(raw: dict) -> Scenario:
         tof = d.get("tof", "datasheet")
         if tof is not None and tof not in TOF_PRESETS:
             raise ScenarioError(f"ducks[{i}].tof must be one of {TOF_PRESETS} or null")
-        ducks.append(Duck(did, spawn, policy, tof))
+        det = d.get("detector", "datasheet")
+        if det is not None and det not in TOF_PRESETS:
+            raise ScenarioError(f"ducks[{i}].detector must be one of {TOF_PRESETS} or null")
+        brain = d.get("brain")
+        if brain is not None and (not isinstance(brain, str) or not DUCK_ID_RE.match(brain)):
+            raise ScenarioError(f"ducks[{i}].brain must be a brain kind name or null")
+        ducks.append(Duck(did, spawn, policy, tof, det, brain))
     if len(ducks) > MAX_DUCKS:
         raise ScenarioError(f"more than {MAX_DUCKS} ducks")
+    persons = []
+    for i, q in enumerate(raw.get("persons", []) or []):
+        if not isinstance(q, dict):
+            raise ScenarioError(f"persons[{i}] must be an object")
+        pid = q.get("id", f"p{i}")
+        if not isinstance(pid, str) or not DUCK_ID_RE.match(pid) or pid in seen:
+            raise ScenarioError(f"persons[{i}].id {pid!r} bad or duplicate")
+        seen.add(pid)
+        path = [_vec(w, 2, f"persons[{i}].path[{k}]", -bound, bound)
+                for k, w in enumerate(q.get("path", []) or [])]
+        persons.append(Person(
+            pid, _vec(q.get("pos", [0.0, 0.0]), 2, f"persons[{i}].pos", -bound, bound),
+            _num(q.get("yaw", 0.0), f"persons[{i}].yaw", -2 * math.pi, 2 * math.pi),
+            path,
+            _num(q.get("speed", 0.3), f"persons[{i}].speed", 0.0, 1.5),
+            _num(q.get("radius", 0.2), f"persons[{i}].radius", 0.05, 0.5),
+            _num(q.get("height", 1.0), f"persons[{i}].height", 0.2, 2.0)))
+    if len(persons) > MAX_PERSONS:
+        raise ScenarioError(f"more than {MAX_PERSONS} persons")
     collision = raw.get("collision", "walk")
     if collision not in ("walk", "all"):
         raise ScenarioError("collision must be 'walk' or 'all'")
     return Scenario(name=name, seed=seed, floor=floor, walls=walls, boxes=boxes,
-                    balls=balls, ducks=ducks, collision=collision)
+                    balls=balls, ducks=ducks, persons=persons, collision=collision)
 
 
 def load_scenario(path: Path) -> Scenario:

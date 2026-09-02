@@ -38,13 +38,13 @@ jobs:
             uv pip install --python .venv torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
           fi
           uv pip install --python .venv -e . pytest
-      - name: Tests (macOS: everything)
+      - name: "Tests (macOS: everything)"
         if: runner.os == 'macOS'
         run: .venv/bin/python -m pytest tests -q -p no:cacheprovider
-      - name: Tests (Linux: everything but the Apple-recorded golden bits)
+      - name: "Tests (Linux: everything but the Apple-recorded golden bits)"
         if: runner.os == 'Linux'
         run: .venv/bin/python -m pytest tests -q -p no:cacheprovider --deselect tests/test_step_perf_parity.py --deselect tests/test_bam_perf_parity.py
-      - name: Tests (Windows: spawn-safe modules + pure contract tests)
+      - name: "Tests (Windows: spawn-safe modules + pure contract tests)"
         if: runner.os == 'Windows'
         run: .venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/test_sensors.py tests/test_world.py tests/test_arena.py tests/test_brain.py tests/test_world_server.py tests/test_env_contract.py tests/test_behaviors.py tests/test_clips.py
 

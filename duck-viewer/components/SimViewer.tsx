@@ -23,6 +23,7 @@ import {
   loadWorld,
   saveRecording,
   SimClient,
+  detectionRay,
   tofZonePoints,
   TOF_PRESETS,
   type FrameEvent,
@@ -163,8 +164,27 @@ function Dynamics({ scenario, client }: { scenario: Scenario | null; client: Sim
   });
   if (!scenario) return null;
   const freeBoxes = scenario.boxes.map((b, i) => ({ b, i })).filter(({ b }) => b.mass > 0);
+  const persons = scenario.persons ?? [];
   return (
     <group>
+      {persons.map((q) => (
+        <group
+          key={q.id}
+          ref={(el) => {
+            if (el) refs.current.set(q.id, el);
+          }}
+        >
+          {/* a capsule standing on the floor; the nose cone shows its heading */}
+          <mesh rotation={[Math.PI / 2, 0, 0]}>
+            <capsuleGeometry args={[q.radius, Math.max(q.height - 2 * q.radius, 0.02), 6, 16]} />
+            <meshStandardMaterial color="#5a8dd6" roughness={0.8} transparent opacity={0.85} />
+          </mesh>
+          <mesh position={[q.radius + 0.03, 0, 0]} rotation={[0, 0, -Math.PI / 2]}>
+            <coneGeometry args={[0.04, 0.08, 10]} />
+            <meshStandardMaterial color="#9cc2ff" />
+          </mesh>
+        </group>
+      ))}
       {scenario.balls.map((ball, i) => (
         <group
           key={`ball${i}`}
@@ -304,6 +324,56 @@ function EditorFloor({ state, onClick }: { state: EditorState; onClick: (x: numb
         </mesh>
       )}
     </group>
+  );
+}
+
+const MAX_DET = 12 * 16;
+
+/** Detector overlay: one ray per detection from the head camera, as long as
+ *  the width-derived range, colored by class (person blue, duck amber, ball
+ *  orange, ghost grey); a small ring at its end. */
+function DetOverlay({ scene, client, enabled }: { scene: Scene; client: SimClient; enabled: boolean }) {
+  const lines = useRef<THREE.LineSegments>(null);
+  const jawIdx = useMemo(() => scene.bodies.indexOf("jaw_soft"), [scene]);
+  const pos = useMemo(() => new Float32Array(MAX_DET * 2 * 3), []);
+  const colors = useMemo(() => new Float32Array(MAX_DET * 2 * 3), []);
+  const col = useMemo(() => new THREE.Color(), []);
+  useFrame(() => {
+    const ls = lines.current;
+    if (!ls) return;
+    const f = client.frame;
+    let n = 0;
+    if (f && enabled && jawIdx >= 0) {
+      const sel = getSelectedDuck();
+      for (const d of f.ducks) {
+        const det = d.sensors?.det;
+        const jaw = d.bodies[jawIdx];
+        if (!det || !jaw || (sel && d.id !== sel)) continue;
+        for (const it of det.items) {
+          if (n >= MAX_DET) break;
+          const { origin, dir } = detectionRay(jaw, it);
+          const L = Math.min(it.range, 4);
+          const o = n * 6;
+          pos[o] = origin[0]; pos[o + 1] = origin[1]; pos[o + 2] = origin[2];
+          pos[o + 3] = origin[0] + dir[0] * L; pos[o + 4] = origin[1] + dir[1] * L; pos[o + 5] = origin[2] + dir[2] * L;
+          col.set(!it.name ? "#8a8f98" : it.cls === "person" ? "#5a8dd6" : it.cls === "ball" ? "#ff8c00" : it.cls === "duck" ? "#f2b632" : "#43c2b8");
+          for (let k = 0; k < 2; k++) col.toArray(colors, o + k * 3);
+          n++;
+        }
+      }
+    }
+    (ls.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (ls.geometry.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+    ls.geometry.setDrawRange(0, n * 2);
+  });
+  return (
+    <lineSegments ref={lines} frustumCulled={false}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[pos, 3]} />
+        <bufferAttribute attach="attributes-color" args={[colors, 3]} />
+      </bufferGeometry>
+      <lineBasicMaterial vertexColors transparent opacity={0.9} />
+    </lineSegments>
   );
 }
 
@@ -537,6 +607,7 @@ export default function SimViewer() {
   const [showTof, setShowTof] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [possessed, setPossessed] = useState<string | null>(null);
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
   const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number }>({
@@ -586,6 +657,7 @@ export default function SimViewer() {
         kbps: 0.7 * s.kbps + 0.3 * kbps,
       }));
       setSelected(getSelectedDuck());
+      setPossessed(f?.possessed ?? null);
     }, 250);
     // Drive: while P-mode is on, held keys become one twist, re-sent every
     // 100 ms (the lab holds a manual command for 6 s after the last one).
@@ -716,6 +788,7 @@ export default function SimViewer() {
           {client && <Dynamics scenario={scenario} client={client} />}
           {scene && client && <SimDucks scene={scene} client={client} />}
           {scene && client && <TofOverlay scene={scene} client={client} enabled={showTof} />}
+          {scene && client && <DetOverlay scene={scene} client={client} enabled={showTof} />}
         </group>
         {client && <SimTargets client={client} />}
         <OrbitControls
@@ -753,8 +826,26 @@ export default function SimViewer() {
           onClick={() => setDriving((v) => !v)}
           title="P"
         >
-          {driving ? "🎮 driving (WASD)" : "🎮 drive"}
+          {driving ? (possessed ? `🎮 driving ${possessed}` : "🎮 driving ducks") : "🎮 drive"}
         </button>
+        {(scenario?.persons?.length ?? 0) > 0 && (
+          <select
+            value={possessed ?? ""}
+            onChange={(e) => {
+              client?.sendPossess(e.target.value || null);
+              if (e.target.value) setDriving(true);
+            }}
+            style={{ ...BTN, padding: "3px 6px" }}
+            title="possess a person: your keys move them, the ducks keep their brains"
+          >
+            <option value="">drive: ducks</option>
+            {scenario!.persons!.map((q) => (
+              <option key={q.id} value={q.id}>
+                be {q.id}
+              </option>
+            ))}
+          </select>
+        )}
         <button style={{ ...BTN, borderColor: showTof ? "#43c2b8" : "#2b313b" }} onClick={() => setShowTof((v) => !v)} title="T">
           ToF overlay
         </button>
@@ -787,25 +878,90 @@ export default function SimViewer() {
               falls {selDuck.falls} · speed {selDuck.speed.toFixed(2)} / {selDuck.cmdSpeed.toFixed(2)} m/s
             </div>
             <div style={{ color: selDuck.brain.kind === "wander" ? "#43c2b8" : "#9aa5b1" }}>
-              brain {selDuck.brain.kind} · {selDuck.brain.state} · wz {selDuck.brain.cmd[2].toFixed(2)}
+              {selDuck.brain.kind} · {selDuck.brain.state} · vx {selDuck.brain.cmd[0].toFixed(2)} wz {selDuck.brain.cmd[2].toFixed(2)}
             </div>
-            {selDuck.tof && (
-              <div style={{ marginTop: 4 }}>
-                noise{" "}
-                <select
-                  value={selDuck.tof}
-                  onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset)}
-                  style={{ ...BTN, padding: "1px 4px" }}
-                >
-                  {TOF_PRESETS.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                  {selDuck.tof === "custom" && <option value="custom">custom</option>}
-                </select>
+            <div style={{ marginTop: 4, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              brain{" "}
+              <select
+                value={selDuck.brain.kind === "manual" ? "" : selDuck.brain.kind}
+                onChange={(e) => client?.sendBrain(selDuck.id, e.target.value)}
+                style={{ ...BTN, padding: "1px 4px" }}
+              >
+                {(world?.brains ?? ["wander", "follow", "script"]).map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+                {selDuck.brain.kind === "manual" && <option value="">manual</option>}
+              </select>
+              <label title="apply the brain's gaze intent to the walker's head command (the shipped walker never trained with one)">
+                <input type="checkbox" checked={selDuck.headApplied} onChange={(e) => client?.sendHead(selDuck.id, e.target.checked)} /> head
+              </label>
+            </div>
+            {selDuck.brain.inputs && (selDuck.brain.inputs.tof || selDuck.brain.inputs.det) && (
+              <div style={{ marginTop: 4, display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 8px", color: "#9aa5b1" }}>
+                {(["tof", "det"] as const).map((k) => {
+                  const inp = selDuck.brain.inputs[k];
+                  if (!inp) return null;
+                  const age = inp.age === null ? null : Math.round(inp.age * 1000);
+                  return [
+                    <span key={`${k}l`}>{k}</span>,
+                    <span key={`${k}v`} style={{ color: inp.stale ? "#f2b632" : "#43c2b8" }}>
+                      {age === null ? "never" : `${age} ms`}{inp.stale ? " · stale" : ""}{k === "det" && "n" in inp ? ` · ${inp.n} seen` : ""}
+                    </span>,
+                  ];
+                })}
+                {selDuck.brain.inputs.target && (
+                  <>
+                    <span>target</span>
+                    <span>
+                      {(selDuck.brain.inputs.target.bearing * 57.3).toFixed(0)}° · {selDuck.brain.inputs.target.range?.toFixed(2) ?? "?"} m · {selDuck.brain.inputs.target.since.toFixed(1)} s ago
+                    </span>
+                  </>
+                )}
               </div>
             )}
+            {selDuck.sensors?.det && (
+              <div style={{ marginTop: 4, color: "#9aa5b1" }}>
+                sees:{" "}
+                {selDuck.sensors.det.items.length
+                  ? selDuck.sensors.det.items.map((it, i) => (
+                      <span key={i} style={{ color: it.name ? "#c9d0d8" : "#8a8f98" }}>
+                        {it.cls} {(it.bearing * 57.3).toFixed(0)}° {it.range.toFixed(1)} m{i < selDuck.sensors!.det!.items.length - 1 ? ", " : ""}
+                      </span>
+                    ))
+                  : "nothing"}
+                <span title="person / ball / marker are simulated-only classes today; the robot's NPU detects ducks"> ⓘ</span>
+              </div>
+            )}
+            <div style={{ marginTop: 4, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              {selDuck.tof && (
+                <>
+                  tof{" "}
+                  <select value={selDuck.tof} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "tof")} style={{ ...BTN, padding: "1px 4px" }}>
+                    {TOF_PRESETS.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                    {selDuck.tof === "custom" && <option value="custom">custom</option>}
+                  </select>
+                </>
+              )}
+              {selDuck.detector && (
+                <>
+                  det{" "}
+                  <select value={selDuck.detector} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "det")} style={{ ...BTN, padding: "1px 4px" }}>
+                    {TOF_PRESETS.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                    {selDuck.detector === "custom" && <option value="custom">custom</option>}
+                  </select>
+                </>
+              )}
+            </div>
           </div>
         ) : (
           <div style={{ color: "#9aa5b1", marginBottom: 8 }}>click a duck (or press 1–9)</div>

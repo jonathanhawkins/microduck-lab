@@ -26,10 +26,10 @@ import mujoco
 import numpy as np
 
 from .. import contract as C
-from ..sensors import TofNoise, TofSensor
+from ..sensors import Detector, DetectorNoise, Target, TofNoise, TofSensor
 from ..walk_env import MicroduckWalkEnv
 from .compose import DuckAddress, compose, spawn_duck
-from .scenario import Scenario
+from .scenario import Person, Scenario
 
 Infer = Callable[[np.ndarray], np.ndarray]
 _NEG_Z = np.array([0.0, 0.0, -1.0], np.float32)
@@ -48,6 +48,7 @@ class WorldDuck:
     infer: Infer = zero_infer
     policy_id: str | None = None
     tof: TofSensor | None = None
+    detector: Detector | None = None
     max_steps: int = int(round(30.0 / C.CTRL_DT))
     last_action: np.ndarray = field(default_factory=lambda: np.zeros(C.NUM_JOINTS, np.float32))
     prev_joint_vel: np.ndarray = field(default_factory=lambda: np.zeros(C.NUM_JOINTS, np.float32))
@@ -125,6 +126,59 @@ class WorldDuck:
         self.head_cmd[:] = 0.0 if head is None else np.asarray(head, np.float32)
 
 
+class WorldPerson:
+    """A mocap capsule walking its waypoints at a set speed, or driven by a
+    possessing human (`cmd` = [vx, vy, wz] in its own heading frame)."""
+
+    def __init__(self, model: mujoco.MjModel, spec: Person):
+        self.spec = spec
+        self.id = spec.id
+        self.body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, spec.id)
+        self.mocap = int(model.body_mocapid[self.body])
+        self.x, self.y, self.yaw = spec.pos[0], spec.pos[1], spec.yaw
+        self.wp = 0
+        self.cmd: np.ndarray | None = None      # possessed: heading-frame twist
+        self.possessed = False
+
+    def reset(self, data: mujoco.MjData) -> None:
+        self.x, self.y, self.yaw = self.spec.pos[0], self.spec.pos[1], self.spec.yaw
+        self.wp = 0
+        self.cmd = None
+        self.write(data)
+
+    def write(self, data: mujoco.MjData) -> None:
+        data.mocap_pos[self.mocap] = [self.x, self.y, self.spec.height / 2]
+        data.mocap_quat[self.mocap] = [np.cos(self.yaw / 2), 0.0, 0.0, np.sin(self.yaw / 2)]
+
+    def step(self, data: mujoco.MjData, dt: float) -> None:
+        if self.possessed and self.cmd is not None:
+            vx, vy, wz = (float(v) for v in self.cmd)
+            self.yaw += wz * dt
+            c, s_ = np.cos(self.yaw), np.sin(self.yaw)
+            self.x += (vx * c - vy * s_) * dt
+            self.y += (vx * s_ + vy * c) * dt
+        elif self.spec.path and self.spec.speed > 0:
+            tx, ty = self.spec.path[self.wp]
+            dx, dy = tx - self.x, ty - self.y
+            dist = float(np.hypot(dx, dy))
+            if dist < 0.05:
+                self.wp = (self.wp + 1) % len(self.spec.path)
+            else:
+                target_yaw = float(np.arctan2(dy, dx))
+                err = float(np.arctan2(np.sin(target_yaw - self.yaw), np.cos(target_yaw - self.yaw)))
+                self.yaw += float(np.clip(err, -1.5 * dt, 1.5 * dt))
+                step = min(self.spec.speed * dt, dist)
+                self.x += step * np.cos(self.yaw)
+                self.y += step * np.sin(self.yaw)
+        self.write(data)
+
+    def payload(self) -> dict:
+        return {"id": self.id, "kind": "person",
+                "pose": [round(self.x, 4), round(self.y, 4), round(self.spec.height / 2, 4),
+                         round(float(np.cos(self.yaw / 2)), 4), 0.0, 0.0, round(float(np.sin(self.yaw / 2)), 4)],
+                "possessed": self.possessed}
+
+
 class World:
     def __init__(self, scenario: Scenario, infer_for: dict[str, Infer] | None = None,
                  max_episode_s: float = 30.0, seed: int | None = None):
@@ -136,6 +190,16 @@ class World:
         self.rng = np.random.default_rng(scenario.seed if seed is None else seed)
         infer_for = infer_for or {}
         self.ducks: dict[str, WorldDuck] = {}
+        self.persons: dict[str, WorldPerson] = {
+            p.id: WorldPerson(self.model, p) for p in scenario.persons}
+        # What a detector can find: every duck's trunk, every ball, every person.
+        targets = [Target(d.id, "duck", mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                                          f"{d.id}/trunk_base"), 0.10)
+                   for d in scenario.ducks]
+        targets += [Target(f"ball{i}", "ball", mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                                                f"ball{i}"), b.radius)
+                    for i, b in enumerate(scenario.balls)]
+        targets += [Target(p.id, "person", self.persons[p.id].body, p.radius) for p in scenario.persons]
         for d in scenario.ducks:
             adr = DuckAddress.resolve(self.model, d.id)
             tof = None
@@ -143,9 +207,14 @@ class World:
                 tof = TofSensor(self.model, site=adr.prefix + "tof",
                                 noise=TofNoise.preset(d.tof),
                                 seed=int(self.rng.integers(0, 2**31 - 1)))
+            det = None
+            if d.detector is not None:
+                det = Detector(self.model, site=adr.prefix + "head_camera",
+                               noise=DetectorNoise.preset(d.detector), targets=targets,
+                               seed=int(self.rng.integers(0, 2**31 - 1)))
             self.ducks[d.id] = WorldDuck(
                 id=d.id, adr=adr, spawn=d.spawn, infer=infer_for.get(d.id, zero_infer),
-                policy_id=d.policy, tof=tof,
+                policy_id=d.policy, tof=tof, detector=det,
                 max_steps=int(round(max_episode_s / C.CTRL_DT)))
         # Body ranges per duck: the attached subtree is contiguous after the
         # trunk, so the viewer's per-duck body list is one slice.
@@ -162,7 +231,7 @@ class World:
                 continue
             b = int(self.model.jnt_bodyid[j])
             name = self.model.body(b).name
-            if "/" in name:
+            if "/" in name or name in self.persons:
                 continue
             kind = "ball" if name.startswith("ball") else "box"
             self.objects.append((name, kind, b))
@@ -176,6 +245,8 @@ class World:
         mujoco.mj_resetData(self.model, self.data)
         self.t = 0.0
         self.tick = 0
+        for p in self.persons.values():
+            p.reset(self.data)
         for d in self.ducks.values():
             self._respawn(d)
         mujoco.mj_forward(self.model, self.data)
@@ -191,6 +262,8 @@ class World:
         d.episodes += 1
         if d.tof is not None:
             d.tof.reset()
+        if d.detector is not None:
+            d.detector.reset()
 
     def reset_duck(self, duck_id: str) -> None:
         d = self.ducks[duck_id]
@@ -212,6 +285,8 @@ class World:
             raw = np.asarray(d.infer(obs), np.float32)
             d.last_action = raw.copy()
             data.ctrl[d.adr.actuators] = C.DEFAULT_POSE + raw.clip(-4.0, 4.0)
+        for p in self.persons.values():
+            p.step(data, C.CTRL_DT)
         for _ in range(C.DECIMATION):
             mujoco.mj_step(m, data)
         self.t += C.CTRL_DT
@@ -231,6 +306,8 @@ class World:
         for d in self.ducks.values():
             if d.tof is not None:
                 d.tof.sample(data, self.t)
+            if d.detector is not None:
+                d.detector.sample(data, self.t)
         t2 = time.perf_counter()
         a = 0.02
         self.perf["stepMs"] += a * ((t1 - t0) * 1e3 - self.perf["stepMs"])
@@ -255,7 +332,22 @@ class World:
 
     def sensors_payload(self, duck_id: str) -> dict | None:
         d = self.ducks[duck_id]
-        if d.tof is None or d.tof.last is None:
-            return None
-        return {"tof": {**d.tof.last.as_payload(),
-                        "age": round(self.t - d.tof.last.t, 4)}}
+        out: dict = {}
+        if d.tof is not None and d.tof.last is not None:
+            out["tof"] = {**d.tof.last.as_payload(), "age": round(self.t - d.tof.last.t, 4)}
+        if d.detector is not None and d.detector.last is not None:
+            f = d.detector.last
+            out["det"] = {"t": round(f.t, 4), "age": round(self.t - f.t, 4),
+                          "items": [x.as_payload() for x in f.detections]}
+        return out or None
+
+    def persons_payload(self) -> list[dict]:
+        return [p.payload() for p in self.persons.values()]
+
+    def possess(self, person_id: str | None) -> None:
+        """Hand one person to a human (None releases all). A possessed person
+        follows `cmd` instead of its path."""
+        for p in self.persons.values():
+            p.possessed = p.id == person_id
+            if not p.possessed:
+                p.cmd = None

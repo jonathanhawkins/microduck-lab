@@ -49,18 +49,18 @@ def test_sky_rows_and_dropouts_are_ignored():
 
 def test_turn_memory_and_stuck_spin():
     w = Wander(WanderParams(), stuck_s=1.0, unstick_s=0.5)
-    assert w.step(None, None, 0.0) == (0.0, 0.0, 0.0) and w.state == "blind"
+    assert w.decide(None, None, 0.0) == (0.0, 0.0, 0.0) and w.state == "blind"
     f = frame(3000, c4=500, c5=500, c6=500, c7=500)
-    assert w.step(f, None, 0.1)[2] > 0 and w.state == "steer"
+    assert w.decide(f, None, 0.1)[2] > 0 and w.state == "steer"
     # A nearly symmetric frame keeps the remembered direction.
     sym = frame(3000, c2=500, c3=500, c4=500, c5=500)
-    assert w.step(sym, None, 0.2)[2] > 0
+    assert w.decide(sym, None, 0.2)[2] > 0
     # Forward command, no progress for > stuck_s → an unstick spin.
     clear = frame(3000)
     for k in range(12):
-        out = w.step(clear, None, 1.0 + k * 0.1, speed=0.0)
+        out = w.decide(clear, None, 1.0 + k * 0.1, speed=0.0)
     assert w.state == "unstick" and out[0] == 0.0 and abs(out[2]) == 1.0
-    assert w.step(clear, None, 2.7, speed=0.0)[0] == 0.3 and w.state == "cruise"
+    assert w.decide(clear, None, 2.7, speed=0.0)[0] == 0.3 and w.state == "cruise"
 
 
 @pytest.mark.skipif(not C.SCENE_WALK_XML.exists(), reason="microduck_rl checkout not found")
@@ -82,11 +82,45 @@ def test_wander_keeps_a_walking_duck_off_the_wall():
     min_gap = 9.0
     for _ in range(int(6.0 / C.CTRL_DT)):
         tof = d.tof.last
-        cmd = w.step(None if tof is None else tof.depth_mm, None if tof is None else tof.valid,
-                     world.t, d.heading_speed(world.data))
+        cmd = w.decide(None if tof is None else tof.depth_mm, None if tof is None else tof.valid,
+                       world.t, d.heading_speed(world.data))
         d.set_cmd(world.data, cmd)
         world.step()
         min_gap = min(min_gap, 1.0 - float(d.trunk_pos(world.data)[0]))
     assert d.falls == 0
     assert min_gap > 0.15, min_gap            # never got its beak on the wall
     assert w.state in ("steer", "cruise", "spin")
+
+
+@pytest.mark.skipif(not C.SCENE_WALK_XML.exists(), reason="microduck_rl checkout not found")
+def test_follow_brain_tracks_a_walking_person():
+    import onnxruntime as ort
+
+    from microduck_local.brain import Follow, Senses
+    from microduck_local.world import Duck, Person, Scenario, World
+    path = C.MICRODUCK_RL_DIR.parent / "microduck" / "policies" / "alpha_walking.onnx"
+    if not path.exists():
+        pytest.skip("upstream policies not checked out")
+    sess = ort.InferenceSession(str(path))
+    nm = sess.get_inputs()[0].name
+    sc = Scenario(name="fm", floor=(8, 8),
+                  ducks=[Duck("d0", (0.0, 0.0, 0.0), None, "ideal", "ideal")],
+                  persons=[Person("p0", (1.0, 0.0), 0.0, path=[(2.5, 0.0), (2.5, 1.0)], speed=0.2)])
+    world = World(sc, infer_for={"d0": lambda o: sess.run(None, {nm: o[None]})[0][0].astype(np.float32)})
+    d, p = world.ducks["d0"], world.persons["p0"]
+    brain = Follow()
+    gaps, states = [], set()
+    for _ in range(int(12.0 / C.CTRL_DT)):
+        tof, det = d.tof.last, d.detector.last
+        intent = brain.step(Senses(t=world.t, tof=tof, tof_age=None if tof is None else world.t - tof.t,
+                                   det=det, det_age=None if det is None else world.t - det.t,
+                                   speed=d.heading_speed(world.data)))
+        d.set_cmd(world.data, intent.twist)
+        world.step()
+        states.add(brain.state)
+        gaps.append(float(np.hypot(p.x - d.trunk_pos(world.data)[0], p.y - d.trunk_pos(world.data)[1])))
+    assert d.falls == 0
+    assert "approach" in states
+    # The person walked ~2.4 m away and around a corner; the duck kept up.
+    assert gaps[-1] < 1.6, gaps[-1]
+    assert min(gaps[-100:]) > 0.35            # …without walking into it

@@ -11,7 +11,8 @@ export const TOF_PRESETS: TofPreset[] = ["ideal", "datasheet", "hostile"];
 export interface ScenarioWall { from: [number, number]; to: [number, number]; height: number; thickness: number }
 export interface ScenarioBox { pos: [number, number, number]; size: [number, number, number]; yaw: number; mass: number; rgba: [number, number, number, number] }
 export interface ScenarioBall { pos: [number, number]; radius: number; mass: number }
-export interface ScenarioDuck { id: string; spawn: [number, number, number]; policy: string | null; tof: TofPreset | null }
+export interface ScenarioDuck { id: string; spawn: [number, number, number]; policy: string | null; tof: TofPreset | null; detector?: TofPreset | null; brain?: string | null }
+export interface ScenarioPerson { id: string; pos: [number, number]; yaw: number; path: [number, number][]; speed: number; radius: number; height: number }
 export interface Scenario {
   version: number;
   name: string;
@@ -21,6 +22,7 @@ export interface Scenario {
   boxes: ScenarioBox[];
   balls: ScenarioBall[];
   ducks: ScenarioDuck[];
+  persons?: ScenarioPerson[];
   collision: "walk" | "all";
 }
 export interface ScenarioListing { name: string; builtin: boolean; ducks: number; objects: number; modified: number | null }
@@ -90,6 +92,13 @@ export function tofZonePoints(jaw: number[], mm: number[]): { origin: [number, n
   });
   return { origin, pts };
 }
+export interface DetectionItem { cls: string; name: string; bearing: number; elevation: number; width: number; range: number; conf: number }
+export interface DetPayload { t: number; age: number; items: DetectionItem[] }
+export interface BrainInputs {
+  tof?: { age: number | null; stale: boolean; max: number };
+  det?: { age: number | null; stale: boolean; max: number; n: number };
+  target?: { bearing: number; range: number | null; since: number } | null;
+}
 export interface SimDuck {
   id: string;
   name: string;
@@ -101,13 +110,15 @@ export interface SimDuck {
   cmdSpeed: number;
   steerable: boolean;
   tof: TofPreset | "custom" | null;
-  /** Who is steering this duck this tick: its own wander brain (auto mode,
-   *  ducks with a ToF), the demo script (blind ducks), or you (manual). */
-  brain: { kind: "wander" | "script" | "manual"; state: string; cmd: [number, number, number] };
+  detector: TofPreset | "custom" | null;
+  /** Who is steering this duck this tick: a brain from the lab's registry
+   *  (auto mode), the demo script (blind ducks), or you (manual). */
+  brain: { kind: string; state: string; cmd: [number, number, number]; head?: number[]; note?: string; inputs: BrainInputs };
+  headApplied: boolean;
   bodies: number[][];
-  sensors: { tof: TofPayload } | null;
+  sensors: { tof?: TofPayload; det?: DetPayload } | null;
 }
-export interface SimObject { id: string; kind: "ball" | "box"; pose: number[] }
+export interface SimObject { id: string; kind: "ball" | "box" | "person"; pose: number[]; possessed?: boolean }
 export interface SimFrame {
   t: number;
   tick: number;
@@ -119,12 +130,29 @@ export interface SimFrame {
   events: string[];
   ducks: SimDuck[];
   objects: SimObject[];
+  possessed: string | null;
 }
 export interface WorldInfo {
   scenario: Scenario | null;
   loading: boolean;
-  ducks: Omit<SimDuck, "bodies" | "sensors">[];
+  ducks: Omit<SimDuck, "bodies" | "sensors" | "brain" | "headApplied">[];
   presets: TofPreset[];
+  brains: string[];
+}
+
+// The head camera: the MJCF `head_camera` site, x-forward, on jaw_soft.
+export const CAM_SITE_POS: [number, number, number] = [0.0155, -0.0000913778, -0.0733];
+export const CAM_SITE_QUAT_WXYZ: [number, number, number, number] = [0.707107, 0, 0.707107, 0];
+
+/** World-frame ray for one detection (origin + unit direction) from the jaw pose. */
+export function detectionRay(jaw: number[], d: DetectionItem): { origin: [number, number, number]; dir: [number, number, number] } {
+  const jq = [jaw[3], jaw[4], jaw[5], jaw[6]];
+  const off = quatRotate(jq, CAM_SITE_POS);
+  const origin: [number, number, number] = [jaw[0] + off[0], jaw[1] + off[1], jaw[2] + off[2]];
+  const sq = quatMul(jq, CAM_SITE_QUAT_WXYZ);
+  const cb = Math.cos(d.bearing), sb = Math.sin(d.bearing), ce = Math.cos(d.elevation), se = Math.sin(d.elevation);
+  const local: [number, number, number] = [cb * ce, sb * ce, se];
+  return { origin, dir: quatRotate(sq, local) };
 }
 
 export async function fetchScenarios(): Promise<ScenarioListing[]> {
@@ -259,7 +287,10 @@ export class SimClient {
   sendCmd(cmd: [number, number, number]) { this.send({ cmd }); }
   sendReset() { this.send({ reset: true }); }
   sendAssign(duck: string, policy: string) { this.send({ assign: { duck, policy } }); }
-  sendNoise(duck: string, preset: TofPreset) { this.send({ noise: { duck, preset } }); }
+  sendNoise(duck: string, preset: TofPreset, sensor: "tof" | "det" = "tof") { this.send({ noise: { duck, preset, sensor } }); }
+  sendBrain(duck: string, kind: string) { this.send({ brain: { duck, kind } }); }
+  sendPossess(person: string | null) { this.send({ possess: person }); }
+  sendHead(duck: string, apply: boolean) { this.send({ head: { duck, apply } }); }
   close() {
     this.closed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);

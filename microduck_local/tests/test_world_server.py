@@ -137,3 +137,38 @@ def test_ring_records_without_a_client_and_saves_a_recording(app, tmp_path):
         assert rec["frames"][0]["tick"] <= rec["frames"][-1]["tick"]
         assert c.delete("/recordings/take1").status_code == 200
         assert c.get("/recordings/take1").status_code == 404
+
+
+def test_follow_me_scenario_persons_brains_and_possess(app):
+    with TestClient(app) as c:
+        info = c.post("/world/load", json={"scenario": "follow-me"}).json()
+        assert info["ducks"][0]["detector"] == "datasheet" and "follow" in info["brains"]
+        with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+            frame = None
+            for _ in range(8):
+                frame = ws.receive_json()
+            d = frame["ducks"][0]
+            assert d["brain"]["kind"] == "follow" and "inputs" in d["brain"]
+            assert d["brain"]["inputs"]["det"]["max"] > 0 and d["headApplied"] is False
+            persons = [o for o in frame["objects"] if o["kind"] == "person"]
+            assert persons and persons[0]["id"] == "p0" and persons[0]["possessed"] is False
+            assert frame["possessed"] is None
+            # Possess the person: the manual command drives IT, the duck keeps its brain.
+            ws.send_text(json.dumps({"possess": "p0"}))
+            ws.send_text(json.dumps({"cmd": [0.4, 0.0, 0.0]}))
+            for _ in range(6):
+                frame = ws.receive_json()
+            assert frame["possessed"] == "p0" and frame["mode"] == "manual"
+            assert frame["ducks"][0]["brain"]["kind"] == "follow"
+            ws.send_text(json.dumps({"brain": {"duck": "d0", "kind": "wander"}}))
+            ws.send_text(json.dumps({"possess": None}))
+            ws.send_text(json.dumps({"noise": {"duck": "d0", "preset": "hostile", "sensor": "det"}}))
+            for _ in range(4):
+                frame = ws.receive_json()
+            # Released: the manual command (still held) steers the ducks; the
+            # brain behind it is now wander.
+            assert frame["possessed"] is None and frame["ducks"][0]["brain"]["kind"] == "manual"
+            assert frame["ducks"][0]["brainKind"] == "wander"
+            assert frame["ducks"][0]["detector"] == "hostile"
+        assert c.post("/world/brain", json={"duck": "d0", "kind": "nope"}).status_code == 422
+        assert c.post("/world/brain", json={"duck": "d0", "kind": "follow"}).status_code == 200

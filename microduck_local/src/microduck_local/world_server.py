@@ -26,17 +26,20 @@ HTTP:
 WS /ws/sim — 25 Hz frames:
   {t, tick, rtf, perf: {stepMs, sensorMs}, scenario, cmd, mode, events,
    ducks: [{id, name, policy, falls, step, rew, speed, cmdSpeed, steerable,
-            brain: {kind: "wander"|"script"|"manual", state, cmd},
+            brain: {kind, state, cmd, head, note, inputs: {tof: {age, stale}, det: {age, stale, n}, target?}},
             bodies: [[x,y,z,qw,qx,qy,qz] × 16] (world first, as GET /scene lists bodies),
-            sensors: {tof: {t, mm[64], age}} | null}],   (zone points: page-side)
-   objects: [{id, kind, pose}]}
+            sensors: {tof: {t, mm[64], age}, det: {t, age, items: [{cls, name, bearing, elevation, width, range, conf}]}} | null}],
+   objects: [{id, kind: "ball"|"box"|"person", pose, possessed?}], possessed: person id | null}
 accepts:
   {"cmd": [vx, vy, wz]}   drive every duck (held OVERRIDE_HOLD_S); otherwise a duck with
                           a ToF wanders on the brain layer's Wander controller and a
                           blind duck follows the demo script
   {"reset": true}         respawn everything
   {"assign": {"duck": id, "policy": palette id}}
-  {"noise": {"duck": id, "preset": name}}
+  {"noise": {"duck": id, "preset": name, "sensor": "tof"|"det"}}
+  {"brain": {"duck": id, "kind": "wander"|"follow"|"script"}}   swap a duck's brain
+  {"possess": person id | null}   your cmd drives that person (ducks stay on their brains)
+  {"head": {"duck": id, "apply": bool}}   let a brain's gaze intent reach the walker's command block
 
 Scenario files live in microduck_local/scenarios/ (MICRODUCK_SCENARIOS_DIR
 relocates it). Built-ins are generated in code so a fresh checkout has
@@ -61,9 +64,10 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from .brain import Wander
-from .sensors import TofNoise
-from .world import Ball, Duck, Scenario, Wall, World, make_room
+from .brain import REGISTRY, Intent, Senses
+from .brain import runtime as brain_runtime
+from .sensors import DetectorNoise, TofNoise
+from .world import Ball, Duck, Person, Scenario, Wall, World, make_room
 from .world.scenario import NAME_RE, TOF_PRESETS, ScenarioError, validate_scenario
 
 TICK_HZ = 50
@@ -111,7 +115,15 @@ def builtin_scenarios() -> dict[str, Scenario]:
     room.balls.append(Ball((0.0, 0.0)))
     for d in room.ducks:
         d.policy = DEFAULT_POLICY
-    return {s.name: s for s in (empty, wall, room)}
+    fx, fy = 3.0, 2.5
+    follow = Scenario(
+        name="follow-me", floor=(6.5, 5.5),
+        walls=[Wall((-fx, -fy), (fx, -fy)), Wall((fx, -fy), (fx, fy)),
+               Wall((fx, fy), (-fx, fy)), Wall((-fx, fy), (-fx, -fy))],
+        ducks=[Duck("d0", (0.0, 0.0, 0.0), DEFAULT_POLICY, "datasheet", "datasheet", "follow")],
+        persons=[Person("p0", (1.2, 0.0), 1.57,
+                        path=[(1.2, 1.2), (-1.2, 1.2), (-1.2, -1.2), (1.2, -1.2)], speed=0.25)])
+    return {s.name: s for s in (empty, wall, room, follow)}
 
 
 BUILTIN_NAMES = frozenset(builtin_scenarios().keys())
@@ -167,9 +179,14 @@ class WorldState:
         self.loading = False
         self.rtf = 0.0
         self.task: asyncio.Task | None = None
-        # Auto mode: a duck with a ToF wanders on its own brain (the first
-        # controller of roadmap Track 2); a blind duck follows the script.
-        self.brains: dict[str, Wander] = {}
+        # Auto mode: each duck runs a brain from the registry (brain/runtime.py);
+        # a blind duck gets the script. Intents are remembered for the frame.
+        self.brains: dict[str, object] = {}
+        self.intents: dict[str, Intent] = {}
+        # Brains may ask for a head pose; the shipped walker never trained
+        # with one (roadmap 3.7), so gaze intents are REPORTED but only
+        # applied to ducks that opt in.
+        self.head_cmds: set[str] = set()
         # Every broadcast frame, serialised, newest last. Kept without a
         # browser attached so "what just happened?" has an answer after the
         # fact — the roadmap's record/replay primitive (0.6).
@@ -203,7 +220,15 @@ class WorldState:
             if f is not None:
                 infer[d.id] = f
         world = World(scenario, infer_for=infer)
-        self.brains = {d.id: Wander() for d in world.ducks.values() if d.tof is not None}
+        self.brains = {}
+        for sd in scenario.ducks:
+            kind = sd.brain or ("wander" if sd.tof is not None else "script")
+            try:
+                self.brains[sd.id] = REGISTRY.make(kind)
+            except ValueError as e:
+                self.events.append(f"{sd.id}: {e}; using script")
+                self.brains[sd.id] = REGISTRY.make("script")
+        self.intents = {}
         return world
 
     def preload(self, name: str) -> None:
@@ -217,34 +242,51 @@ class WorldState:
         return {
             "scenario": self.scenario.to_dict() if self.scenario else None,
             "loading": self.loading,
-            "ducks": [duck_info(w, d) for d in w.ducks.values()] if w else [],
+            "ducks": [duck_info(w, d, self.brains) for d in w.ducks.values()] if w else [],
             "presets": list(TOF_PRESETS),
+            "brains": sorted(REGISTRY.kinds),
         }
 
+    def senses_for(self, d) -> Senses:
+        w = self.world
+        tof = d.tof.last if d.tof is not None else None
+        det = d.detector.last if d.detector is not None else None
+        return Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
+                      det=det, det_age=None if det is None else w.t - det.t,
+                      speed=d.heading_speed(w.data))
+
     def drive(self, cmd: np.ndarray, mode: str) -> None:
-        """Set every duck's command for this tick: the manual override for
-        all of them, else each duck's own brain (or the script, blind)."""
+        """Set every duck's command for this tick. A possessed person takes
+        the manual command instead of the ducks; otherwise manual overrides
+        every duck, and in auto each duck runs its brain (script = the demo)."""
         w = self.world
         if w is None:
             return
+        possessed = next((p for p in w.persons.values() if p.possessed), None)
+        if possessed is not None:
+            possessed.cmd = cmd if mode == "manual" else None
+        manual_ducks = mode == "manual" and possessed is None
         for d in w.ducks.values():
-            brain = self.brains.get(d.id) if mode == "auto" else None
-            if brain is None:
-                d.set_cmd(w.data, cmd)
+            brain = self.brains.get(d.id)
+            if manual_ducks or brain is None or brain.kind == "script":
+                d.set_cmd(w.data, cmd if (manual_ducks or brain is None or possessed is None) else cmd)
+                self.intents[d.id] = Intent(twist=tuple(float(v) for v in cmd))
                 continue
-            tof = d.tof.last if d.tof is not None else None
-            d.set_cmd(w.data, brain.step(
-                None if tof is None else tof.depth_mm,
-                None if tof is None else tof.valid,
-                w.t, d.heading_speed(w.data)))
+            intent = brain.step(self.senses_for(d))
+            self.intents[d.id] = intent
+            d.set_cmd(w.data, intent.twist, intent.head if d.id in self.head_cmds else None)
 
     def brain_payload(self, d, mode: str) -> dict:
-        brain = self.brains.get(d.id)
-        if mode == "manual" or brain is None:
-            return {"kind": "manual" if mode == "manual" else "script",
-                    "state": mode, "cmd": [round(float(v), 3) for v in d.twist_cmd]}
-        return {"kind": "wander", "state": brain.state,
-                "cmd": [round(float(v), 3) for v in brain.last]}
+        possessed = any(p.possessed for p in self.world.persons.values()) if self.world else False
+        eff = "auto" if (mode == "manual" and possessed) else mode
+        return brain_runtime.payload(self.brains.get(d.id), self.intents.get(d.id), eff)
+
+    def set_brain(self, duck_id: str, kind: str) -> None:
+        w = self.world
+        if w is None or duck_id not in w.ducks:
+            raise KeyError(duck_id)
+        self.brains[duck_id] = REGISTRY.make(kind)
+        self.events.append(f"{duck_id} brain → {kind}")
 
     def frame(self, cmd: np.ndarray, mode: str) -> dict:
         w = self.world
@@ -252,8 +294,9 @@ class WorldState:
         if w is not None:
             for d in w.ducks.values():
                 ducks.append({
-                    **duck_info(w, d),
+                    **duck_info(w, d, self.brains),
                     "brain": self.brain_payload(d, mode),
+                    "headApplied": d.id in self.head_cmds,
                     # Body 0 is the WORLD in the viewer's scene (GET /scene),
                     # so a duck's 15 bodies ride behind one identity pose and
                     # the same Duck renderer works on both pages.
@@ -271,11 +314,12 @@ class WorldState:
             "mode": mode,
             "events": list(self.events)[-5:],
             "ducks": ducks,
-            "objects": w.objects_payload() if w else [],
+            "objects": (w.objects_payload() + w.persons_payload()) if w else [],
+            "possessed": next((p.id for p in w.persons.values() if p.possessed), None) if w else None,
         }
 
 
-def duck_info(w: World, d) -> dict:
+def duck_info(w: World, d, brains: dict | None = None) -> dict:
     return {
         "id": d.id,
         "name": d.id if d.policy_id is None else f"{d.id} · {d.policy_id.split(':', 1)[-1]}",
@@ -287,7 +331,16 @@ def duck_info(w: World, d) -> dict:
         "cmdSpeed": round(float(d.twist_cmd[0]), 3),
         "steerable": True,
         "tof": None if d.tof is None else preset_name(d.tof.noise),
+        "detector": None if d.detector is None else det_preset_name(d.detector.noise),
+        "brainKind": getattr(brains.get(d.id), "kind", "script") if brains is not None else None,
     }
+
+
+def det_preset_name(noise: DetectorNoise) -> str:
+    for name in TOF_PRESETS:
+        if DetectorNoise.preset(name) == noise:
+            return name
+    return "custom"
 
 
 def preset_name(noise: TofNoise) -> str:
@@ -320,6 +373,12 @@ class LoadReq(BaseModel):
 class NoiseReq(BaseModel):
     duck: str
     preset: str
+    sensor: str = "tof"        # "tof" | "det"
+
+
+class BrainReq(BaseModel):
+    duck: str
+    kind: str
 
 
 class SaveReq(BaseModel):
@@ -399,12 +458,29 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
             raise HTTPException(404, f"no duck {req.duck!r}")
         if req.preset not in TOF_PRESETS:
             raise HTTPException(422, f"preset must be one of {TOF_PRESETS}")
-        tof = w.ducks[req.duck].tof
-        if tof is None:
-            raise HTTPException(409, f"{req.duck} has no ToF in this scenario")
-        tof.noise = TofNoise.preset(req.preset)
-        st.events.append(f"{req.duck} ToF noise → {req.preset}")
-        return duck_info(w, w.ducks[req.duck])
+        d = w.ducks[req.duck]
+        if req.sensor == "det":
+            if d.detector is None:
+                raise HTTPException(409, f"{req.duck} has no detector in this scenario")
+            d.detector.noise = DetectorNoise.preset(req.preset)
+        elif req.sensor == "tof":
+            if d.tof is None:
+                raise HTTPException(409, f"{req.duck} has no ToF in this scenario")
+            d.tof.noise = TofNoise.preset(req.preset)
+        else:
+            raise HTTPException(422, "sensor must be 'tof' or 'det'")
+        st.events.append(f"{req.duck} {req.sensor} noise → {req.preset}")
+        return duck_info(w, d)
+
+    @app.post("/world/brain")
+    def set_brain(req: BrainReq) -> dict:
+        try:
+            st.set_brain(req.duck, req.kind)
+        except KeyError:
+            raise HTTPException(404, f"no duck {req.duck!r}") from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        return {"duck": req.duck, "kind": req.kind, "kinds": sorted(REGISTRY.kinds)}
 
     @app.get("/replay/ring")
     def replay_ring(last: int = 1500) -> Response:
@@ -490,6 +566,7 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                         d.falls = 0
                     for b in st.brains.values():
                         b.reset()
+                    st.intents.clear()
                     st.script_t = 0.0
                 if "assign" in msg and st.world is not None:
                     a = msg["assign"]
@@ -497,9 +574,29 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                 if "noise" in msg and st.world is not None:
                     n = msg["noise"]
                     try:
-                        set_noise(NoiseReq(duck=str(n.get("duck")), preset=str(n.get("preset"))))
+                        set_noise(NoiseReq(duck=str(n.get("duck")), preset=str(n.get("preset")),
+                                           sensor=str(n.get("sensor", "tof"))))
                     except HTTPException as e:
                         st.events.append(f"noise ignored: {e.detail}")
+                if "brain" in msg and st.world is not None:
+                    b = msg["brain"]
+                    try:
+                        set_brain(BrainReq(duck=str(b.get("duck")), kind=str(b.get("kind"))))
+                    except HTTPException as e:
+                        st.events.append(f"brain ignored: {e.detail}")
+                if "possess" in msg and st.world is not None:
+                    who = msg["possess"]
+                    who = None if who in (None, "", False) else str(who)
+                    if who is not None and who not in st.world.persons:
+                        st.events.append(f"possess ignored: no person {who}")
+                    else:
+                        st.world.possess(who)
+                        st.events.append(f"you are {who}" if who else "released")
+                if "head" in msg and st.world is not None:
+                    h = msg["head"]
+                    did = str(h.get("duck"))
+                    if did in st.world.ducks:
+                        (st.head_cmds.add if h.get("apply") else st.head_cmds.discard)(did)
         except WebSocketDisconnect:
             pass
         finally:

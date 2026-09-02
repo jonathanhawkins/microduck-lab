@@ -10,7 +10,7 @@ import { useState } from "react";
 import { LAB_HTTP } from "@/lib/lab";
 import { loadWorld, type Scenario, type WorldInfo } from "@/lib/sim";
 
-export type EditorTool = "wall" | "box" | "ball" | "duck" | null;
+export type EditorTool = "wall" | "box" | "ball" | "duck" | "person" | null;
 
 export interface EditorState {
   draft: Scenario;
@@ -89,6 +89,16 @@ export function applyFloorClick(st: EditorState, x: number, y: number): EditorSt
       return {
         ...st,
         draft: { ...d, ducks: [...d.ducks, { id: `d${n}`, spawn: [x, y, 0], policy: "pollen:alpha_walking", tof: "datasheet" }] },
+      };
+    }
+    case "person": {
+      const persons = d.persons ?? [];
+      let n = persons.length;
+      while (persons.some((q) => q.id === `p${n}`)) n++;
+      // A default patrol: back and forth across the floor from the click.
+      return {
+        ...st,
+        draft: { ...d, persons: [...persons, { id: `p${n}`, pos: [x, y], yaw: 0, path: [[x, y], [-x, y]], speed: 0.25, radius: 0.2, height: 1.0 }] },
       };
     }
     default:
@@ -179,6 +189,7 @@ export function SimEditor({
         {toolBtn("box", "▣ box")}
         {toolBtn("ball", "● ball")}
         {toolBtn("duck", "🦆 duck")}
+        {toolBtn("person", "🧍 person")}
       </div>
       <div style={{ color: "#9aa5b1", marginBottom: 6 }}>
         {state.tool === "wall"
@@ -199,8 +210,29 @@ export function SimEditor({
         row(`box ${i}: ${b.pos[0]},${b.pos[1]} · ${b.size.map((v) => v.toFixed(2)).join("×")}${b.mass ? ` · ${b.mass} kg` : ""}`, () => setDraft({ ...d, boxes: d.boxes.filter((_, k) => k !== i) }), `b${i}`)
       )}
       {d.balls.map((b, i) => row(`ball ${i}: ${b.pos[0]},${b.pos[1]}`, () => setDraft({ ...d, balls: d.balls.filter((_, k) => k !== i) }), `k${i}`))}
-      {d.ducks.map((k, i) =>
-        row(`${k.id}: ${k.spawn[0]},${k.spawn[1]} · ${k.policy?.split(":").pop() ?? "stand"} · tof ${k.tof ?? "off"}`, () => setDraft({ ...d, ducks: d.ducks.filter((_, j) => j !== i) }), `d${i}`)
+      {d.ducks.map((k, i) => (
+        <div key={`d${i}`} style={{ display: "flex", justifyContent: "space-between", gap: 6, color: "#c9d0d8", alignItems: "center" }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {k.id}: {k.spawn[0]},{k.spawn[1]} · {k.policy?.split(":").pop() ?? "stand"}
+          </span>
+          <select
+            value={k.brain ?? ""}
+            onChange={(e) => setDraft({ ...d, ducks: d.ducks.map((q, j) => (j === i ? { ...q, brain: e.target.value || null } : q)) })}
+            style={{ ...BTN, padding: "0 3px" }}
+            title="brain in auto mode"
+          >
+            <option value="">auto</option>
+            <option value="wander">wander</option>
+            <option value="follow">follow</option>
+            <option value="script">script</option>
+          </select>
+          <button style={{ ...BTN, padding: "0 5px" }} onClick={() => setDraft({ ...d, ducks: d.ducks.filter((_, j) => j !== i) })} title="remove">
+            ✕
+          </button>
+        </div>
+      ))}
+      {(d.persons ?? []).map((q, i) =>
+        row(`${q.id}: ${q.pos[0]},${q.pos[1]} · ${q.path.length} waypoints · ${q.speed} m/s`, () => setDraft({ ...d, persons: (d.persons ?? []).filter((_, j) => j !== i) }), `p${i}`)
       )}
       <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
         <input value={name} onChange={(e) => setName(e.target.value)} style={{ ...BTN, flex: 1, padding: "2px 6px" }} placeholder="scenario name" />

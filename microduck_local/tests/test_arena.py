@@ -179,3 +179,36 @@ def test_shipped_walker_walks_in_a_world():
     for _ in range(int(3.0 / C.CTRL_DT)):
         world.step()
     assert sum(d.falls for d in world.ducks.values()) == 0
+
+
+def test_persons_walk_their_path_and_ducks_detect_them():
+    from microduck_local.world import Person
+    sc = Scenario(name="pp", floor=(8, 8),
+                  ducks=[Duck("d0", (0.0, 0.0, 0.0), None, "ideal", "ideal")],
+                  persons=[Person("p0", (1.0, 0.0), 0.0, path=[(1.0, 0.6), (1.0, -0.6)], speed=0.5)])
+    world = World(sc)
+    p = world.persons["p0"]
+    assert world.objects == [] and world.persons_payload()[0]["kind"] == "person"
+    ys, seen = [], []
+    for _ in range(int(3.0 / C.CTRL_DT)):
+        world.step()
+        ys.append(p.y)
+        s = world.sensors_payload("d0")
+        if s and "det" in s:
+            seen += [x for x in s["det"]["items"] if x["cls"] == "person"]
+    assert max(ys) > 0.5 and min(ys) < 0.4          # went up to the first waypoint and came back
+    # Seen while it crossed the field of view, at a bearing that tracked it.
+    assert len(seen) > 5 and max(abs(x["bearing"]) for x in seen) < 0.6
+    assert all(0.5 < x["range"] < 1.6 for x in seen)
+    # Possess: the path stops and the twist drives it in its own heading frame.
+    world.possess("p0")
+    p.yaw = 0.0                                   # face +x: the twist is in the person's own frame
+    p.cmd = np.array([0.5, 0.0, 0.0])
+    x0 = p.x
+    for _ in range(50):
+        world.step()
+    assert p.possessed and p.x > x0 + 0.4
+    world.possess(None)
+    assert not p.possessed and p.cmd is None
+    world.reset()
+    assert (p.x, p.y) == (1.0, 0.0) and world.ducks["d0"].detector.last is None

@@ -92,6 +92,17 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
         body.add_geom(name=f"ball{i}_geom", type=mujoco.mjtGeom.mjGEOM_SPHERE,
                       size=[ball.radius, 0, 0], group=0, rgba=[1.0, 0.55, 0.0, 1.0],
                       friction=[0.5, 0.005, 0.0001])
+    for i, person in enumerate(scenario.persons):
+        # A mocap body: the world moves it kinematically (data.mocap_pos /
+        # mocap_quat); ducks collide with it like a wall that walks. A capsule
+        # standing on the floor, its "chest" at duck-head height.
+        body = w.add_body(name=person.id, mocap=True,
+                          pos=[person.pos[0], person.pos[1], person.height / 2],
+                          quat=_yaw_quat(person.yaw))
+        half = max(person.height / 2 - person.radius, 0.01)
+        body.add_geom(name=f"{person.id}_geom", type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                      size=[person.radius, half, 0], group=0,
+                      rgba=[0.35, 0.55, 0.85, 1.0])
     for duck in scenario.ducks:
         robot = mujoco.MjSpec.from_file(str(robot_xml))
         x, y, yaw = duck.spawn
