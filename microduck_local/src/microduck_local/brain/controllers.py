@@ -429,6 +429,15 @@ class ChaseParams:
     approach_back: float = 0.22
     approach_speed: float = 0.25
     approach_tol: float = 0.04
+    # Stage two follows the LINE, not the heading: on a pure forward
+    # command the walker holds its yaw but crabs sideways (measured 9 cm
+    # of side error over the 22 cm walk-in, and shots got worse), so a
+    # gentle cross-track law steers it back onto the line - `k_lat` per m
+    # off the line, `k_head` per rad off the heading, capped at
+    # `approach_wz` so no step is a turn against the ball.
+    k_lat: float = 4.0
+    k_head: float = 1.5
+    approach_wz: float = 0.5
     # Traced: a re-plan with the ball already inside `backoff_range` puts
     # the pre-spot behind the duck, and the turn in place toward it is a
     # turn against the ball. Back off instead (turn away, walk clear - the
@@ -773,12 +782,14 @@ class Chase:
             else:
                 vx, wz, dist, bearing = self._servo(odom, (sx, sy), cold, p.lineup_tol)
                 if mode == "kick" and self.state != "settle":
-                    # Stage two: straight in along the line (the walker holds
-                    # its yaw on a pure forward command), stop on the spot -
-                    # by the distance left along the line, not the servo's radius.
+                    # Stage two: in along the line, steering onto it (the
+                    # walker crabs on a pure forward command), stop on the
+                    # spot by the distance left along the line.
                     along = (sx - odom[0]) * math.cos(u) + (sy - odom[1]) * math.sin(u)
+                    lat = -(odom[0] - sx) * math.sin(u) + (odom[1] - sy) * math.cos(u)   # +: left of the line
                     if along > p.lineup_tol:
-                        vx, wz = p.approach_speed, 0.0
+                        vx = p.approach_speed
+                        wz = float(np.clip(-p.k_lat * lat + p.k_head * heading_err, -p.approach_wz, p.approach_wz))
                         dist = along
                     else:
                         vx, wz, dist = 0.0, 0.0, 0.0
@@ -791,8 +802,17 @@ class Chase:
             squared = abs(heading_err) <= p.aim_tol + (0.15 if settling else 0.0)
             if self.spot is None:
                 pass                                            # backing off (above)
+            elif on_spot and not squared and mode == "kick":
+                # On the spot but off the heading: a turn in place here is a
+                # turn against the ball (traced: 14 s of it). Back off and
+                # lay the line again from further out.
+                self.spot = None
+                self._retreat_t0 = t
+                self._retreat_sign = -1.0 if heading_err >= 0 else 1.0
+                vx, _, wz = turn(self._retreat_sign, cold)
+                self.state = "retreat"
             elif on_spot and not squared:
-                vx, _, wz = turn(heading_err, cold)            # on the spot but not facing the goal: square up
+                vx, _, wz = turn(heading_err, cold)            # a push spot: square up
                 self.state = "lineup"
             elif on_spot:
                 # Stand first: robotd runs a kick at the standing tuning, and
