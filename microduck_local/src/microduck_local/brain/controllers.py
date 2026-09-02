@@ -13,6 +13,7 @@ and the lesson page shows exactly which zones it looked at.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -258,18 +259,31 @@ class Follow:
 @dataclass(frozen=True)
 class ChaseParams:
     target_cls: str = "ball"
-    speed: float = 0.45            # walk at the ball: the walker IS the kick (roadmap soccer, first form)
+    speed: float = 0.45            # walk at the ball
     k_turn: float = 3.0
     turn_first: float = 0.6        # rad off the nose: turn in place before walking
     lost_s: float = 2.0
     tof_stop: float = 0.3          # walls and ducks in the upper ToF rows; the ball is too low to count
+    # The shipped kicks (measured, `walker-facts`-style, on the walker): a
+    # ball 0.08 m ahead of the trunk and 0.06 m to the kicking foot's side
+    # flies 1.6 m; 0.10 m dead ahead barely moves; the other side, nothing.
+    kick_ahead: float = 0.08
+    kick_side: float = 0.06
+    lineup_range: float = 0.6      # a ball seen inside this is worth lining up on (the last 0.3 m are blind)
+    lineup_tol: float = 0.03       # trunk within this of the kicking spot: kick
+    lineup_s: float = 4.0          # give up a line-up after this long
+    settle_s: float = 0.4          # stand this long on the spot before the kick (robotd kicks at standing tuning)
+    kick_clear: float = 0.35       # no kick with anything closer than this ahead (upper ToF rows)
 
 
 class Chase:
-    """Walk at the nearest ball and through it — a kick is a walk for a
-    walker with no kicking reflex. Tracks the ball (brain/tracker.py),
-    coasts on a lost track, searches turning left. The ToF bumper reads only
-    the upper rows so a 7 cm ball on the floor does not stop the chase."""
+    """Walk at the nearest ball, line up, and KICK it with the shipped kick
+    policy (roadmap soccer, first form). Tracks the ball (brain/tracker.py)
+    while it is in view; a floor ball leaves both the camera and the ToF
+    in the last ~0.3 m, so the line-up is dead reckoning in odometry to a
+    spot `kick_ahead` behind the ball and `kick_side` to the foot's side,
+    then a 0.5 s kick window. Searches turning left. The ToF bumper reads
+    only the upper rows so the ball itself does not stop the chase."""
 
     kind = "chase"
     DET_MAX_AGE = 0.4
@@ -287,6 +301,9 @@ class Chase:
         self.last_seen_t: float | None = None
         self._senses: Senses | None = None
         self.last = (0.0, 0.0, 0.0)
+        self.kicks = 0
+        self.spot: tuple[float, float, str] | None = None     # odom-frame kicking spot + foot
+        self.t_state = 0.0
         self.tracker.reset()
         self.gait.reset()
 
@@ -298,24 +315,87 @@ class Chase:
             "bearing": round(self.last_bearing, 3), "range": None,
             "since": round(self._senses.t - self.last_seen_t, 2)}
         out["tracks"] = self.tracker.payload(self._senses.t)
+        out["chase"] = {"kicks": self.kicks, "spot": None if self.spot is None else
+                        [round(self.spot[0], 3), round(self.spot[1], 3), self.spot[2]]}
         return out
+
+    def _lineup_spot(self, odom, ball) -> tuple[float, float, str]:
+        """Where to stand to kick a ball seen at (bearing, range): behind it
+        along the current line of sight, offset to the far side so the
+        nearer foot meets it. Left foot kicks a ball to its LEFT."""
+        p = self.p
+        x, y, yaw = odom
+        a = yaw + ball.bearing
+        bx, by = x + ball.range * math.cos(a), y + ball.range * math.sin(a)
+        foot = "kick_left" if ball.bearing >= 0 else "kick_right"
+        side = -p.kick_side if foot == "kick_left" else p.kick_side     # stand to the ball's other side
+        sx = bx - p.kick_ahead * math.cos(a) - side * math.sin(a)
+        sy = by - p.kick_ahead * math.sin(a) + side * math.cos(a)
+        return sx, sy, foot
 
     def step(self, senses: Senses) -> Intent:
         self._senses = senses
         p = self.p
+        t = senses.t
         cold = self.gait.update(senses)
-        yaw = None if senses.odom is None else senses.odom[2]
-        self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), senses.t, yaw)
-        ball = self.tracker.best(p.target_cls, senses.t, min_hits=1)
+        odom = senses.odom or (0.0, 0.0, 0.0)
+        self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), t, odom[2])
+        ball = self.tracker.best(p.target_cls, t, min_hits=1)
+        fresh = ball is not None and ball.age(t) <= self.DET_MAX_AGE
         tof = senses.fresh_tof(self.TOF_MAX_AGE)
         ahead = np.inf
         if tof is not None:
             ahead = float(_column_clearance(tof.depth_mm, tof.valid, WanderParams(rows=(2, 5)))[3:5].min())
-        if ball is not None and ball.age(senses.t) < p.lost_s:
+        skill = None
+        if senses.skill is not None:
+            vx, wz = 0.0, 0.0                                   # the kick owns the reflex tier
+            self.state = "kick"
+        elif self.state in ("lineup", "settle") and self.spot is not None:
+            # Refresh the spot while the ball is still in view, then walk it blind.
+            if fresh and ball.range < p.lineup_range:
+                self.spot = self._lineup_spot(odom, ball)
+            sx, sy, foot = self.spot
+            dx, dy = sx - odom[0], sy - odom[1]
+            dist = math.hypot(dx, dy)
+            bearing = math.atan2(math.sin(math.atan2(dy, dx) - odom[2]), math.cos(math.atan2(dy, dx) - odom[2]))
+            if dist <= p.lineup_tol:
+                # Stand first: robotd runs a kick at the standing tuning, and a
+                # kick started mid-stride fell 4 times in 7 here. Something
+                # within `kick_clear` ahead (a wall, the other duck) means the
+                # swing lands on it: let it go and look again.
+                vx, wz = 0.0, 0.0
+                if ahead < p.kick_clear:
+                    self.spot = None
+                    self.state = "search"
+                elif self.state != "settle":
+                    self.state = "settle"
+                    self.t_state = t
+                elif t - self.t_state >= p.settle_s:
+                    skill = foot
+                    self.kicks += 1
+                    self.spot = None
+                    self.state = "kick"
+            elif self.state == "lineup" and t - self.t_state > p.lineup_s:
+                self.spot = None
+                self.state = "search"
+                vx, _, wz = turn(1.0, cold)
+            elif abs(bearing) > 0.5 and dist > 0.08:
+                vx, _, wz = turn(bearing, cold)
+                self.state = "lineup"
+            else:
+                vx = 0.25 if dist < 0.2 else p.speed
+                wz = float(np.clip(p.k_turn * bearing, -1.0, 1.0))
+                self.state = "lineup"
+        elif ball is not None and ball.age(t) < p.lost_s:
             self.last_bearing = ball.bearing
-            if ball.age(senses.t) <= self.DET_MAX_AGE:
-                self.last_seen_t = senses.t
-            if abs(ball.bearing) > p.turn_first:
+            if fresh:
+                self.last_seen_t = t
+            if fresh and ball.range < p.lineup_range and abs(ball.bearing) < 0.5:
+                self.spot = self._lineup_spot(odom, ball)
+                self.state = "lineup"
+                self.t_state = t
+                vx, wz = p.speed, float(np.clip(p.k_turn * ball.bearing, -1.0, 1.0))
+            elif abs(ball.bearing) > p.turn_first:
                 vx, _, wz = turn(ball.bearing, cold)
                 self.state = "turn"
             else:
@@ -325,10 +405,18 @@ class Chase:
             vx, _, wz = turn(1.0, cold)
             self.state = "search"
         if ahead < p.tof_stop and vx > 0:
-            vx, wz = 0.0, 1.0
-            self.state = "blocked"
+            # A wall or the other duck right there: no walking, no cold-turn
+            # creep (measured: every remaining fall was a line-up walking
+            # into a wall or a kicked turn creeping into one). Turning still
+            # happens — the left turn that starts from a standstill.
+            vx = 0.0
+            if self.state in ("lineup", "settle"):
+                wz = 1.0 if wz > 0 else -1.0 if wz < 0 else 0.0
+            else:
+                wz = 1.0
+                self.state = "blocked"
         self.last = (vx, 0.0, wz)
-        return Intent(twist=self.last, note=self.state)
+        return Intent(twist=self.last, note=self.state, skill=skill)
 
 
 def _r(v) -> float | None:

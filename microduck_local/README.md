@@ -351,9 +351,13 @@ its current intent live.
 
   ```bash
   uv run train-brain --envs 4 --steps 400_000 --run-name follow-v1   # ~10 min on 4 cores
-  uv run eval-brain brains/follow-v1 --episodes 20                    # vs the scripted Follow
+  uv run eval-brain --brain learned:follow-v1 --preset hostile --episodes 12   # vs `--brain follow`
   uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v1"
   ```
+
+  `brains/follow-v1/brain.onnx` (112 kB) and its contract ship in the
+  repo, so `learned:follow-v1` works from a fresh clone; retrain to
+  replace it (the SB3 checkpoint stays local).
 
   Measured on identical follow-me episodes: the learned brain holds the
   distance band 0.73 / 0.61 of the time under the datasheet / hostile

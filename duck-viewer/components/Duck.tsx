@@ -35,20 +35,11 @@ function bodyColor(name: string): string {
 // mouth pink, and the beak/shoes a flat gold where the real parts are
 // orange with yellow soles. Override those by material name; everything
 // else renders straight from the streamed rgba.
-const MATERIAL_FIX: Record<string, string> = {
-  face_part_material: "#a5a6a2", // face panel — light grey, exports dark slate
-  noenoeil_material: "#f2b705", // eye ring — yellow print, not grey
-  soft_mouth_top_material: "#e06a1e", // soft TPU mouth seam
-  jaw_soft_material: "#e06a1e",
-  jaw_material: "#e8862e", // lower beak: orange, not gold
-  bottom_head_shell_material: "#e8862e",
-  foot_left_material: "#e8862e", // TPU shoes orange…
-  foot_right_material: "#e8862e",
-  ankle_left_material: "#e8862e",
-  ankle_right_material: "#e8862e",
-  sole_left_material: "#f2b705", // …with yellow soles
-  sole_right_material: "#f2b705",
-};
+// Per-material colour overrides by MJCF material name. The 2026-09 upstream
+// CAD re-export (microduck_rl #29) carries the right colours itself — orange
+// beak and shoes, yellow eye ring and soles, light-grey face — so the table is
+// empty; it stays as the place to put the next export's mistakes.
+const MATERIAL_FIX: Record<string, string> = {};
 
 /** Resolved sRGB→linear color for one geom (override → MJCF rgba → fallback). */
 function geomColor(g: SceneGeom, bodyName: string, out: THREE.Color): THREE.Color {

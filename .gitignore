@@ -15,7 +15,13 @@ __pycache__/
 
 # Training artifacts and runtime state (regenerated; runs/ grows to GBs)
 microduck_local/runs/
-microduck_local/brains/
+microduck_local/brains/*
+# …except the shipped learned brain (112 kB ONNX + its contract), so
+# `learned:follow-v1` works out of the box; the SB3 checkpoint stays local.
+!microduck_local/brains/follow-v1/
+microduck_local/brains/follow-v1/*
+!microduck_local/brains/follow-v1/brain.onnx
+!microduck_local/brains/follow-v1/brain.json
 microduck_local/recordings/
 microduck_local/lab-state.json
 microduck_local/teach-weights.json

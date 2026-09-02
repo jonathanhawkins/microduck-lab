@@ -193,9 +193,10 @@ frames carry the world body first, as `GET /scene` lists bodies.
   add GPU-heavy effects back.
 - Duck colors are the MJCF material rgba streamed per geom, carried through the
   per-body merge as a vertex-color channel (so per-part color costs zero extra
-  draw calls). A few materials the OnShape export got wrong vs the printed
-  robot (eye ring, soft mouth, shoes) are overridden by name in `Duck.tsx`
-  (`MATERIAL_FIX`); against a lab too old to stream colors the viewer falls
-  back to one guessed color per body.
+  draw calls). `Duck.tsx` keeps a by-name override table (`MATERIAL_FIX`)
+  for materials an export gets wrong; the 2026-09 upstream CAD re-export
+  carries the right colours itself, so the table is empty today. Against a
+  lab too old to stream colors the viewer falls back to one guessed color
+  per body.
 - The lab loop is single-threaded Python: 8 ducks × 50 Hz ≈ 5% of one core.
   Dozens of ducks are fine; hundreds would want the envs in a worker pool.

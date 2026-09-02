@@ -26,15 +26,13 @@ jobs:
         working-directory: .
         run: |
           # PINNED: the contract, golden-bit and symmetry tests measure THESE
-          # models and policies. Upstream re-exported the robot from new CAD
-          # on 2026-09-02 (microduck_rl #29) and the mirrored-rollout drift
-          # test moved across its threshold on both OSes within the hour —
-          # a model change, not a lab change. Bump the shas on purpose, with
-          # the tests re-measured, never by accident.
+          # models and policies (microduck_rl badc4e7 = the 2026-09-02 CAD
+          # re-export, #29; the drift test was re-measured against it). Bump
+          # the shas on purpose, with the tests re-measured, never by accident.
           git clone --filter=blob:none https://github.com/pollen-robotics/microduck_rl
-          git -C microduck_rl checkout --quiet 5946fd9cdbc58956424420153e51975af3b30d77
+          git -C microduck_rl checkout --quiet badc4e7ffe5507fd7acb1a21487bd2925c1afe5a
           git clone --filter=blob:none https://github.com/pollen-robotics/microduck
-          git -C microduck checkout --quiet 9f7eaad1008fffd90ef871a33a18aecd066b51a9
+          git -C microduck checkout --quiet 2c61dcc1f03440541cdc0729f7a375b2a9ea3005
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-python@v5
         with:

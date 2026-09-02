@@ -47,6 +47,7 @@ render-rollout = "microduck_local.render_rollout:main"
 train-brain = "microduck_local.train_brain:main"
 eval-brain = "microduck_local.eval_brain:main"
 eval-tidy = "microduck_local.eval_tidy:main"
+eval-pitch = "microduck_local.eval_pitch:main"
 trace-tidy = "microduck_local.trace_tidy:main"
 walker-facts = "microduck_local.walker_facts:main"
 

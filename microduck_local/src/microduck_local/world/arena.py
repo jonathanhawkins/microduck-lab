@@ -41,6 +41,13 @@ from .scenario import PICKABLE_KINDS, Person, Scenario
 GROUND_PICK_PERIOD_S = 4.0
 GROUND_PICK_CLOSE_PHI = 0.38
 GROUND_PICK_END_PHI = 0.7
+# The shipped kicks (ball_kick_left / ball_kick_right) run as a WINDOW, not a
+# phase: the robot hands the reflex tier to the kick network for
+# `kick_duration` (0.5 s in robotd's control.rs) with an all-zero command,
+# then back to the walker. Same protocol here.
+KICK_S = 0.5
+SKILLS = {"ground_pick": "alpha_ground_pick.onnx", "kick_left": "ball_kick_left.onnx",
+          "kick_right": "ball_kick_right.onnx"}
 PICK_REACH_AHEAD = 0.078     # where the tip lands, ahead of the trunk origin (m), standing on the walker
 PICK_REACH_LEFT = 0.014      # …and a touch to the left (the beak is not on the centreline)
 GRASP_TOL_XY = 0.04          # a toy centre within this of the tip can be grasped (the beak is ~2 cm wide)
@@ -498,12 +505,13 @@ class World:
 
     def start_skill(self, d: WorldDuck, name: str) -> bool:
         """Hand the reflex tier to a skill policy for one cycle (the robot's
-        own pattern: hard swap in, auto swap back). Only ground_pick today."""
-        if name != "ground_pick" or d.skill is not None:
+        own pattern: hard swap in, auto swap back): ground_pick (a phase
+        cycle) or kick_left / kick_right (a 0.5 s window)."""
+        if name not in SKILLS or d.skill is not None:
             return False
         if name not in self.skills:
             from ..brain.brain_env import POLICIES_DIR, onnx_infer
-            path = POLICIES_DIR / "alpha_ground_pick.onnx"
+            path = POLICIES_DIR / SKILLS[name]
             if not path.exists():
                 return False
             self.skills[name] = onnx_infer(path)
@@ -540,6 +548,15 @@ class World:
         use, ending the cycle at its exit phase."""
         if d.skill is None:
             return None
+        if d.skill.startswith("kick"):
+            if self.t - d.skill_t0 >= KICK_S:
+                d.skill, d.skill_infer = None, None
+                d.twist_cmd[:] = 0.0
+                return None
+            d.twist_cmd[:] = 0.0                  # the kick's observation carries an all-zero command
+            d.head_cmd[:] = 0.0
+            d.body_cmd[:] = 0.0
+            return d.skill_infer
         phi = (self.t - d.skill_t0) / GROUND_PICK_PERIOD_S
         if phi >= GROUND_PICK_END_PHI:
             d.skill, d.skill_infer = None, None

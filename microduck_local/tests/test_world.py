@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from microduck_local import contract as C
+from microduck_local.brain.brain_env import POLICIES_DIR
 from microduck_local.world import (
     Ball,
     Box,
@@ -167,3 +168,32 @@ def test_pitch_counts_goals_and_recentres_the_ball():
     mujoco.mj_forward(w.model, w.data)
     w.step()
     assert w.soccer_score()["left"] == 0
+
+
+@pytest.mark.skipif(not (POLICIES_DIR / "ball_kick_left.onnx").exists(), reason="upstream policies not checked out")
+def test_shipped_kick_skill_sends_the_ball_flying():
+    """The kicks run as a 0.5 s window with an all-zero command, like robotd.
+    Measured: a ball 8 cm ahead and 6 cm to the foot's side flies over a
+    metre; on the wrong side it is not touched."""
+    import mujoco
+
+    from microduck_local.brain.brain_env import onnx_infer
+    from microduck_local.world import Ball, Duck, Scenario, World
+    for side, by, expect in (("kick_left", 0.06, 1.0), ("kick_right", -0.06, 1.0), ("kick_right", 0.06, 0.02)):
+        sc = Scenario(name="k", floor=(4, 4), ducks=[Duck("d0", (0, 0, 0), None, None, None)], balls=[Ball((0.08, by))])
+        w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=0)
+        d = w.ducks["d0"]
+        for _ in range(50):
+            d.set_cmd(w.data, [0, 0, 0])
+            w.step()
+        b = mujoco.mj_name2id(w.model, mujoco.mjtObj.mjOBJ_BODY, "ball0")
+        p0 = w.data.xpos[b].copy()
+        assert w.start_skill(d, side) and d.skill == side
+        for _ in range(int(1.5 / C.CTRL_DT)):
+            w.step()
+        moved = float(np.hypot(*(w.data.xpos[b] - p0)[:2]))
+        assert d.skill is None and d.falls == 0
+        if expect >= 1.0:
+            assert moved > expect, (side, by, moved)
+        else:
+            assert moved < expect, (side, by, moved)
