@@ -25,8 +25,16 @@ jobs:
       - name: Upstream checkouts (MJCF models, shipped policies)
         working-directory: .
         run: |
-          git clone --depth 1 https://github.com/pollen-robotics/microduck_rl
-          git clone --depth 1 https://github.com/pollen-robotics/microduck
+          # PINNED: the contract, golden-bit and symmetry tests measure THESE
+          # models and policies. Upstream re-exported the robot from new CAD
+          # on 2026-09-02 (microduck_rl #29) and the mirrored-rollout drift
+          # test moved across its threshold on both OSes within the hour —
+          # a model change, not a lab change. Bump the shas on purpose, with
+          # the tests re-measured, never by accident.
+          git clone --filter=blob:none https://github.com/pollen-robotics/microduck_rl
+          git -C microduck_rl checkout --quiet 5946fd9cdbc58956424420153e51975af3b30d77
+          git clone --filter=blob:none https://github.com/pollen-robotics/microduck
+          git -C microduck checkout --quiet 9f7eaad1008fffd90ef871a33a18aecd066b51a9
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-python@v5
         with:
