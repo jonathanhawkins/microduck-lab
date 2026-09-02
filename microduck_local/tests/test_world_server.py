@@ -193,3 +193,25 @@ def test_playroom_scenario_streams_toys_basket_and_tidy_state(app):
             assert d["brainKind"] == "tidy" and d["brain"]["kind"] == "tidy" and d["headApplied"] is True
             assert d["holding"] is None and d["skill"] is None and d["beak"] == "open"
             assert d["brain"]["inputs"]["tidy"]["picked"] == 0
+
+
+def test_tether_latency_delays_intents_and_maps_stream(app):
+    """12.10: with a tether the intent applied now is the one decided
+    tether_ms ago; frames say so, and occupancy maps ride every 12th frame."""
+    with TestClient(app) as c:
+        c.post("/world/load", json={"scenario": "playroom"})
+        assert c.post("/world/tether", json={"ms": 250}).json() == {"tetherMs": 250.0}
+        with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+            maps_seen = 0
+            frame = None
+            for _ in range(30):
+                frame = ws.receive_json()
+                maps_seen += frame["maps"] is not None
+            assert frame["tetherMs"] == 250.0 and maps_seen >= 2
+            m = next(iter(frame["maps"].values())) if frame["maps"] else None
+            if m is not None:
+                assert m["nx"] * m["ny"] == len(m["cells"]) and set(m["cells"]) <= set("012")
+            ws.send_text(json.dumps({"tether": 0}))
+            for _ in range(4):
+                frame = ws.receive_json()
+            assert frame["tetherMs"] == 0.0

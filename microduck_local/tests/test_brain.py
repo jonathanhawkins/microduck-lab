@@ -124,3 +124,19 @@ def test_follow_brain_tracks_a_walking_person():
     # The person walked ~2.4 m away and around a corner; the duck kept up.
     assert gaps[-1] < 1.6, gaps[-1]
     assert min(gaps[-100:]) > 0.35            # …without walking into it
+
+
+def test_chase_brain_walks_at_a_tracked_ball_and_searches_left_without_one():
+    """The soccer brain: a tracked ball ahead means walk at it (the walk is
+    the kick); none means a left search turn, kicked when the gait is cold."""
+    from microduck_local.brain import REGISTRY
+    from microduck_local.brain.gait import TURN_KICK
+    from microduck_local.brain.runtime import Senses
+    from microduck_local.sensors.detector import Detection, DetectionFrame
+    b = REGISTRY.make("chase")
+    assert b.kind == "chase"
+    none = b.step(Senses(t=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert none.twist == (TURN_KICK, 0.0, 1.0) and none.note == "search"
+    fr = DetectionFrame(0.1, [Detection("ball", "ball0", 0.2, -0.3, 0.05, 1.0, 0.9)])
+    seen = b.step(Senses(t=0.1, det=fr, det_age=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert seen.note == "chase" and seen.twist[0] > 0.3 and seen.twist[2] > 0

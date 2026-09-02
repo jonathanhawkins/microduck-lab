@@ -183,7 +183,7 @@ class BrainEnv(gym.Env):
         det = d.detector.last if d.detector is not None else None
         return Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
                       det=det, det_age=None if det is None else w.t - det.t,
-                      speed=d.heading_speed(w.data))
+                      speed=d.heading_speed(w.data), odom=w.odom(d))
 
     def _obs(self) -> np.ndarray:
         o, seen_t = senses_to_obs(self.senses(), self.task.target_cls, self._last_action,

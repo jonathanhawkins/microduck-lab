@@ -47,6 +47,30 @@ GRASP_TOL_XY = 0.04          # a toy centre within this of the tip can be graspe
 GRASP_TOL_Z = 0.045
 
 Infer = Callable[[np.ndarray], np.ndarray]
+
+
+@dataclass
+class OdomNoise:
+    """How the (x, y, yaw) a brain gets drifts from the truth (roadmap 1.7).
+    The robot's odometry is dead reckoning from leg kinematics + the IMU's
+    yaw: distance is over/under-counted by a per-run scale (foot slip),
+    yaw integrates a gyro bias, and both get per-step noise. The presets
+    are ASSUMPTIONS in the absence of a measurement on the robot — the
+    point is that a brain must survive them, not their exact size."""
+    scale_sigma: float = 0.0        # per-run distance scale error, 1σ (fraction)
+    yaw_bias_sigma: float = 0.0     # per-run gyro bias, 1σ (rad/s)
+    step_sigma: float = 0.0         # per-step position noise, 1σ (m per m walked)
+    yaw_step_sigma: float = 0.0     # per-step yaw noise, 1σ (rad per rad turned)
+
+    @staticmethod
+    def preset(name: str) -> "OdomNoise":
+        if name == "ideal":
+            return OdomNoise()
+        if name == "datasheet":
+            return OdomNoise(scale_sigma=0.03, yaw_bias_sigma=np.deg2rad(0.3), step_sigma=0.02, yaw_step_sigma=0.02)
+        if name == "hostile":
+            return OdomNoise(scale_sigma=0.08, yaw_bias_sigma=np.deg2rad(1.0), step_sigma=0.05, yaw_step_sigma=0.05)
+        raise ValueError(f"unknown odom preset {name!r}")
 _NEG_Z = np.array([0.0, 0.0, -1.0], np.float32)
 _E_FWD = np.array([1.0, 0.0, 0.0])
 
@@ -69,6 +93,13 @@ class WorldDuck:
     # skill cycle the reflex tier is running instead of the walker.
     holding: str | None = None
     beak_closed: bool = False
+    # Dead-reckoned pose the brain gets (World.odom): the truth plus OdomNoise.
+    odom_preset: str = "ideal"
+    odom_noise: OdomNoise = field(default_factory=OdomNoise)
+    odom_est: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    _odom_true_prev: np.ndarray | None = None
+    _odom_scale: float = 1.0
+    _odom_yaw_bias: float = 0.0
     skill: str | None = None
     skill_t0: float = 0.0
     skill_infer: Infer | None = None
@@ -235,6 +266,15 @@ class World:
         targets += [Target(t.id, "toy", self.pickables[t.id],
                            max(PICKABLE_KINDS[t.kind]["size"]) / 2) for t in scenario.pickables]
         self.basket = scenario.basket
+        # Soccer (first form): a pitch counts goals on both short walls.
+        self.goal_width = float(scenario.goal_width)
+        self.goals = {"left": 0, "right": 0}
+        self._ball_joint: int | None = None
+        if self.goal_width > 0 and scenario.balls:
+            bb = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ball0")
+            for j in range(self.model.njnt):
+                if int(self.model.jnt_bodyid[j]) == bb and self.model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE:
+                    self._ball_joint = j
         if scenario.basket is not None:
             targets.append(Target("basket", "basket",
                                   mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "basket_marker"), 0.12))
@@ -245,7 +285,8 @@ class World:
             if d.tof is not None and adr.tof_site >= 0:
                 tof = TofSensor(self.model, site=adr.prefix + "tof",
                                 noise=TofNoise.preset(d.tof),
-                                seed=int(self.rng.integers(0, 2**31 - 1)))
+                                seed=int(self.rng.integers(0, 2**31 - 1)),
+                                base_body=adr.trunk_body)
             det = None
             if d.detector is not None:
                 det = Detector(self.model, site=adr.prefix + "head_camera",
@@ -254,6 +295,7 @@ class World:
             self.ducks[d.id] = WorldDuck(
                 id=d.id, adr=adr, spawn=d.spawn, infer=infer_for.get(d.id, zero_infer),
                 policy_id=d.policy, tof=tof, detector=det,
+                odom_preset=d.odom, odom_noise=OdomNoise.preset(d.odom),
                 max_steps=(2**62 if not np.isfinite(max_episode_s)
                            else int(round(max_episode_s / C.CTRL_DT))))
         # Body ranges per duck: the attached subtree is contiguous after the
@@ -278,7 +320,7 @@ class World:
             self.objects.append((name, kind, b))
         # Rolling cost of one control step, split physics / sensors (ms),
         # EMA over ~1 s of ticks — the /sim perf HUD reads it.
-        self.perf = {"stepMs": 0.0, "sensorMs": 0.0}
+        self.perf = {"stepMs": 0.0, "sensorMs": 0.0, "encodeMs": 0.0}
         self.reset()
 
     # -- lifecycle ------------------------------------------------------------
@@ -297,6 +339,7 @@ class World:
     def _respawn(self, d: WorldDuck) -> None:
         x, y, yaw = d.spawn
         spawn_duck(self.model, self.data, d.adr, x, y, yaw)
+        self._odom_reset(d, x, y, yaw)
         d.last_action[:] = 0.0
         d.step_count = 0
         d._hold_yaw = None
@@ -328,6 +371,73 @@ class World:
 
     def _eq_id(self, d: WorldDuck, toy: str) -> int:
         return mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_EQUALITY, f"{d.id}/hold/{toy}")
+
+    # -- soccer ---------------------------------------------------------------
+    def _check_goal(self) -> None:
+        j = self._ball_joint
+        q = int(self.model.jnt_qposadr[j])
+        x, y = float(self.data.qpos[q]), float(self.data.qpos[q + 1])
+        hx = self.scenario.floor[0] / 2 - 0.25             # the walls sit 0.25 m inside the floor's edge
+        if abs(y) < self.goal_width / 2 and abs(x) > hx - 0.08:
+            self.goals["right" if x > 0 else "left"] += 1
+            v = int(self.model.jnt_dofadr[j])
+            self.data.qpos[q:q + 7] = [0.0, 0.0, self.scenario.balls[0].radius + 0.005, 1.0, 0.0, 0.0, 0.0]
+            self.data.qvel[v:v + 6] = 0.0
+
+    def soccer_score(self) -> dict | None:
+        if self._ball_joint is None:
+            return None
+        q = int(self.model.jnt_qposadr[self._ball_joint])
+        return {"left": self.goals["left"], "right": self.goals["right"],
+                "ball": [round(float(self.data.qpos[q]), 3), round(float(self.data.qpos[q + 1]), 3)]}
+
+    # -- odometry (roadmap 1.7) ---------------------------------------------
+    def _odom_reset(self, d: WorldDuck, x: float, y: float, yaw: float) -> None:
+        n = d.odom_noise
+        d.odom_est[:] = (x, y, yaw)
+        d._odom_true_prev = np.array([x, y, yaw])
+        d._odom_scale = 1.0 + float(self.rng.normal(0.0, n.scale_sigma)) if n.scale_sigma else 1.0
+        d._odom_yaw_bias = float(self.rng.normal(0.0, n.yaw_bias_sigma)) if n.yaw_bias_sigma else 0.0
+
+    def _odom_step(self, d: WorldDuck) -> None:
+        """Dead-reckon one control step: the TRUE motion in the body frame,
+        scaled, biased and noised per OdomNoise, integrated in the estimate's
+        own frame — so a yaw error bends the whole path after it."""
+        pos = d.trunk_pos(self.data)
+        yaw = d.yaw(self.data)
+        if d._odom_true_prev is None:
+            self._odom_reset(d, float(pos[0]), float(pos[1]), yaw)
+            return
+        px, py, pyaw = d._odom_true_prev
+        dx, dy = float(pos[0]) - px, float(pos[1]) - py
+        c, s_ = np.cos(pyaw), np.sin(pyaw)
+        fwd, left = c * dx + s_ * dy, -s_ * dx + c * dy          # body-frame step
+        dyaw = float(np.arctan2(np.sin(yaw - pyaw), np.cos(yaw - pyaw)))
+        d._odom_true_prev = np.array([pos[0], pos[1], yaw])
+        n = d.odom_noise
+        if n.scale_sigma or n.yaw_bias_sigma or n.step_sigma or n.yaw_step_sigma:
+            ds = float(np.hypot(fwd, left))
+            fwd *= d._odom_scale
+            left *= d._odom_scale
+            if n.step_sigma and ds > 0:
+                fwd += float(self.rng.normal(0.0, n.step_sigma * ds))
+                left += float(self.rng.normal(0.0, n.step_sigma * ds))
+            dyaw += d._odom_yaw_bias * C.CTRL_DT
+            if n.yaw_step_sigma and dyaw:
+                dyaw += float(self.rng.normal(0.0, n.yaw_step_sigma * abs(dyaw)))
+        eyaw = d.odom_est[2]
+        d.odom_est[0] += np.cos(eyaw) * fwd - np.sin(eyaw) * left
+        d.odom_est[1] += np.sin(eyaw) * fwd + np.cos(eyaw) * left
+        d.odom_est[2] = float(np.arctan2(np.sin(eyaw + dyaw), np.cos(eyaw + dyaw)))
+
+    def odom(self, d: WorldDuck) -> tuple[float, float, float]:
+        """The (x, y, yaw) a brain gets: the truth under the `ideal` preset."""
+        return float(d.odom_est[0]), float(d.odom_est[1]), float(d.odom_est[2])
+
+    def set_odom_preset(self, d: WorldDuck, name: str) -> None:
+        d.odom_preset, d.odom_noise = name, OdomNoise.preset(name)
+        pos = d.trunk_pos(self.data)
+        self._odom_reset(d, float(pos[0]), float(pos[1]), d.yaw(self.data))
 
     def grasp(self, d: WorldDuck, tol_xy: float = GRASP_TOL_XY, tol_z: float = GRASP_TOL_Z) -> str | None:
         """Close the beak: the nearest toy within tolerance of the mouth tip
@@ -468,6 +578,10 @@ class World:
                 self._respawn(d)
                 mujoco.mj_forward(m, data)
                 d.prev_joint_vel = d.joint_vel(data)
+        for d in self.ducks.values():
+            self._odom_step(d)
+        if self._ball_joint is not None:
+            self._check_goal()
         t1 = time.perf_counter()
         for d in self.ducks.values():
             if d.tof is not None:

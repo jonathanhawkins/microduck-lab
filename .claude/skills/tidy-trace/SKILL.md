@@ -15,6 +15,8 @@ next door (the shipped `alpha_walking` / `alpha_ground_pick` policies).
 ```bash
 uv run trace-tidy --seed 2 --seconds 300            # transitions, releases, landings, falls
 uv run trace-tidy --seed 0 --every 5                 # + a position/intent line every 5 s
+uv run trace-tidy --seed 0 --odom hostile            # under odometry drift (roadmap 1.7)
+uv run eval-tidy --seeds 8 --jobs 4 --tether-ms 250  # the benchmark, parallel, over a brain tether (12.10)
 ```
 
 Read it like this:

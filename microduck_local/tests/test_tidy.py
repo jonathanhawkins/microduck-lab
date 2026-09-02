@@ -151,7 +151,11 @@ def test_tidy_brain_geometry_and_gating_without_physics():
     # exactly the error the stamp exists to remove.
     b._cam = (0.241, 0.112)
     _, _, rng_walk = b._locate((0.0, 0.0, 0.0), det, b.p.toy_z, t=1.0)
+    assert rng_walk == b.p.far_range          # 1.78 m by the elevation: beyond far_range it is a direction
+    b.p = type(b.p)(far_range=4.0)
+    _, _, rng_walk = b._locate((0.0, 0.0, 0.0), det, b.p.toy_z, t=1.0)
     assert rng_walk > 1.6
+    b.p = type(b.p)()
     # Tracked ids beat confidence: a faint far toy is worth walking to, a
     # confident ghost (no id) is not.
     assert b._trusted(Detection("toy", "t3", 0.0, 0.0, 0.03, 2.0, conf=0.15))
@@ -163,9 +167,9 @@ def test_tidy_brain_geometry_and_gating_without_physics():
     b.basket_mem = (2.0, 2.0)
     assert not b._in_basket_zone((0.0, 0.0, 0.0), det, 1.0)
     # Cold gait: a turn gets the forward kick, either way; warm: none.
-    b._cold = True
+    b._gait.cold = True
     assert b._turn(+1.0) == (b.p.turn_kick, 0.0, 1.0) and b._turn(-1.0) == (b.p.turn_kick, 0.0, -1.0)
-    b._cold = False
+    b._gait.cold = False
     assert b._turn(-1.0) == (0.0, 0.0, -1.0)
     # The frame contract the stamp rides on.
     fr = DetectionFrame(t=0.0, detections=[det], cam_z=0.234, cam_pitch=0.197)

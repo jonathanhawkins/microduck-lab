@@ -142,3 +142,28 @@ def test_scenario_roundtrip_and_validation(tmp_path):
 def test_all_collision_robot_variant_composes():
     m = compose(Scenario(name="all", collision="all", ducks=[Duck("d0", (0, 0, 0))]))
     assert mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, "d0/mouth_tip") >= 0
+
+
+def test_pitch_counts_goals_and_recentres_the_ball():
+    """Soccer, first form: a ball across a short wall's line inside the goal
+    width is a goal for that side; the ball comes back to the centre."""
+    import mujoco
+
+    from microduck_local.world import World, make_pitch
+    from microduck_local.world.scenario import validate_scenario
+    sc = make_pitch()
+    assert validate_scenario(sc.to_dict()) == sc and sc.goal_width == 0.7
+    w = World(sc)
+    assert w.soccer_score() == {"left": 0, "right": 0, "ball": [0.0, 0.0]}
+    j = w._ball_joint
+    q = int(w.model.jnt_qposadr[j])
+    hx = sc.floor[0] / 2 - 0.25
+    w.data.qpos[q:q + 2] = [hx - 0.03, 0.1]                  # on the right goal line, inside the posts
+    mujoco.mj_forward(w.model, w.data)
+    w.step()
+    s = w.soccer_score()
+    assert s["left"] == 0 and s["right"] == 1 and abs(s["ball"][0]) < 0.05 and abs(s["ball"][1]) < 0.05
+    w.data.qpos[q:q + 2] = [-(hx - 0.03), 0.6]               # left line but outside the posts: no goal
+    mujoco.mj_forward(w.model, w.data)
+    w.step()
+    assert w.soccer_score()["left"] == 0

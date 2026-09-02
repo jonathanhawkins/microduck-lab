@@ -14,18 +14,28 @@ the tree, and Track 12 has its first working loop:
 - Phase 1: `world/` (0.1–0.3 incl. the page's editor), `sensors/` ToF (1.1,
   1.2, 1.8, 1.9), `world_server.py` + `/sim` (0.4, 0.6 record/replay, 7.1–7.4,
   7.8), the CI matrix (9.6, Windows runs the spawn-safe modules).
-- Phase 2: the geometric detector (1.3), persons + possess, the brain runtime
-  with freshness (2.1, 2.4), `Wander` and `Follow` (2.3), `BrainEnv` +
-  `train-brain` + `eval-brain` (3.1, 3.2). **Measured:** on identical
+- Phase 2: the geometric detector (1.3) and a tracker with ids over it,
+  persons + possess, the brain runtime with freshness (2.1, 2.4), `Wander`
+  and `Follow` (2.3), `BrainEnv` + `train-brain` + `eval-brain` (3.1, 3.2),
+  odometry drift presets (1.7) and an occupancy map per duck in its own
+  odometry frame, painted on the page (the first of the mapping track);
+  the `pitch` scenario with two `chase` brains and goal counting (the first
+  of the soccer track). Binary framing (0.5) stays open on a measurement:
+  the page's perf readout puts the JSON encode at ~1 ms per 40 ms frame
+  for one duck (physics 1.1, sensors 0.3), so JSON holds until rosters of
+  four or more ducks make the encode the largest term. **Measured:** on identical
   follow-me episodes the learned brain (`brains/follow-v1`, 400k decisions,
   ~10 min on 4 cores) holds the distance band 0.73 / 0.61 of the time under
   the datasheet / hostile presets against the scripted controller's 0.42 /
   0.41, and keeps the person in sight 0.85 vs 0.39.
 - Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
   a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
-  12.13). **Measured:** 0.67 of six scattered toys are in the basket after
-  five minutes (5/4/3 of 6 over three seeds, 1.7 falls a run) — up from
-  0.11 when the loop first closed. What it took, each a measurement on
+  12.13), the tether toggle (12.10: `--tether-ms`, `POST /world/tether`).
+  **Measured:** 0.90 of six scattered toys are in the basket after five
+  minutes (8 seeds, 0.25 falls a run; 0.88 / 0.12 under datasheet odometry
+  drift, 0.79 / 0.50 under hostile drift, 0.79 / 1.88 with a 250 ms brain
+  tether — the falls are the tether's cost) — up from 0.67 / 1.7 falls at
+  the first close of the loop and 0.11 before that. What it took, each a measurement on
   the walker, not a tune: releases only after a standing re-measure of
   the basket at 0.42 m (walking rocks the head 0.02 rad and holds it
   0.08 rad higher than standing — detection frames now carry the camera

@@ -77,6 +77,7 @@ class Duck:
     tof: str | None = "datasheet"      # ToF noise preset, None = no sensor
     detector: str | None = "datasheet" # camera+NPU detector preset, None = none
     brain: str | None = None           # brain kind in auto mode; None = wander if ToF else script
+    odom: str = "ideal"                # odometry drift preset the brain's (x, y, yaw) carries (roadmap 1.7)
 
 
 @dataclass
@@ -129,6 +130,7 @@ class Scenario:
     persons: list[Person] = field(default_factory=list)
     pickables: list[Pickable] = field(default_factory=list)
     basket: Basket | None = None
+    goal_width: float = 0.0            # > 0: a pitch — goals on both short walls this wide (World counts them)
     collision: str = "walk"
     version: int = SCENARIO_VERSION
 
@@ -227,7 +229,12 @@ def validate_scenario(raw: dict) -> Scenario:
         if did in seen:
             raise ScenarioError(f"duplicate duck id {did!r}")
         seen.add(did)
-        spawn = _vec(d.get("spawn", [0.0, 0.0, 0.0]), 3, f"ducks[{i}].spawn", -bound, bound)
+        sp = d.get("spawn", [0.0, 0.0, 0.0])
+        if not isinstance(sp, (list, tuple)) or len(sp) != 3:
+            raise ScenarioError(f"ducks[{i}].spawn must be [x, y, yaw]")
+        xy = _vec(sp[:2], 2, f"ducks[{i}].spawn", -bound, bound)
+        yaw = _vec([sp[2]], 1, f"ducks[{i}].spawn yaw", -2 * math.pi, 2 * math.pi)   # a heading, not a coordinate
+        spawn = (xy[0], xy[1], yaw[0])
         policy = d.get("policy")
         if policy is not None and (not isinstance(policy, str) or len(policy) > 200):
             raise ScenarioError(f"ducks[{i}].policy must be a palette id string or null")
@@ -240,7 +247,10 @@ def validate_scenario(raw: dict) -> Scenario:
         brain = d.get("brain")
         if brain is not None and (not isinstance(brain, str) or not DUCK_ID_RE.match(brain)):
             raise ScenarioError(f"ducks[{i}].brain must be a brain kind name or null")
-        ducks.append(Duck(did, spawn, policy, tof, det, brain))
+        odom = d.get("odom", "ideal") or "ideal"
+        if odom not in TOF_PRESETS:
+            raise ScenarioError(f"ducks[{i}].odom must be one of {TOF_PRESETS}")
+        ducks.append(Duck(did, spawn, policy, tof, det, brain, odom))
     if len(ducks) > MAX_DUCKS:
         raise ScenarioError(f"more than {MAX_DUCKS} ducks")
     persons = []
@@ -288,7 +298,10 @@ def validate_scenario(raw: dict) -> Scenario:
     collision = raw.get("collision", "walk")
     if collision not in ("walk", "all"):
         raise ScenarioError("collision must be 'walk' or 'all'")
-    return Scenario(name=name, seed=seed, floor=floor, walls=walls, boxes=boxes,
+    goal_width = raw.get("goal_width", 0.0) or 0.0
+    if not isinstance(goal_width, (int, float)) or not 0.0 <= goal_width <= 5.0:
+        raise ScenarioError("goal_width must be a number in [0, 5]")
+    return Scenario(name=name, seed=seed, floor=floor, walls=walls, boxes=boxes, goal_width=float(goal_width),
                     balls=balls, ducks=ducks, persons=persons, pickables=pickables,
                     basket=basket, collision=collision)
 
@@ -365,3 +378,18 @@ def make_playroom(seed: int = 0, n: int = 6, size: tuple[float, float] = (3.0, 2
     return Scenario(name=name or f"playroom-{seed}", seed=seed, floor=(size[0] + 0.5, size[1] + 0.5),
                     walls=walls, ducks=[Duck("d0", (0.0, 0.0, 0.0), None, "datasheet", "datasheet", "tidy")],
                     pickables=toys, basket=basket)
+
+
+def make_pitch(size: tuple[float, float] = (3.0, 2.5), name: str | None = None,
+               goal_width: float = 0.7) -> Scenario:
+    """Two ducks, one ball, walls all round (the soccer track's first form).
+    A goal is the ball crossing either short wall's line inside
+    `goal_width`; the World counts them and re-centres the ball."""
+    hx, hy = size[0] / 2, size[1] / 2
+    corners = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+    walls = [Wall(corners[i], corners[(i + 1) % 4], 0.3, 0.02) for i in range(4)]
+    return Scenario(name=name or "pitch", floor=(size[0] + 0.5, size[1] + 0.5), walls=walls,
+                    balls=[Ball((0.0, 0.0))],
+                    ducks=[Duck("d0", (-0.9, 0.0, 0.0), None, "datasheet", "datasheet", "chase"),
+                           Duck("d1", (0.9, 0.0, math.pi), None, "datasheet", "datasheet", "chase")],
+                    goal_width=goal_width)

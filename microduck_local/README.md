@@ -321,6 +321,29 @@ its current intent live.
 - **Persons** are mocap capsules that walk waypoint paths; press the page's
   possess button (or send `{"possess": "p0"}`) to drive one yourself and
   see how a brain reacts.
+- `brain/tracker.py` is the **tracker** over the detector's frames: ids
+  from association (class, bearing gate, range gate), smoothing, hit
+  counts, and coasting through misses with the remembered bearing turning
+  with the body (from odometry). `Follow` acts on a track, not on whatever
+  the last frame said, and a one-frame ghost never confirms. In the sim the
+  detector also hands out true names; the tracker keeps them for the tools,
+  its ids are its own.
+- `brain/gait.py` holds the **walker facts every brain shares** (measured
+  with `walker-facts`): it does not walk backwards, a right turn from a
+  standstill never starts and a left one sometimes does not, so a cold
+  turn gets a 0.2 m/s forward kick that is dropped as soon as the body is
+  turning. `GaitWatch` decides "cold" from odometry, never from the intent.
+- **Odometry drift** (roadmap 1.7): the `(x, y, yaw)` a brain gets is dead
+  reckoning — a per-run distance scale, a gyro bias, per-step noise — under
+  the same `ideal` / `datasheet` / `hostile` presets (`Duck.odom`, the
+  inspector's odom select, `eval-tidy --odom`). The presets are
+  assumptions until someone measures the robot; the point is that a brain
+  has to live with them.
+- **Room mapping** (`brain/mapping.py`): an occupancy grid per duck in its
+  own odometry frame, built from the ToF frames' mount pose (each frame
+  carries where the sensor was on the body) and its own pose, floor hits
+  traced as free space. The page paints it on the floor (`M`); under drift
+  it smears exactly as the robot's would.
 - `brain/brain_env.py` turns the brain tier into a gymnasium env
   (`BrainEnv`: 80-float obs from senses, a 3-float twist action, decisions
   at 10 Hz, the shipped walker frozen underneath, domain randomization on
@@ -334,10 +357,22 @@ its current intent live.
 
   Measured on identical follow-me episodes: the learned brain holds the
   distance band 0.73 / 0.61 of the time under the datasheet / hostile
-  presets against the scripted controller's 0.42 / 0.41, and keeps the
-  person in sight 0.85 vs 0.39. The obs layout is a contract shared by
+  presets against the scripted controller's 0.45 / 0.40 (12 episodes;
+  0.41 / 0.39 before the tracker and the swept gains), and keeps the
+  person in sight 0.85 vs 0.38. The obs layout is a contract shared by
   training and the in-world `LearnedBrain` (`brain/learned.py`), and the
   exported ONNX bakes the normalizer in, like `export-walk`.
+
+### Two ducks, one ball (the soccer track's first form)
+
+`pitch` is a walled 3 × 2.5 m room with a ball in the middle and two ducks
+running the `chase` brain: track the ball, walk at it, and through it — for
+a walker with no kicking reflex, the walk *is* the kick. The World counts a
+goal whenever the ball crosses either short wall's line inside the goal
+width and puts it back in the centre; the page shows the score. It is the
+smallest thing that puts two brains in one room and lets them interfere:
+the soccer track's later items (a kicking reflex, teams, a learned striker)
+build on this scenario and this score.
 
 ### Tidy the playroom (roadmap Track 12)
 
@@ -371,15 +406,34 @@ What is real and what is a model here, so nobody mistakes one for the other:
 - Odometry is the sim's truth for now (roadmap 1.7 adds drift); the real
   robot's drifts, which is why the basket is re-acquired by sight every trip.
 
-**Measured** (`eval-tidy --seeds 3 --toys 6 --seconds 300`, datasheet noise):
-0.67 of the toys end up in the basket within five minutes (5, 4 and 3 of
-6), 1.7 falls per run, releases land within 3 cm of where the brain
-thinks the basket is. Every step of the way there was a measurement, not a
-guess — `uv run walker-facts` re-measures them (the walker does not walk
-backwards at all; a right turn from a standstill barely happens; the head
-rides 0.08 rad higher while walking than standing) and `uv run trace-tidy`
+**Measured** (`eval-tidy --seeds 8 --toys 6 --seconds 300 --jobs 2`,
+datasheet sensor noise):
+
+| odometry | tether | tidied (mean of 8 seeds) | falls / run |
+|---|---|---|---|
+| ideal | onboard | **0.90** (5, 5, 6, 6, 5, 4, 6, 6 of 6) | 0.25 |
+| datasheet drift | onboard | 0.88 | 0.12 |
+| hostile drift | onboard | 0.79 | 0.50 |
+| ideal | 250 ms round trip | 0.79 | 1.88 |
+
+The tether row is roadmap 12.10's answer in one line: a laptop brain over
+Wi-Fi keeps most of the tidying but trips at the rim four times as often,
+because the release and the obstacle guard act on senses a quarter of a
+second old. The 50 Hz reflex stays onboard either way.
+
+Up from 0.67 and 1.7 falls a run at the first close of the loop, and 0.11
+before that. What moved it: the basket is re-measured standing still and
+never released on a long-range guess; far sightings are directions, not
+ranges (at 2.3 m the elevation-to-range map is 34 m per radian); the held
+toy is masked out of the ToF guard (it sits 2.5 cm from the sensor and
+read as a wall); a stop out of a steering step lunges 2–3 cm, so the last
+centimetres are walked straight; the obstacle detour walks past whatever
+the servo wanted. Every step of the way there was a measurement, not a
+guess — `uv run walker-facts` re-measures them and `uv run trace-tidy`
 shows one run state by state, with every release, landing and fall in
 context. `.claude/skills/tidy-trace/SKILL.md` is the debugging guide.
+`--tether-ms` (roadmap 12.10) delays every intent by a brain round trip;
+`POST /world/tether` does the same live on the page.
 
 ## Teachable behaviors (the viewer's 🎓 teach panel)
 
@@ -460,8 +514,8 @@ src/microduck_local/
 ├── world/          # scenario contract, MjSpec composition, World (N ducks, one mjData,
 │                   # persons, toys, basket, grasp-as-attachment, skills)
 ├── sensors/        # ray rig on mj_multiRay, the 8×8 ToF, the geometric detector
-├── brain/          # senses → intents: runtime contract, Wander/Follow/Script, the tidy
-│                   # state machine, BrainEnv + LearnedBrain (train-brain / eval-brain)
+├── brain/          # senses → intents: runtime contract, tracker, gait facts, Wander/Follow/
+│                   # Script, the tidy state machine, occupancy mapping, BrainEnv + LearnedBrain
 ├── eval_tidy.py    # the playroom benchmark (eval-tidy)
 └── world_server.py # the /sim page's backend: /scenarios, /world, /ws/sim
 tests/              # contract locks: obs order, action semantics, DR non-accumulation,

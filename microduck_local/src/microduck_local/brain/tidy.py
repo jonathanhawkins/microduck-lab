@@ -30,9 +30,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .. import contract as C
 from ..world.arena import PICK_REACH_AHEAD, PICK_REACH_LEFT
 from .controllers import WanderParams, _column_clearance, wander_from_tof
+from .gait import TURN_KICK, GaitWatch, turn
 from .runtime import REGISTRY, Intent, Senses, age_inputs
 
 
@@ -58,11 +58,12 @@ class TidyParams:
     # reach 0.04 m ahead of the trunk, the beak tip 0.08 m (head LEVEL —
     # pitching it down pulls the tip back to 0.053), and a held toy sits
     # 0.005–0.023 m beyond the tip. A 0.3 m tray's rim outer face is at
-    # 0.156, so 0.225 minus the ~1 cm coast leaves the feet 2 cm outside
-    # the rim and the toy 1.5–3 cm inside it. ASSUMPTION: a 0.3 m basket.
+    # 0.156, so 0.23 plus the ~1 cm coast leaves the feet 2.5 cm outside
+    # the rim and the toy 1–3 cm inside it. ASSUMPTION: a 0.3 m basket.
     # Tight on purpose: a miss is retried, a trip over the rim is a fall.
-    basket_reach: float = 0.225
+    basket_reach: float = 0.23
     basket_confirm_range: float = 0.6  # release only if the marker was seen from closer than this
+    far_range: float = 1.2             # beyond this a sighting is a direction, not a range (see _locate)
     aim_range: float = 0.42            # stop here, square up, stand still and re-measure the basket before the blind end
     aim_settle_s: float = 0.6          # the walker needs ~0.5 s to come to rest
     aim_s: float = 1.4
@@ -72,8 +73,9 @@ class TidyParams:
     settle_s: float = 0.6
     backoff_turn: float = 2.6          # after a release: turn LEFT this far (rad, in place)…
     backoff_walk_s: float = 1.5        # …then walk straight this long before scanning again
-    turn_kick: float = 0.2             # forward command that starts the gait for a RIGHT turn
+    turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
+    hold_blind_m: float = 0.12         # ToF returns closer than this while holding are the toy in the beak
     scan_wz: float = 1.0               # the shipped walker barely turns in place below 1.0
     explore_s: float = 6.0             # wander this long after an empty scan
     min_conf: float = 0.1              # a tracked detection needs no more than this (see _trusted)
@@ -120,8 +122,7 @@ class Tidy:
         self._aim_turning = False
         self._backoff_t = 0.0
         self._blocked_t = -9.0
-        self._moving_t = -9.0            # last time the body was seen walking or turning
-        self._cold = True
+        self._gait = GaitWatch()
         self._aim_fixes: list[tuple[float, float]] = []
         self._aim_last_t = -9.0
 
@@ -189,7 +190,12 @@ class Tidy:
         horiz_cam = float(np.clip((cam_z - target_z) / math.tan(depression), 0.0, 4.0))
         x, y, yaw = odom
         a = yaw + det.bearing
-        rng = p.cam_ahead + horiz_cam
+        # Beyond `far_range` the elevation says almost nothing about range
+        # (at 2.3 m the map is 34 m per radian: 0.02 rad of head bob is
+        # 0.7 m — measured, an estimate that hopped between 1.3 and 3.4 m
+        # and a duck that spun for four minutes). The bearing is still
+        # good, so a far sighting means "walk that way, at least this far".
+        rng = min(p.cam_ahead + horiz_cam, p.far_range)
         return x + rng * math.cos(a), y + rng * math.sin(a), rng
 
     def _set_head(self, down: bool, t: float) -> None:
@@ -210,8 +216,8 @@ class Tidy:
         if loc is None:
             return None
         tx, ty, rng = loc
-        if self.est is None:
-            self.est = (tx, ty)
+        if self.est is None or rng >= p.far_range:
+            self.est = (tx, ty)                                  # a far fix is a direction: replace, never average
         else:
             if k is None:
                 k = 0.7 if rng < p.basket_confirm_range else 0.3
@@ -241,22 +247,28 @@ class Tidy:
         return (self.p.approach_speed, 0.0, float(np.clip(self.p.k_turn * bearing, -1.0, 1.0))), dist, bearing
 
     def _turn(self, sign: float) -> tuple[float, float, float]:
-        """Turn in place. Measured on the shipped walker: with the gait going
-        (just walked, or already turning) wz=±1 turns at ~0.6–0.8 rad/s; from
-        a standstill a right turn never starts (0.05 rad/s) and a left one
-        usually does within a second — but not always (30 s of nothing
-        after a pick, once). So a COLD turn gets a small forward command
-        as a kick (vx 0.2 with wz -1: 0.7 rad/s from cold; it creeps forward
-        a few centimetres a second, which is why the kick drops the moment
-        the body is actually turning)."""
-        wz = 1.0 if sign > 0 else -1.0
-        return (self.p.turn_kick, 0.0, wz) if self._cold else (0.0, 0.0, wz)
+        """Turn in place (brain/gait.py: a cold gait needs the forward kick)."""
+        return turn(sign, self._gait.cold, self.p.turn_kick)
 
-    def _bumper(self, senses: Senses) -> float:
+    def _tof_view(self, senses: Senses):
+        """(depth_mm, valid) for obstacle logic. A held toy sits 2–3 cm from
+        the sensor, in the bottom rows of the centre columns (measured: ToF
+        minimum 25 mm all through a carry, and a guard that read it as a
+        wall — 3 minutes of "blocked" with a toy in the beak). While
+        holding, returns closer than `hold_blind_m` are the toy, not the room."""
         tof = senses.fresh_tof(self.TOF_MAX_AGE)
         if tof is None:
+            return None, None
+        if senses.holding:
+            near = tof.depth_mm < int(self.p.hold_blind_m * 1000)
+            return tof.depth_mm, tof.valid & ~near
+        return tof.depth_mm, tof.valid
+
+    def _bumper(self, senses: Senses) -> float:
+        depth, valid = self._tof_view(senses)
+        if depth is None:
             return math.inf
-        return float(_column_clearance(tof.depth_mm, tof.valid, WanderParams())[3:5].min())
+        return float(_column_clearance(depth, valid, WanderParams())[3:5].min())
 
     # -- the machine ---------------------------------------------------------
     def step(self, senses: Senses) -> Intent:
@@ -265,12 +277,7 @@ class Tidy:
         odom = senses.odom or (0.0, 0.0, 0.0)
         fr = senses.fresh_det(self.DET_MAX_AGE)
         self._cam = (fr.cam_z, fr.cam_pitch) if (fr is not None and fr.cam_z > 0.0) else None
-        # Is the gait going? (see _turn) — from the odometry, not the intent.
-        if self._prev_yaw is not None:
-            dyaw = math.atan2(math.sin(odom[2] - self._prev_yaw), math.cos(odom[2] - self._prev_yaw))
-            if abs(senses.speed or 0.0) > 0.05 or abs(dyaw) > 0.3 * C.CTRL_DT:
-                self._moving_t = t
-        self._cold = t - self._moving_t > 0.4
+        self._gait.update(senses)                      # is the gait going? (see _turn)
         twist = (0.0, 0.0, 0.0)
         head = (0.0, 0.0, 0.0, 0.0)
         beak = None
@@ -326,9 +333,8 @@ class Tidy:
             if self._nearest(senses, "toy", odom) is not None:
                 self._enter("scan", t)
             else:
-                tof = senses.fresh_tof(self.TOF_MAX_AGE)
-                # The ToF looks down with the head: only its top rows see ahead.
-                twist = wander_from_tof(tof.depth_mm, tof.valid) if tof is not None else (0.0, 0.0, 0.0)
+                depth, valid = self._tof_view(senses)
+                twist = wander_from_tof(depth, valid) if depth is not None else (0.0, 0.0, 0.0)
                 if twist[0] == 0.0 and twist[2] != 0.0:
                     twist = self._turn(twist[2])
                 if t - self.t_state > p.explore_s:
@@ -419,8 +425,8 @@ class Tidy:
             if self._nearest(senses, "basket") is not None:
                 self._enter("carry", t)
             else:
-                tof = senses.fresh_tof(self.TOF_MAX_AGE)
-                twist = wander_from_tof(tof.depth_mm, tof.valid) if tof is not None else (0.0, 0.0, 0.0)
+                depth, valid = self._tof_view(senses)
+                twist = wander_from_tof(depth, valid) if depth is not None else (0.0, 0.0, 0.0)
                 if twist[0] == 0.0 and twist[2] != 0.0:
                     twist = self._turn(twist[2])
                 if t - self.t_state > p.explore_s:
@@ -452,7 +458,11 @@ class Tidy:
                 # walked off in whatever direction the ToF guard had left it.
                 twist, dist, bearing = self._servo(odom, p.basket_reach)
                 if twist[0] > p.turn_kick:
-                    twist = (p.approach_speed, 0.0, float(np.clip(twist[2], -0.5, 0.5)))
+                    # …and none at all in the last few centimetres: a stop
+                    # out of a steering step lunged 2–3 cm instead of the
+                    # 1 cm coast, which is the whole margin at the rim.
+                    wz = 0.0 if dist < p.basket_reach + 0.06 else float(np.clip(twist[2], -0.5, 0.5))
+                    twist = (p.approach_speed, 0.0, wz)
             if dist <= p.basket_reach:
                 if self.basket_confirmed:
                     self._enter("drop", t)
@@ -558,22 +568,23 @@ class Tidy:
         guard = self.state in ("approach", "explore", "carry_explore") or (
             self.state == "deliver" and not (self.aimed and self.est is not None
                                              and math.hypot(self.est[0] - odom[0], self.est[1] - odom[1]) < 0.5))
-        if twist[0] > p.turn_kick and guard:
-            tof = senses.fresh_tof(self.TOF_MAX_AGE)
-            if tof is not None:
+        if guard:
+            depth, valid = self._tof_view(senses)
+            if depth is not None:
                 rows = (0, 2) if self._head_down else (2, 7)
-                ahead = float(_column_clearance(tof.depth_mm, tof.valid, WanderParams(rows=rows))[3:5].min())
-                if ahead < 0.25:
+                ahead = float(_column_clearance(depth, valid, WanderParams(rows=rows))[3:5].min())
+                if t - self._blocked_t < p.detour_s and ahead >= 0.25 and self.state in ("approach", "deliver"):
+                    # Just cleared a blocker: one straight step past it
+                    # WHATEVER the servo wants (it wanted to turn back into
+                    # it — measured: a left/right ping-pong at a toy, 4 min).
+                    twist = (p.approach_speed, 0.0, 0.0)
+                    note += " · detour"
+                elif twist[0] > p.turn_kick and ahead < 0.25:
                     # Turn LEFT at full rate (the servo's steering rate never
-                    # turns the walker — measured: 200 s "blocked" on one
-                    # spot), then walk one straight detour step past it
-                    # before the servo takes the wheel back.
+                    # turns the walker — measured: 200 s "blocked" on one spot).
                     twist = self._turn(+1.0)
                     self._blocked_t = t
                     note += " · blocked"
-                elif t - self._blocked_t < p.detour_s and self.state in ("approach", "deliver"):
-                    twist = (p.approach_speed, 0.0, 0.0)
-                    note += " · detour"
 
         self._prev_yaw = odom[2]
         self.last = twist

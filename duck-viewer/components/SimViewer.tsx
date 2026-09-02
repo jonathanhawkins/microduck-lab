@@ -438,6 +438,62 @@ function SimTargets({ client }: { client: SimClient }) {
   return null;
 }
 
+/** What a duck believes the room looks like: its occupancy grid (brain
+ *  layer, in its own odometry frame) painted onto a floor-level plane.
+ *  Free = faint teal, occupied = amber, unknown = clear. Under odometry
+ *  drift the map smears exactly as the robot's would. */
+function MapOverlay({ client, duckId, enabled }: { client: SimClient; duckId: string | null; enabled: boolean }) {
+  const canvas = useMemo(() => document.createElement("canvas"), []);
+  const texture = useMemo(() => {
+    const t = new THREE.CanvasTexture(canvas);
+    t.magFilter = THREE.NearestFilter;
+    t.minFilter = THREE.NearestFilter;
+    return t;
+  }, [canvas]);
+  const meshRef = useRef<THREE.Mesh>(null);
+  const last = useRef<{ frames: number; id: string | null }>({ frames: -1, id: null });
+  useFrame(() => {
+    const m = meshRef.current;
+    if (!m) return;
+    const f = client.frame;
+    const id = duckId ?? f?.ducks[0]?.id ?? null;
+    const map = enabled && f?.maps && id ? f.maps[id] : null;
+    if (!map) {
+      if (!f?.maps) return;          // keep the last painted map between map frames
+      m.visible = false;
+      return;
+    }
+    m.visible = true;
+    if (map.frames === last.current.frames && id === last.current.id) return;
+    last.current = { frames: map.frames, id };
+    canvas.width = map.nx;
+    canvas.height = map.ny;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const img = ctx.createImageData(map.nx, map.ny);
+    for (let j = 0; j < map.ny; j++) {
+      for (let i = 0; i < map.nx; i++) {
+        const c = map.cells.charCodeAt(j * map.nx + i) - 48;
+        const k = ((map.ny - 1 - j) * map.nx + i) * 4;   // canvas rows run top-down; the grid runs from -y
+        if (c === 2) { img.data[k] = 242; img.data[k + 1] = 182; img.data[k + 2] = 50; img.data[k + 3] = 220; }
+        else if (c === 1) { img.data[k] = 67; img.data[k + 1] = 194; img.data[k + 2] = 184; img.data[k + 3] = 60; }
+        else { img.data[k + 3] = 0; }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    texture.needsUpdate = true;
+    const w = map.nx * map.res, h = map.ny * map.res;
+    m.scale.set(w, h, 1);
+    m.position.set(map.origin[0] + w / 2, map.origin[1] + h / 2, 0.003);   // inside the stage's Z-up group
+  });
+  return (
+    <mesh ref={meshRef} visible={false}>
+      <planeGeometry args={[1, 1]} />
+      <meshBasicMaterial map={texture} transparent depthWrite={false} />
+    </mesh>
+  );
+}
+
 /** The 8×8 depth matrix of the selected duck, painted straight off the
  *  stream (no React state per frame). */
 function Heatmap({ client, duckId }: { client: SimClient; duckId: string | null }) {
@@ -640,13 +696,16 @@ export default function SimViewer() {
   const [loading, setLoading] = useState(false);
   const [driving, setDriving] = useState(false);
   const [showTof, setShowTof] = useState(true);
+  const [showMap, setShowMap] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [possessed, setPossessed] = useState<string | null>(null);
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
-  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null }>({
+  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: { left: number; right: number } | null }>({
     rtf: 0,
+    perf: "",
+    soccer: null,
     mode: "auto",
     t: 0,
     events: [],
@@ -692,6 +751,9 @@ export default function SimViewer() {
         events: ev.length ? [...s.events, ...ev].slice(-4) : s.events,
         kbps: 0.7 * s.kbps + 0.3 * kbps,
         tidy: f?.tidy ?? null,
+        soccer: f?.soccer ?? null,
+        // Where the lab's 20 ms tick goes: physics+policies / sensors / frame encode.
+        perf: f?.perf ? `${f.perf.stepMs.toFixed(2)}+${f.perf.sensorMs.toFixed(2)}+${(f.perf.encodeMs ?? 0).toFixed(2)} ms` : "",
       }));
       setSelected(getSelectedDuck());
       setPossessed(f?.possessed ?? null);
@@ -826,6 +888,7 @@ export default function SimViewer() {
           {scene && client && <SimDucks scene={scene} client={client} />}
           {scene && client && <TofOverlay scene={scene} client={client} enabled={showTof} />}
           {scene && client && <DetOverlay scene={scene} client={client} enabled={showTof} />}
+          {client && <MapOverlay client={client} duckId={selected} enabled={showMap} />}
         </group>
         {client && <SimTargets client={client} />}
         <OrbitControls
@@ -883,6 +946,9 @@ export default function SimViewer() {
             ))}
           </select>
         )}
+        <button style={{ ...BTN, borderColor: showMap ? "#43c2b8" : "#2b313b" }} onClick={() => setShowMap((v) => !v)} title="M: the selected duck's occupancy map, in its own odometry frame">
+          map
+        </button>
         <button style={{ ...BTN, borderColor: showTof ? "#43c2b8" : "#2b313b" }} onClick={() => setShowTof((v) => !v)} title="T">
           ToF overlay
         </button>
@@ -897,6 +963,9 @@ export default function SimViewer() {
         <span style={{ color: "#9aa5b1" }}>
           {scenario ? scenario.name : "no world loaded"} · t {status.t.toFixed(1)} s · RTF {status.rtf.toFixed(2)} · {status.mode} ·{" "}
           {status.kbps.toFixed(0)} kB/s
+          {status.perf && (
+            <span title="lab cost per 20 ms tick: physics+policies + sensors + frame encode"> · {status.perf}</span>
+          )}
         </span>
         <span style={{ color: connected ? "#43c2b8" : "#f2b632" }}>{connected ? "● live" : "○ offline"}</span>
       </div>
@@ -990,6 +1059,16 @@ export default function SimViewer() {
                   </select>
                 </>
               )}
+              {selDuck.odom && (
+                <div style={{ marginTop: 4 }}>
+                  odom{" "}
+                  <select value={selDuck.odom} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "odom")} style={{ ...BTN, padding: "1px 4px" }} title="odometry drift the brain lives with (roadmap 1.7)">
+                    <option value="ideal">ideal</option>
+                    <option value="datasheet">datasheet</option>
+                    <option value="hostile">hostile</option>
+                  </select>
+                </div>
+              )}
               {selDuck.detector && (
                 <>
                   det{" "}
@@ -1037,6 +1116,15 @@ export default function SimViewer() {
             setSelectedDuck(null);
           }}
         />
+      )}
+      {status.soccer && (
+        <div style={{ position: "absolute", top: 56, left: 10, background: "rgba(16,18,22,0.9)", border: "1px solid #2b313b", borderRadius: 6, color: "#e9edf1", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, padding: "8px 10px", zIndex: 20 }}>
+          <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>Pitch</div>
+          <div style={{ fontSize: 22, fontWeight: 600 }}>
+            {status.soccer.left} <span style={{ fontSize: 12, color: "#9aa5b1" }}>left</span> · {status.soccer.right} <span style={{ fontSize: 12, color: "#9aa5b1" }}>right</span>
+          </div>
+          <div style={{ color: "#9aa5b1" }}>goals · two chase brains, one ball</div>
+        </div>
       )}
       {status.tidy && (
         <div style={{ ...PANEL, top: 56, left: editor ? 270 : 10, color: "#c9d0d8" }}>

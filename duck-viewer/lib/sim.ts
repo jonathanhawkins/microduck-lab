@@ -122,6 +122,9 @@ export interface SimDuck {
   tof: TofPreset | "custom" | null;
   detector: TofPreset | "custom" | null;
   holding: string | null;
+  /** Odometry drift preset the brain's pose carries (roadmap 1.7), and the drifted estimate itself. */
+  odom?: string;
+  odomEst?: [number, number, number];
   skill: string | null;
   beak: "open" | "closed";
   /** Who is steering this duck this tick: a brain from the lab's registry
@@ -137,6 +140,8 @@ export interface SimFrame {
   t: number;
   tick: number;
   rtf: number;
+  /** Lab-side cost per control step (ms, running means): physics + policies, sensors, and the JSON frame encode. */
+  perf: { stepMs: number; sensorMs: number; encodeMs?: number } | null;
   scenario: string | null;
   loading: boolean;
   cmd: [number, number, number];
@@ -146,6 +151,21 @@ export interface SimFrame {
   objects: SimObject[];
   possessed: string | null;
   tidy: TidyScore | null;
+  /** Soccer score on a pitch scenario (goals per short wall, ball position), else null. */
+  soccer: { left: number; right: number; ball: [number, number] } | null;
+  /** Brain round-trip latency applied to every intent (roadmap 12.10), ms; 0 = onboard. */
+  tetherMs?: number;
+  /** Occupancy maps per duck, in each duck's ODOMETRY frame (brain-layer output, ~2 Hz; null on the other frames). */
+  maps: Record<string, OccupancyMap> | null;
+}
+export interface OccupancyMap {
+  nx: number;
+  ny: number;
+  res: number;
+  origin: [number, number];
+  frames: number;
+  /** ny*nx chars, row-major from -y: '0' unknown, '1' free, '2' occupied. */
+  cells: string;
 }
 export interface WorldInfo {
   scenario: Scenario | null;
@@ -302,7 +322,7 @@ export class SimClient {
   sendCmd(cmd: [number, number, number]) { this.send({ cmd }); }
   sendReset() { this.send({ reset: true }); }
   sendAssign(duck: string, policy: string) { this.send({ assign: { duck, policy } }); }
-  sendNoise(duck: string, preset: TofPreset, sensor: "tof" | "det" = "tof") { this.send({ noise: { duck, preset, sensor } }); }
+  sendNoise(duck: string, preset: TofPreset, sensor: "tof" | "det" | "odom" = "tof") { this.send({ noise: { duck, preset, sensor } }); }
   sendBrain(duck: string, kind: string) { this.send({ brain: { duck, kind } }); }
   sendPossess(person: string | null) { this.send({ possess: person }); }
   sendHead(duck: string, apply: boolean) { this.send({ head: { duck, apply } }); }

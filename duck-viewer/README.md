@@ -161,6 +161,14 @@ page's picker). One room, many ducks, and what each duck senses:
   toys and the basket on the floor, set each duck's brain, then save-and-load
   under a name (`PUT /scenarios/{name}`; built-ins are read-only, so a draft
   of one saves as a copy).
+- **Map** (`M`): the selected duck's occupancy grid, painted on the floor —
+  what it believes the room is, from its ToF frames and its own odometry
+  (amber occupied, teal free). Switch its `odom` preset in the inspector to
+  `datasheet` or `hostile` and watch the map smear like a real robot's.
+- **Perf** (top bar): the lab's cost per 20 ms tick as physics+policies +
+  sensors + frame encode, next to RTF and kB/s.
+- **Pitch score** (top-left, `pitch` scenario): goals per side while two
+  `chase` brains go after one ball.
 - **Tidy score** (top-left, `playroom` scenario): toys in the basket, what the
   duck is carrying, picks and deliveries — the same numbers `eval-tidy`
   prints headless.

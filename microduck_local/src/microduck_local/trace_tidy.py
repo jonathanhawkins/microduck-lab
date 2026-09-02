@@ -32,10 +32,9 @@ from .world import World, make_playroom
 
 def senses_of(w: World, d) -> Senses:
     tof, det = d.tof.last, d.detector.last
-    pos = d.trunk_pos(w.data)
     return Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
                   det=det, det_age=None if det is None else w.t - det.t,
-                  speed=d.heading_speed(w.data), odom=(float(pos[0]), float(pos[1]), d.yaw(w.data)),
+                  speed=d.heading_speed(w.data), odom=w.odom(d),
                   holding=d.holding is not None, skill=d.skill)
 
 
@@ -46,9 +45,11 @@ def main() -> None:
     ap.add_argument("--seconds", type=float, default=300.0)
     ap.add_argument("--every", type=float, default=0.0, help="print a position line every N s (0 = off)")
     ap.add_argument("--history", type=float, default=2.0, help="seconds of context printed before a fall")
+    ap.add_argument("--odom", default="ideal", choices=["ideal", "datasheet", "hostile"])
     args = ap.parse_args()
 
     sc = make_playroom(seed=args.seed, n=args.toys)
+    sc.ducks[0].odom = args.odom
     w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=args.seed)
     d = w.ducks["d0"]
     brain = REGISTRY.make("tidy")

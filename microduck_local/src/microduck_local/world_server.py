@@ -67,12 +67,14 @@ from pydantic import BaseModel
 from .brain import REGISTRY, Intent, Senses
 from .brain import runtime as brain_runtime
 from .brain import tidy as _tidy  # noqa: F401  (registers the tidy brain)
+from .brain.mapping import GridSpec, OccupancyGrid
 from .sensors import DetectorNoise, TofNoise
-from .world import Ball, Duck, Person, Scenario, Wall, World, make_playroom, make_room
+from .world import Ball, Duck, Person, Scenario, Wall, World, make_pitch, make_playroom, make_room
 from .world.scenario import NAME_RE, TOF_PRESETS, ScenarioError, validate_scenario
 
 TICK_HZ = 50
 SEND_EVERY = 2
+MAP_EVERY = 12               # occupancy maps ride every 12th frame (~2 Hz): 3–4 kB each per duck
 OVERRIDE_HOLD_S = 6.0
 RING_S = 120.0                       # the scrub bar reaches this far back
 RING_FRAMES = int(RING_S * TICK_HZ / SEND_EVERY)
@@ -126,7 +128,10 @@ def builtin_scenarios() -> dict[str, Scenario]:
                         path=[(1.2, 1.2), (-1.2, 1.2), (-1.2, -1.2), (1.2, -1.2)], speed=0.25)])
     playroom = make_playroom(seed=0, n=6, name="playroom")
     playroom.ducks[0].policy = DEFAULT_POLICY
-    return {s.name: s for s in (empty, wall, room, follow, playroom)}
+    pitch = make_pitch(name="pitch")
+    for d in pitch.ducks:
+        d.policy = DEFAULT_POLICY
+    return {s.name: s for s in (empty, wall, room, follow, playroom, pitch)}
 
 
 BUILTIN_NAMES = frozenset(builtin_scenarios().keys())
@@ -181,6 +186,12 @@ class WorldState:
         self.events: deque[str] = deque(maxlen=200)
         self.loading = False
         self.rtf = 0.0
+        self.maps: dict[str, OccupancyGrid] = {}
+        self.send_maps = False
+        # Roadmap 12.10: the brain tier "over a tether" — every intent lands
+        # this long after the senses it came from. 0 = onboard.
+        self.tether_ms = 0.0
+        self._tether_queue: dict[str, deque] = {}
         self.task: asyncio.Task | None = None
         # Auto mode: each duck runs a brain from the registry (brain/runtime.py);
         # a blind duck gets the script. Intents are remembered for the frame.
@@ -232,6 +243,11 @@ class WorldState:
                 self.events.append(f"{sd.id}: {e}; using script")
                 self.brains[sd.id] = REGISTRY.make("script")
         self.intents = {}
+        # Room mapping (roadmap 4.x first step): an occupancy grid per duck
+        # in ITS odometry frame, from its ToF frames — never from the sim.
+        fx, fy = scenario.floor
+        self.maps = {sd.id: OccupancyGrid(GridSpec(size=(fx + 1.0, fy + 1.0)))
+                     for sd in scenario.ducks if sd.tof is not None}
         return world
 
     def preload(self, name: str) -> None:
@@ -254,11 +270,10 @@ class WorldState:
         w = self.world
         tof = d.tof.last if d.tof is not None else None
         det = d.detector.last if d.detector is not None else None
-        pos = d.trunk_pos(w.data)
         return Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
                       det=det, det_age=None if det is None else w.t - det.t,
                       speed=d.heading_speed(w.data),
-                      odom=(float(pos[0]), float(pos[1]), d.yaw(w.data)),
+                      odom=w.odom(d),
                       holding=d.holding is not None, skill=d.skill)
 
     def drive(self, cmd: np.ndarray, mode: str) -> None:
@@ -278,7 +293,17 @@ class WorldState:
                 d.set_cmd(w.data, cmd if (manual_ducks or brain is None or possessed is None) else cmd)
                 self.intents[d.id] = Intent(twist=tuple(float(v) for v in cmd))
                 continue
-            intent = brain.step(self.senses_for(d))
+            decided = brain.step(self.senses_for(d))
+            if self.tether_ms > 0:
+                # Over the tether: the intent decided now lands later; what
+                # lands now was decided tether_ms ago (senses were that old too).
+                q = self._tether_queue.setdefault(d.id, deque())
+                q.append((w.t + self.tether_ms / 1000.0, decided))
+                intent = self.intents.get(d.id, Intent())
+                while q and q[0][0] <= w.t + 1e-9:
+                    intent = q.popleft()[1]
+            else:
+                intent = decided
             self.intents[d.id] = intent
             w.apply_intent(d, intent)
             if d.skill is None:              # a running skill owns the command block
@@ -325,6 +350,9 @@ class WorldState:
             "ducks": ducks,
             "objects": (w.objects_payload() + w.persons_payload()) if w else [],
             "tidy": w.tidy_score() if (w and w.pickables) else None,
+            "soccer": w.soccer_score() if w else None,
+            "maps": ({k: g.payload() for k, g in self.maps.items()} if (w and self.send_maps) else None),
+            "tetherMs": self.tether_ms,
             "possessed": next((p.id for p in w.persons.values() if p.possessed), None) if w else None,
         }
 
@@ -344,6 +372,8 @@ def duck_info(w: World, d, brains: dict | None = None) -> dict:
         "detector": None if d.detector is None else det_preset_name(d.detector.noise),
         "brainKind": getattr(brains.get(d.id), "kind", "script") if brains is not None else None,
         "holding": d.holding,
+        "odom": d.odom_preset,
+        "odomEst": [round(float(v), 3) for v in d.odom_est],
         "skill": d.skill,
         "beak": "closed" if d.beak_closed else "open",
     }
@@ -383,10 +413,14 @@ class LoadReq(BaseModel):
     scenario: str
 
 
+class TetherReq(BaseModel):
+    ms: float = 0.0
+
+
 class NoiseReq(BaseModel):
     duck: str
     preset: str
-    sensor: str = "tof"        # "tof" | "det"
+    sensor: str = "tof"        # "tof" | "det" | "odom"
 
 
 class BrainReq(BaseModel):
@@ -464,6 +498,16 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
         st.events.append(f"loaded {sc.name}: {len(sc.ducks)} ducks")
         return st.payload()
 
+    @app.post("/world/tether")
+    def set_tether(req: TetherReq) -> dict:
+        """Roadmap 12.10: run every brain 'over a tether' with this much
+        senses→intent round-trip latency (0 = onboard). Watch what a laptop
+        brain over Wi-Fi does to a pick, live."""
+        st.tether_ms = float(max(0.0, min(req.ms, 2000.0)))
+        st._tether_queue.clear()
+        st.events.append(f"tether {st.tether_ms:.0f} ms" if st.tether_ms else "brains onboard (no tether)")
+        return {"tetherMs": st.tether_ms}
+
     @app.post("/world/noise")
     def set_noise(req: NoiseReq) -> dict:
         w = st.world
@@ -480,6 +524,8 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
             if d.tof is None:
                 raise HTTPException(409, f"{req.duck} has no ToF in this scenario")
             d.tof.noise = TofNoise.preset(req.preset)
+        elif req.sensor == "odom":
+            w.set_odom_preset(d, req.preset)
         else:
             raise HTTPException(422, "sensor must be 'tof' or 'det'")
         st.events.append(f"{req.duck} {req.sensor} noise → {req.preset}")
@@ -575,6 +621,8 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                     st.override_until = time.monotonic() + OVERRIDE_HOLD_S
                 if msg.get("reset") and st.world is not None:
                     st.world.reset()
+                    for g in st.maps.values():
+                        g.reset()
                     for d in st.world.ducks.values():
                         d.falls = 0
                     for b in st.brains.values():
@@ -584,6 +632,9 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                 if "assign" in msg and st.world is not None:
                     a = msg["assign"]
                     asyncio.create_task(do_assign(str(a.get("duck")), str(a.get("policy"))))
+                if "tether" in msg:
+                    st.tether_ms = float(max(0.0, min(float(msg["tether"] or 0.0), 2000.0)))
+                    st._tether_queue.clear()
                 if "noise" in msg and st.world is not None:
                     n = msg["noise"]
                     try:
@@ -639,13 +690,21 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                 st.drive(cmd, mode)
                 w.step()
                 window_sim += 1.0 / TICK_HZ
+                for did, grid in st.maps.items():
+                    d = w.ducks.get(did)
+                    if d is not None and d.tof is not None:
+                        grid.update(d.tof.last, w.odom(d))
             tick += 1
             if tick % TICK_HZ == 0:
                 wall = now - window_t0
                 st.rtf = window_sim / wall if wall > 0 else 0.0
                 window_t0, window_sim = now, 0.0
             if tick % SEND_EVERY == 0:
+                t_enc = time.perf_counter()
+                st.send_maps = (tick // SEND_EVERY) % MAP_EVERY == 0
                 frame = json.dumps(st.frame(cmd, mode))
+                if w is not None:                      # what the loop spends on the wire, not the sim
+                    w.perf["encodeMs"] += 0.05 * ((time.perf_counter() - t_enc) * 1e3 - w.perf.get("encodeMs", 0.0))
                 st.events.clear()
                 st.ring.append(frame)
                 dead = []

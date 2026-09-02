@@ -80,6 +80,14 @@ class TofFrame:
     depth_mm: np.ndarray        # (rows, cols) uint16, 0 = no target
     valid: np.ndarray           # (rows, cols) bool
     truth_m: np.ndarray = field(repr=False, default=None)  # noise-free, -1 = miss
+    # Where the sensor was, in the base body's HEADING frame (yaw only: the
+    # frame a brain's odometry lives in): origin and rotation, so a brain
+    # can place a zone's hit at odom ⊕ mount_pos + mount_rot · dir · depth.
+    # On the robot this is the neck/head servo positions + IMU pitch/roll
+    # through the known kinematics. None when the sensor has no base body.
+    mount_pos: np.ndarray | None = field(repr=False, default=None)     # (3,)
+    mount_rot: np.ndarray | None = field(repr=False, default=None)     # (3, 3)
+    dirs_local: np.ndarray | None = field(repr=False, default=None)    # (rows, cols, 3) zone directions, sensor frame
 
     def as_payload(self) -> dict:
         """Wire shape for the lab's frame stream (small; the viewer draws it)."""
@@ -95,14 +103,18 @@ class TofSensor:
         spec: TofSpec = TofSpec(),
         noise: TofNoise = TofNoise.ideal(),
         seed: int | None = 0,
+        base_body: int | None = None,
     ):
         self.spec = spec if site is None else replace(spec, site=site)
         self.noise = noise
         self.rng = np.random.default_rng(seed)
+        self.base_body = base_body          # frames are stamped with the mount pose relative to it
+        self._model = model
         s = self.spec
         self.fan = RayFan(model, tof_fan(s.rows, s.cols, s.fov_deg, s.subrays),
                           site=s.site, max_range=s.max_range_m)
         self._zone_index = self._build_zone_index()
+        self._dirs_cache = self.zone_dirs_local()
         self.period = 1.0 / s.rate_hz
         self.last: TofFrame | None = None
         self._next_t = 0.0
@@ -167,7 +179,17 @@ class TofSensor:
                 valid[:] = False
         meas = np.clip(meas, s.min_range_m, s.max_range_m)
         depth = np.where(valid, np.round(meas * 1000.0), 0).astype(np.uint16)
-        return TofFrame(t=float(t), depth_mm=depth, valid=valid, truth_m=truth)
+        mount_pos = mount_rot = None
+        if self.base_body is not None:
+            bp = data.xpos[self.base_body]
+            bq = data.xquat[self.base_body]
+            yaw = float(np.arctan2(2.0 * (bq[0] * bq[3] + bq[1] * bq[2]), 1.0 - 2.0 * (bq[2] ** 2 + bq[3] ** 2)))
+            c, sn = np.cos(yaw), np.sin(yaw)
+            Rh = np.array([[c, -sn, 0.0], [sn, c, 0.0], [0.0, 0.0, 1.0]])
+            mount_pos = Rh.T @ (self.fan.origin(data) - bp)
+            mount_rot = Rh.T @ self.fan.rotation(data)
+        return TofFrame(t=float(t), depth_mm=depth, valid=valid, truth_m=truth,
+                        mount_pos=mount_pos, mount_rot=mount_rot, dirs_local=self._dirs_cache)
 
     def sample(self, data: mujoco.MjData, t: float) -> TofFrame | None:
         """Rate-limited: a new frame when one is due at `rate_hz`, else None.
