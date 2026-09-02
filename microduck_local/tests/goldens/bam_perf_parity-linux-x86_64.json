@@ -81,6 +81,7 @@
   "vin_last": "0x1.a18df33f3251dp+2"
  },
  "provenance": {
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.80GHz",
   "microduck_rl": "badc4e7ffe5507fd7acb1a21487bd2925c1afe5a",
   "mujoco": "3.10.0",
   "numpy": "2.5.2",

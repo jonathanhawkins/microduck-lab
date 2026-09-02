@@ -253,11 +253,17 @@ def test_full_bam_rollout_matches_pre_optimization_golden_bits():
     g = golden["data"]
     stale = gs.check_provenance(golden)
     env, _ = _rollout()
-    np.testing.assert_array_equal(env.data.qpos, _hex(g["qpos"]), err_msg=stale)
-    np.testing.assert_array_equal(env.data.qvel, _hex(g["qvel"]), err_msg=stale)
-    np.testing.assert_array_equal(env.bam.applied_torque, _hex(g["tau_last"]), err_msg=stale)
-    np.testing.assert_array_equal(env.bam.last_frictionloss, _hex(g["fl_last"]), err_msg=stale)
-    assert env.bam.last_vin == float.fromhex(g["vin_last"]), stale
+    got = {"qpos": env.data.qpos, "qvel": env.data.qvel, "tau_last": env.bam.applied_torque,
+           "fl_last": env.bam.last_frictionloss}
+    if gs.same_cpu(golden):
+        for k, v in got.items():
+            np.testing.assert_array_equal(v, _hex(g[k]), err_msg=stale or k)
+        assert env.bam.last_vin == float.fromhex(g["vin_last"]), stale
+    else:
+        # Another CPU of this platform: the same rollout, within ULP noise.
+        for k, v in got.items():
+            np.testing.assert_allclose(v, _hex(g[k]), rtol=gs.RTOL, atol=gs.ATOL, err_msg=stale or k)
+        np.testing.assert_allclose(env.bam.last_vin, float.fromhex(g["vin_last"]), rtol=gs.RTOL, atol=gs.ATOL)
 
 
 def test_full_bam_rollout_torque_sum_matches_golden():
@@ -271,4 +277,8 @@ def test_full_bam_rollout_torque_sum_matches_golden():
         pytest.skip(gs.skip_reason(GOLDEN_NAME))
     _, taus = _rollout()
     total = float(sum(float(np.sum(t)) for t in taus))
-    assert total == float.fromhex(golden["data"]["tau_sum"]), gs.check_provenance(golden)
+    want = float.fromhex(golden["data"]["tau_sum"])
+    if gs.same_cpu(golden):
+        assert total == want, gs.check_provenance(golden)
+    else:
+        np.testing.assert_allclose(total, want, rtol=gs.RTOL, atol=gs.ATOL, err_msg=gs.check_provenance(golden))

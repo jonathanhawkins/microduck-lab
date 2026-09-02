@@ -108,12 +108,18 @@ def build_env(key):
 def fingerprint(env, steps=STEPS, reset_every=RESET_EVERY, seed=SEED):
     """sha256 over every obs byte, reward, per-term running sum and done flag
     of a multi-episode random-action rollout — plus the first episode's
-    per-term sums as float.hex, for a readable diff when the digest moves."""
+    per-term sums as float.hex, for a readable diff when the digest moves —
+    plus a per-EPISODE summary (per-term sums, reward total, obs sum and
+    abs-sum, step count, termination) that another CPU can compare by
+    tolerance (golden_store.py)."""
     h = hashlib.sha256()
     rng = np.random.default_rng(seed)
     obs, _ = env.reset(seed=seed)
     h.update(obs.tobytes())
     first_ep = None
+    episodes = []
+    ep = {"reward": 0.0, "obs_sum": float(np.sum(obs, dtype=np.float64)),
+          "obs_abs": float(np.sum(np.abs(obs), dtype=np.float64)), "steps": 0, "terminated": False}
     for i in range(steps):
         a = rng.uniform(-1.0, 1.0, C.NUM_JOINTS).astype(np.float32)
         obs, r, term, trunc, _ = env.step(a)
@@ -124,13 +130,22 @@ def fingerprint(env, steps=STEPS, reset_every=RESET_EVERY, seed=SEED):
         for k, v in env.reward_sums.items():
             h.update(k.encode())
             h.update(struct.pack("<d", v))
+        ep["reward"] += float(r)
+        ep["obs_sum"] += float(np.sum(obs, dtype=np.float64))
+        ep["obs_abs"] += float(np.sum(np.abs(obs), dtype=np.float64))
+        ep["steps"] += 1
         if term or trunc or (i + 1) % reset_every == 0:
+            ep["terminated"] = bool(term)
+            ep["terms"] = {k: float(v) for k, v in env.reward_sums.items()}
+            episodes.append(ep)
             if first_ep is None:
                 first_ep = {k: float(v).hex()
                             for k, v in env.reward_sums.items()}
             obs, _ = env.reset()
             h.update(obs.tobytes())
-    return h.hexdigest(), first_ep or {}
+            ep = {"reward": 0.0, "obs_sum": float(np.sum(obs, dtype=np.float64)),
+                  "obs_abs": float(np.sum(np.abs(obs), dtype=np.float64)), "steps": 0, "terminated": False}
+    return h.hexdigest(), first_ep or {}, episodes
 
 
 # The goldens live in tests/goldens/step_perf_parity-<platform>.json (see
@@ -144,9 +159,9 @@ def _fingerprint_all():
     out = {}
     for key in CONFIGS:
         env = build_env(key)
-        digest, first_ep = fingerprint(env)
+        digest, first_ep, episodes = fingerprint(env)
         env.close()
-        out[key] = (digest, first_ep)
+        out[key] = (digest, first_ep, episodes)
     return out
 
 
@@ -167,17 +182,22 @@ def test_rollout_fingerprint_matches_pre_optimization_golden(key):
     golden = _golden()
     if golden is None:
         pytest.skip(gs.skip_reason(GOLDEN_NAME))
-    digest, first_ep = golden["data"][key]
+    digest, first_ep, episodes = golden["data"][key]
     env = build_env(key)
     try:
-        got_digest, got_first = fingerprint(env)
+        got_digest, got_first, got_episodes = fingerprint(env)
     finally:
         env.close()
-    # Per-term sums first: on a mismatch they say WHICH term moved — and a
-    # golden made against another model or library is named before that.
+    # Per-episode sums first, by tolerance: on a mismatch they say WHICH
+    # term of WHICH episode moved — and a golden made against another model
+    # or library is named before that.
     stale = gs.check_provenance(golden)
-    assert got_first == first_ep, stale or "a per-term sum moved (same model, same libraries)"
-    assert got_digest == digest, stale or "the rollout digest moved"
+    assert len(got_episodes) == len(episodes), stale or "the episode count moved"
+    gs.close(got_episodes, episodes, stale or key)
+    if gs.same_cpu(golden):
+        # The CPU that recorded it: to the bit.
+        assert got_first == first_ep, stale or "a per-term sum moved (same model, same libraries, same CPU)"
+        assert got_digest == digest, stale or "the rollout digest moved"
 
 
 # ------------------------------------------------ unit parity vs verbatim refs
@@ -304,3 +324,22 @@ def test_helpers_track_out_of_band_state_changes():
     obs, *_ = env.step(np.zeros(C.NUM_JOINTS, np.float32))
     assert np.isfinite(obs).all()
     env.close()
+
+
+def test_cross_cpu_tolerance_passes_ulp_noise_and_fails_a_real_change():
+    """The other-CPU path (golden_store.close): a last-bits difference in a
+    per-term sum — what another runner's SIMD reduction order produces —
+    passes; a change in the 5th digit — what a model re-export or an
+    indexing bug produces — fails."""
+    import golden_store as gs
+    golden = gs.load(GOLDEN_NAME)
+    if golden is None:
+        pytest.skip(gs.skip_reason(GOLDEN_NAME))
+    _, first_ep, episodes = golden["data"]["walkenv-xml"]
+    noisy = [dict(e, terms={k: v * (1 + 3e-13) for k, v in e["terms"].items()}) for e in episodes]
+    gs.close(noisy, episodes, "ulp")
+    moved = [dict(e, terms={k: v * (1 + 2e-5) if v else v for k, v in e["terms"].items()}) for e in episodes]
+    with pytest.raises(AssertionError):
+        gs.close(moved, episodes, "moved")
+    hexed = {k: float.fromhex(v) for k, v in first_ep.items()}
+    gs.close(hexed, first_ep, "hex")
