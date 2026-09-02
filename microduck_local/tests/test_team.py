@@ -94,7 +94,6 @@ def test_chase_pitches_the_head_down_walking_at_a_near_ball_and_not_when_turning
 def test_chase_wall_rule_turns_away_from_a_wall_beside_it():
     depth = np.full((8, 8), 2000, np.uint16)
     depth[2:5, 0:3] = 150                                  # a wall 15 cm off the LEFT columns
-    tof = TofFrame(t=0.1, depth_mm=depth, valid=np.ones((8, 8), bool))
     b = Chase(ChaseParams())
     b.step(_senses(0.0, None, speed=0.0))
     out = b.step(_senses(0.7, None, TofFrame(t=0.7, depth_mm=depth, valid=np.ones((8, 8), bool)), speed=0.0))
