@@ -360,15 +360,17 @@ its current intent live.
   the *senses* only) and `train-brain` / `eval-brain` train and score one:
 
   ```bash
-  uv run train-brain --envs 4 --steps 400_000 --run-name follow-v2   # ~10 min on 4 cores
-  uv run eval-brain --brain learned:follow-v2 --preset hostile --episodes 12   # vs `--brain follow`
-  uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v2"
+  uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety   # ~15 min
+  uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24   # vs `--brain follow`
+  uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v4"
+  # …and watch the run live at http://localhost:63317/train (duck-viewer)
   ```
 
-  `brains/follow-v1`, `follow-v2` and `follow-v3` (112 kB each,
-  `brain.onnx` + the contract in `brain.json`) ship in the repo, so
-  `learned:follow-v1` / `-v2` / `-v3` work from a fresh clone; retrain to
-  replace them (the SB3 checkpoints stay local). The observation comes in two
+  `brains/follow-v1` … `follow-v4` (112 kB each, `brain.onnx` + the
+  contract in `brain.json`) ship in the repo, so `learned:follow-v1` /
+  `-v2` / `-v3` / `-v4` work from a fresh clone; retrain to replace them
+  (the SB3 checkpoints and `progress.jsonl` stay local — which is why a
+  cloned brain shows no curve on the `/train` page). The observation comes in two
   versions (`brain_env.py`): v1 fed the nearest raw detection; v2 feeds
   the TRACKER's target (its bearing keeps turning with the body through
   a miss), a coasting flag, confirmation and the odometry yaw rate, in
@@ -384,21 +386,48 @@ its current intent live.
   invisible — every brain's "in sight" fell as it closed in, and the
   scripted one coasted and searched with the person a metre ahead. A
   point-like target (a ball) is unchanged. Every row below moved with
-  it (in sight 0.75 → 0.99 for `follow-v2`), so the table is the new
-  world; the brains were not retrained on it.
+  it (in sight 0.75 → 0.96 for `follow-v2`), so the table is the new
+  world. `follow-v4` is the first brain TRAINED in it; v1–v3 are scored in
+  it but were trained before it.
 
-  Measured on identical follow-me episodes (12, the pinned model), in
-  band / in sight under the datasheet and hostile presets:
+  Measured on identical follow-me episodes, in band / in sight under the
+  datasheet and hostile presets. **240 episodes a cell** (24 episodes x 10
+  eval seeds) — the whole table is one sample, six seeds deeper than the
+  12-episode figures it replaces, which moved some cells by up to 0.04 and
+  narrowed the seed spread to +-0.02..0.04:
 
   | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
   |---|---|---|---|---|
-  | `follow-v2` + reflex tier | **0.77 / 0.99** | **0.69** / 0.88 | **0.74** / 0.94 | **0.69** / 0.89 |
-  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.72 / 0.94 | 0.61 / 0.75 | **0.74** / 0.92 | **0.69** / 0.82 |
-  | `follow-v1` (version-1 observation, no reflex tier) | 0.70 / 0.93 | 0.60 / 0.91 | 0.62 / 0.88 | 0.59 / 0.91 |
-  | scripted `follow` + reflex tier | 0.49 / 0.86 | 0.43 / 0.72 | 0.48 / 0.75 | 0.42 / 0.68 |
+  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.81 / 0.95** | **0.76** / 0.87 | **0.82 / 0.96** | **0.74** / 0.87 |
+  | `follow-v2` + reflex tier | 0.77 / 0.96 | 0.67 / 0.87 | 0.76 / 0.94 | 0.65 / 0.85 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.74 / 0.95 | 0.63 / 0.88 | 0.75 / 0.94 | 0.62 / 0.86 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.72 / 0.94 | 0.57 / 0.88 | 0.69 / 0.94 | 0.58 / 0.88 |
+  | scripted `follow` + reflex tier | 0.48 / 0.83 | 0.41 / 0.74 | 0.48 / 0.82 | 0.41 / 0.74 |
 
-  (Before the legs: 0.80 / 0.75, 0.63 / 0.61; 0.71 / 0.68, 0.63 / 0.57;
-  0.73 / 0.85, 0.60 / 0.75; 0.46 / 0.53, 0.42 / 0.40.)
+  (Before the legs, at 12 episodes: 0.80 / 0.75, 0.63 / 0.61; 0.71 / 0.68,
+  0.63 / 0.57; 0.73 / 0.85, 0.60 / 0.75; 0.46 / 0.53, 0.42 / 0.40.)
+
+  **`follow-v4` is the follower to pick.** Every shipped brain before it was
+  trained while a person vanished inside 1.2 m; v4 is the first trained in
+  the world the legs detector made, and it is ahead in all four cells — by
+  0.05 on the datasheet preset and 0.09 under hostile noise, on 9/10 and
+  10/10 eval seeds respectively. The gap is widest exactly where the old
+  brains were worst, which is the shape you would expect if the thing they
+  were missing was the close-in half of the band. It also *bumps less*:
+  15.5 an episode against v2's 21.8 on the datasheet preset (21.2 vs 26.9
+  hostile) — the first learned brain to move that number, which had sat at
+  14-27 for all of them.
+
+  It cost 2M decisions (15 min, 12 envs, `--variety`, ~2.2k steps/s on an
+  M-series Mac) against v2's 800k and v3's 600k. Its reward curve is flat
+  from ~900k, so the budget, not the recipe, is what v3 was short of:
+
+  ```bash
+  uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety
+  ```
+
+  Watch a run go at `/train` in the viewer (below) rather than tailing the
+  log.
 
   The **reflex tier** is the thing that moved: under a version-2 brain
   the env yaws the head toward the tracked target (0.8 × the body
@@ -414,12 +443,14 @@ its current intent live.
   v1 fell from 0.73 to 0.60). `+variety` (`eval-brain --variety`,
   `train-brain --variety`) is two free 30 cm boxes re-scattered every
   episode and a second duck walking a slow circle: every brain loses
-  0.03–0.14 to it, v3, trained on it, loses least on the clean preset.
-  v3 is not otherwise better than v2 (600k decisions vs v2's 800k; its
-  reward was still climbing), so `follow-v2` is the follower to pick and
-  v3 the one to keep training. Bumps stay at 14–27 an episode for every
-  learned brain: the person walks through the duck as often as the duck
-  walks into the person, and a reflex stop cannot help with the first.
+  0.03–0.14 to it; v3 and v4, trained on it, lose least (v4 is
+  fractionally BETTER with variety than without, 0.82 vs 0.81). v3 was
+  never otherwise better than v2 (600k decisions vs v2's 800k; its reward
+  was still climbing) — `follow-v4` settles that by running the same recipe
+  to 2M, and it is the follower to pick. Bumps sat at 14–27 an episode for
+  every learned brain — the person walks through the duck as often as the
+  duck walks into the person, and a reflex stop cannot help with the first
+  — until v4 took the datasheet figure to 15.5.
 
   **Getting out of the way** (`brain/controllers.ClosingWatch`, `eval-brain
   --charge S --avoid`): the case where the person — or another duck —

@@ -59,15 +59,22 @@ the tree, and Track 12 has its first working loop:
   follow-me episodes (12, the pinned model, the detector seeing a person
   by its legs — its middle leaves the 48° frustum at 1.2 m, inside the
   follow band, which had every brain losing sight as it closed in) the
-  learned brains hold the distance band 0.77 / 0.69 (`follow-v2` under
+  learned brains hold the distance band 0.81 / 0.76 (**`follow-v4`**, the
+  first brain RETRAINED in this world — v3's recipe, the reflex tier and
+  variety, run to 2M decisions), 0.77 / 0.67 (`follow-v2` under
   the reflex tier — the env yaws the head toward the tracked target and
-  refuses to walk into something 0.25 m ahead), 0.72 / 0.61 (`follow-v3`,
-  trained with the reflex tier and variety: boxes and a wandering duck;
-  0.74 on the variety benchmark) and 0.70 / 0.60 (`follow-v1`,
-  version-1 observation, scored in the world it was trained in) under
-  the datasheet / hostile presets against the scripted controller's
-  0.49 / 0.43; in sight 0.99 / 0.88, 0.94 / 0.75, 0.93 / 0.91 vs 0.86 /
-  0.72. The scripted one loses because it stands still and goes cold; an
+  refuses to walk into something 0.25 m ahead), 0.74 / 0.63 (`follow-v3`,
+  trained with the reflex tier and variety: boxes and a wandering duck)
+  and 0.72 / 0.57 (`follow-v1`, version-1 observation, scored in the world
+  it was trained in) under the datasheet / hostile presets against the
+  scripted controller's 0.48 / 0.41; in sight 0.95 / 0.87, 0.96 / 0.87,
+  0.95 / 0.88, 0.94 / 0.88 vs 0.83 / 0.74. Re-measured at 240 episodes a
+  cell (24 x 10 eval seeds), which moved some of the earlier 12-episode
+  cells by up to 0.04. v4 leads every cell — 9/10 eval seeds on the
+  datasheet preset, 10/10 under hostile noise — and is the first learned
+  brain to move the bump count (15.5 an episode against v2's 21.8); it is
+  the follower to pick.
+  The scripted one loses because it stands still and goes cold; an
   idle sidestep took it from 0.36 to 0.51 in sight, the head gaze to
   0.53, and the rest of the gap is the learned brain's continuous motion.
   A dodge for a person walking at the duck (`ClosingWatch`: the ToF
