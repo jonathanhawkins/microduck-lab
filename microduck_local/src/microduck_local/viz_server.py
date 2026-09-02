@@ -171,6 +171,7 @@ from pydantic import BaseModel
 # stale scorecard missing new terms (bit the user twice: head_up, head_up_pull).
 from . import behaviors as behaviors_mod
 from . import contract as C
+from .brain.learned import brains_dir
 from . import motion as motion_mod
 from .train import RUNS_DIR
 from .walk_env import MicroduckWalkEnv, shared_model_scope
@@ -2785,6 +2786,74 @@ def make_app(ducks: list[Duck]):
     def get_behaviors() -> dict:
         return {"behaviors": [behaviors_mod.behavior_card(b)
                               for b in behaviors_mod.BEHAVIORS.values()]}
+
+    # ------------------------------------------------ 🧠 brain training runs
+
+    # train-brain is a plain CLI process: nothing about it reaches the lab, so
+    # a brain run has always been invisible while a teach job is watchable.
+    # This reads the artifacts the trainer already writes — brain.json (the
+    # contract) and progress.jsonl (one row per rollout) — so the viewer's
+    # /train page can chart a run live without the trainer knowing about it.
+    # Read-only and derived entirely from disk: nothing here can steer a run.
+    BRAIN_ACTIVE_S = 30.0     # a progress file touched this recently is live
+    BRAIN_MAX_POINTS = 400    # downsample the curve; 2M steps is ~1300 rows
+
+    @app.get("/brains")
+    def get_brains() -> dict:
+        try:
+            root = brains_dir()
+        except Exception:
+            return {"brains": []}
+        if not root.is_dir():
+            return {"brains": []}
+        now = time.time()
+        out = []
+        for d in sorted(root.iterdir()):
+            if not d.is_dir():
+                continue
+            card: dict = {"name": d.name}
+            try:
+                card.update(json.loads((d / "brain.json").read_text()))
+            except Exception:
+                pass                      # a run mid-flight may not have one yet
+            card["shipped"] = (d / "brain.onnx").exists()
+            prog = d / "progress.jsonl"
+            rows = []
+            if prog.is_file():
+                try:
+                    for ln in prog.read_text().splitlines():
+                        ln = ln.strip()
+                        if not ln:
+                            continue
+                        try:
+                            rows.append(json.loads(ln))
+                        except json.JSONDecodeError:
+                            continue      # a half-written last line while training
+                except OSError:
+                    rows = []
+                card["active"] = (now - prog.stat().st_mtime) < BRAIN_ACTIVE_S
+            else:
+                card["active"] = False
+            card["rollouts"] = len(rows)
+            if rows:
+                last = rows[-1]
+                card["last"] = last
+                done, want = last.get("steps") or 0, card.get("steps") or 0
+                el = last.get("elapsed_s") or 0
+                card["progress"] = min(1.0, done / want) if want else None
+                card["steps_per_s"] = round(done / el, 1) if el else None
+                card["eta_s"] = (round((want - done) / (done / el))
+                                 if card["active"] and el and done and want > done else None)
+            # Downsample evenly, always keeping the first and last row.
+            if len(rows) > BRAIN_MAX_POINTS:
+                step = len(rows) / BRAIN_MAX_POINTS
+                idx = sorted({int(i * step) for i in range(BRAIN_MAX_POINTS)} | {len(rows) - 1})
+                rows = [rows[i] for i in idx]
+            card["curve"] = [{"steps": r.get("steps"), "ep_rew": r.get("ep_rew"),
+                              "ep_len": r.get("ep_len"), "elapsed_s": r.get("elapsed_s")}
+                             for r in rows]
+            out.append(card)
+        return {"brains": out}
 
     # ------------------------------------------------ 🎬 animation authoring
 

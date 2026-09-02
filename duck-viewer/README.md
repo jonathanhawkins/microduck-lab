@@ -235,6 +235,36 @@ what the lab simulates:
 ![the living room](../docs/media/sim-living-room.jpg)
 ![the playroom](../docs/media/sim-playroom.jpg)
 
+## `/train`: brain training runs
+
+`http://localhost:63317/train` charts `train-brain` runs live.
+
+`train-brain` is a plain CLI process — it never talks to the lab — so a brain
+run used to be invisible while a `/teach` job was watchable. The lab's
+`GET /brains` reads the artifacts the trainer already writes
+(`brains/<run>/brain.json` and `progress.jsonl`) and this page polls it every
+2 s. Nothing here can start, steer or stop a run: it is a read of the disk.
+That also means it picks up a run started before the page was opened, and
+keeps the curve of one that has already finished.
+
+- **Run list** (left, the only scrolling region on the page — the page itself
+  is fixed to the viewport). One card per directory in `brains/`: progress
+  bar, steps done against the budget, last reward, elapsed, ETA, steps/s, and
+  the contract tags from `brain.json` (`variety`, `obs v2`, envs, seed). A
+  live run is marked `● live`; a finished one that exported is `shipped`.
+- **Chart** (right). Bold line is a 9-rollout trailing mean, faint line the
+  raw per-rollout value, toggled between episode reward and episode length.
+  Hover for a crosshair: a rule at the hovered step and a readout of every
+  charted run's value there. A run that had already stopped by that step is
+  greyed and labelled with the step it ended at, rather than showing its
+  final value as though it were current.
+- Click a card to focus it; click its swatch to add or remove it from the
+  chart. `all` / `none` toggles everything.
+
+A brain cloned from the repo shows *no curve* — only `brain.onnx` and
+`brain.json` are committed, `progress.jsonl` stays local — and the card says
+so rather than reading as a broken run.
+
 ## Notes for future work
 
 - The scene payload is ~20 MB raw (gzipped over the wire, one-time). If it ever
