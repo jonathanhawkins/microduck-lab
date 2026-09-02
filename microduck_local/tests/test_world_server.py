@@ -20,6 +20,7 @@ ORIGIN = {"origin": "http://localhost:63317"}
 @pytest.fixture
 def app(monkeypatch, tmp_path):
     monkeypatch.setenv("MICRODUCK_SCENARIOS_DIR", str(tmp_path / "scenarios"))
+    monkeypatch.setenv("MICRODUCK_RECORDINGS_DIR", str(tmp_path / "recordings"))
     monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
     return V.make_app([])
 
@@ -73,13 +74,10 @@ def test_load_world_and_stream_frames(app):
             d = frame["ducks"][0]
             assert len(d["bodies"]) == 16 and d["bodies"][0] == [0, 0, 0, 1, 0, 0, 0]
             tof = d["sensors"]["tof"]
-            assert len(tof["mm"]) == 64 and len(tof["pts"]) == 64
-            # The wall is a metre ahead: the middle of the frame reports ~0.94 m,
-            # and its points sit on the wall plane at x = 1.0 (thickness 2 cm).
+            assert len(tof["mm"]) == 64 and "pts" not in tof
+            # The wall is a metre ahead: the middle of the frame reports ~0.94 m.
             mid = tof["mm"][3 * 8 + 3]
             assert 900 < mid < 960
-            px = tof["pts"][3 * 8 + 3]
-            assert px is not None and abs(px[0] - 0.99) < 0.02
             assert frame["mode"] == "auto" and len(frame["cmd"]) == 3
             # A duck with a ToF drives itself in auto mode.
             assert d["brain"]["kind"] == "wander" and d["brain"]["state"] in ("cruise", "steer", "spin", "blind", "unstick")
@@ -113,3 +111,29 @@ def test_sim_socket_rejects_foreign_origins(app):
         with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
             f = ws.receive_json()
             assert f["ducks"] == [] and f["scenario"] is None   # nothing loaded, still alive
+
+
+def test_ring_records_without_a_client_and_saves_a_recording(app, tmp_path):
+    import gzip
+    import time
+    with TestClient(app) as c:
+        assert c.post("/replay/save", json={"name": "x"}).status_code == 409   # nothing yet
+        c.post("/world/load", json={"scenario": "wall-test"})
+        time.sleep(0.5)                                     # no socket attached: the ring still fills
+        ring = c.get("/replay/ring?last=5").json()
+        assert 1 <= ring["count"] <= 5 and len(ring["frames"]) == ring["count"]
+        f = ring["frames"][-1]
+        assert f["scenario"] == "wall-test" and f["ducks"][0]["id"] == "d0"
+        assert c.post("/replay/save", json={"name": "bad name"}).status_code == 400
+        h = c.post("/replay/save", json={"name": "take1"}).json()
+        assert h["frames"] >= 1 and h["scenario"] == "wall-test"
+        p = tmp_path / "recordings" / "take1.jsonl.gz"
+        with gzip.open(p, "rt") as fh:
+            lines = fh.read().splitlines()
+        assert len(lines) == h["frames"] + 1
+        assert [r["name"] for r in c.get("/recordings").json()["recordings"]] == ["take1"]
+        rec = c.get("/recordings/take1").json()
+        assert rec["header"]["name"] == "take1" and len(rec["frames"]) == h["frames"]
+        assert rec["frames"][0]["tick"] <= rec["frames"][-1]["tick"]
+        assert c.delete("/recordings/take1").status_code == 200
+        assert c.get("/recordings/take1").status_code == 404

@@ -15,13 +15,20 @@ HTTP:
   POST /world/load {"scenario": name}      compose + swap (a second or so;
                                the loop keeps streaming the old world meanwhile)
   POST /world/noise {"duck": id, "preset": "ideal"|"datasheet"|"hostile"}
+  GET  /replay/ring?last=N     the last N frames the loop broadcast (a ring of
+                               RING_S seconds at 25 Hz, kept whether or not a
+                               browser is attached) — the page's scrub bar
+  POST /replay/save {"name"}   write the ring to recordings/<name>.jsonl.gz
+  GET  /recordings             [{name, frames, span, scenario, saved}]
+  GET  /recordings/{name}      the frames of one recording (JSON array)
+  DELETE /recordings/{name}
 
 WS /ws/sim — 25 Hz frames:
-  {t, tick, rtf, scenario, cmd, mode, events,
+  {t, tick, rtf, perf: {stepMs, sensorMs}, scenario, cmd, mode, events,
    ducks: [{id, name, policy, falls, step, rew, speed, cmdSpeed, steerable,
             brain: {kind: "wander"|"script"|"manual", state, cmd},
             bodies: [[x,y,z,qw,qx,qy,qz] × 16] (world first, as GET /scene lists bodies),
-            sensors: {tof: {t, mm[64], age, pts[64]: [x,y,z] | null}} | null}],
+            sensors: {tof: {t, mm[64], age}} | null}],   (zone points: page-side)
    objects: [{id, kind, pose}]}
 accepts:
   {"cmd": [vx, vy, wz]}   drive every duck (held OVERRIDE_HOLD_S); otherwise a duck with
@@ -39,8 +46,10 @@ something to load, and they cannot be overwritten — save under another name.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import os
+import re
 import time
 import traceback
 from collections import deque
@@ -49,6 +58,7 @@ from typing import Callable
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .brain import Wander
@@ -59,6 +69,9 @@ from .world.scenario import NAME_RE, TOF_PRESETS, ScenarioError, validate_scenar
 TICK_HZ = 50
 SEND_EVERY = 2
 OVERRIDE_HOLD_S = 6.0
+RING_S = 120.0                       # the scrub bar reaches this far back
+RING_FRAMES = int(RING_S * TICK_HZ / SEND_EVERY)
+RECORDING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 DEFAULT_POLICY = "pollen:alpha_walking"
 # A gentle drive script for the auto mode: walk, turn, stand, repeat.
 DEMO_SCRIPT: list[tuple[float, tuple[float, float, float]]] = [
@@ -69,6 +82,12 @@ DEMO_SCRIPT: list[tuple[float, tuple[float, float, float]]] = [
 ]
 
 Infer = Callable[[np.ndarray], np.ndarray]
+
+
+def recordings_dir() -> Path:
+    return Path(os.environ.get(
+        "MICRODUCK_RECORDINGS_DIR",
+        Path(__file__).resolve().parents[2] / "recordings"))
 
 
 def scenarios_dir() -> Path:
@@ -151,6 +170,10 @@ class WorldState:
         # Auto mode: a duck with a ToF wanders on its own brain (the first
         # controller of roadmap Track 2); a blind duck follows the script.
         self.brains: dict[str, Wander] = {}
+        # Every broadcast frame, serialised, newest last. Kept without a
+        # browser attached so "what just happened?" has an answer after the
+        # fact — the roadmap's record/replay primitive (0.6).
+        self.ring: deque[str] = deque(maxlen=RING_FRAMES)
 
     def current_cmd(self, now: float) -> tuple[np.ndarray, str]:
         if self.override is not None and now < self.override_until:
@@ -241,6 +264,7 @@ class WorldState:
             "t": round(w.t, 3) if w else 0.0,
             "tick": w.tick if w else 0,
             "rtf": round(self.rtf, 2),
+            "perf": ({k: round(v, 3) for k, v in w.perf.items()} if w else None),
             "scenario": self.scenario.name if self.scenario else None,
             "loading": self.loading,
             "cmd": [round(float(v), 3) for v in cmd],
@@ -277,13 +301,13 @@ def tof_payload(w: World, d) -> dict | None:
     if d.tof is None or d.tof.last is None:
         return None
     f = d.tof.last
-    pts = d.tof.zone_points(w.data, f).reshape(-1, 3)
+    # No world points here: the page reconstructs each zone's point from the
+    # head pose it already has plus the fixed zone directions (lib/sim.ts
+    # `tofZonePoints`), which cut a 2-duck stream from 145 to ~45 kB/s.
     return {"tof": {
         "t": round(f.t, 4),
         "mm": f.depth_mm.reshape(-1).tolist(),
         "age": round(w.t - f.t, 4),
-        "pts": [None if not np.isfinite(p).all() else [round(float(v), 3) for v in p]
-                for p in pts],
     }}
 
 
@@ -296,6 +320,10 @@ class LoadReq(BaseModel):
 class NoiseReq(BaseModel):
     duck: str
     preset: str
+
+
+class SaveReq(BaseModel):
+    name: str
 
 
 # -- mounting --------------------------------------------------------------------
@@ -378,6 +406,70 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
         st.events.append(f"{req.duck} ToF noise → {req.preset}")
         return duck_info(w, w.ducks[req.duck])
 
+    @app.get("/replay/ring")
+    def replay_ring(last: int = 1500) -> Response:
+        n = max(0, min(int(last), len(st.ring)))
+        frames = list(st.ring)[-n:] if n else []
+        body = '{"frames":[' + ",".join(frames) + '],"count":' + str(n) + "}"
+        return Response(content=body, media_type="application/json")
+
+    @app.post("/replay/save")
+    def replay_save(req: SaveReq) -> dict:
+        if not RECORDING_RE.match(req.name or ""):
+            raise HTTPException(400, f"bad recording name {req.name!r}")
+        frames = list(st.ring)
+        if not frames:
+            raise HTTPException(409, "nothing recorded yet")
+        d = recordings_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{req.name}.jsonl.gz"
+        first, last_ = json.loads(frames[0]), json.loads(frames[-1])
+        header = {"version": 1, "name": req.name,
+                  "scenario": st.scenario.name if st.scenario else None,
+                  "saved": time.time(), "frames": len(frames),
+                  "span": round(float(last_.get("t", 0)) - float(first.get("t", 0)), 3)}
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            f.write(json.dumps(header) + "\n")
+            for fr in frames:
+                f.write(fr + "\n")
+        st.events.append(f"saved {len(frames)} frames as {req.name}")
+        return header
+
+    @app.get("/recordings")
+    def get_recordings() -> dict:
+        out = []
+        d = recordings_dir()
+        if d.exists():
+            for p in sorted(d.glob("*.jsonl.gz")):
+                try:
+                    with gzip.open(p, "rt", encoding="utf-8") as f:
+                        out.append(json.loads(f.readline()))
+                except (OSError, ValueError):
+                    continue
+        return {"recordings": out}
+
+    def recording_path(name: str) -> Path:
+        if not RECORDING_RE.match(name or ""):
+            raise HTTPException(400, f"bad recording name {name!r}")
+        p = recordings_dir() / f"{name}.jsonl.gz"
+        if not p.exists():
+            raise HTTPException(404, f"no recording {name!r}")
+        return p
+
+    @app.get("/recordings/{name}")
+    def get_recording(name: str) -> Response:
+        p = recording_path(name)
+        with gzip.open(p, "rt", encoding="utf-8") as f:
+            header = f.readline().strip()
+            frames = [ln.strip() for ln in f if ln.strip()]
+        body = '{"header":' + header + ',"frames":[' + ",".join(frames) + "]}"
+        return Response(content=body, media_type="application/json")
+
+    @app.delete("/recordings/{name}")
+    def delete_recording(name: str) -> dict:
+        recording_path(name).unlink()
+        return {"deleted": name}
+
     @app.websocket("/ws/sim")
     async def ws_sim(sock: WebSocket):
         if not origin_allowed(sock.headers.get("origin")):
@@ -442,9 +534,10 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                 wall = now - window_t0
                 st.rtf = window_sim / wall if wall > 0 else 0.0
                 window_t0, window_sim = now, 0.0
-            if tick % SEND_EVERY == 0 and st.clients:
+            if tick % SEND_EVERY == 0:
                 frame = json.dumps(st.frame(cmd, mode))
                 st.events.clear()
+                st.ring.append(frame)
                 dead = []
                 for c in list(st.clients):
                     try:

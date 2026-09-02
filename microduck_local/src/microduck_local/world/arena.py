@@ -18,6 +18,7 @@ duck's measured yaw, the way the robot runtime would.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -165,6 +166,9 @@ class World:
                 continue
             kind = "ball" if name.startswith("ball") else "box"
             self.objects.append((name, kind, b))
+        # Rolling cost of one control step, split physics / sensors (ms),
+        # EMA over ~1 s of ticks — the /sim perf HUD reads it.
+        self.perf = {"stepMs": 0.0, "sensorMs": 0.0}
         self.reset()
 
     # -- lifecycle ------------------------------------------------------------
@@ -201,6 +205,7 @@ class World:
 
     # -- one 50 Hz control step -----------------------------------------------
     def step(self) -> None:
+        t0 = time.perf_counter()
         m, data = self.model, self.data
         for d in self.ducks.values():
             obs = d.obs(data)
@@ -222,9 +227,14 @@ class World:
                 self._respawn(d)
                 mujoco.mj_forward(m, data)
                 d.prev_joint_vel = d.joint_vel(data)
+        t1 = time.perf_counter()
         for d in self.ducks.values():
             if d.tof is not None:
                 d.tof.sample(data, self.t)
+        t2 = time.perf_counter()
+        a = 0.02
+        self.perf["stepMs"] += a * ((t1 - t0) * 1e3 - self.perf["stepMs"])
+        self.perf["sensorMs"] += a * ((t2 - t1) * 1e3 - self.perf["sensorMs"])
 
     # -- payloads for the lab stream ------------------------------------------
     def duck_pose(self, duck_id: str) -> list[list[float]]:

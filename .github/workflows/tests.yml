@@ -1,0 +1,65 @@
+# Contract tests on the three desktops the lab targets. macOS is first-class
+# (the golden-bit parity files were recorded there and run only there);
+# Ubuntu runs everything else; Windows runs the modules written spawn-safe
+# from day one (world, sensors, brain, world server) plus the pure contract
+# tests — the fork-based vec env is a known gap (docs/sim-roadmap.md §9).
+name: tests
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: microduck_local
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upstream checkouts (MJCF models, shipped policies)
+        working-directory: .
+        run: |
+          git clone --depth 1 https://github.com/pollen-robotics/microduck_rl
+          git clone --depth 1 https://github.com/pollen-robotics/microduck
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (CPU torch; the lock resolves CUDA wheels on Linux)
+        run: |
+          uv venv --python 3.12 .venv
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            uv pip install --python .venv torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+          fi
+          uv pip install --python .venv -e . pytest
+      - name: Tests (macOS: everything)
+        if: runner.os == 'macOS'
+        run: .venv/bin/python -m pytest tests -q -p no:cacheprovider
+      - name: Tests (Linux: everything but the Apple-recorded golden bits)
+        if: runner.os == 'Linux'
+        run: .venv/bin/python -m pytest tests -q -p no:cacheprovider --deselect tests/test_step_perf_parity.py --deselect tests/test_bam_perf_parity.py
+      - name: Tests (Windows: spawn-safe modules + pure contract tests)
+        if: runner.os == 'Windows'
+        run: .venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/test_sensors.py tests/test_world.py tests/test_arena.py tests/test_brain.py tests/test_world_server.py tests/test_env_contract.py tests/test_behaviors.py tests/test_clips.py
+
+  viewer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: duck-viewer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: duck-viewer/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build

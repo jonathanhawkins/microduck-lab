@@ -16,11 +16,17 @@ import { assignDrag, nearestDuck, type AssignTarget } from "@/lib/assign";
 import { getSelectedDuck, setSelectedDuck } from "@/lib/select";
 import {
   depthColor,
+  fetchRing,
   fetchScenarios,
   fetchWorld,
+  frameEvents,
   loadWorld,
+  saveRecording,
   SimClient,
+  tofZonePoints,
   TOF_PRESETS,
+  type FrameEvent,
+  type SimFrame,
   type Scenario,
   type ScenarioListing,
   type SimDuck,
@@ -28,6 +34,7 @@ import {
   type WorldInfo,
 } from "@/lib/sim";
 import { buildBodyGeometries, Duck } from "./Duck";
+import { applyFloorClick, emptyDraft, SimEditor, type EditorState } from "./SimEditor";
 
 const BG = "#101216";
 const PANEL: React.CSSProperties = {
@@ -52,10 +59,6 @@ const BTN: React.CSSProperties = {
   fontSize: 12,
   cursor: "pointer",
 };
-
-// Where the ToF aperture sits on the head: the MJCF `tof` site, in the
-// jaw_soft body frame (robot_walk.xml). Used only to draw the frustum lines.
-const TOF_SITE_POS: [number, number, number] = [0.0135, 0.0224086, -0.0733];
 
 type Held = Set<string>;
 
@@ -204,9 +207,6 @@ function TofOverlay({ scene, client, enabled }: { scene: Scene; client: SimClien
   const jawIdx = useMemo(() => scene.bodies.indexOf("jaw_soft"), [scene]);
   const m = useMemo(() => new THREE.Matrix4(), []);
   const col = useMemo(() => new THREE.Color(), []);
-  const q = useMemo(() => new THREE.Quaternion(), []);
-  const origin = useMemo(() => new THREE.Vector3(), []);
-  const jawPos = useMemo(() => new THREE.Vector3(), []);
   const linePos = useMemo(() => new Float32Array(MAX_DOTS * 2 * 3), []);
   useFrame(() => {
     const im = inst.current;
@@ -215,12 +215,14 @@ function TofOverlay({ scene, client, enabled }: { scene: Scene; client: SimClien
     const f = client.frame;
     let n = 0;
     let ln = 0;
-    if (f && enabled) {
+    if (f && enabled && jawIdx >= 0) {
       const sel = getSelectedDuck();
       for (const d of f.ducks) {
         const tof = d.sensors?.tof;
-        if (!tof || (sel && d.id !== sel)) continue;
-        tof.pts.forEach((p, k) => {
+        const jaw = d.bodies[jawIdx];
+        if (!tof || !jaw || (sel && d.id !== sel)) continue;
+        const { origin, pts } = tofZonePoints(jaw, tof.mm);
+        pts.forEach((p, k) => {
           if (!p || n >= MAX_DOTS) return;
           m.makeTranslation(p[0], p[1], p[2]);
           im.setMatrixAt(n, m);
@@ -229,23 +231,17 @@ function TofOverlay({ scene, client, enabled }: { scene: Scene; client: SimClien
           n++;
         });
         // Frustum: aperture → the four corner zones that hit something.
-        const jaw = jawIdx >= 0 ? d.bodies[jawIdx] : undefined;
-        if (jaw) {
-          q.set(jaw[4], jaw[5], jaw[6], jaw[3]);
-          jawPos.set(jaw[0], jaw[1], jaw[2]);
-          origin.set(...TOF_SITE_POS).applyQuaternion(q).add(jawPos);
-          for (const k of CORNER_ZONES) {
-            const p = tof.pts[k];
-            if (!p || ln * 6 + 6 > linePos.length) continue;
-            const o = ln * 6;
-            linePos[o] = origin.x;
-            linePos[o + 1] = origin.y;
-            linePos[o + 2] = origin.z;
-            linePos[o + 3] = p[0];
-            linePos[o + 4] = p[1];
-            linePos[o + 5] = p[2];
-            ln++;
-          }
+        for (const k of CORNER_ZONES) {
+          const p = pts[k];
+          if (!p || ln * 6 + 6 > linePos.length) continue;
+          const o = ln * 6;
+          linePos[o] = origin[0];
+          linePos[o + 1] = origin[1];
+          linePos[o + 2] = origin[2];
+          linePos[o + 3] = p[0];
+          linePos[o + 4] = p[1];
+          linePos[o + 5] = p[2];
+          ln++;
         }
       }
     }
@@ -269,6 +265,45 @@ function TofOverlay({ scene, client, enabled }: { scene: Scene; client: SimClien
         <lineBasicMaterial color="#43c2b8" transparent opacity={0.35} />
       </lineSegments>
     </>
+  );
+}
+
+/** Editing: an invisible floor that turns pointer clicks into world (x, y),
+ *  plus markers for the draft's duck spawns and the armed wall start. */
+function EditorFloor({ state, onClick }: { state: EditorState; onClick: (x: number, y: number) => void }) {
+  const [fx, fy] = state.draft.floor.size;
+  return (
+    <group>
+      <mesh
+        position={[0, 0, 0.0005]}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          e.stopPropagation();
+          onClick(e.point.x, -e.point.z);   // three world → MuJoCo (group is rotated -90° about X)
+        }}
+      >
+        <planeGeometry args={[fx, fy]} />
+        <meshBasicMaterial color="#43c2b8" transparent opacity={0.06} depthWrite={false} />
+      </mesh>
+      {state.draft.ducks.map((d) => (
+        <group key={d.id} position={[d.spawn[0], d.spawn[1], 0.01]} rotation={[0, 0, d.spawn[2]]}>
+          <mesh>
+            <ringGeometry args={[0.1, 0.13, 32]} />
+            <meshBasicMaterial color="#f2b632" side={THREE.DoubleSide} />
+          </mesh>
+          <mesh position={[0.16, 0, 0]} rotation={[0, 0, -Math.PI / 2]}>
+            <coneGeometry args={[0.03, 0.08, 12]} />
+            <meshBasicMaterial color="#f2b632" />
+          </mesh>
+        </group>
+      ))}
+      {state.wallStart && (
+        <mesh position={[state.wallStart[0], state.wallStart[1], 0.01]}>
+          <ringGeometry args={[0.03, 0.05, 24]} />
+          <meshBasicMaterial color="#cfcac2" side={THREE.DoubleSide} />
+        </mesh>
+      )}
+    </group>
   );
 }
 
@@ -356,6 +391,140 @@ function Heatmap({ client, duckId }: { client: SimClient; duckId: string | null 
   );
 }
 
+/** Scrub bar over the lab's ring of the last two minutes: pause pulls the
+ *  ring, the slider picks a frame (every panel then reads that frame), tick
+ *  marks are falls / brain transitions / drive-mode changes, save writes the
+ *  ring to recordings/. Space toggles, ←/→ step while paused. */
+function Timeline({ client }: { client: SimClient }) {
+  const [frames, setFrames] = useState<SimFrame[] | null>(null);
+  const [idx, setIdx] = useState(0);
+  const [events, setEvents] = useState<FrameEvent[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const framesRef = useRef<SimFrame[] | null>(null);
+  framesRef.current = frames;
+  const idxRef = useRef(0);
+  idxRef.current = idx;
+
+  const pause = async () => {
+    setBusy(true);
+    try {
+      const ring = await fetchRing();
+      if (!ring.length) {
+        setMsg("nothing recorded yet");
+        return;
+      }
+      setFrames(ring);
+      setEvents(frameEvents(ring));
+      const last = ring.length - 1;
+      setIdx(last);
+      client.scrub = ring[last];
+    } catch (e) {
+      setMsg(String((e as Error).message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const goLive = () => {
+    client.scrub = null;
+    setFrames(null);
+    setEvents([]);
+  };
+  const seek = (i: number) => {
+    const f = framesRef.current;
+    if (!f) return;
+    const j = Math.max(0, Math.min(f.length - 1, i));
+    setIdx(j);
+    client.scrub = f[j];
+  };
+  const save = async () => {
+    const name = window.prompt("save the last two minutes as", `take-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`);
+    if (!name) return;
+    try {
+      const h = await saveRecording(name);
+      setMsg(`saved ${h.frames} frames (${h.span.toFixed(1)} s) as ${h.name}`);
+    } catch (e) {
+      setMsg(String((e as Error).message ?? e));
+    }
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
+      if (e.key === " ") {
+        e.preventDefault();
+        if (framesRef.current) goLive();
+        else pause();
+      } else if (framesRef.current && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+        e.preventDefault();
+        seek(idxRef.current + (e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 25 : 1));
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!msg) return;
+    const id = setTimeout(() => setMsg(null), 4000);
+    return () => clearTimeout(id);
+  }, [msg]);
+
+  const n = frames?.length ?? 0;
+  const cur = frames?.[idx];
+  const t0 = frames?.[0]?.t ?? 0;
+  const t1 = frames?.[n - 1]?.t ?? 0;
+  return (
+    <div style={{ ...PANEL, bottom: 10, left: 320, right: 10, display: "flex", gap: 10, alignItems: "center" }}>
+      {frames ? (
+        <button style={{ ...BTN, borderColor: "#f2b632" }} onClick={goLive} title="space">
+          ▶ live
+        </button>
+      ) : (
+        <button style={BTN} onClick={pause} disabled={busy} title="space">
+          {busy ? "…" : "⏸ scrub"}
+        </button>
+      )}
+      <div style={{ position: "relative", flex: 1, height: 22 }}>
+        <input
+          type="range"
+          min={0}
+          max={Math.max(0, n - 1)}
+          value={frames ? idx : 0}
+          disabled={!frames}
+          onChange={(e) => seek(Number(e.target.value))}
+          style={{ width: "100%", position: "absolute", top: 2, left: 0, margin: 0 }}
+        />
+        {frames &&
+          events.map((ev, k) => (
+            <div
+              key={k}
+              title={`${ev.t.toFixed(2)} s · ${ev.text}`}
+              onClick={() => seek(ev.index)}
+              style={{
+                position: "absolute",
+                left: `${(ev.index / Math.max(1, n - 1)) * 100}%`,
+                top: 16,
+                width: 2,
+                height: 6,
+                background: ev.kind === "fall" ? "#e5484d" : ev.kind === "brain" ? "#f2b632" : "#43c2b8",
+                cursor: "pointer",
+              }}
+            />
+          ))}
+      </div>
+      <span style={{ color: "#9aa5b1", minWidth: 150, textAlign: "right" }}>
+        {frames && cur
+          ? `${cur.t.toFixed(2)} s · frame ${idx + 1}/${n} · ${(t1 - t0).toFixed(0)} s ring`
+          : msg ?? "space: pause + scrub"}
+      </span>
+      <button style={BTN} onClick={save} title="write the ring to recordings/">
+        💾 save
+      </button>
+    </div>
+  );
+}
+
 export default function SimViewer() {
   const [scene, setScene] = useState<Scene | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -367,12 +536,17 @@ export default function SimViewer() {
   const [driving, setDriving] = useState(false);
   const [showTof, setShowTof] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
-  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[] }>({
+  const [editor, setEditor] = useState<EditorState | null>(null);
+  const worldRef = useRef<WorldInfo | null>(null);
+  worldRef.current = world;
+  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number }>({
     rtf: 0,
     mode: "auto",
     t: 0,
     events: [],
+    kbps: 0,
   });
+  const lastBytes = useRef({ bytes: 0, at: 0 });
   const clientRef = useRef<SimClient | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const held = useRef<Held>(new Set());
@@ -398,13 +572,18 @@ export default function SimViewer() {
     load();
     // Low-rate status mirror (HUD numbers, toasts): 4 Hz is plenty.
     const statusTimer = setInterval(() => {
-      const f = client.frame;
+      const f = client.live;
       const ev = client.drainEvents();
+      const now = Date.now();
+      const lb = lastBytes.current;
+      const kbps = lb.at ? ((client.bytes - lb.bytes) / 1024) / ((now - lb.at) / 1000) : 0;
+      lastBytes.current = { bytes: client.bytes, at: now };
       setStatus((s) => ({
         rtf: f?.rtf ?? 0,
         mode: f?.mode ?? "auto",
         t: f?.t ?? 0,
         events: ev.length ? [...s.events, ...ev].slice(-4) : s.events,
+        kbps: 0.7 * s.kbps + 0.3 * kbps,
       }));
       setSelected(getSelectedDuck());
     }, 250);
@@ -440,6 +619,10 @@ export default function SimViewer() {
         if (!e.repeat) setShowTof((v) => !v);
         return;
       }
+      if (k === "e") {
+        if (!e.repeat) setEditor((st) => (st ? null : { draft: emptyDraft(worldRef.current?.scenario ?? null), tool: null, wallStart: null }));
+        return;
+      }
       if (k === "escape") {
         setSelectedDuck(null);
         return;
@@ -449,6 +632,7 @@ export default function SimViewer() {
         setSelectedDuck(d ? d.id : null);
         return;
       }
+      if (clientRef.current?.scrub) return;   // scrubbing: arrows step frames
       if (drivingRef.current && DRIVE_KEYS.has(k)) {
         e.preventDefault();
         held.current.add(k);
@@ -495,7 +679,7 @@ export default function SimViewer() {
   };
   const selectAt = (e: React.MouseEvent<HTMLDivElement>) => {
     const t = e.target as HTMLElement | null;
-    if (t?.tagName !== "CANVAS") return;
+    if (t?.tagName !== "CANVAS" || editor) return;
     if (Math.hypot(e.clientX - downAt.current.x, e.clientY - downAt.current.y) > 5) return;
     setSelectedDuck(nearestDuck(e.clientX, e.clientY));
   };
@@ -503,6 +687,9 @@ export default function SimViewer() {
   const selDuck: SimDuck | undefined = clientRef.current?.frame?.ducks.find((d) => d.id === selected);
   const scenario = world?.scenario ?? null;
   const client = clientRef.current;
+  // While editing, the statics on stage are the DRAFT's; the ducks and
+  // objects keep streaming from the loaded world underneath.
+  const shown = editor ? editor.draft : scenario;
 
   return (
     <div
@@ -524,7 +711,8 @@ export default function SimViewer() {
         <directionalLight position={[-2, 2.5, -1.5]} intensity={0.4} color="#8fa3c7" />
         <gridHelper args={[18, 72, "#3a4150", "#262a33"]} position={[0, -0.003, 0]} />
         <group rotation={[-Math.PI / 2, 0, 0]}>
-          <Statics scenario={scenario} />
+          <Statics scenario={shown} />
+          {editor && <EditorFloor state={editor} onClick={(x, y) => setEditor((st) => (st ? applyFloorClick(st, x, y) : st))} />}
           {client && <Dynamics scenario={scenario} client={client} />}
           {scene && client && <SimDucks scene={scene} client={client} />}
           {scene && client && <TofOverlay scene={scene} client={client} enabled={showTof} />}
@@ -570,9 +758,17 @@ export default function SimViewer() {
         <button style={{ ...BTN, borderColor: showTof ? "#43c2b8" : "#2b313b" }} onClick={() => setShowTof((v) => !v)} title="T">
           ToF overlay
         </button>
+        <button
+          style={{ ...BTN, borderColor: editor ? "#f2b632" : "#2b313b" }}
+          onClick={() => setEditor((st) => (st ? null : { draft: emptyDraft(scenario), tool: null, wallStart: null }))}
+          title="E"
+        >
+          ✎ edit
+        </button>
         <span style={{ flex: 1 }} />
         <span style={{ color: "#9aa5b1" }}>
-          {scenario ? scenario.name : "no world loaded"} · t {status.t.toFixed(1)} s · RTF {status.rtf.toFixed(2)} · {status.mode}
+          {scenario ? scenario.name : "no world loaded"} · t {status.t.toFixed(1)} s · RTF {status.rtf.toFixed(2)} · {status.mode} ·{" "}
+          {status.kbps.toFixed(0)} kB/s
         </span>
         <span style={{ color: connected ? "#43c2b8" : "#f2b632" }}>{connected ? "● live" : "○ offline"}</span>
       </div>
@@ -627,13 +823,28 @@ export default function SimViewer() {
         where the sensor <i>claims</i> a surface is. In auto mode a tiny wander brain reads the middle columns
         and steers toward the open side; it emits only a twist, the same command the real robot takes.
         <div style={{ marginTop: 6, color: "#9aa5b1" }}>
-          R restart · P drive (WASD/arrows, Q/E strafe) · T ToF · 1–9 select · Esc
+          R restart · P drive (WASD/arrows, Q/E strafe) · T ToF · E edit · 1–9 select · Esc · space scrub
         </div>
       </div>
 
+      {editor && (
+        <SimEditor
+          state={editor}
+          setState={setEditor}
+          onClose={() => setEditor(null)}
+          onLoaded={(w) => {
+            setWorld(w);
+            if (w.scenario) setPick(w.scenario.name);
+            fetchScenarios().then(setScenarios).catch(() => {});
+            setSelectedDuck(null);
+          }}
+        />
+      )}
+      {client && <Timeline client={client} />}
+
       {/* events */}
       {(status.events.length > 0 || error) && (
-        <div style={{ ...PANEL, bottom: 10, right: 10, maxWidth: 360, color: error ? "#f2b632" : "#c9d0d8" }}>
+        <div style={{ ...PANEL, bottom: 54, right: 10, maxWidth: 360, color: error ? "#f2b632" : "#c9d0d8" }}>
           {error ?? status.events.map((e, i) => <div key={i}>{e}</div>)}
         </div>
       )}

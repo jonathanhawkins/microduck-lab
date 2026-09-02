@@ -2,6 +2,7 @@
 // screenshot, and print the console. Usage:
 //   node shot.mjs [--url http://localhost:63317/sim] [--out /tmp/sim.png]
 //                 [--keys "Escape,1"] [--wait 6000] [--width 1400 --height 860]
+//                 [--click-text "▭ wall"] [--clicks "700,500;900,520"]   (buttons by text, then canvas px)
 // Needs a lab (uv run duck-lab --world <scenario>) and the viewer (npm run dev)
 // already running — see bringup.sh. Playwright is resolved from the global
 // node_modules on the web runner; locally `npm i -g playwright` or point
@@ -33,6 +34,12 @@ page.on("pageerror", (e) => logs.push(`pageerror: ${e.message}`));
 await page.goto(url, { waitUntil: "networkidle" });
 await page.waitForTimeout(wait);
 for (const k of keys) { await page.keyboard.press(k); await page.waitForTimeout(400); }
+if (args["click-text"]) {
+  for (const t of args["click-text"].split(";").filter(Boolean)) { await page.getByText(t, { exact: true }).first().click(); await page.waitForTimeout(300); }
+}
+if (args.clicks) {
+  for (const c of args.clicks.split(";").filter(Boolean)) { const [x, y] = c.split(",").map(Number); await page.mouse.click(x, y); await page.waitForTimeout(300); }
+}
 await page.waitForTimeout(1200);
 await page.screenshot({ path: out });
 const live = await page.locator("text=● live").count();

@@ -29,7 +29,66 @@ export interface TofPayload {
   t: number;
   mm: number[];                       // 64, row-major, 0 = no target
   age: number;
-  pts: ([number, number, number] | null)[]; // world points (MuJoCo frame) per zone
+}
+
+// The ToF's mount on the head: the MJCF `tof` site in the jaw_soft body
+// frame (robot_walk.xml), x-forward / y-left / z-up. Mirrors sensors/tof.py.
+export const TOF_ROWS = 8;
+export const TOF_COLS = 8;
+export const TOF_FOV_DEG = 45;
+export const TOF_SITE_POS: [number, number, number] = [0.0135, 0.0224086, -0.0733];
+export const TOF_SITE_QUAT_WXYZ: [number, number, number, number] = [0.707107, 0, 0.707107, 0];
+
+/** Zone centre directions in the site frame, row-major (row 0 = up, col 0 = left). */
+export const TOF_ZONE_DIRS: [number, number, number][] = (() => {
+  const half = Math.tan((TOF_FOV_DEG * Math.PI) / 360);
+  const out: [number, number, number][] = [];
+  for (let r = 0; r < TOF_ROWS; r++)
+    for (let c = 0; c < TOF_COLS; c++) {
+      const y = half * (1 - (2 * c + 1) / TOF_COLS);
+      const z = half * (1 - (2 * r + 1) / TOF_ROWS);
+      const n = Math.hypot(1, y, z);
+      out.push([1 / n, y / n, z / n]);
+    }
+  return out;
+})();
+
+function quatMul(a: number[], b: number[]): [number, number, number, number] {
+  // wxyz
+  return [
+    a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+    a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+    a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+  ];
+}
+function quatRotate(q: number[], v: [number, number, number]): [number, number, number] {
+  // wxyz quaternion applied to v
+  const [w, x, y, z] = q;
+  const t0 = 2 * (y * v[2] - z * v[1]);
+  const t1 = 2 * (z * v[0] - x * v[2]);
+  const t2 = 2 * (x * v[1] - y * v[0]);
+  return [
+    v[0] + w * t0 + (y * t2 - z * t1),
+    v[1] + w * t1 + (z * t0 - x * t2),
+    v[2] + w * t2 + (x * t1 - y * t0),
+  ];
+}
+
+/** World-frame aperture and zone points of a ToF frame, from the jaw body
+ *  pose [x,y,z,qw,qx,qy,qz] the duck frame already carries. null = no target. */
+export function tofZonePoints(jaw: number[], mm: number[]): { origin: [number, number, number]; pts: ([number, number, number] | null)[] } {
+  const jq = [jaw[3], jaw[4], jaw[5], jaw[6]];
+  const off = quatRotate(jq, TOF_SITE_POS);
+  const origin: [number, number, number] = [jaw[0] + off[0], jaw[1] + off[1], jaw[2] + off[2]];
+  const sq = quatMul(jq, TOF_SITE_QUAT_WXYZ);
+  const pts = TOF_ZONE_DIRS.map((d, k) => {
+    const depth = mm[k] / 1000;
+    if (!depth) return null;
+    const w = quatRotate(sq, d);
+    return [origin[0] + w[0] * depth, origin[1] + w[1] * depth, origin[2] + w[2] * depth] as [number, number, number];
+  });
+  return { origin, pts };
 }
 export interface SimDuck {
   id: string;
@@ -88,11 +147,65 @@ export async function loadWorld(name: string): Promise<WorldInfo> {
   return r.json();
 }
 
-/** WebSocket client for /ws/sim: keeps the latest frame, reconnects. */
+export async function fetchRing(last = 1500): Promise<SimFrame[]> {
+  const r = await fetch(`${LAB_HTTP}/replay/ring?last=${last}`);
+  if (!r.ok) throw new Error(`GET /replay/ring ${r.status}`);
+  return (await r.json()).frames;
+}
+export interface RecordingHeader { name: string; scenario: string | null; saved: number; frames: number; span: number }
+export async function saveRecording(name: string): Promise<RecordingHeader> {
+  const r = await fetch(`${LAB_HTTP}/replay/save`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `save ${r.status}`);
+  return r.json();
+}
+export async function fetchRecordings(): Promise<RecordingHeader[]> {
+  const r = await fetch(`${LAB_HTTP}/recordings`);
+  if (!r.ok) throw new Error(`GET /recordings ${r.status}`);
+  return (await r.json()).recordings;
+}
+export async function fetchRecording(name: string): Promise<{ header: RecordingHeader; frames: SimFrame[] }> {
+  const r = await fetch(`${LAB_HTTP}/recordings/${encodeURIComponent(name)}`);
+  if (!r.ok) throw new Error(`GET /recordings/${name} ${r.status}`);
+  return r.json();
+}
+
+/** Something worth a tick mark on the scrub bar, found by diffing frames. */
+export interface FrameEvent { index: number; t: number; kind: "fall" | "brain" | "mode"; text: string }
+export function frameEvents(frames: SimFrame[]): FrameEvent[] {
+  const out: FrameEvent[] = [];
+  for (let i = 1; i < frames.length; i++) {
+    const a = frames[i - 1], b = frames[i];
+    if (a.mode !== b.mode) out.push({ index: i, t: b.t, kind: "mode", text: `${b.mode} drive` });
+    for (const d of b.ducks) {
+      const prev = a.ducks.find((x) => x.id === d.id);
+      if (!prev) continue;
+      if (d.falls > prev.falls) out.push({ index: i, t: b.t, kind: "fall", text: `${d.id} fell` });
+      // Only the interesting brain transitions: a cruise↔steer flip every
+      // few frames is noise on a bar this wide.
+      if (d.brain && prev.brain && d.brain.state !== prev.brain.state && ["spin", "unstick", "blind", "lost"].includes(d.brain.state))
+        out.push({ index: i, t: b.t, kind: "brain", text: `${d.id}: ${prev.brain.state} → ${d.brain.state}` });
+    }
+  }
+  return out;
+}
+
+/** WebSocket client for /ws/sim: keeps the latest frame, reconnects. While
+ *  scrubbing, `frame` is the scrubbed frame and live frames keep arriving
+ *  underneath (`live`), so going back to live is instant. */
 export class SimClient {
-  frame: SimFrame | null = null;
+  live: SimFrame | null = null;
+  scrub: SimFrame | null = null;
+  get frame(): SimFrame | null {
+    return this.scrub ?? this.live;
+  }
   connected = false;
   lastFrameAt = 0;
+  /** Bytes received so far (the perf HUD differentiates it). */
+  bytes = 0;
   private ws: WebSocket | null = null;
   private closed = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -115,7 +228,8 @@ export class SimClient {
     ws.onmessage = (ev) => {
       if (this.ws !== ws) return;
       const frame: SimFrame = JSON.parse(ev.data);
-      this.frame = frame;
+      this.live = frame;
+      this.bytes += ev.data.length;
       this.lastFrameAt = Date.now();
       if (frame.events?.length) {
         this.pendingEvents.push(...frame.events);

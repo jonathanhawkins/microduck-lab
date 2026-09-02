@@ -14,13 +14,18 @@ if [[ "${2:-}" == "--restart" || "${1:-}" == "--restart" ]]; then
   sleep 1
 fi
 if ! curl -sf -o /dev/null http://127.0.0.1:8788/world; then
+  # A synced .venv skips uv's re-sync (and its network round trip); fully
+  # detached (setsid, stdin from /dev/null) so a caller piping this script's
+  # output never waits on the lab's inherited descriptors.
+  LAB_CMD=("$ROOT/microduck_local/.venv/bin/duck-lab")
+  [[ -x "${LAB_CMD[0]}" ]] || LAB_CMD=(uv run duck-lab)
   ( cd "$ROOT/microduck_local" && LAB_STATE_PATH="$LOGS/lab-state.json" \
-      nohup uv run duck-lab --fresh --world "$SCENARIO" --port 8788 > "$LOGS/lab.log" 2>&1 & )
-  for _ in $(seq 1 40); do curl -sf -o /dev/null http://127.0.0.1:8788/world && break; sleep 0.5; done
+      setsid nohup "${LAB_CMD[@]}" --fresh --world "$SCENARIO" --port 8788 > "$LOGS/lab.log" 2>&1 < /dev/null & )
+  for _ in $(seq 1 120); do curl -sf -o /dev/null http://127.0.0.1:8788/world && break; sleep 0.5; done
 fi
 curl -sf -o /dev/null http://127.0.0.1:8788/world && echo "lab: up ($(curl -s http://127.0.0.1:8788/world | head -c 60)…)" || { echo "lab failed:"; tail -20 "$LOGS/lab.log"; exit 1; }
 if ! curl -sf -o /dev/null http://127.0.0.1:63317/sim; then
-  ( cd "$ROOT/duck-viewer" && PORT=63317 nohup npm run dev > "$LOGS/viewer.log" 2>&1 & )
+  ( cd "$ROOT/duck-viewer" && PORT=63317 setsid nohup npm run dev > "$LOGS/viewer.log" 2>&1 < /dev/null & )
   for _ in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:63317/sim && break; sleep 1; done
 fi
 curl -sf -o /dev/null http://127.0.0.1:63317/sim && echo "viewer: up" || { echo "viewer failed:"; tail -20 "$LOGS/viewer.log"; exit 1; }
