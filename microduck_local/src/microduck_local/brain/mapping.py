@@ -107,11 +107,11 @@ class OccupancyGrid:
         """Wire shape: a (ny, nx) grid of 0 (unknown) / 1 (free) / 2 (occupied)
         as a compact string, plus the geometry to draw it."""
         cls = np.where(self.logodds >= 1.0, 2, np.where(self.logodds <= -1.0, 1, 0)).astype(np.uint8)
-        # One character per cell, row-major from -y: '0','1','2'.
-        rows = ["".join("012"[v] for v in row) for row in cls]
+        # One character per cell, row-major from -y: '0','1','2' — ASCII 48 + class,
+        # straight from the array (a per-cell Python join cost ~3 ms per map).
         s = self.spec
         return {"nx": self.nx, "ny": self.ny, "res": s.res, "origin": [-s.size[0] / 2, -s.size[1] / 2],
-                "frames": self.frames, "cells": "".join(rows)}
+                "frames": self.frames, "cells": (cls.reshape(-1) + 48).tobytes().decode("ascii")}
 
 
 __all__ = ["GridSpec", "OccupancyGrid"]
