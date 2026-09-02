@@ -21,9 +21,10 @@ the tree, and Track 12 has its first working loop:
   odometry frame, painted on the page (the first of the mapping track);
   the `pitch` scenario with two `chase` brains and goal counting (the first
   of the soccer track). Binary framing (0.5) stays open on a measurement:
-  the page's perf readout puts the JSON encode at ~1 ms per 40 ms frame
-  for one duck (physics 1.1, sensors 0.3), so JSON holds until rosters of
-  four or more ducks make the encode the largest term. **Measured:** on identical
+  the page's perf readout puts the JSON encode at 0.8 ms per 40 ms frame
+  for two ducks with maps streaming (physics 1.6, sensors 0.6 — the whole
+  loop is ~7% of a core), so JSON holds until rosters of four or more
+  ducks make the encode the largest term. **Measured:** on identical
   follow-me episodes the learned brain (`brains/follow-v1`, 400k decisions,
   ~10 min on 4 cores) holds the distance band 0.73 / 0.61 of the time under
   the datasheet / hostile presets against the scripted controller's 0.42 /
