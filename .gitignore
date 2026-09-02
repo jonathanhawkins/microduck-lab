@@ -2,6 +2,9 @@
 # (see README "Getting set up"). This repo tracks only the local-training stack.
 /microduck/
 /microduck_rl/
+# …or symlinked in from elsewhere (a trailing slash does not match a symlink)
+/microduck
+/microduck_rl
 
 # Python
 __pycache__/
