@@ -484,17 +484,32 @@ and a look win). Measured 1v1 over 8 seeds × 300 s: **1.12 goals, 11.8
 kicks, 0.50 falls a run** (1.38 / 6.5 / 0.50 before: kicks nearly
 doubled, goals within the noise of eight seeds, falls held).
 
+**A goal restarts play from a kickoff** (`World.kickoff`): the ball on
+the centre spot with 5 cm of random nudge (two mirror-image ducks would
+otherwise meet nose to nose), every duck back on its spawn with its
+odometry frame, and a 1 s hold during which every walker gets a zero
+command whatever its brain asks — play resumes from standing ducks, not
+from the heap at the goal mouth. `World.goal_seq` says a goal happened;
+`brain/team.kickoff_brains` makes every brain forget its plan (the chase
+brain keeps its kick tally) and wipes the team boards; the lab loop and
+`eval-pitch` both do this, and the page's score panel counts the kickoff
+down. Re-measured over 4 seeds × 300 s: **1v1 2.00 goals, 8.2 kicks,
+0.50 falls a run** — one kick in four scores where one in ten did, since
+every goal is followed by a clean approach from the spawns instead of a
+scramble at the wall.
+
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where
 I put it. The nearest attacks, the others support (0.7 m behind the
 ball toward their own goal, spread sideways by rank, facing it, never
 inside 0.45 m of it); the attacker keeps the role until a teammate is
 clearly nearer, so two ducks a centimetre apart in range do not swap
-every frame. Measured over 4 seeds × 300 s: **2v2 2.25 goals, 10.8
-kicks, 3.0 falls a run (0.75 per duck); 3v3 1.00 goals, 5.8 kicks, 5.25
-falls a run (0.88 per duck)** on a pitch that grows 0.4 × 0.35 m a
-side. Six ducks crowd one ball: falls per duck climb with the roster
-(0.25 → 0.75 → 0.88) as the avoid and retreat rules fire against three
+every frame. Measured over 4 seeds × 300 s, with the kickoff: **2v2 2.00
+goals, 7.8 kicks, 2.75 falls a run (0.69 per duck); 3v3 0.75 goals, 5.2
+kicks, 4.75 falls a run (0.79 per duck)** on a pitch that grows 0.4 ×
+0.35 m a side (before the kickoff 2.25 / 10.8 / 3.0 and 1.00 / 5.8 /
+5.25). Six ducks crowd one ball: falls per duck climb with the roster
+(0.25 → 0.69 → 0.79) as the avoid and retreat rules fire against three
 bodies at once, and the supporters' spots overlap the opponents'
 attackers. The next form is positional play — supporters that mark
 rather than shadow — and a scoreboard that counts possession.
