@@ -45,12 +45,18 @@ def test_chase_plans_behind_the_ball_toward_the_goal_and_falls_back_to_the_line_
     b = Chase(p, goal=(1.5, 0.0))
     # Ball 0.4 m ahead, duck at the origin facing +x, goal at +1.5: behind it already, kick spot.
     spot = b._plan((0.0, 0.0, 0.0), _ball(0.0, 0.4))
-    assert spot[4] == "kick" and abs(spot[0] - (0.4 - p.kick_ahead)) < 1e-9 and abs(abs(spot[1]) - p.kick_side) < 1e-9
-    assert abs(spot[3]) < 1e-9
+    # The body stands rotated by the kick map's deflection so the KICK flies along the line (u = 0).
+    defl = {"kick_left": p.kick_deflect_left, "kick_right": p.kick_deflect_right}[spot[2]]
+    h = -defl
+    side = -p.kick_side if spot[2] == "kick_left" else p.kick_side
+    assert spot[4] == "kick" and abs(spot[3] - h) < 1e-9
+    assert abs(spot[0] - (0.4 - p.kick_ahead * math.cos(h) - side * math.sin(h))) < 1e-9
+    assert abs(spot[1] - (0.0 - p.kick_ahead * math.sin(h) + side * math.cos(h))) < 1e-9
+    assert abs(math.hypot(spot[0] - 0.4, spot[1]) - math.hypot(p.kick_ahead, p.kick_side)) < 1e-9
     # The goal is more than `aim_max` off the line of sight: kick along the line of sight instead.
-    side = Chase(p, goal=(0.0, 1.5))
-    spot = side._plan((0.0, 0.0, 0.0), _ball(0.0, 0.4))
-    assert abs(spot[3]) < 1e-9
+    side_b = Chase(p, goal=(0.0, 1.5))
+    spot = side_b._plan((0.0, 0.0, 0.0), _ball(0.0, 0.4))
+    assert abs(spot[3] + {"kick_left": p.kick_deflect_left, "kick_right": p.kick_deflect_right}[spot[2]]) < 1e-9
     # Pushing is off by default (measured); switched on, a far goal gives a push spot squarely behind the ball.
     assert ChaseParams().push_beyond == math.inf
     far = Chase(ChaseParams(push_beyond=1.4), goal=(3.0, 0.0))
@@ -60,7 +66,7 @@ def test_chase_plans_behind_the_ball_toward_the_goal_and_falls_back_to_the_line_
     free = Chase(p)
     free.attack = 0.5
     spot = free._plan((0.0, 0.0, 0.0), _ball(0.0, 0.4))
-    assert abs(spot[3] - 0.5) < 1e-9 and spot[4] == "kick"
+    assert abs(spot[3] - (0.5 - {"kick_left": p.kick_deflect_left, "kick_right": p.kick_deflect_right}[spot[2]])) < 1e-9 and spot[4] == "kick"
     assert free._own_goal((0.0, 0.0, 0.0))[0] < 0
     # The foot keeps its choice near the line (hysteresis), flips well off it.
     b.spot = ("x", "y", "kick_left", 0.0, "kick")

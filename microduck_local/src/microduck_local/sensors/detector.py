@@ -87,6 +87,11 @@ class Target:
     cls: str
     body: int
     radius: float
+    # Vertical extent centred on the body (a person: its height). A detector
+    # on a 24 cm-high head sees a person's legs long after its middle has
+    # left the 48 deg vertical frustum (the capsule's centre leaves it at
+    # 1.2 m); the part in view is what is reported. 0: a point-like thing.
+    height: float = 0.0
 
 
 @dataclass
@@ -165,11 +170,29 @@ class Detector:
         if local[0] <= 0:
             return None
         bearing = float(np.arctan2(local[1], local[0]))
-        elev = float(np.arctan2(local[2], np.hypot(local[0], local[1])))
         if abs(bearing) > np.deg2rad(self.spec.fov_h_deg) / 2:
             return None
-        if abs(elev) > np.deg2rad(self.spec.fov_v_deg) / 2:
-            return None
+        half_v = np.deg2rad(self.spec.fov_v_deg) / 2
+        if tgt.height > 0:
+            # The part of a tall target inside the frustum: its top and bottom
+            # in world z, through the camera's tilt, clipped to the frustum.
+            up = R.T @ np.array([0.0, 0.0, 1.0])
+            horiz = float(np.hypot(local[0], local[1]))
+            lo, hi = local + up * (-tgt.height / 2), local + up * (tgt.height / 2)
+            e_lo = float(np.arctan2(lo[2], horiz))
+            e_hi = float(np.arctan2(hi[2], horiz))
+            e_lo, e_hi = min(e_lo, e_hi), max(e_lo, e_hi)
+            a, b = max(e_lo, -half_v), min(e_hi, half_v)
+            if a > b:
+                return None
+            elev = 0.5 * (a + b)
+            # Range and the occlusion ray go to the point actually reported.
+            p = R @ np.array([local[0], local[1], horiz * np.tan(elev)])
+            rng = float(np.linalg.norm(p))
+        else:
+            elev = float(np.arctan2(local[2], np.hypot(local[0], local[1])))
+            if abs(elev) > half_v:
+                return None
         # Occlusion: the first thing along the line of sight must be the
         # target itself (or nothing closer than its front face).
         geomid = np.zeros(1, dtype=np.int32)

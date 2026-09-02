@@ -348,10 +348,9 @@ class BrainEnv(gym.Env):
                 a = a.copy()
                 a[0] = 0.0                                  # the reflex tier refuses to walk into it
         if t.avoid and d.tof is not None and self._builder.tracker is not None:
-            side = self._closing.step(d.tof.last, w.t, d.heading_speed(w.data))
-            if side:
-                a = a.copy()
-                a[0], a[1] = 0.0, side                      # the reflex tier steps out of its path
+            dodge = self._closing.step(d.tof.last, w.t, d.heading_speed(w.data))
+            if dodge is not None:
+                a = np.array(dodge, np.float32)             # the reflex tier gets out of its path
         d.set_cmd(w.data, a, (0.0, 0.0, self.gaze(), 0.0))
         if t.charge and w.t - self._last_charge >= t.charge:
             self._last_charge = w.t
@@ -387,7 +386,10 @@ class BrainEnv(gym.Env):
         truncated = self._steps >= self.max_decisions
         if fell:
             reward -= 1.0
-        info = {"dist": dist, "bearing": bearing, "seen": seen, "bumped": bumped}
+        # Contact (truth, for the benchmark): the person's capsule against the body.
+        contact = dist < self.person.spec.radius + 0.10
+        info = {"dist": dist, "bearing": bearing, "seen": seen, "bumped": bumped, "contact": contact,
+                "dodges": self._closing.count}
         return self._obs(), float(reward), terminated, truncated, info
 
     def close(self) -> None:

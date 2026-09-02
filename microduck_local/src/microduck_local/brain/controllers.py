@@ -63,11 +63,17 @@ def tof_clearance_3d(frame, zmin: float = 0.08, zmax: float = 0.6) -> np.ndarray
 
 @dataclass(frozen=True)
 class ClosingParams:
-    range_m: float = 0.7           # something inside this, ahead...
-    rate: float = 0.15             # ...closing on me faster than my own walk by this (m/s)
+    range_m: float = 1.2           # something inside this, ahead...
+    rate: float = 0.12             # ...closing on me faster than my own walk by this (m/s)
     window_s: float = 0.4          # over this much ToF history (6 frames at 15 Hz)
-    step_s: float = 1.0            # sidestep this long, then look again
-    vy: float = 0.3                # the sidestep (the walker's lateral command)
+    # The manoeuvre. Measured from a standstill: a pure sidestep moves the
+    # walker 1 cm in its first second (6 cm in two); a turn toward the
+    # freer side then a walk moves it off the line - and out of the
+    # oncoming path, which a stop alone is not.
+    turn_s: float = 1.0
+    walk_s: float = 1.5
+    speed: float = 0.3
+    cooldown_s: float = 1.5        # after one, look again this much later
 
 
 class ClosingWatch:
@@ -75,10 +81,10 @@ class ClosingWatch:
     columns, body-height returns only) shrinks at my own speed when I walk
     at a wall and faster when a person or a duck comes at me; the
     difference, fitted over a short window, is the closing rate. Past
-    `rate` inside `range_m`, the answer is a sidestep to the freer side
-    (the columns with more clearance) for `step_s` - out of its path, which
-    a stop alone is not. Nothing here needs more than the robot's ToF and
-    its own commanded speed."""
+    `rate` inside `range_m`, the answer is a manoeuvre out of its path: a
+    turn toward the freer side (the columns with more clearance), then a
+    walk. Nothing here needs more than the robot's ToF and its own
+    commanded speed."""
 
     def __init__(self, p: ClosingParams = ClosingParams()):
         self.p = p
@@ -89,11 +95,13 @@ class ClosingWatch:
         self._last_t: float | None = None
         self.closing = 0.0                               # m/s toward me beyond my own walk (last estimate)
         self.side = 0.0
-        self.until = -1.0
+        self.t0 = -1e9
+        self.until = -1e9
+        self.count = 0
 
-    def step(self, frame, t: float, speed: float) -> float:
-        """Fold the newest ToF frame; returns the lateral command to hold
-        now (0.0: none)."""
+    def step(self, frame, t: float, speed: float, cold: bool = True) -> tuple[float, float, float] | None:
+        """Fold the newest ToF frame; returns the twist to hold now, or
+        None when there is nothing to get out of the way of."""
         p = self.p
         if frame is not None and frame.t != self._last_t:
             self._last_t = frame.t
@@ -111,12 +119,18 @@ class ClosingWatch:
                 self.closing = -slope - max(float(speed), 0.0)
             else:
                 self.closing = 0.0
-            if ahead < p.range_m and self.closing > p.rate and t >= self.until:
+            if ahead < p.range_m and self.closing > p.rate and t >= self.until + p.cooldown_s:
                 left = float(np.mean(np.minimum(cols[0:3], 4.0)))
                 right = float(np.mean(np.minimum(cols[5:8], 4.0)))
                 self.side = 1.0 if left >= right else -1.0
-                self.until = t + p.step_s
-        return self.side * p.vy if t < self.until else 0.0
+                self.t0 = t
+                self.until = t + p.turn_s + p.walk_s
+                self.count += 1
+        if t >= self.until:
+            return None
+        if t < self.t0 + p.turn_s:
+            return turn(self.side, cold)
+        return (p.speed, 0.0, 0.0)
 
 
 def wander_from_tof(depth_mm: np.ndarray, valid: np.ndarray | None = None,
@@ -235,7 +249,7 @@ class FollowParams:
     search_wz: float = 1.0             # the shipped walker barely turns in place below 1.0
     tof_stop: float = 0.35         # never walk into what the ToF says is right there
     head_yaw_gain: float = 0.8     # look toward the target (the robot's own gaze intent)
-    avoid: bool = True             # sidestep out of the path of whatever walks at me (ClosingWatch)
+    avoid: bool = True             # get out of the path of whatever walks at me (ClosingWatch)
 
 
 class Follow:
@@ -352,10 +366,10 @@ class Follow:
         # Something walking at me - the person turning back, another duck -
         # gets a sidestep out of its path (after the bumper: this one is
         # meant to move with something right there).
-        side = self.closing.step(tof, senses.t, senses.speed) if p.avoid else 0.0
-        if side:
-            vx, vy = 0.0, side
-            self.state = "sidestep"
+        dodge = self.closing.step(tof, senses.t, senses.speed, cold) if p.avoid else None
+        if dodge is not None:
+            vx, vy, wz = dodge
+            self.state = "dodge"
         head_yaw = float(np.clip(p.head_yaw_gain * self.last_bearing, -0.6, 0.6)) if self.last_seen_t else 0.0
         self.last = (vx, vy, wz)
         return Intent(twist=self.last, head=(0.0, 0.0, head_yaw, 0.0), note=self.state)
@@ -375,6 +389,16 @@ class ChaseParams:
     # flies 1.6 m; 0.10 m dead ahead barely moves; the other side, nothing.
     kick_ahead: float = 0.08
     kick_side: float = 0.06
+    # The kick map (a standing duck, the ball swept over (ahead, side) of
+    # the trunk, kick_left; the right kick checked mirrored): the ball
+    # leaves at an angle to the BODY heading that depends on the side
+    # offset - 15 deg/cm near 2 cm, 4.5 deg/cm around 4-8 cm, where the
+    # shipped spot sits - and at the spot it is +21.6 deg for the left foot
+    # (2.1 m) and -11 deg for the right (1.9 m), the same whichever way the
+    # body is yawed. The line-up stands the body rotated by this so the
+    # kick itself flies along the line to the goal.
+    kick_deflect_left: float = 0.377
+    kick_deflect_right: float = -0.19
     lineup_range: float = 0.6      # a ball seen inside this is worth lining up on
     refresh_min: float = 0.35      # …and the spot is re-planned from sightings down to this range, then walked blind
     lineup_tol: float = 0.03       # trunk within this of the kicking spot: kick
@@ -562,8 +586,11 @@ class Chase:
         if self.spot is not None and self.spot[2] in ("kick_left", "kick_right") and abs(rel) < 0.3:
             foot = self.spot[2]                                   # hysteresis: nearly on the line, keep the foot
         side = -p.kick_side if foot == "kick_left" else p.kick_side     # stand to the ball's other side
-        return (bx - p.kick_ahead * math.cos(u) - side * math.sin(u),
-                by - p.kick_ahead * math.sin(u) + side * math.cos(u), foot, u, "kick")
+        # The body heading that sends the kick along u (the map's deflection
+        # is in the body frame, so the spot is laid out in that heading too).
+        h = _wrap(u - (p.kick_deflect_left if foot == "kick_left" else p.kick_deflect_right))
+        return (bx - p.kick_ahead * math.cos(h) - side * math.sin(h),
+                by - p.kick_ahead * math.sin(h) + side * math.cos(h), foot, h, "kick")
 
     def _servo(self, odom, target, cold, stop: float, slow_in: float = 0.2) -> tuple[float, float, float, float]:
         """(vx, wz, dist, bearing) toward a point: turn in place first when

@@ -41,7 +41,7 @@ def run(brain_kind: str, preset: str | None, episodes: int, seed: int, task: Fol
     for ep in range(episodes):
         obs, _ = env.reset(seed=seed + ep)
         brain.reset()
-        in_band = err = seen = bumps = 0.0
+        in_band = err = seen = bumps = contact = 0.0
         n = 0
         ret = 0.0
         falls = 0
@@ -58,13 +58,15 @@ def run(brain_kind: str, preset: str | None, episodes: int, seed: int, task: Fol
             err += abs(info["dist"] - task.distance)
             seen += info["seen"]
             bumps += info["bumped"]
+            contact += info["contact"]
             if term:
                 falls += 1
             if term or trunc:
                 break
         rows.append({"return": ret, "in_band": in_band / n, "dist_err": err / n,
-                     "seen": seen / n, "bumps": bumps, "falls": falls, "decisions": n})
-    keys = ("return", "in_band", "dist_err", "seen", "bumps", "falls")
+                     "seen": seen / n, "bumps": bumps, "contact": contact / 10.0, "falls": falls, "decisions": n,
+                     "dodges": int(brain.closing.count if hasattr(brain, "closing") else info.get("dodges", 0))})
+    keys = ("return", "in_band", "dist_err", "seen", "bumps", "contact", "falls", "dodges")
     summary = {k: float(np.mean([r[k] for r in rows])) for k in keys}
     return {"brain": brain_kind, "preset": preset or "random", "episodes": episodes,
             "variety": bool(task.furniture or task.distractor), "charge": task.charge,
@@ -97,7 +99,8 @@ def main() -> None:
         tags = (" +variety" if res["variety"] else "") + ("" if res["reflex"] else " no-reflex") \
             + (f" +charge {res['charge']:g}s" if res["charge"] else "") + (" +avoid" if res["avoid"] else "")
         print(f"{res['brain']} @ {res['preset']}{tags}: in-band {res['in_band']:.2f} · |err| {res['dist_err']:.2f} m · "
-              f"seen {res['seen']:.2f} · bumps {res['bumps']:.1f}/ep · falls {res['falls']:.2f}/ep · return {res['return']:.1f}")
+              f"seen {res['seen']:.2f} · bumps {res['bumps']:.1f}/ep · contact {res['contact']:.1f} s/ep · dodges {res['dodges']:.1f}/ep · "
+              f"falls {res['falls']:.2f}/ep · return {res['return']:.1f}")
 
 
 if __name__ == "__main__":

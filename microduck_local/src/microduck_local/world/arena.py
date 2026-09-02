@@ -274,7 +274,7 @@ class World:
         targets += [Target(f"ball{i}", "ball", mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
                                                                 f"ball{i}"), b.radius)
                     for i, b in enumerate(scenario.balls)]
-        targets += [Target(p.id, "person", self.persons[p.id].body, p.radius) for p in scenario.persons]
+        targets += [Target(p.id, "person", self.persons[p.id].body, p.radius, height=p.height) for p in scenario.persons]
         self.pickables: dict[str, int] = {
             t.id: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, t.id) for t in scenario.pickables}
         self.pickable_kind = {t.id: t.kind for t in scenario.pickables}

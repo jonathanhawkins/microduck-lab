@@ -147,3 +147,30 @@ def test_frames_carry_the_camera_pose_and_toys_do_not_occlude():
     w.data.qpos[q:q + 3] = cam + 0.3 * (mk - cam)
     mujoco.mj_forward(w.model, w.data)
     assert "basket" in {x.cls for x in d.detector.capture(w.data, 0.0).detections}
+
+
+def test_a_person_is_seen_by_its_legs_up_close_and_a_point_target_is_not():
+    """A person is a vertical extent: the part inside the 48 deg frustum is
+    reported (its middle leaves the frustum at about 1.2 m from a 24 cm
+    camera). A point-like target of the same height is lost there."""
+    import mujoco
+
+    from microduck_local.world import Duck, Person, Scenario, World
+    sc = Scenario(name="near", floor=(6, 6), ducks=[Duck("d0", (0.0, 0.0, 0.0), None, None, "ideal")],
+                  persons=[Person("p0", (0.5, 0.0), 0.0, [], 0.0, 0.18, 1.6)])
+    w = World(sc)
+    d = w.ducks["d0"]
+    for _ in range(6):
+        w.step()
+    fr = d.detector.last
+    people = [x for x in fr.detections if x.cls == "person"]
+    assert len(people) == 1 and abs(people[0].bearing) < 0.05
+    assert abs(people[0].elevation) <= np.deg2rad(24.0) + 1e-6      # reported inside the frustum
+    assert 0.4 < people[0].range_est < 0.9                           # width-ranged, at the person
+    # The same body as a point target at 0.8 m up: gone.
+    tgt = next(t for t in d.detector.targets if t.cls == "person")
+    origin = np.ascontiguousarray(w.data.site_xpos[d.detector.site_id], dtype=np.float64)
+    R = w.data.site_xmat[d.detector.site_id].reshape(3, 3)
+    from dataclasses import replace
+    assert d.detector._visible(w.data, replace(tgt, height=0.0), origin, R) is None
+    assert d.detector._visible(w.data, tgt, origin, R) is not None
