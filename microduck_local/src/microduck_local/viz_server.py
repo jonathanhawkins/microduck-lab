@@ -174,6 +174,7 @@ from . import contract as C
 from . import motion as motion_mod
 from .train import RUNS_DIR
 from .walk_env import MicroduckWalkEnv, shared_model_scope
+from .world_server import mount_world
 
 TICK_HZ = 50            # env control rate (real time)
 SEND_EVERY = 2          # broadcast at 25 Hz
@@ -886,8 +887,8 @@ def build_ducks(args) -> list[Duck]:
                 print(f"[lab] skipping {p}: no policy.onnx / model.zip")
         else:
             print(f"[lab] skipping {spec}: not an .onnx or run dir")
-    if not ducks:
-        raise SystemExit("no ducks — pass run dirs or .onnx paths")
+    if not ducks and not getattr(args, "world", None):
+        raise SystemExit("no ducks — pass run dirs or .onnx paths (or --world <scenario>)")
     return ducks
 
 
@@ -2596,6 +2597,7 @@ def make_app(ducks: list[Duck]):
     @asynccontextmanager
     async def lifespan(_app):
         task = asyncio.create_task(lab_loop())
+        world.start()   # the /sim world loop, beside the roster loop
         # Nothing else ever retrieves this task's exception, so before this
         # callback a crash in lab_loop killed every duck SILENTLY: HTTP and
         # the WebSocket handshake kept working, the viewer kept its green
@@ -2613,6 +2615,7 @@ def make_app(ducks: list[Duck]):
         task.add_done_callback(_loop_died)
         yield
         task.cancel()
+        world.stop()
         if st.job:
             st.job.stop()
 
@@ -2648,6 +2651,11 @@ def make_app(ducks: list[Duck]):
         # let the two drift apart on the next port-scheme change.
         allow_origin_regex=LOCAL_ORIGIN_RE.pattern,
         allow_methods=["*"], allow_headers=["*"])
+
+    # World mode (the /sim page): its own World, routes and /ws/sim socket —
+    # see world_server.py. Mounted first so its routes exist before the
+    # lifespan starts its loop.
+    world = mount_world(app, load_infer=load_policy_infer, origin_allowed=origin_allowed)
 
     @app.get("/scene")
     def get_scene() -> dict:
@@ -3556,6 +3564,9 @@ def main() -> None:
     ap.add_argument("--checkpoints", default=None,
                     help="run dir: add one duck per training checkpoint")
     ap.add_argument("--port", type=int, default=8788)
+    ap.add_argument("--world", default=None, metavar="SCENARIO",
+                    help="preload a /sim world (a built-in or scenarios/<name>.json); "
+                         "with --world the roster may be empty")
     ap.add_argument("--fresh", action="store_true",
                     help="delete lab-state.json and seed the roster from the "
                          "CLI args instead of restoring it")
@@ -3575,7 +3586,10 @@ def main() -> None:
     print(f"[lab] {len(ducks)} ducks: {', '.join(d.label for d in ducks)}")
 
     import uvicorn
-    uvicorn.run(make_app(ducks), host="127.0.0.1", port=args.port, log_level="warning")
+    app = make_app(ducks)
+    if args.world:
+        app.state.world.preload(args.world)
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

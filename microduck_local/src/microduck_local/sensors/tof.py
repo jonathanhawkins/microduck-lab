@@ -194,3 +194,18 @@ class TofSensor:
         if self._last_hits is None:
             return None
         return self.fan.hit_points(data, self._last_hits)
+
+    def zone_points(self, data: mujoco.MjData, frame: TofFrame | None = None) -> np.ndarray:
+        """(rows, cols, 3) world points at each zone's REPORTED depth along
+        the zone's centre ray, NaN where the zone is invalid — what the
+        sensor claims to see, drawn where it claims it is. Uses the mount's
+        pose NOW; pair it with a fresh frame for the overlay."""
+        frame = self.last if frame is None else frame
+        s = self.spec
+        if frame is None:
+            return np.full((s.rows, s.cols, 3), np.nan)
+        dirs = self.zone_dirs_local() @ self.fan.rotation(data).T
+        depth = frame.depth_mm.astype(np.float64) / 1000.0
+        pts = self.fan.origin(data)[None, None, :] + dirs * depth[..., None]
+        pts[~frame.valid] = np.nan
+        return pts
