@@ -490,8 +490,14 @@ I put it. The nearest attacks, the others support (0.7 m behind the
 ball toward their own goal, spread sideways by rank, facing it, never
 inside 0.45 m of it); the attacker keeps the role until a teammate is
 clearly nearer, so two ducks a centimetre apart in range do not swap
-every frame. Measured 2v2 over 4 seeds: **2.25 goals, 10.8 kicks, 3.0
-falls a run (0.75 per duck)**.
+every frame. Measured over 4 seeds × 300 s: **2v2 2.25 goals, 10.8
+kicks, 3.0 falls a run (0.75 per duck); 3v3 1.00 goals, 5.8 kicks, 5.25
+falls a run (0.88 per duck)** on a pitch that grows 0.4 × 0.35 m a
+side. Six ducks crowd one ball: falls per duck climb with the roster
+(0.25 → 0.75 → 0.88) as the avoid and retreat rules fire against three
+bodies at once, and the supporters' spots overlap the opponents'
+attackers. The next form is positional play — supporters that mark
+rather than shadow — and a scoreboard that counts possession.
 
 ### Tidy the playroom (roadmap Track 12)
 
