@@ -429,6 +429,16 @@ class ChaseParams:
     approach_back: float = 0.22
     approach_speed: float = 0.25
     approach_tol: float = 0.04
+    # Traced: a re-plan with the ball already inside `backoff_range` puts
+    # the pre-spot behind the duck, and the turn in place toward it is a
+    # turn against the ball. Back off instead (turn away, walk clear - the
+    # retreat manoeuvre) and line up again from further out. And a search
+    # begun with the ball at the feet turns in place without ever seeing
+    # it (a standing turn barely turns): after `search_walk_after` with
+    # no sighting, walk `search_walk_s` to change the view.
+    backoff_range: float = 0.35
+    search_walk_after: float = 3.0
+    search_walk_s: float = 1.0
     lineup_tol: float = 0.03       # trunk within this of the kicking spot: kick
     lineup_s: float = 4.0          # give up a line-up after this long
     settle_s: float = 0.4          # stand this long on the spot before the kick (robotd kicks at standing tuning)
@@ -563,7 +573,7 @@ class Chase:
         self._retreat_t0 = -9.0
         self._retreat_sign = 1.0
         self._look_t0 = -9.0
-        self._search_t0 = -9.0
+        self._search_t0: float | None = None
         self._prev_skill = None
         self.tracker.reset()
         self.gait.reset()
@@ -744,11 +754,22 @@ class Chase:
                 # square up there, where a turn in place cannot touch the ball.
                 px, py = sx - p.approach_back * math.cos(u), sy - p.approach_back * math.sin(u)
                 vx, wz, pdist, bearing = self._servo(odom, (px, py), cold, p.approach_tol)
-                if pdist <= p.approach_tol + 0.02 and abs(heading_err) <= p.aim_tol:
+                ball_rng = math.hypot(sx + p.kick_ahead * math.cos(u) - odom[0], sy + p.kick_ahead * math.sin(u) - odom[1])
+                if abs(bearing) > 1.8 and ball_rng < p.backoff_range and pdist > p.approach_tol + 0.02:
+                    # The pre-spot is behind us with the ball at our feet:
+                    # turning to it is a turn against the ball. Back off.
+                    self.spot = None
+                    self._retreat_t0 = t
+                    self._retreat_sign = -1.0 if _wrap(math.atan2(sy - odom[1], sx - odom[0]) - odom[2]) >= 0 else 1.0
+                    vx, _, wz = turn(self._retreat_sign, cold)
+                    self.state = "retreat"
+                    dist = 9.0
+                elif pdist <= p.approach_tol + 0.02 and abs(heading_err) <= p.aim_tol:
                     self.lined = True
+                    self.t_state = t                            # stage two gets its own clock
                 elif pdist <= p.approach_tol + 0.02:
                     vx, _, wz = turn(heading_err, cold)
-                dist = pdist + p.approach_back                 # nowhere near the spot yet
+                dist = pdist + p.approach_back if self.spot is not None else 9.0   # nowhere near the spot yet
             else:
                 vx, wz, dist, bearing = self._servo(odom, (sx, sy), cold, p.lineup_tol)
                 if mode == "kick" and self.state != "settle":
@@ -768,7 +789,9 @@ class Chase:
             settling = self.state == "settle"
             on_spot = dist <= p.lineup_tol + (0.03 if settling else 0.0)
             squared = abs(heading_err) <= p.aim_tol + (0.15 if settling else 0.0)
-            if on_spot and not squared:
+            if self.spot is None:
+                pass                                            # backing off (above)
+            elif on_spot and not squared:
                 vx, _, wz = turn(heading_err, cold)            # on the spot but not facing the goal: square up
                 self.state = "lineup"
             elif on_spot:
@@ -822,13 +845,16 @@ class Chase:
                 if fresh and ball.range < p.head_range:
                     gaze_at = ball.range
         else:
-            if self.state != "search":
+            if self.state != "search" or self._search_t0 is None:
                 self._search_t0 = t
             vx, _, wz = turn(1.0, cold)
             self.state = "search"
-            if (t - self._search_t0) % p.search_dip_every < p.search_dip_s:
+            since = t - self._search_t0
+            if since % p.search_dip_every < p.search_dip_s:
                 vx, wz = 0.0, 0.0                               # a standing look down: a near ball is below the level camera
                 gaze_at = p.dip_range
+            elif since > p.search_walk_after and (since - p.search_walk_after) % (p.search_walk_after) < p.search_walk_s:
+                vx, wz = p.speed, 0.0                           # a standing turn barely turns: move to see from elsewhere
         # A wall beside us: no turn in place toward it (measured: a line-up
         # turning against the boards tipped over). Turn toward the side
         # with more room — in a corner that is still a turn, the one move

@@ -35,8 +35,11 @@ the tree, and Track 12 has its first working loop:
   of side offset; compensating it in the stance measured 1.38 goals
   against 2.00 over 8 seeds and ships off: the line-up's 2–3 cm, not the
   map, scatters the shots) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
-  2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 0.75 / 5.2 / 4.75 —
-  falls per duck climb with the roster. Dribbling, a walk-round and
+  2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
+  after the traced fix (supporters turning in place against a teammate
+  or the boards: the support spot stays inside the pitch and a supporter
+  with a duck track beside it stands; 0.75 / 5.2 / 4.75 before) — falls
+  per duck still climb with the roster. Dribbling, a walk-round and
   close-range re-planning were built, measured worse, and ship off with
   the numbers.
   `brains/follow-v1` ships in the repo. Upstream is pinned (microduck_rl
@@ -69,7 +72,12 @@ the tree, and Track 12 has its first working loop:
   person in the 2–5 s it has (1 cm of sidestep in its first second),
   contact time is the same either way (4.9 vs 5.3 s an episode) and in
   ordinary following it fires on a person merely walking toward the duck
-  (in band 0.49 → 0.39). The page's camera inset (V) shows what the head
+  (in band 0.49 → 0.39). A polite person (`Person.yield_m`: stops short
+  of a duck in its way, steps around after 2.5 s) settles it — the mocap
+  capsule walked through the duck, a real person does not: on the charge
+  case the scripted follow holds the band 0.92 with no contact and no
+  falls, the learned brains 0.93, and the dodge only costs; facing the
+  person and standing is the behaviour. The page's camera inset (V) shows what the head
   camera sees at the detector's field of view, from the pose the frame
   was captured at, with the detections as boxes.
 - Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
@@ -368,7 +376,7 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 4.3 | **Ball perception** | Detector class `ball` (bearing, size ⇒ distance) plus ToF blob; honest label in the UI that the real robot cannot see a ball until someone trains that detector class. | S | ★★★★ |
 | 4.4 | **Striker brain (RL)** | 1v0: dribble toward the goal; reward = ball progress toward goal, being behind the ball, no collisions; discrete kick selection via 3.5. | M | ★★★★★ |
 | 4.5 | **Self-play ladder** | 1v1, then 2v2 with parameter sharing; league of past checkpoints as opponents; ELO in the scoreboard; the lesson is non-stationarity. | L | ★★★★★ |
-| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". **Done (first form):** `Duck.team`, `make_pitch(per_side)`, a team blackboard with attacker/support roles (`brain/team.py`), `pitch-2v2` / `pitch-3v3` built-ins, `eval-pitch --per-side`, a kickoff after every goal; measured 2v2 2.00 goals, 7.8 kicks, 2.75 falls a run, 3v3 0.75 / 5.2 / 4.75 (falls per duck climb with the roster: 0.25 → 0.69 → 0.79). | M | ★★★★ |
+| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". **Done (first form):** `Duck.team`, `make_pitch(per_side)`, a team blackboard with attacker/support roles (`brain/team.py`), `pitch-2v2` / `pitch-3v3` built-ins, `eval-pitch --per-side`, a kickoff after every goal; measured 2v2 2.00 goals, 7.8 kicks, 2.75 falls a run, 3v3 1.00 / 7.8 / 3.50 with supporters that stay off the boards and stand beside a teammate (falls per duck climb with the roster: 0.25 → 0.69 → 0.58). | M | ★★★★ |
 | 4.7 | **Goal / pitch sensing honesty** | Options: known pitch + drifting odometry (real-ish), or detector classes for goal markers. Expose the choice in the scenario; teach why it matters. | S | ★★★ |
 | 4.8 | **Flocking / follow-the-leader** | Upstream's sketch verbatim: RSSI holds spacing, ToF handles the duck ahead; then a learned version. Cheap once 1.2 + 1.6 exist. | S | ★★★ |
 | 4.9 | **Synchronized dance** | Shared BLE beat drives head-bobs across ducks; the speaker plays each duck's voice on the beat. Pure delight, ten lines once 1.6 and 6.x exist. | S | ★★ |

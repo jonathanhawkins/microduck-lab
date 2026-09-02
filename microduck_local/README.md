@@ -445,6 +445,23 @@ its current intent live.
   m/s, cost less and buy the same nothing). The mechanism and the flag
   stay for the robot, where a person does not walk through it.
 
+  **A polite person** (`Person.yield_m`, `eval-brain --polite M`) settles
+  it. The mocap capsule walked through the duck, so contact seconds could
+  not fall whatever the duck did; a real person stops. With `yield_m`
+  the walker stands when a duck is inside that range on its way (facing
+  the way it wants to go) and after 2.5 s gives the waypoint up and
+  steps around — turning in place first, not arcing through what is
+  beside it. On the charge case with the person stopping 0.55 m centre
+  to centre (its surface 0.35 m from the duck), datasheet, 12 episodes:
+  the scripted follow holds the band **0.92** of the time with **no
+  contact and no falls** (`follow-v2` 0.93, `follow-v3` 0.93), and the
+  dodge only costs (0.83 in band, 25 bumps an episode, the dodge walking
+  into the person). Facing the person and standing — what the follow
+  already does inside the band — is the right behaviour; the dodge stays
+  off. (With the person stopping 0.35 m centre to centre, nearly touching
+  a 0.2 m capsule, every brain fell out of band, 0.28–0.32, with the
+  same zero contact: the band is the metric that moved, not safety.)
+
   Why the scripted one loses: a probe of both on the same episodes showed
   the learned brain sidestepping ±0.23 the whole time and holding the
   bearing at 0.13 rad, while the scripted one stood still between
@@ -569,6 +586,17 @@ kicks, 4.75 falls a run (0.79 per duck)** on a pitch that grows 0.4 ×
 bodies at once, and the supporters' spots overlap the opponents'
 attackers. The next form is positional play — supporters that mark
 rather than shadow — and a scoreboard that counts possession.
+
+**3v3 falls, traced** (3 seeds × 300 s, 14 falls): 10 were supporters
+turning in place with a teammate 5–28 cm away or against the boards —
+a body beside the duck is outside the camera's 62° and the ToF's 45°,
+so neither the avoid rule nor the wall rule saw it. Two answers: the
+support spot stays 0.35 m inside the pitch (the brain gets the pitch's
+bounds from `make_pitch`), and a supporter with any duck track inside
+0.3 m within the last 1.5 s (a track's bearing turns with the body, so
+a duck seen a second ago still says where it is) stands instead of
+turning in place. 3v3 over 4 seeds: **1.00 goals, 7.8 kicks, 3.50 falls
+a run (0.58 per duck)**, from 0.75 / 5.2 / 4.75 (0.79).
 
 ### Tidy the playroom (roadmap Track 12)
 
