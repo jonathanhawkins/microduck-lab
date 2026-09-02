@@ -10,12 +10,15 @@ from .arena import World, WorldDuck, WorldPerson, zero_infer
 from .compose import ROBOT_XML, DuckAddress, compose, duck_prefix, spawn_duck
 from .scenario import (
     Ball,
+    Basket,
     Box,
     Duck,
     Person,
+    Pickable,
     Scenario,
     Wall,
     load_scenario,
+    make_playroom,
     make_room,
     validate_scenario,
 )
@@ -23,6 +26,6 @@ from .scenario import (
 __all__ = [
     "ROBOT_XML", "DuckAddress", "World", "WorldDuck", "WorldPerson", "compose", "duck_prefix",
     "spawn_duck", "zero_infer",
-    "Ball", "Box", "Duck", "Person", "Scenario", "Wall",
-    "load_scenario", "make_room", "validate_scenario",
+    "Ball", "Basket", "Box", "Duck", "Person", "Pickable", "Scenario", "Wall",
+    "load_scenario", "make_playroom", "make_room", "validate_scenario",
 ]

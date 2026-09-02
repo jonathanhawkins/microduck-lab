@@ -25,7 +25,7 @@ import mujoco
 import numpy as np
 
 from .. import contract as C
-from .scenario import Scenario
+from .scenario import PICKABLE_KINDS, Scenario
 
 ROBOT_DIR = C.MICRODUCK_RL_DIR / "src/mjlab_microduck/robot/microduck"
 ROBOT_XML = {
@@ -92,6 +92,31 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
         body.add_geom(name=f"ball{i}_geom", type=mujoco.mjtGeom.mjGEOM_SPHERE,
                       size=[ball.radius, 0, 0], group=0, rgba=[1.0, 0.55, 0.0, 1.0],
                       friction=[0.5, 0.005, 0.0001])
+    for t in scenario.pickables:
+        k = PICKABLE_KINDS[t.kind]
+        half = [v / 2 for v in k["size"]]
+        body = w.add_body(name=t.id, pos=[t.pos[0], t.pos[1], half[2] + 0.001], quat=_yaw_quat(t.yaw))
+        body.add_freejoint(name=f"{t.id}_free")
+        body.add_geom(name=f"{t.id}_geom", type=mujoco.mjtGeom.mjGEOM_BOX, size=half,
+                      mass=k["mass"], group=0, rgba=list(k["rgba"]),
+                      friction=[0.8, 0.005, 0.0001])
+    if scenario.basket is not None:
+        b = scenario.basket
+        bx, by = b.pos
+        sx, sy = b.size[0] / 2, b.size[1] / 2
+        th = 0.006
+        w.add_geom(name="basket_floor", type=mujoco.mjtGeom.mjGEOM_BOX, size=[sx, sy, th],
+                   pos=[bx, by, th], group=0, rgba=[0.55, 0.42, 0.25, 1.0])
+        for i, (px, py, hx_, hy_) in enumerate((
+                (bx, by - sy, sx, th), (bx, by + sy, sx, th), (bx - sx, by, th, sy), (bx + sx, by, th, sy))):
+            w.add_geom(name=f"basket_wall{i}", type=mujoco.mjtGeom.mjGEOM_BOX, size=[hx_, hy_, b.rim / 2],
+                       pos=[px, py, b.rim / 2], group=0, rgba=[0.6, 0.47, 0.3, 1.0])
+        # A marker the detector can find (the "basket" class): a small
+        # non-colliding body at the rim's centre, so re-acquiring the basket
+        # across the room is a detection, not dead reckoning.
+        mk = w.add_body(name="basket_marker", pos=[bx, by, b.rim + 0.02])
+        mk.add_geom(name="basket_marker_geom", type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.02, 0, 0],
+                    contype=0, conaffinity=0, group=1, rgba=[0.2, 0.9, 0.5, 1.0])
     for i, person in enumerate(scenario.persons):
         # A mocap body: the world moves it kinematically (data.mocap_pos /
         # mocap_quat); ducks collide with it like a wall that walks. A capsule
@@ -108,6 +133,13 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
         x, y, yaw = duck.spawn
         frame = w.add_frame(pos=[x, y, 0.0], quat=_yaw_quat(yaw))
         spec.attach(robot, prefix=duck_prefix(duck.id), frame=frame)
+    # Grasp = attachment: one INACTIVE weld per (duck, pickable). The world
+    # sets its relative pose and switches it on when a beak closes on a toy.
+    for duck in scenario.ducks:
+        for t in scenario.pickables:
+            spec.add_equality(name=f"{duck.id}/hold/{t.id}", type=mujoco.mjtEq.mjEQ_WELD,
+                              objtype=mujoco.mjtObj.mjOBJ_BODY,
+                              name1=f"{duck_prefix(duck.id)}jaw_soft", name2=t.id, active=False)
     model = spec.compile()
     # Feet win the friction pair, as the walk env sets for every model.
     for duck in scenario.ducks:

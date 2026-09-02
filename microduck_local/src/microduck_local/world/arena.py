@@ -29,7 +29,22 @@ from .. import contract as C
 from ..sensors import Detector, DetectorNoise, Target, TofNoise, TofSensor
 from ..walk_env import MicroduckWalkEnv
 from .compose import DuckAddress, compose, spawn_duck
-from .scenario import Person, Scenario
+from .scenario import PICKABLE_KINDS, Person, Scenario
+
+# The shipped ground-pick cycle (upstream microduck_ground_pick_env_cfg.py):
+# a 4 s period encoded as [cos 2πφ, sin 2πφ, 0] in the twist slots; the beak
+# tip bottoms out ~2 cm above the floor, ~8 cm ahead of the trunk (12.7 cm
+# from a sagged, unpowered stand), for φ ∈ [0.2, 0.42] (measured in this
+# world), and the runtime hands back to
+# the walker at φ = 0.7. The mouth servo is scripted, outside the policy:
+# here it closes at φ = 0.38, inside that window.
+GROUND_PICK_PERIOD_S = 4.0
+GROUND_PICK_CLOSE_PHI = 0.38
+GROUND_PICK_END_PHI = 0.7
+PICK_REACH_AHEAD = 0.078     # where the tip lands, ahead of the trunk origin (m), standing on the walker
+PICK_REACH_LEFT = 0.014      # …and a touch to the left (the beak is not on the centreline)
+GRASP_TOL_XY = 0.03          # a toy centre within this of the tip: a clean grasp
+GRASP_TOL_Z = 0.045
 
 Infer = Callable[[np.ndarray], np.ndarray]
 _NEG_Z = np.array([0.0, 0.0, -1.0], np.float32)
@@ -50,6 +65,16 @@ class WorldDuck:
     tof: TofSensor | None = None
     detector: Detector | None = None
     max_steps: int = int(round(30.0 / C.CTRL_DT))
+    # Manipulation state (roadmap 12.2/12.3): what the beak holds, and the
+    # skill cycle the reflex tier is running instead of the walker.
+    holding: str | None = None
+    beak_closed: bool = False
+    skill: str | None = None
+    skill_t0: float = 0.0
+    skill_infer: Infer | None = None
+    grasp_attempts: int = 0
+    grasp_successes: int = 0
+    last_grasp_err: float | None = None   # xy distance tip→nearest toy at the last close (m)
     last_action: np.ndarray = field(default_factory=lambda: np.zeros(C.NUM_JOINTS, np.float32))
     prev_joint_vel: np.ndarray = field(default_factory=lambda: np.zeros(C.NUM_JOINTS, np.float32))
     twist_cmd: np.ndarray = field(default_factory=lambda: np.zeros(3, np.float32))
@@ -200,6 +225,16 @@ class World:
                                                                 f"ball{i}"), b.radius)
                     for i, b in enumerate(scenario.balls)]
         targets += [Target(p.id, "person", self.persons[p.id].body, p.radius) for p in scenario.persons]
+        self.pickables: dict[str, int] = {
+            t.id: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, t.id) for t in scenario.pickables}
+        self.pickable_kind = {t.id: t.kind for t in scenario.pickables}
+        targets += [Target(t.id, "toy", self.pickables[t.id],
+                           max(PICKABLE_KINDS[t.kind]["size"]) / 2) for t in scenario.pickables]
+        self.basket = scenario.basket
+        if scenario.basket is not None:
+            targets.append(Target("basket", "basket",
+                                  mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "basket_marker"), 0.12))
+        self.skills: dict[str, Infer] = {}
         for d in scenario.ducks:
             adr = DuckAddress.resolve(self.model, d.id)
             tof = None
@@ -233,7 +268,8 @@ class World:
             name = self.model.body(b).name
             if "/" in name or name in self.persons:
                 continue
-            kind = "ball" if name.startswith("ball") else "box"
+            kind = ("ball" if name.startswith("ball") else
+                    "toy" if name in self.pickables else "box")
             self.objects.append((name, kind, b))
         # Rolling cost of one control step, split physics / sensors (ms),
         # EMA over ~1 s of ticks — the /sim perf HUD reads it.
@@ -260,6 +296,9 @@ class World:
         d.step_count = 0
         d._hold_yaw = None
         d.episodes += 1
+        self.release(d)
+        d.skill = None
+        d.skill_infer = None
         if d.tof is not None:
             d.tof.reset()
         if d.detector is not None:
@@ -277,12 +316,132 @@ class World:
         d.policy_id = policy_id
 
     # -- one 50 Hz control step -----------------------------------------------
+    # -- manipulation (roadmap 12.2 / 12.3) ------------------------------------
+    def mouth_tip(self, d: WorldDuck) -> np.ndarray:
+        sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, d.adr.prefix + "mouth_tip")
+        return self.data.site_xpos[sid]
+
+    def _eq_id(self, d: WorldDuck, toy: str) -> int:
+        return mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_EQUALITY, f"{d.id}/hold/{toy}")
+
+    def grasp(self, d: WorldDuck, tol_xy: float = GRASP_TOL_XY, tol_z: float = GRASP_TOL_Z) -> str | None:
+        """Close the beak: the nearest toy within tolerance of the mouth tip
+        gets WELDED to the jaw (grasp as an attachment event, roadmap 12.2).
+        Success is a curve in alignment error, not physics: p = 1 at zero
+        error, 0 at the tolerance. Returns the toy id or None."""
+        d.beak_closed = True
+        if d.holding is not None or not self.pickables:
+            return d.holding
+        tip = self.mouth_tip(d)
+        best, best_err, nearest = None, 9.0, 9.0
+        for toy, b in self.pickables.items():
+            if any(o.holding == toy for o in self.ducks.values()):
+                continue
+            p = self.data.xpos[b]
+            exy = float(np.hypot(p[0] - tip[0], p[1] - tip[1]))
+            ez = abs(float(p[2] - tip[2]))
+            nearest = min(nearest, exy)
+            if exy < tol_xy and ez < tol_z and exy < best_err:
+                best, best_err = toy, exy
+        d.grasp_attempts += 1
+        d.last_grasp_err = None if nearest >= 9.0 else nearest
+        if best is None:
+            return None
+        # Gentle in the middle, zero at the edge: a 2 cm miss on a 3 cm
+        # window still grasps 3 times in 4. A model, not physics (12.2).
+        p_ok = 1.0 - (best_err / tol_xy) ** 2
+        if self.rng.random() > p_ok:
+            return None
+        eq = self._eq_id(d, best)
+        jaw = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, d.adr.prefix + "jaw_soft")
+        b = self.pickables[best]
+        # Weld data: anchor (in body1) + relative pose of body2 in body1, so
+        # the toy keeps exactly the pose it was caught in.
+        Rj = self.data.xmat[jaw].reshape(3, 3)
+        rel_p = Rj.T @ (self.data.xpos[b] - self.data.xpos[jaw])
+        qj, qb = self.data.xquat[jaw], self.data.xquat[b]
+        qj_inv = np.array([qj[0], -qj[1], -qj[2], -qj[3]])
+        rel_q = np.zeros(4)
+        mujoco.mju_mulQuat(rel_q, qj_inv, qb)
+        self.model.eq_data[eq, 0:3] = 0.0
+        self.model.eq_data[eq, 3:6] = rel_p
+        self.model.eq_data[eq, 6:10] = rel_q
+        self.model.eq_data[eq, 10] = 1.0
+        self.data.eq_active[eq] = 1
+        d.holding = best
+        d.grasp_successes += 1
+        return best
+
+    def release(self, d: WorldDuck) -> str | None:
+        d.beak_closed = False
+        toy = d.holding
+        if toy is None:
+            return None
+        self.data.eq_active[self._eq_id(d, toy)] = 0
+        d.holding = None
+        return toy
+
+    def start_skill(self, d: WorldDuck, name: str) -> bool:
+        """Hand the reflex tier to a skill policy for one cycle (the robot's
+        own pattern: hard swap in, auto swap back). Only ground_pick today."""
+        if name != "ground_pick" or d.skill is not None:
+            return False
+        if name not in self.skills:
+            from ..brain.brain_env import POLICIES_DIR, onnx_infer
+            path = POLICIES_DIR / "alpha_ground_pick.onnx"
+            if not path.exists():
+                return False
+            self.skills[name] = onnx_infer(path)
+        d.skill, d.skill_t0, d.skill_infer = name, self.t, self.skills[name]
+        d._hold_yaw = None
+        return True
+
+    def in_basket(self, toy: str) -> bool:
+        if self.basket is None:
+            return False
+        p = self.data.xpos[self.pickables[toy]]
+        bx, by = self.basket.pos
+        sx, sy = self.basket.size[0] / 2, self.basket.size[1] / 2
+        return bool(abs(p[0] - bx) < sx and abs(p[1] - by) < sy and p[2] < self.basket.rim + 0.05)
+
+    def tidy_score(self) -> dict:
+        n = len(self.pickables)
+        done = sum(self.in_basket(t) for t in self.pickables)
+        return {"total": n, "inBasket": done, "held": [d.holding for d in self.ducks.values() if d.holding]}
+
+    def apply_intent(self, d: WorldDuck, intent) -> None:
+        """Route a brain's non-twist intents to the reflex tier."""
+        if intent.skill:
+            self.start_skill(d, intent.skill)
+        if intent.beak == "close" and not d.beak_closed:
+            self.grasp(d)
+        elif intent.beak == "open" and d.beak_closed:
+            self.release(d)
+
+    def _skill_cmd(self, d: WorldDuck) -> Infer | None:
+        """While a skill runs, it owns the command block; returns the infer to
+        use, ending the cycle at its exit phase."""
+        if d.skill is None:
+            return None
+        phi = (self.t - d.skill_t0) / GROUND_PICK_PERIOD_S
+        if phi >= GROUND_PICK_END_PHI:
+            d.skill, d.skill_infer = None, None
+            d.twist_cmd[:] = 0.0
+            return None
+        d.twist_cmd[:] = (np.cos(2 * np.pi * phi), np.sin(2 * np.pi * phi), 0.0)
+        d.head_cmd[:] = 0.0
+        d.body_cmd[:] = 0.0
+        if phi >= GROUND_PICK_CLOSE_PHI and not d.beak_closed:
+            self.grasp(d)
+        return d.skill_infer
+
     def step(self) -> None:
         t0 = time.perf_counter()
         m, data = self.model, self.data
         for d in self.ducks.values():
+            skill = self._skill_cmd(d)
             obs = d.obs(data)
-            raw = np.asarray(d.infer(obs), np.float32)
+            raw = np.asarray((skill or d.infer)(obs), np.float32)
             d.last_action = raw.copy()
             data.ctrl[d.adr.actuators] = C.DEFAULT_POSE + raw.clip(-4.0, 4.0)
         for p in self.persons.values():
@@ -324,10 +483,15 @@ class World:
 
     def objects_payload(self) -> list[dict]:
         out = []
+        held = {d.holding: d.id for d in self.ducks.values() if d.holding}
         for name, kind, b in self.objects:
             p, q = self.data.xpos[b], self.data.xquat[b]
-            out.append({"id": name, "kind": kind,
-                        "pose": [round(float(v), 4) for v in (*p, *q)]})
+            item = {"id": name, "kind": kind, "pose": [round(float(v), 4) for v in (*p, *q)]}
+            if kind == "toy":
+                item["toy"] = self.pickable_kind[name]
+                item["held"] = held.get(name)
+                item["inBasket"] = self.in_basket(name)
+            out.append(item)
         return out
 
     def sensors_payload(self, duck_id: str) -> dict | None:

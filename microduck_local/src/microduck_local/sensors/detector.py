@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 import mujoco
 import numpy as np
 
-DETECT_CLASSES = ("duck", "person", "ball", "marker")
+DETECT_CLASSES = ("duck", "person", "ball", "marker", "toy", "basket")
 
 
 @dataclass(frozen=True)
@@ -40,8 +40,8 @@ class DetectorSpec:
     site: str = "head_camera"
     # Apparent-width thresholds: below `w_none` a target is never found,
     # above `w_full` always (before noise); linear in between.
-    w_none_rad: float = np.deg2rad(1.5)
-    w_full_rad: float = np.deg2rad(6.0)
+    w_none_rad: float = np.deg2rad(1.0)     # ~5 px of a 320 px frame over 62°
+    w_full_rad: float = np.deg2rad(4.0)     # ~21 px: always found (before noise)
 
 
 @dataclass(frozen=True)
@@ -112,7 +112,7 @@ class DetectionFrame:
     detections: list[Detection]
 
 
-NOMINAL_RADIUS = {"duck": 0.10, "person": 0.20, "ball": 0.035, "marker": 0.05}
+NOMINAL_RADIUS = {"duck": 0.10, "person": 0.20, "ball": 0.035, "marker": 0.05, "toy": 0.02, "basket": 0.12}
 
 
 class Detector:

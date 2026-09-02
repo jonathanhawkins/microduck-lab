@@ -145,7 +145,7 @@ class FollowParams:
     max_speed: float = 0.45
     min_speed: float = 0.12        # alpha_walking treats slower asks as "stand"
     lost_s: float = 2.0            # keep the last bearing this long, then search
-    search_wz: float = 0.7
+    search_wz: float = 1.0             # the shipped walker barely turns in place below 1.0
     tof_stop: float = 0.35         # never walk into what the ToF says is right there
     head_yaw_gain: float = 0.8     # look toward the target (the robot's own gaze intent)
 
@@ -213,12 +213,13 @@ class Follow:
             err = target.range_est - p.distance
             vx = float(np.clip(p.k_speed * err, 0.0, p.max_speed))
             if abs(target.bearing) > 0.6:
-                vx = 0.0                                # turn first, walk after
+                vx = 0.0                                # turn first, walk after…
+                wz = 1.0 if target.bearing > 0 else -1.0   # …at the rate the walker honours
             elif 0.0 < vx < p.min_speed:
                 vx = 0.0 if err < 0.1 else p.min_speed
             self.state = "hold" if vx == 0.0 and abs(wz) < 0.2 else "approach"
         elif self.last_seen_t is not None and senses.t - self.last_seen_t < p.lost_s:
-            wz = float(np.clip(p.k_turn * self.last_bearing, -1.0, 1.0))
+            wz = (1.0 if self.last_bearing > 0 else -1.0) if abs(self.last_bearing) > 0.15 else 0.0
             vx = 0.0
             self.state = "coast"
         else:

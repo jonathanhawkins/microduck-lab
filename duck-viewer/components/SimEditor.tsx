@@ -10,7 +10,7 @@ import { useState } from "react";
 import { LAB_HTTP } from "@/lib/lab";
 import { loadWorld, type Scenario, type WorldInfo } from "@/lib/sim";
 
-export type EditorTool = "wall" | "box" | "ball" | "duck" | "person" | null;
+export type EditorTool = "wall" | "box" | "ball" | "duck" | "person" | "toy" | "basket" | null;
 
 export interface EditorState {
   draft: Scenario;
@@ -101,6 +101,15 @@ export function applyFloorClick(st: EditorState, x: number, y: number): EditorSt
         draft: { ...d, persons: [...persons, { id: `p${n}`, pos: [x, y], yaw: 0, path: [[x, y], [-x, y]], speed: 0.25, radius: 0.2, height: 1.0 }] },
       };
     }
+    case "toy": {
+      const toys = d.pickables ?? [];
+      let n = toys.length;
+      while (toys.some((q) => q.id === `t${n}`)) n++;
+      const kinds = ["brick", "block", "sock"] as const;
+      return { ...st, draft: { ...d, pickables: [...toys, { id: `t${n}`, kind: kinds[n % 3], pos: [x, y], yaw: 0 }] } };
+    }
+    case "basket":
+      return { ...st, draft: { ...d, basket: { pos: [x, y], size: [0.3, 0.3], rim: 0.06 } } };
     default:
       return st;
   }
@@ -190,6 +199,8 @@ export function SimEditor({
         {toolBtn("ball", "● ball")}
         {toolBtn("duck", "🦆 duck")}
         {toolBtn("person", "🧍 person")}
+        {toolBtn("toy", "🧱 toy")}
+        {toolBtn("basket", "🧺 basket")}
       </div>
       <div style={{ color: "#9aa5b1", marginBottom: 6 }}>
         {state.tool === "wall"
@@ -224,6 +235,7 @@ export function SimEditor({
             <option value="">auto</option>
             <option value="wander">wander</option>
             <option value="follow">follow</option>
+            <option value="tidy">tidy</option>
             <option value="script">script</option>
           </select>
           <button style={{ ...BTN, padding: "0 5px" }} onClick={() => setDraft({ ...d, ducks: d.ducks.filter((_, j) => j !== i) })} title="remove">
@@ -231,6 +243,8 @@ export function SimEditor({
           </button>
         </div>
       ))}
+      {(d.pickables ?? []).map((q, i) => row(`${q.id}: ${q.kind} at ${q.pos[0]},${q.pos[1]}`, () => setDraft({ ...d, pickables: (d.pickables ?? []).filter((_, j) => j !== i) }), `t${i}`))}
+      {d.basket && row(`basket at ${d.basket.pos[0]},${d.basket.pos[1]} · rim ${d.basket.rim} m`, () => setDraft({ ...d, basket: null }), "basket")}
       {(d.persons ?? []).map((q, i) =>
         row(`${q.id}: ${q.pos[0]},${q.pos[1]} · ${q.path.length} waypoints · ${q.speed} m/s`, () => setDraft({ ...d, persons: (d.persons ?? []).filter((_, j) => j !== i) }), `p${i}`)
       )}

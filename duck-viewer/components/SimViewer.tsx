@@ -21,6 +21,8 @@ import {
   fetchWorld,
   frameEvents,
   loadWorld,
+  PICKABLE_COLORS,
+  PICKABLE_SIZES,
   saveRecording,
   SimClient,
   detectionRay,
@@ -132,6 +134,25 @@ function Statics({ scenario }: { scenario: Scenario | null }) {
           </mesh>
         );
       })}
+      {scenario.basket && (
+        <group position={[scenario.basket.pos[0], scenario.basket.pos[1], 0]}>
+          <mesh position={[0, 0, 0.006]}>
+            <boxGeometry args={[scenario.basket.size[0], scenario.basket.size[1], 0.012]} />
+            <meshStandardMaterial color="#8c6b40" roughness={0.9} />
+          </mesh>
+          {[
+            [0, -scenario.basket.size[1] / 2, scenario.basket.size[0], 0.012],
+            [0, scenario.basket.size[1] / 2, scenario.basket.size[0], 0.012],
+            [-scenario.basket.size[0] / 2, 0, 0.012, scenario.basket.size[1]],
+            [scenario.basket.size[0] / 2, 0, 0.012, scenario.basket.size[1]],
+          ].map(([x, y, sx, sy], i) => (
+            <mesh key={i} position={[x, y, scenario.basket!.rim / 2]}>
+              <boxGeometry args={[sx, sy, scenario.basket!.rim]} />
+              <meshStandardMaterial color="#99784d" roughness={0.9} />
+            </mesh>
+          ))}
+        </group>
+      )}
       {scenario.boxes.map((b, i) =>
         b.mass > 0 ? null : (
           <mesh key={`b${i}`} position={b.pos} rotation={[0, 0, b.yaw]}>
@@ -165,8 +186,22 @@ function Dynamics({ scenario, client }: { scenario: Scenario | null; client: Sim
   if (!scenario) return null;
   const freeBoxes = scenario.boxes.map((b, i) => ({ b, i })).filter(({ b }) => b.mass > 0);
   const persons = scenario.persons ?? [];
+  const toys = scenario.pickables ?? [];
   return (
     <group>
+      {toys.map((t) => (
+        <group
+          key={t.id}
+          ref={(el) => {
+            if (el) refs.current.set(t.id, el);
+          }}
+        >
+          <mesh>
+            <boxGeometry args={PICKABLE_SIZES[t.kind] ?? [0.03, 0.03, 0.03]} />
+            <meshStandardMaterial color={PICKABLE_COLORS[t.kind] ?? "#cccccc"} roughness={0.7} />
+          </mesh>
+        </group>
+      ))}
       {persons.map((q) => (
         <group
           key={q.id}
@@ -610,12 +645,13 @@ export default function SimViewer() {
   const [possessed, setPossessed] = useState<string | null>(null);
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
-  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number }>({
+  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null }>({
     rtf: 0,
     mode: "auto",
     t: 0,
     events: [],
     kbps: 0,
+    tidy: null,
   });
   const lastBytes = useRef({ bytes: 0, at: 0 });
   const clientRef = useRef<SimClient | null>(null);
@@ -655,6 +691,7 @@ export default function SimViewer() {
         t: f?.t ?? 0,
         events: ev.length ? [...s.events, ...ev].slice(-4) : s.events,
         kbps: 0.7 * s.kbps + 0.3 * kbps,
+        tidy: f?.tidy ?? null,
       }));
       setSelected(getSelectedDuck());
       setPossessed(f?.possessed ?? null);
@@ -877,6 +914,11 @@ export default function SimViewer() {
             <div style={{ color: "#9aa5b1" }}>
               falls {selDuck.falls} · speed {selDuck.speed.toFixed(2)} / {selDuck.cmdSpeed.toFixed(2)} m/s
             </div>
+            <div style={{ color: "#9aa5b1" }}>
+              beak {selDuck.beak}
+              {selDuck.holding ? ` · holding ${selDuck.holding}` : ""}
+              {selDuck.skill ? ` · skill ${selDuck.skill}` : ""}
+            </div>
             <div style={{ color: selDuck.brain.kind === "wander" ? "#43c2b8" : "#9aa5b1" }}>
               {selDuck.brain.kind} · {selDuck.brain.state} · vx {selDuck.brain.cmd[0].toFixed(2)} wz {selDuck.brain.cmd[2].toFixed(2)}
             </div>
@@ -995,6 +1037,21 @@ export default function SimViewer() {
             setSelectedDuck(null);
           }}
         />
+      )}
+      {status.tidy && (
+        <div style={{ ...PANEL, top: 56, left: editor ? 270 : 10, color: "#c9d0d8" }}>
+          <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>Tidy score</div>
+          <div style={{ fontSize: 20, fontVariantNumeric: "tabular-nums" }}>
+            {status.tidy.inBasket} / {status.tidy.total} <span style={{ fontSize: 12, color: "#9aa5b1" }}>in the basket</span>
+          </div>
+          {status.tidy.held.length > 0 && <div style={{ color: "#9aa5b1" }}>carrying {status.tidy.held.join(", ")}</div>}
+          {selDuck?.brain.inputs.tidy && (
+            <div style={{ color: "#9aa5b1" }}>
+              picked {selDuck.brain.inputs.tidy.picked} · delivered {selDuck.brain.inputs.tidy.delivered}
+              {selDuck.brain.inputs.tidy.givenUp.length ? ` · gave up on ${selDuck.brain.inputs.tidy.givenUp.join(", ")}` : ""}
+            </div>
+          )}
+        </div>
       )}
       {client && <Timeline client={client} />}
 

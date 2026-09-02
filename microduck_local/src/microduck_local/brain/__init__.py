@@ -5,6 +5,7 @@ physics or the 61-obs contract."""
 
 from .controllers import Follow, FollowParams, Script, Wander, WanderParams, wander_from_tof
 from .runtime import REGISTRY, Brain, Intent, Senses
+from .tidy import Tidy, TidyParams
 
 __all__ = ["Brain", "Follow", "FollowParams", "Intent", "REGISTRY", "Script", "Senses",
-           "Wander", "WanderParams", "wander_from_tof"]
+           "Tidy", "TidyParams", "Wander", "WanderParams", "wander_from_tof"]

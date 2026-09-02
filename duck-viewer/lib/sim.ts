@@ -13,6 +13,14 @@ export interface ScenarioBox { pos: [number, number, number]; size: [number, num
 export interface ScenarioBall { pos: [number, number]; radius: number; mass: number }
 export interface ScenarioDuck { id: string; spawn: [number, number, number]; policy: string | null; tof: TofPreset | null; detector?: TofPreset | null; brain?: string | null }
 export interface ScenarioPerson { id: string; pos: [number, number]; yaw: number; path: [number, number][]; speed: number; radius: number; height: number }
+export interface ScenarioPickable { id: string; kind: "brick" | "block" | "sock"; pos: [number, number]; yaw: number }
+export interface ScenarioBasket { pos: [number, number]; size: [number, number]; rim: number }
+export const PICKABLE_SIZES: Record<string, [number, number, number]> = {
+  brick: [0.032, 0.016, 0.0096],
+  block: [0.04, 0.04, 0.04],
+  sock: [0.06, 0.035, 0.025],
+};
+export const PICKABLE_COLORS: Record<string, string> = { brick: "#d92626", block: "#f2bf33", sock: "#9999e6" };
 export interface Scenario {
   version: number;
   name: string;
@@ -23,6 +31,8 @@ export interface Scenario {
   balls: ScenarioBall[];
   ducks: ScenarioDuck[];
   persons?: ScenarioPerson[];
+  pickables?: ScenarioPickable[];
+  basket?: ScenarioBasket | null;
   collision: "walk" | "all";
 }
 export interface ScenarioListing { name: string; builtin: boolean; ducks: number; objects: number; modified: number | null }
@@ -111,14 +121,18 @@ export interface SimDuck {
   steerable: boolean;
   tof: TofPreset | "custom" | null;
   detector: TofPreset | "custom" | null;
+  holding: string | null;
+  skill: string | null;
+  beak: "open" | "closed";
   /** Who is steering this duck this tick: a brain from the lab's registry
    *  (auto mode), the demo script (blind ducks), or you (manual). */
-  brain: { kind: string; state: string; cmd: [number, number, number]; head?: number[]; note?: string; inputs: BrainInputs };
+  brain: { kind: string; state: string; cmd: [number, number, number]; head?: number[]; note?: string; beak?: string | null; skill?: string | null; inputs: BrainInputs & { tidy?: { picked: number; delivered: number; givenUp: string[] } } };
   headApplied: boolean;
   bodies: number[][];
   sensors: { tof?: TofPayload; det?: DetPayload } | null;
 }
-export interface SimObject { id: string; kind: "ball" | "box" | "person"; pose: number[]; possessed?: boolean }
+export interface SimObject { id: string; kind: "ball" | "box" | "person" | "toy"; pose: number[]; possessed?: boolean; toy?: string; held?: string | null; inBasket?: boolean }
+export interface TidyScore { total: number; inBasket: number; held: string[] }
 export interface SimFrame {
   t: number;
   tick: number;
@@ -131,6 +145,7 @@ export interface SimFrame {
   ducks: SimDuck[];
   objects: SimObject[];
   possessed: string | null;
+  tidy: TidyScore | null;
 }
 export interface WorldInfo {
   scenario: Scenario | null;

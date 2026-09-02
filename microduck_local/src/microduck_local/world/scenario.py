@@ -12,6 +12,8 @@ Format v1 (JSON, saved under microduck_local/scenarios/<name>.json):
                 "tof": "datasheet", "detector": "datasheet", "brain": "follow"}],
      "persons": [{"id": "p0", "pos": [x, y], "yaw": 0.0, "path": [[x, y], ...],
                   "speed": 0.3, "radius": 0.2, "height": 1.0}],  # kinematic walkers
+     "pickables": [{"id": "t0", "kind": "brick"|"block"|"sock", "pos": [x, y], "yaw": 0.0}],
+     "basket": {"pos": [x, y], "size": [0.3, 0.3], "rim": 0.06} | null,   # the tidy target
      "collision": "walk"}                               # "walk" | "all" robot MJCF
 
 Everything is metres, radians, world frame, z up. Validation is strict on
@@ -89,6 +91,32 @@ class Person:
     height: float = 1.0
 
 
+# What a duck can pick up: full extents (m), mass (kg), colour. Sizes are
+# the real things — a 2×4 brick, a wooden block, a rolled-up sock.
+PICKABLE_KINDS: dict[str, dict] = {
+    "brick": {"size": (0.032, 0.016, 0.0096), "mass": 0.0025, "rgba": (0.85, 0.15, 0.15, 1.0)},
+    "block": {"size": (0.04, 0.04, 0.04), "mass": 0.02, "rgba": (0.95, 0.75, 0.2, 1.0)},
+    "sock": {"size": (0.06, 0.035, 0.025), "mass": 0.02, "rgba": (0.6, 0.6, 0.9, 1.0)},
+}
+
+
+@dataclass
+class Pickable:
+    id: str
+    kind: str
+    pos: tuple[float, float]
+    yaw: float = 0.0
+
+
+@dataclass
+class Basket:
+    """A low tray the duck drops things into: four thin walls on a floor
+    plate. `rim` must sit below the beak when standing (~0.2 m)."""
+    pos: tuple[float, float]
+    size: tuple[float, float] = (0.3, 0.3)
+    rim: float = 0.06
+
+
 @dataclass
 class Scenario:
     name: str
@@ -99,6 +127,8 @@ class Scenario:
     balls: list[Ball] = field(default_factory=list)
     ducks: list[Duck] = field(default_factory=list)
     persons: list[Person] = field(default_factory=list)
+    pickables: list[Pickable] = field(default_factory=list)
+    basket: Basket | None = None
     collision: str = "walk"
     version: int = SCENARIO_VERSION
 
@@ -106,6 +136,7 @@ class Scenario:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["floor"] = {"size": list(self.floor)}
+        d["basket"] = None if self.basket is None else asdict(self.basket)
         d["walls"] = [{"from": list(w.start), "to": list(w.end),
                        "height": w.height, "thickness": w.thickness}
                       for w in self.walls]
@@ -231,11 +262,35 @@ def validate_scenario(raw: dict) -> Scenario:
             _num(q.get("height", 1.0), f"persons[{i}].height", 0.2, 2.0)))
     if len(persons) > MAX_PERSONS:
         raise ScenarioError(f"more than {MAX_PERSONS} persons")
+    pickables = []
+    for i, q in enumerate(raw.get("pickables", []) or []):
+        if not isinstance(q, dict):
+            raise ScenarioError(f"pickables[{i}] must be an object")
+        tid = q.get("id", f"t{i}")
+        if not isinstance(tid, str) or not DUCK_ID_RE.match(tid) or tid in seen:
+            raise ScenarioError(f"pickables[{i}].id {tid!r} bad or duplicate")
+        seen.add(tid)
+        kind = q.get("kind", "brick")
+        if kind not in PICKABLE_KINDS:
+            raise ScenarioError(f"pickables[{i}].kind must be one of {sorted(PICKABLE_KINDS)}")
+        pickables.append(Pickable(tid, kind, _vec(q.get("pos"), 2, f"pickables[{i}].pos", -bound, bound),
+                                  _num(q.get("yaw", 0.0), f"pickables[{i}].yaw", -2 * math.pi, 2 * math.pi)))
+    if len(pickables) > 40:
+        raise ScenarioError("more than 40 pickables")
+    basket = None
+    braw = raw.get("basket")
+    if braw is not None:
+        if not isinstance(braw, dict):
+            raise ScenarioError("basket must be an object or null")
+        basket = Basket(_vec(braw.get("pos"), 2, "basket.pos", -bound, bound),
+                        _vec(braw.get("size", [0.3, 0.3]), 2, "basket.size", 0.1, 1.0),
+                        _num(braw.get("rim", 0.06), "basket.rim", 0.02, 0.18))
     collision = raw.get("collision", "walk")
     if collision not in ("walk", "all"):
         raise ScenarioError("collision must be 'walk' or 'all'")
     return Scenario(name=name, seed=seed, floor=floor, walls=walls, boxes=boxes,
-                    balls=balls, ducks=ducks, persons=persons, collision=collision)
+                    balls=balls, ducks=ducks, persons=persons, pickables=pickables,
+                    basket=basket, collision=collision)
 
 
 def load_scenario(path: Path) -> Scenario:
@@ -283,3 +338,30 @@ def make_room(seed: int = 0, size: tuple[float, float] = (3.0, 2.5),
                 break
     return Scenario(name=name or f"room-{seed}", seed=seed, floor=(size[0] + 0.5, size[1] + 0.5),
                     walls=walls, boxes=boxes, ducks=ducks)
+
+
+def make_playroom(seed: int = 0, n: int = 6, size: tuple[float, float] = (3.0, 2.5),
+                  name: str | None = None) -> Scenario:
+    """A walled room with `n` toys scattered on the floor, a low basket in a
+    corner, and one duck facing the mess. Deterministic in `seed`."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    hx, hy = size[0] / 2, size[1] / 2
+    corners = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+    walls = [Wall(corners[i], corners[(i + 1) % 4], 0.3, 0.02) for i in range(4)]
+    basket = Basket((hx - 0.35, hy - 0.35), (0.3, 0.3), 0.06)
+    kinds = list(PICKABLE_KINDS)
+    toys: list[Pickable] = []
+    for i in range(n):
+        for _try in range(50):
+            x = float(rng.uniform(-hx + 0.3, hx - 0.3))
+            y = float(rng.uniform(-hy + 0.3, hy - 0.3))
+            if math.dist((x, y), basket.pos) < 0.45 or math.dist((x, y), (0.0, 0.0)) < 0.35:
+                continue
+            if all(math.dist((x, y), t.pos) > 0.2 for t in toys):
+                toys.append(Pickable(f"t{i}", kinds[i % len(kinds)], (x, y), float(rng.uniform(0, math.pi))))
+                break
+    return Scenario(name=name or f"playroom-{seed}", seed=seed, floor=(size[0] + 0.5, size[1] + 0.5),
+                    walls=walls, ducks=[Duck("d0", (0.0, 0.0, 0.0), None, "datasheet", "datasheet", "tidy")],
+                    pickables=toys, basket=basket)

@@ -33,6 +33,12 @@ class Senses:
     det: DetectionFrame | None = None
     det_age: float | None = None
     speed: float | None = None           # heading-frame forward speed, m/s
+    # What the robot's own telemetry adds: odometry (x, y, yaw — true here
+    # for now; roadmap 1.7 makes it drift), whether the beak holds something
+    # (servo load on the robot), and whether a skill cycle is running.
+    odom: tuple[float, float, float] | None = None
+    holding: bool = False
+    skill: str | None = None
 
     def fresh_tof(self, max_age: float) -> TofFrame | None:
         return self.tof if (self.tof is not None and self.tof_age is not None
@@ -48,6 +54,8 @@ class Intent:
     twist: tuple[float, float, float] = (0.0, 0.0, 0.0)
     head: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)   # neck_pitch, head_pitch, head_yaw, head_roll
     note: str = ""                       # one-line "why" for the inspector
+    beak: str | None = None              # "open" | "close" — the mouth servo, outside the policy
+    skill: str | None = None             # ask the reflex tier for a skill cycle ("ground_pick")
 
 
 class Brain(Protocol):
@@ -67,10 +75,22 @@ class BrainRegistry:
         self.kinds[kind] = cls
 
     def make(self, kind: str, **kw) -> Brain:
+        if kind.startswith("learned:"):
+            from .learned import LearnedBrain  # lazy: onnxruntime
+            return LearnedBrain(kind.split(":", 1)[1], **kw)
         try:
             return self.kinds[kind](**kw)
         except KeyError:
-            raise ValueError(f"unknown brain kind {kind!r}; have {sorted(self.kinds)}") from None
+            raise ValueError(f"unknown brain kind {kind!r}; have {sorted(self.available())}") from None
+
+    def available(self) -> list[str]:
+        """Registered kinds plus every exported learned brain on disk."""
+        from .learned import brains_dir
+        out = sorted(self.kinds)
+        d = brains_dir()
+        if d.exists():
+            out += [f"learned:{p.parent.name}" for p in sorted(d.glob("*/brain.onnx"))]
+        return out
 
 
 REGISTRY = BrainRegistry()
@@ -86,6 +106,8 @@ def payload(brain: Brain | None, intent: Intent | None, mode: str) -> dict:
             "cmd": [round(float(v), 3) for v in (intent.twist if intent else (0, 0, 0))],
             "head": [round(float(v), 3) for v in (intent.head if intent else (0, 0, 0, 0))],
             "note": intent.note if intent else "",
+            "beak": intent.beak if intent else None,
+            "skill": intent.skill if intent else None,
             "inputs": brain.inputs()}
 
 

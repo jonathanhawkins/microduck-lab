@@ -53,9 +53,41 @@ ACT_LOW = np.array([-0.2, -0.3, -1.0], np.float32)
 ACT_HIGH = np.array([0.6, 0.3, 1.0], np.float32)
 
 
+def senses_to_obs(s: Senses, target_cls: str, last_action: np.ndarray,
+                  last_seen_t: float | None) -> tuple[np.ndarray, float | None]:
+    """The brain observation contract (layout above), from what a brain gets.
+    Returns (obs, updated last_seen_t). Shared by BrainEnv (training) and
+    LearnedBrain (inference in the world), so the two can never drift."""
+    o = np.zeros(BRAIN_OBS_DIM, np.float32)
+    if s.tof is not None:
+        o[0:64] = np.clip(s.tof.depth_mm.reshape(-1) / 1000.0, 0.0, 4.0)
+        o[64] = min(s.tof_age or 0.0, 1.0)
+    else:
+        o[64] = 1.0
+    tgt = None
+    if s.det is not None:
+        cands = [x for x in s.det.detections if x.cls == target_cls]
+        if cands:
+            tgt = min(cands, key=lambda x: x.range_est)
+    if tgt is not None:
+        o[65:71] = [1.0, tgt.bearing, tgt.elevation, tgt.width, min(tgt.range_est, 4.0), tgt.conf]
+        last_seen_t = s.t
+    o[71] = min(s.det_age if s.det_age is not None else 1.0, 1.0)
+    o[72] = 5.0 if last_seen_t is None else min(s.t - last_seen_t, 5.0)
+    o[73:76] = last_action
+    o[76] = s.speed or 0.0
+    return o, last_seen_t
+
+
 def onnx_infer(path: Path) -> Callable[[np.ndarray], np.ndarray]:
+    """A batch-1 ONNX policy on ONE thread: a dozen training workers each
+    spinning a full thread pool for a 61-float MLP measured 170 decisions/s
+    where a single env alone does ~390."""
     import onnxruntime as ort
-    sess = ort.InferenceSession(str(path))
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    sess = ort.InferenceSession(str(path), sess_options=opts)
     name = sess.get_inputs()[0].name
     return lambda obs: sess.run(None, {name: obs[None]})[0][0].astype(np.float32)
 
@@ -154,25 +186,9 @@ class BrainEnv(gym.Env):
                       speed=d.heading_speed(w.data))
 
     def _obs(self) -> np.ndarray:
-        s = self.senses()
-        o = np.zeros(BRAIN_OBS_DIM, np.float32)
-        if s.tof is not None:
-            o[0:64] = np.clip(s.tof.depth_mm.reshape(-1) / 1000.0, 0.0, 4.0)
-            o[64] = min(s.tof_age or 0.0, 1.0)
-        else:
-            o[64] = 1.0
-        tgt = None
-        if s.det is not None:
-            cands = [x for x in s.det.detections if x.cls == self.task.target_cls]
-            if cands:
-                tgt = min(cands, key=lambda x: x.range_est)
-        if tgt is not None:
-            o[65:71] = [1.0, tgt.bearing, tgt.elevation, tgt.width, min(tgt.range_est, 4.0), tgt.conf]
-            self._last_seen_t = self.world.t
-        o[71] = min(s.det_age if s.det_age is not None else 1.0, 1.0)
-        o[72] = 5.0 if self._last_seen_t is None else min(self.world.t - self._last_seen_t, 5.0)
-        o[73:76] = self._last_action
-        o[76] = s.speed or 0.0
+        o, seen_t = senses_to_obs(self.senses(), self.task.target_cls, self._last_action,
+                                  self._last_seen_t)
+        self._last_seen_t = seen_t
         return o
 
     def _truth(self) -> tuple[float, float]:
@@ -225,4 +241,5 @@ class BrainEnv(gym.Env):
         pass
 
 
-__all__ = ["ACT_HIGH", "ACT_LOW", "BRAIN_ACT_DIM", "BRAIN_OBS_DIM", "BrainEnv", "FollowTask", "onnx_infer"]
+__all__ = ["ACT_HIGH", "ACT_LOW", "BRAIN_ACT_DIM", "BRAIN_OBS_DIM", "BrainEnv", "FollowTask", "onnx_infer",
+           "senses_to_obs"]

@@ -66,8 +66,9 @@ from pydantic import BaseModel
 
 from .brain import REGISTRY, Intent, Senses
 from .brain import runtime as brain_runtime
+from .brain import tidy as _tidy  # noqa: F401  (registers the tidy brain)
 from .sensors import DetectorNoise, TofNoise
-from .world import Ball, Duck, Person, Scenario, Wall, World, make_room
+from .world import Ball, Duck, Person, Scenario, Wall, World, make_playroom, make_room
 from .world.scenario import NAME_RE, TOF_PRESETS, ScenarioError, validate_scenario
 
 TICK_HZ = 50
@@ -123,7 +124,9 @@ def builtin_scenarios() -> dict[str, Scenario]:
         ducks=[Duck("d0", (0.0, 0.0, 0.0), DEFAULT_POLICY, "datasheet", "datasheet", "follow")],
         persons=[Person("p0", (1.2, 0.0), 1.57,
                         path=[(1.2, 1.2), (-1.2, 1.2), (-1.2, -1.2), (1.2, -1.2)], speed=0.25)])
-    return {s.name: s for s in (empty, wall, room, follow)}
+    playroom = make_playroom(seed=0, n=6, name="playroom")
+    playroom.ducks[0].policy = DEFAULT_POLICY
+    return {s.name: s for s in (empty, wall, room, follow, playroom)}
 
 
 BUILTIN_NAMES = frozenset(builtin_scenarios().keys())
@@ -244,16 +247,19 @@ class WorldState:
             "loading": self.loading,
             "ducks": [duck_info(w, d, self.brains) for d in w.ducks.values()] if w else [],
             "presets": list(TOF_PRESETS),
-            "brains": sorted(REGISTRY.kinds),
+            "brains": REGISTRY.available(),
         }
 
     def senses_for(self, d) -> Senses:
         w = self.world
         tof = d.tof.last if d.tof is not None else None
         det = d.detector.last if d.detector is not None else None
+        pos = d.trunk_pos(w.data)
         return Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
                       det=det, det_age=None if det is None else w.t - det.t,
-                      speed=d.heading_speed(w.data))
+                      speed=d.heading_speed(w.data),
+                      odom=(float(pos[0]), float(pos[1]), d.yaw(w.data)),
+                      holding=d.holding is not None, skill=d.skill)
 
     def drive(self, cmd: np.ndarray, mode: str) -> None:
         """Set every duck's command for this tick. A possessed person takes
@@ -274,7 +280,10 @@ class WorldState:
                 continue
             intent = brain.step(self.senses_for(d))
             self.intents[d.id] = intent
-            d.set_cmd(w.data, intent.twist, intent.head if d.id in self.head_cmds else None)
+            w.apply_intent(d, intent)
+            if d.skill is None:              # a running skill owns the command block
+                use_head = d.id in self.head_cmds or getattr(brain, "wants_head", False)
+                d.set_cmd(w.data, intent.twist, intent.head if use_head else None)
 
     def brain_payload(self, d, mode: str) -> dict:
         possessed = any(p.possessed for p in self.world.persons.values()) if self.world else False
@@ -296,7 +305,7 @@ class WorldState:
                 ducks.append({
                     **duck_info(w, d, self.brains),
                     "brain": self.brain_payload(d, mode),
-                    "headApplied": d.id in self.head_cmds,
+                    "headApplied": d.id in self.head_cmds or bool(getattr(self.brains.get(d.id), "wants_head", False)),
                     # Body 0 is the WORLD in the viewer's scene (GET /scene),
                     # so a duck's 15 bodies ride behind one identity pose and
                     # the same Duck renderer works on both pages.
@@ -315,6 +324,7 @@ class WorldState:
             "events": list(self.events)[-5:],
             "ducks": ducks,
             "objects": (w.objects_payload() + w.persons_payload()) if w else [],
+            "tidy": w.tidy_score() if (w and w.pickables) else None,
             "possessed": next((p.id for p in w.persons.values() if p.possessed), None) if w else None,
         }
 
@@ -333,6 +343,9 @@ def duck_info(w: World, d, brains: dict | None = None) -> dict:
         "tof": None if d.tof is None else preset_name(d.tof.noise),
         "detector": None if d.detector is None else det_preset_name(d.detector.noise),
         "brainKind": getattr(brains.get(d.id), "kind", "script") if brains is not None else None,
+        "holding": d.holding,
+        "skill": d.skill,
+        "beak": "closed" if d.beak_closed else "open",
     }
 
 
@@ -480,7 +493,7 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
             raise HTTPException(404, f"no duck {req.duck!r}") from None
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
-        return {"duck": req.duck, "kind": req.kind, "kinds": sorted(REGISTRY.kinds)}
+        return {"duck": req.duck, "kind": req.kind, "kinds": REGISTRY.available()}
 
     @app.get("/replay/ring")
     def replay_ring(last: int = 1500) -> Response:
