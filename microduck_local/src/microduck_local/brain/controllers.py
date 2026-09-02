@@ -276,6 +276,13 @@ class ChaseParams:
     kick_clear: float = 0.35       # no kick with anything closer than this ahead (upper ToF rows)
     aim_tol: float = 0.25          # face the kick direction within this before kicking (rad)
     aim_max: float = 1.05          # aim at the goal only within this of the line of sight (rad)
+    # Yielding to a duck that clearly has the ball: OFF by default. Measured
+    # over 8 seeds × 300 s: off 1.50 goals / 8.5 kicks / 2.12 falls a run,
+    # on (0.5 m) 1.12 / 7.0 / 2.12 — it costs play and saves nothing.
+    yield_range: float = 0.0       # > 0: another duck this close and clearly nearer the ball has it: stand and wait…
+    yield_ratio: float = 0.7       # …"clearly": its range under this fraction of ours (width ranges are rough)
+    yield_s: float = 1.5           # …for at most this long
+    yield_cooldown_s: float = 3.0  # …and not again for this long
 
 
 class Chase:
@@ -307,6 +314,8 @@ class Chase:
         self.spot: tuple[float, float, str, float] | None = None   # odom-frame kicking spot, foot, kick heading
         self.attack: float | None = None                            # heading of the goal it attacks (first odom yaw)
         self.t_state = 0.0
+        self._yield_t0 = -9.0
+        self._yield_end = -9.0
         self.tracker.reset()
         self.gait.reset()
 
@@ -362,6 +371,20 @@ class Chase:
         self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), t, odom[2])
         ball = self.tracker.best(p.target_cls, t, min_hits=1)
         fresh = ball is not None and ball.age(t) <= self.DET_MAX_AGE
+        # The other duck: if it is close and nearer the ball than we are,
+        # it has the ball — yield rather than tangle (measured: with kicks
+        # working, the remaining falls were two ducks on one ball).
+        other = self.tracker.best("duck", t, min_hits=1)
+        # Asymmetric and time-limited, or both stand and wait for each other
+        # (measured: a symmetric yield gave 0 falls and 0.25 goals a run).
+        clearly_nearer = (other is not None and other.age(t) <= p.lost_s and other.range < p.yield_range
+                          and ball is not None and other.range < p.yield_ratio * ball.range
+                          and abs(math.atan2(math.sin(other.bearing - ball.bearing), math.cos(other.bearing - ball.bearing))) < 0.8)
+        if clearly_nearer and self.state != "yield" and t - self._yield_end > p.yield_cooldown_s:
+            self._yield_t0 = t
+        yielding = clearly_nearer and t - self._yield_t0 < p.yield_s
+        if self.state == "yield" and not yielding:
+            self._yield_end = t
         tof = senses.fresh_tof(self.TOF_MAX_AGE)
         ahead = np.inf
         if tof is not None:
@@ -370,6 +393,10 @@ class Chase:
         if senses.skill is not None:
             vx, wz = 0.0, 0.0                                   # the kick owns the reflex tier
             self.state = "kick"
+        elif yielding and self.state not in ("settle",):
+            vx, wz = 0.0, 0.0
+            self.spot = None
+            self.state = "yield"
         elif self.state in ("lineup", "settle") and self.spot is not None:
             # Refresh the spot while the ball is still in view, then walk it blind.
             if fresh and ball.range < p.lineup_range:

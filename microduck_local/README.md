@@ -386,8 +386,11 @@ walk-around to kick toward the goal crossed walls and the other duck
 (4 kicks and 2 falls a run for 1.0 goal), plain line-of-sight kicks were
 11 kicks, 1.25 falls and 1.0 goal, and aiming at the goal only when it
 costs under a 60° detour is **1.75 goals, 6.8 kicks and 1.5 falls a run**
-(`eval-pitch --seeds 4 --seconds 300`). The falls are now duck-on-duck:
-the next item is the two of them not going for the same ball.
+(`eval-pitch --seeds 4 --seconds 300`; over 8 seeds 1.5 goals, 8.5
+kicks, 2.1 falls). The falls are now duck-on-duck. A yield rule (stand
+when the other duck is close and clearly nearer the ball) was measured
+over the same 8 seeds and shipped OFF: 1.1 goals for the same 2.1 falls.
+The next item is a body-aware avoid, not a rule of thumb.
 
 ### Tidy the playroom (roadmap Track 12)
 
