@@ -34,19 +34,24 @@ the tree, and Track 12 has its first working loop:
   for two ducks with maps streaming (physics 1.6, sensors 0.6 — the whole
   loop is ~7% of a core), so JSON holds until rosters of four or more
   ducks make the encode the largest term. **Measured:** on identical
-  follow-me episodes the learned brain (`brains/follow-v1`, 400k decisions,
-  ~10 min on 4 cores) holds the distance band 0.73 / 0.61 of the time under
-  the datasheet / hostile presets against the scripted controller's 0.42 /
-  0.41, and keeps the person in sight 0.85 vs 0.39.
+  follow-me episodes (12, the pinned model) the learned brains hold the
+  distance band 0.73 / 0.60 (`follow-v1`, raw detections) and 0.69 / 0.68
+  (`follow-v2`, the tracker + yaw-rate observation, retrained on the
+  pinned model) of the time under the datasheet / hostile presets against
+  the scripted controller's 0.48 / 0.38, and keep the person in sight
+  0.82 / 0.67 and 0.70 / 0.61 vs 0.47 / 0.33. The scripted one loses because
+  it stands still and goes cold; an idle sidestep took it from 0.36 to 0.51
+  in sight, and the rest of the gap is the learned brain's continuous motion.
 - Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
   a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
   12.13), the tether toggle (12.10: `--tether-ms`, `POST /world/tether`).
-  **Measured:** 0.88 of six scattered toys are in the basket after five
-  minutes on the pinned 2026-09 model (8 seeds, 0.38 falls a run; on the
-  previous export 0.90 / 0.25, and 0.88 / 0.12 under datasheet odometry
-  drift, 0.79 / 0.50 under hostile drift, 0.79 / 1.88 with a 250 ms brain
-  tether — the falls are the tether's cost) — up from 0.67 / 1.7 falls at
-  the first close of the loop and 0.11 before that. What it took, each a measurement on
+  **Measured:** 0.94 of six scattered toys are in the basket after five
+  minutes on the pinned 2026-09 model (8 seeds, 0.50 falls a run; 0.88 /
+  0.50 under datasheet odometry drift, 0.62 / 0.75 under hostile drift,
+  0.79 / 1.50 with a 250 ms brain tether — every traced tethered fall was
+  the stopping stride at the rim on a stop decided 250 ms late) — up from
+  0.88 / 0.38 before rim toys were approached from the outside, 0.67 /
+  1.7 falls at the first close of the loop and 0.11 before that. What it took, each a measurement on
   the walker, not a tune: releases only after a standing re-measure of
   the basket at 0.42 m (walking rocks the head 0.02 rad and holds it
   0.08 rad higher than standing — detection frames now carry the camera

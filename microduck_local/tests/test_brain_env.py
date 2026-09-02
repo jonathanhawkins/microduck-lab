@@ -132,3 +132,21 @@ def test_tiny_ppo_round_trips_through_onnx_into_the_world(tmp_path, monkeypatch)
     assert brain.step(Senses(t=0.02)).twist == intent.twist
     with pytest.raises(ValueError):
         REGISTRY.make("learned:nope")
+
+
+def test_shipped_brains_load_with_their_observation_version():
+    """`brains/follow-v1` (version 1: raw detections) and `brains/follow-v2`
+    (version 2: tracker + yaw rate) both ship; each builds the observation
+    it was trained on and emits a twist inside the intent bounds."""
+    from microduck_local.brain.learned import brains_dir
+    d = brains_dir()
+    if not (d / "follow-v1" / "brain.onnx").exists() or not (d / "follow-v2" / "brain.onnx").exists():
+        pytest.skip("shipped brains not present")
+    v1, v2 = REGISTRY.make("learned:follow-v1"), REGISTRY.make("learned:follow-v2")
+    assert v1.obs_version == 1 and v1.builder.tracker is None
+    assert v2.obs_version == 2 and v2.builder.tracker is not None
+    det = DetectionFrame(t=0.0, detections=[Detection("person", "p0", 0.2, -0.1, 0.3, 1.4, 0.9)])
+    for b in (v1, v2):
+        out = b.step(Senses(t=0.0, det=det, det_age=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
+        assert all(lo - 1e-6 <= v <= hi + 1e-6 for v, lo, hi in zip(out.twist, ACT_LOW, ACT_HIGH))
+        assert b.state == "tracking"

@@ -359,20 +359,31 @@ its current intent live.
   the *senses* only) and `train-brain` / `eval-brain` train and score one:
 
   ```bash
-  uv run train-brain --envs 4 --steps 400_000 --run-name follow-v1   # ~10 min on 4 cores
-  uv run eval-brain --brain learned:follow-v1 --preset hostile --episodes 12   # vs `--brain follow`
-  uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v1"
+  uv run train-brain --envs 4 --steps 400_000 --run-name follow-v2   # ~10 min on 4 cores
+  uv run eval-brain --brain learned:follow-v2 --preset hostile --episodes 12   # vs `--brain follow`
+  uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v2"
   ```
 
-  `brains/follow-v1/brain.onnx` (112 kB) and its contract ship in the
-  repo, so `learned:follow-v1` works from a fresh clone; retrain to
-  replace it (the SB3 checkpoint stays local).
+  `brains/follow-v1` and `brains/follow-v2` (112 kB each, `brain.onnx`
+  + the contract in `brain.json`) ship in the repo, so `learned:follow-v1`
+  / `learned:follow-v2` work from a fresh clone; retrain to replace them
+  (the SB3 checkpoints stay local). The observation comes in two
+  versions (`brain_env.py`): v1 fed the nearest raw detection; v2 feeds
+  the TRACKER's target (its bearing keeps turning with the body through
+  a miss), a coasting flag, confirmation and the odometry yaw rate, in
+  the three slots v1 reserved. A brain's `brain.json` says which it was
+  trained on and `LearnedBrain` builds that one, so v1 still runs
+  bit-for-bit. follow-v2 is v2, trained on the pinned 2026-09 model
+  (400k decisions, then 400k more warm-started).
 
-  Measured on identical follow-me episodes (12, the pinned model): the
-  learned brain `follow-v1` holds the distance band 0.73 / 0.60 of the
-  time under the datasheet / hostile presets against the scripted
-  controller's 0.48 / 0.38, and keeps the person in sight 0.82 / 0.67 vs
-  0.47 / 0.33. Why the scripted one loses: a probe of both on the same
+  Measured on identical follow-me episodes (12, the pinned model):
+  `follow-v1` holds the distance band 0.73 / 0.60 of the time under the
+  datasheet / hostile presets and `follow-v2` 0.69 / 0.68 — the tracker
+  features buy robustness to noise, not accuracy on the clean preset,
+  and v2 bumps the person about twice as often (27 vs 14 ToF bumps an
+  episode) — against the scripted controller's 0.48 / 0.38; in sight
+  0.82 / 0.67 (v1), 0.70 / 0.61 (v2), 0.47 / 0.33 (scripted). Why the
+  scripted one loses: a probe of both on the same
   episodes showed the learned brain sidestepping ±0.23 the whole time
   and holding the bearing at 0.13 rad, while the scripted one stood
   still between corrections, went cold (a standing walker cannot start a
@@ -457,22 +468,29 @@ datasheet sensor noise, upstream models at the pinned shas):
 
 | odometry | tether | tidied (mean of 8 seeds) | falls / run |
 |---|---|---|---|
-| ideal | onboard | **0.88** (6, 5, 6, 3, 5, 5, 6, 6 of 6) | 0.38 |
-| datasheet drift | onboard | 0.88 | 0.12 |
-| hostile drift | onboard | 0.79 | 0.50 |
-| ideal | 250 ms round trip | 0.79 | 1.88 |
+| ideal | onboard | **0.94** (5, 5, 6, 6, 6, 6, 6, 6 of 6) | 0.50 |
+| datasheet drift | onboard | 0.88 | 0.50 |
+| hostile drift | onboard | 0.62 | 0.75 |
+| ideal | 250 ms round trip | 0.79 | 1.50 |
 
-The first row is on the 2026-09 CAD re-export of the robot (microduck_rl
-badc4e7); the same brain scored 0.90 / 0.25 on the previous export, and
-0.77 / 0.88 on the new one before its release distance was re-measured
-(the new model's stop drifts 1–2 cm further, so a quarter of the toys
-landed on the rim). The drift and tether rows were measured on the
-previous export. A model bump is a re-measure, not a merge.
+All four rows are on the 2026-09 CAD re-export (microduck_rl badc4e7),
+with the staged approach for rim toys, the sidestep-then-turn back-off
+and the slower last leg. Before those, on the same model: 0.88 / 0.38
+ideal, 0.81 / 0.25 datasheet, 0.81 / 1.12 hostile, 0.90 / 3.25 tethered
+(the drift and tether rows had only ever been measured on the previous
+export, where they read 0.88 / 0.12, 0.79 / 0.50 and 0.79 / 1.88). Eight
+seeds of six toys is a coarse instrument: one toy is 0.02 and a seed's
+whole trajectory diverges after any change (the hostile row moved
+0.81 → 0.79 → 0.62 across three runs of the same brain with different
+back-offs), so read differences under 0.05 as noise. A model bump is a
+re-measure, not a merge.
 
 The tether row is roadmap 12.10's answer in one line: a laptop brain over
-Wi-Fi keeps most of the tidying but trips at the rim four times as often,
-because the release and the obstacle guard act on senses a quarter of a
-second old. The 50 Hz reflex stays onboard either way.
+Wi-Fi keeps most of the tidying but trips at the rim three times as
+often — every traced tethered fall was the stopping stride at the rim,
+because the stop was decided on senses a quarter of a second old (4.7 cm
+of overshoot at a 0.3 command, 3.0 at 0.25, which is why the last leg is
+walked at 0.25). The 50 Hz reflex stays onboard either way.
 
 Up from 0.67 and 1.7 falls a run at the first close of the loop, and 0.11
 before that. What moved it: the basket is re-measured standing still and
