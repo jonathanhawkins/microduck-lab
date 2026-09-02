@@ -55,11 +55,13 @@ the tree, and Track 12 has its first working loop:
 - Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
   a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
   12.13), the tether toggle (12.10: `--tether-ms`, `POST /world/tether`).
-  **Measured:** 0.94 of six scattered toys are in the basket after five
-  minutes on the pinned 2026-09 model (8 seeds, 0.50 falls a run; 0.88 /
-  0.50 under datasheet odometry drift, 0.62 / 0.75 under hostile drift,
-  0.79 / 1.50 with a 250 ms brain tether — every traced tethered fall was
-  the stopping stride at the rim on a stop decided 250 ms late) — up from
+  **Measured:** 0.89 of six scattered toys are in the basket after five
+  minutes on the pinned 2026-09 model (16 seeds, 0.31 falls a run; 0.84 /
+  0.56 under datasheet odometry drift, 0.79 / 0.75 under hostile drift —
+  the same with the brain's loop-closed pose on or off, so the map is not
+  what tidying needs — 0.76 / 2.19 with a 250 ms brain tether; every
+  traced tethered fall was the stopping stride at the rim on a stop
+  decided 250 ms late) — up from
   0.88 / 0.38 before rim toys were approached from the outside, 0.67 /
   1.7 falls at the first close of the loop and 0.11 before that. What it took, each a measurement on
   the walker, not a tune: releases only after a standing re-measure of

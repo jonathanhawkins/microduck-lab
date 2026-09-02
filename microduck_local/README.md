@@ -546,7 +546,13 @@ with the staged approach for rim toys, the sidestep-then-turn back-off,
 the slower last leg, and the brain steering by its own loop-closed pose
 (`loop_closure`, the wall-line matcher of `brain/mapping.py` folded
 into the tidy brain; `eval-tidy --no-loop-closure` steers by raw
-odometry). Sixteen seeds now (`--seeds` default), each its own toy
+odometry). The loop closure is **measured neutral** here: the hostile
+row reads 0.79 / 0.75 with it on and off over the same 16 seeds (the
+matcher fires — 96 corrections in the first minute of a hostile run —
+but the brain re-acquires the basket and every toy by sight each trip,
+so only the odometry between two sightings matters, and that is short).
+It stays on for the map it builds; the win it was built for is the room
+map itself (5.5). Sixteen seeds now (`--seeds` default), each its own toy
 layout: eight seeds of six toys moved the hostile row 0.81 → 0.79 →
 0.62 across three runs of the same brain with different back-offs, so a
 difference under 0.05 is noise even here. The 8-seed rows before the
