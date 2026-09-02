@@ -71,6 +71,7 @@ uv run bench-envs                             # the right --envs for THIS machin
 uv run duck-lab --checkpoints runs/my-run    # + viewer below → watch it in the browser
 uv run duck-lab --world playroom              # world mode: rooms, sensors, brains (the /sim page)
 uv run eval-tidy --seeds 3 --seconds 300      # Track 12 benchmark; trace-tidy / walker-facts to debug it
+uv run eval-pitch --seeds 4 --seconds 300     # soccer benchmark: two chase brains, shipped kicks, goals
 
 # --- duck-viewer (run from duck-viewer/) ---
 npm run dev                                   # then open the printed localhost URL

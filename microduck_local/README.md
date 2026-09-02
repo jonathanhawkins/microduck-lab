@@ -370,13 +370,24 @@ its current intent live.
 ### Two ducks, one ball (the soccer track's first form)
 
 `pitch` is a walled 3 × 2.5 m room with a ball in the middle and two ducks
-running the `chase` brain: track the ball, walk at it, and through it — for
-a walker with no kicking reflex, the walk *is* the kick. The World counts a
-goal whenever the ball crosses either short wall's line inside the goal
-width and puts it back in the centre; the page shows the score. It is the
-smallest thing that puts two brains in one room and lets them interfere:
-the soccer track's later items (a kicking reflex, teams, a learned striker)
-build on this scenario and this score.
+running the `chase` brain: track the ball, line up behind it, stand, and
+kick it with the robot's own shipped kick policy (`ball_kick_left` /
+`ball_kick_right`, run as a 0.5 s window with an all-zero command exactly
+as robotd does). The World counts a goal whenever the ball crosses either
+short wall's line inside the goal width and puts it back in the centre;
+the page shows the score; `eval-pitch` is the benchmark.
+
+What was measured on the way: a ball 8 cm ahead and 6 cm to the foot's
+side flies 1.6 m, 10 cm dead ahead barely moves, the other side is not
+touched; a floor ball leaves both the camera and the ToF in the last
+0.3 m, so the line-up is dead reckoning in odometry; a kick started
+mid-stride fell 4 times in 7, so the duck stands 0.4 s first; a full
+walk-around to kick toward the goal crossed walls and the other duck
+(4 kicks and 2 falls a run for 1.0 goal), plain line-of-sight kicks were
+11 kicks, 1.25 falls and 1.0 goal, and aiming at the goal only when it
+costs under a 60° detour is **1.75 goals, 6.8 kicks and 1.5 falls a run**
+(`eval-pitch --seeds 4 --seconds 300`). The falls are now duck-on-duck:
+the next item is the two of them not going for the same ball.
 
 ### Tidy the playroom (roadmap Track 12)
 
@@ -411,14 +422,21 @@ What is real and what is a model here, so nobody mistakes one for the other:
   robot's drifts, which is why the basket is re-acquired by sight every trip.
 
 **Measured** (`eval-tidy --seeds 8 --toys 6 --seconds 300 --jobs 2`,
-datasheet sensor noise):
+datasheet sensor noise, upstream models at the pinned shas):
 
 | odometry | tether | tidied (mean of 8 seeds) | falls / run |
 |---|---|---|---|
-| ideal | onboard | **0.90** (5, 5, 6, 6, 5, 4, 6, 6 of 6) | 0.25 |
+| ideal | onboard | **0.88** (6, 5, 6, 3, 5, 5, 6, 6 of 6) | 0.38 |
 | datasheet drift | onboard | 0.88 | 0.12 |
 | hostile drift | onboard | 0.79 | 0.50 |
 | ideal | 250 ms round trip | 0.79 | 1.88 |
+
+The first row is on the 2026-09 CAD re-export of the robot (microduck_rl
+badc4e7); the same brain scored 0.90 / 0.25 on the previous export, and
+0.77 / 0.88 on the new one before its release distance was re-measured
+(the new model's stop drifts 1–2 cm further, so a quarter of the toys
+landed on the rim). The drift and tether rows were measured on the
+previous export. A model bump is a re-measure, not a merge.
 
 The tether row is roadmap 12.10's answer in one line: a laptop brain over
 Wi-Fi keeps most of the tidying but trips at the rim four times as often,

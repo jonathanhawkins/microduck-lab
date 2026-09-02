@@ -58,17 +58,20 @@ class TidyParams:
     # reach 0.04 m ahead of the trunk, the beak tip 0.08 m (head LEVEL —
     # pitching it down pulls the tip back to 0.053), and a held toy sits
     # 0.005–0.023 m beyond the tip. A 0.3 m tray's rim outer face is at
-    # 0.156, so 0.23 plus the ~1 cm coast leaves the feet 2.5 cm outside
-    # the rim and the toy 1–3 cm inside it. ASSUMPTION: a 0.3 m basket.
+    # 0.156, so 0.22 plus the 1–2 cm the stop drifts (measured on the
+    # 2026-09 model: releases landed 0.24–0.25 out at a 0.23 target and a
+    # quarter of the toys on the rim) leaves the feet ~1.5 cm outside the
+    # rim and the toy 2–4 cm inside it. ASSUMPTION: a 0.3 m basket.
     # Tight on purpose: a miss is retried, a trip over the rim is a fall.
-    basket_reach: float = 0.23
+    basket_reach: float = 0.22
     basket_confirm_range: float = 0.6  # release only if the marker was seen from closer than this
     far_range: float = 1.2             # beyond this a sighting is a direction, not a range (see _locate)
     aim_range: float = 0.42            # stop here, square up, stand still and re-measure the basket before the blind end
     aim_settle_s: float = 0.6          # the walker needs ~0.5 s to come to rest
     aim_s: float = 1.4
     aim_align: float = 0.08            # squared up when the basket is within this of the nose (rad)
-    basket_zone: float = 0.28          # toys estimated this close to the basket are IN it (or against the rim): leave them
+    basket_zone: float = 0.33          # toys this close to the basket are in it or against the rim: leave them (every fall
+                                       # in 8 traced runs was an approach or back-off at the rim after a toy 0.2–0.26 m out)
     basket_keepout: float = 0.5        # exploring turns away from the basket inside this radius
     settle_s: float = 0.6
     backoff_turn: float = 2.6          # after a release: turn LEFT this far (rad, in place)…

@@ -274,6 +274,8 @@ class ChaseParams:
     lineup_s: float = 4.0          # give up a line-up after this long
     settle_s: float = 0.4          # stand this long on the spot before the kick (robotd kicks at standing tuning)
     kick_clear: float = 0.35       # no kick with anything closer than this ahead (upper ToF rows)
+    aim_tol: float = 0.25          # face the kick direction within this before kicking (rad)
+    aim_max: float = 1.05          # aim at the goal only within this of the line of sight (rad)
 
 
 class Chase:
@@ -302,7 +304,8 @@ class Chase:
         self._senses: Senses | None = None
         self.last = (0.0, 0.0, 0.0)
         self.kicks = 0
-        self.spot: tuple[float, float, str] | None = None     # odom-frame kicking spot + foot
+        self.spot: tuple[float, float, str, float] | None = None   # odom-frame kicking spot, foot, kick heading
+        self.attack: float | None = None                            # heading of the goal it attacks (first odom yaw)
         self.t_state = 0.0
         self.tracker.reset()
         self.gait.reset()
@@ -319,19 +322,34 @@ class Chase:
                         [round(self.spot[0], 3), round(self.spot[1], 3), self.spot[2]]}
         return out
 
-    def _lineup_spot(self, odom, ball) -> tuple[float, float, str]:
+    def _lineup_spot(self, odom, ball) -> tuple[float, float, str, float]:
         """Where to stand to kick a ball seen at (bearing, range): behind it
-        along the current line of sight, offset to the far side so the
-        nearer foot meets it. Left foot kicks a ball to its LEFT."""
+        on the line the kick should go — toward the goal the duck attacks
+        (`self.attack`, the heading it was placed with; None = the current
+        line of sight) — offset sideways so the nearer foot meets it. The
+        left foot kicks a ball to its LEFT. Returns (x, y, foot, heading)."""
         p = self.p
         x, y, yaw = odom
         a = yaw + ball.bearing
         bx, by = x + ball.range * math.cos(a), y + ball.range * math.sin(a)
-        foot = "kick_left" if ball.bearing >= 0 else "kick_right"
+        # Kick direction: toward the goal when that costs less than `aim_max`
+        # of detour around the ball, else along the line of sight — a full
+        # walk-around crosses walls and the other duck (measured: aimed-only
+        # lined up 4 kicks a run and fell twice; line-of-sight-only kicked 11
+        # times and fell 1.25; goals were 1.0 either way).
+        u = a
+        if self.attack is not None:
+            off = math.atan2(math.sin(self.attack - a), math.cos(self.attack - a))
+            if abs(off) < p.aim_max:
+                u = self.attack
+        # Which foot: the one that ends nearer the ball as the duck comes in
+        # behind it along u, judged from where the duck is now.
+        rel = math.atan2(math.sin(math.atan2(by - y, bx - x) - u), math.cos(math.atan2(by - y, bx - x) - u))
+        foot = "kick_left" if rel >= 0 else "kick_right"
         side = -p.kick_side if foot == "kick_left" else p.kick_side     # stand to the ball's other side
-        sx = bx - p.kick_ahead * math.cos(a) - side * math.sin(a)
-        sy = by - p.kick_ahead * math.sin(a) + side * math.cos(a)
-        return sx, sy, foot
+        sx = bx - p.kick_ahead * math.cos(u) - side * math.sin(u)
+        sy = by - p.kick_ahead * math.sin(u) + side * math.cos(u)
+        return sx, sy, foot, u
 
     def step(self, senses: Senses) -> Intent:
         self._senses = senses
@@ -339,6 +357,8 @@ class Chase:
         t = senses.t
         cold = self.gait.update(senses)
         odom = senses.odom or (0.0, 0.0, 0.0)
+        if self.attack is None and senses.odom is not None:
+            self.attack = odom[2]                  # placed facing the goal it attacks (make_pitch does)
         self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), t, odom[2])
         ball = self.tracker.best(p.target_cls, t, min_hits=1)
         fresh = ball is not None and ball.age(t) <= self.DET_MAX_AGE
@@ -354,11 +374,16 @@ class Chase:
             # Refresh the spot while the ball is still in view, then walk it blind.
             if fresh and ball.range < p.lineup_range:
                 self.spot = self._lineup_spot(odom, ball)
-            sx, sy, foot = self.spot
+            sx, sy, foot, u = self.spot
             dx, dy = sx - odom[0], sy - odom[1]
             dist = math.hypot(dx, dy)
             bearing = math.atan2(math.sin(math.atan2(dy, dx) - odom[2]), math.cos(math.atan2(dy, dx) - odom[2]))
-            if dist <= p.lineup_tol:
+            heading_err = math.atan2(math.sin(u - odom[2]), math.cos(u - odom[2]))
+            if dist <= p.lineup_tol and abs(heading_err) > p.aim_tol:
+                # On the spot but not facing the goal: square up before kicking.
+                vx, _, wz = turn(heading_err, cold)
+                self.state = "lineup"
+            elif dist <= p.lineup_tol:
                 # Stand first: robotd runs a kick at the standing tuning, and a
                 # kick started mid-stride fell 4 times in 7 here. Something
                 # within `kick_clear` ahead (a wall, the other duck) means the

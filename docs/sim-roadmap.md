@@ -19,8 +19,14 @@ the tree, and Track 12 has its first working loop:
   and `Follow` (2.3), `BrainEnv` + `train-brain` + `eval-brain` (3.1, 3.2),
   odometry drift presets (1.7) and an occupancy map per duck in its own
   odometry frame, painted on the page (the first of the mapping track);
-  the `pitch` scenario with two `chase` brains and goal counting (the first
-  of the soccer track). Binary framing (0.5) stays open on a measurement:
+  the `pitch` scenario with two `chase` brains, the robot's shipped kick
+  policies as skills, goal counting and `eval-pitch` (the first of the
+  soccer track: 1.75 goals, 6.8 kicks, 1.5 falls a run over 300 s).
+  `brains/follow-v1` ships in the repo. Upstream is pinned (microduck_rl
+  badc4e7, the 2026-09 CAD re-export; microduck 2c61dcc) and every
+  model-dependent number above was re-measured against it — the tidy loop
+  needed its release distance re-measured (the new model's stop drifts
+  1–2 cm further), nothing else moved. Binary framing (0.5) stays open on a measurement:
   the page's perf readout puts the JSON encode at 0.8 ms per 40 ms frame
   for two ducks with maps streaming (physics 1.6, sensors 0.6 — the whole
   loop is ~7% of a core), so JSON holds until rosters of four or more
@@ -32,8 +38,9 @@ the tree, and Track 12 has its first working loop:
 - Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
   a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
   12.13), the tether toggle (12.10: `--tether-ms`, `POST /world/tether`).
-  **Measured:** 0.90 of six scattered toys are in the basket after five
-  minutes (8 seeds, 0.25 falls a run; 0.88 / 0.12 under datasheet odometry
+  **Measured:** 0.88 of six scattered toys are in the basket after five
+  minutes on the pinned 2026-09 model (8 seeds, 0.38 falls a run; on the
+  previous export 0.90 / 0.25, and 0.88 / 0.12 under datasheet odometry
   drift, 0.79 / 0.50 under hostile drift, 0.79 / 1.88 with a 250 ms brain
   tether — the falls are the tether's cost) — up from 0.67 / 1.7 falls at
   the first close of the loop and 0.11 before that. What it took, each a measurement on
