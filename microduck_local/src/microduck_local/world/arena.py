@@ -18,6 +18,7 @@ duck's measured yaw, the way the robot runtime would.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -398,6 +399,14 @@ class World:
             v = int(self.model.jnt_dofadr[j])
             self.data.qpos[q:q + 7] = [0.0, 0.0, self.scenario.balls[0].radius + 0.005, 1.0, 0.0, 0.0, 0.0]
             self.data.qvel[v:v + 6] = 0.0
+
+    def goal_for(self, d: WorldDuck) -> tuple[float, float] | None:
+        """The goal this duck attacks (world = odometry-at-spawn frame): the
+        one its team is placed to face, by its spawn heading. None off a pitch."""
+        if self.goal_width <= 0:
+            return None
+        hx = self.scenario.floor[0] / 2 - 0.25
+        return (hx if math.cos(d.spawn[2]) >= 0 else -hx), 0.0
 
     def soccer_score(self) -> dict | None:
         if self._ball_joint is None:

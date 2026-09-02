@@ -167,8 +167,9 @@ page's picker). One room, many ducks, and what each duck senses:
   `datasheet` or `hostile` and watch the map smear like a real robot's.
 - **Perf** (top bar): the lab's cost per 20 ms tick as physics+policies +
   sensors + frame encode, next to RTF and kB/s.
-- **Pitch score** (top-left, `pitch` scenario): goals per side while two
-  `chase` brains go after one ball.
+- **Pitch score** (top-left, `pitch` / `pitch-2v2` / `pitch-3v3`): goals per
+  side while the `chase` brains go after one ball; in a team each duck's
+  inspector shows its role (attack / support) and the team's blackboard.
 - **Tidy score** (top-left, `playroom` scenario): toys in the basket, what the
   duck is carrying, picks and deliveries — the same numbers `eval-tidy`
   prints headless.

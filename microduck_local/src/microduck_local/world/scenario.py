@@ -78,6 +78,7 @@ class Duck:
     detector: str | None = "datasheet" # camera+NPU detector preset, None = none
     brain: str | None = None           # brain kind in auto mode; None = wander if ToF else script
     odom: str = "ideal"                # odometry drift preset the brain's (x, y, yaw) carries (roadmap 1.7)
+    team: str | None = None            # soccer: teammates share a blackboard (brain/team.py); None = alone
 
 
 @dataclass
@@ -250,7 +251,10 @@ def validate_scenario(raw: dict) -> Scenario:
         odom = d.get("odom", "ideal") or "ideal"
         if odom not in TOF_PRESETS:
             raise ScenarioError(f"ducks[{i}].odom must be one of {TOF_PRESETS}")
-        ducks.append(Duck(did, spawn, policy, tof, det, brain, odom))
+        team = d.get("team")
+        if team is not None and (not isinstance(team, str) or not DUCK_ID_RE.match(team)):
+            raise ScenarioError(f"ducks[{i}].team must be a short name or null")
+        ducks.append(Duck(did, spawn, policy, tof, det, brain, odom, team))
     if len(ducks) > MAX_DUCKS:
         raise ScenarioError(f"more than {MAX_DUCKS} ducks")
     persons = []
@@ -380,16 +384,29 @@ def make_playroom(seed: int = 0, n: int = 6, size: tuple[float, float] = (3.0, 2
                     pickables=toys, basket=basket)
 
 
-def make_pitch(size: tuple[float, float] = (3.0, 2.5), name: str | None = None,
-               goal_width: float = 0.7) -> Scenario:
-    """Two ducks, one ball, walls all round (the soccer track's first form).
+def make_pitch(size: tuple[float, float] | None = None, name: str | None = None,
+               goal_width: float = 0.7, per_side: int = 1) -> Scenario:
+    """`per_side` ducks a side, one ball, walls all round (the soccer track).
     A goal is the ball crossing either short wall's line inside
-    `goal_width`; the World counts them and re-centres the ball."""
+    `goal_width`; the World counts them and re-centres the ball. The left
+    team ("left", d0…) attacks +x, the right team ("right") attacks −x;
+    the pitch grows a little with the roster. Teammates share a
+    blackboard (brain/team.py) — a message a second over Wi-Fi on the
+    robot — that says who attacks and where the ball was seen."""
+    per_side = max(1, int(per_side))
+    if size is None:
+        size = (3.0 + 0.4 * (per_side - 1), 2.5 + 0.35 * (per_side - 1))
     hx, hy = size[0] / 2, size[1] / 2
     corners = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
     walls = [Wall(corners[i], corners[(i + 1) % 4], 0.3, 0.02) for i in range(4)]
-    return Scenario(name=name or "pitch", floor=(size[0] + 0.5, size[1] + 0.5), walls=walls,
-                    balls=[Ball((0.0, 0.0))],
-                    ducks=[Duck("d0", (-0.9, 0.0, 0.0), None, "datasheet", "datasheet", "chase"),
-                           Duck("d1", (0.9, 0.0, math.pi), None, "datasheet", "datasheet", "chase")],
-                    goal_width=goal_width)
+    ducks = []
+    ys = [0.0] if per_side == 1 else [(-0.5 + i / (per_side - 1)) * (hy - 0.5) * 1.4 for i in range(per_side)]
+    for i, y in enumerate(ys):
+        x = 0.9 + 0.3 * (i % 2)                       # a little staggered, so nobody starts nose to nose
+        ducks.append(Duck(f"d{i}", (-x, y, 0.0), None, "datasheet", "datasheet", "chase", team="left"))
+    for i, y in enumerate(ys):
+        x = 0.9 + 0.3 * (i % 2)
+        ducks.append(Duck(f"d{per_side + i}", (x, -y, math.pi), None, "datasheet", "datasheet", "chase", team="right"))
+    return Scenario(name=name or ("pitch" if per_side == 1 else f"pitch-{per_side}v{per_side}"),
+                    floor=(size[0] + 0.5, size[1] + 0.5), walls=walls,
+                    balls=[Ball((0.0, 0.0))], ducks=ducks, goal_width=goal_width)

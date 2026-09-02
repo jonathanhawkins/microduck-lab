@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .gait import GaitWatch, turn
+from .gait import TURN_KICK, GaitWatch, turn
 from .runtime import REGISTRY, Intent, Senses, age_inputs
 from .tracker import Tracker, TrackerParams
 
@@ -44,6 +44,21 @@ def _column_clearance(depth_mm: np.ndarray, valid: np.ndarray | None,
     d, ok = d[r0:r1], ok[r0:r1]
     d = np.where(ok, d, np.inf)
     return d.min(axis=0)
+
+
+def tof_clearance_3d(frame, zmin: float = 0.08, zmax: float = 0.6) -> np.ndarray:
+    """Nearest return per column that is a BODY-height thing — a wall, a
+    duck, furniture — whatever the head is doing: each zone's hit is placed
+    in the body's heading frame from the mount pose the frame carries, and
+    hits on the floor (below `zmin`; a ball is 7 cm tall) or above `zmax`
+    do not count. Falls back to the level-head rows when a frame carries no
+    mount pose (synthetic frames)."""
+    if frame.mount_pos is None or frame.dirs_local is None:
+        return _column_clearance(frame.depth_mm, frame.valid, WanderParams(rows=(2, 5)))
+    d = frame.depth_mm.astype(np.float64) / 1000.0
+    z = frame.mount_pos[2] + frame.dirs_local[..., 2] * d
+    ok = frame.valid & (frame.depth_mm > 0) & (z > zmin) & (z < zmax)
+    return np.where(ok, d, np.inf).min(axis=0)
 
 
 def wander_from_tof(depth_mm: np.ndarray, valid: np.ndarray | None = None,
@@ -284,22 +299,50 @@ class ChaseParams:
     k_turn: float = 3.0
     turn_first: float = 0.6        # rad off the nose: turn in place before walking
     lost_s: float = 2.0
-    tof_stop: float = 0.3          # walls and ducks in the upper ToF rows; the ball is too low to count
+    tof_stop: float = 0.3          # walls and ducks (body-height ToF returns); the ball and the floor do not count
+    side_stop: float = 0.22        # a wall this close in the side columns: no turn in place toward it
     # The shipped kicks (measured, `walker-facts`-style, on the walker): a
     # ball 0.08 m ahead of the trunk and 0.06 m to the kicking foot's side
     # flies 1.6 m; 0.10 m dead ahead barely moves; the other side, nothing.
     kick_ahead: float = 0.08
     kick_side: float = 0.06
-    lineup_range: float = 0.6      # a ball seen inside this is worth lining up on (the last 0.3 m are blind)
+    lineup_range: float = 0.6      # a ball seen inside this is worth lining up on
+    refresh_min: float = 0.35      # …and the spot is re-planned from sightings down to this range, then walked blind
     lineup_tol: float = 0.03       # trunk within this of the kicking spot: kick
     lineup_s: float = 4.0          # give up a line-up after this long
     settle_s: float = 0.4          # stand this long on the spot before the kick (robotd kicks at standing tuning)
-    kick_clear: float = 0.35       # no kick with anything closer than this ahead (upper ToF rows)
+    kick_clear: float = 0.35       # no kick with anything closer than this ahead
     aim_tol: float = 0.25          # face the kick direction within this before kicking (rad)
     aim_max: float = 1.05          # aim at the goal only within this of the line of sight (rad)
-    # Yielding to a duck that clearly has the ball: OFF by default. Measured
-    # over 8 seeds × 300 s: off 1.50 goals / 8.5 kicks / 2.12 falls a run,
-    # on (0.5 m) 1.12 / 7.0 / 2.12 — it costs play and saves nothing.
+    # The head. Level, the camera loses a floor ball ~0.3 m out. Pitched
+    # by `_gaze` (a law that puts the ball on the camera's axis: measured
+    # 0.6 of command = 0.647 rad of camera, 0.20 m up) while WALKING at a
+    # ball inside `head_range`, it keeps the ball in view to ~0.2 m, so the
+    # line-up spot is refreshed to `refresh_min` instead of 0.6 m. Only
+    # while walking: the walker cannot turn in place with its head down
+    # (measured, tidy.py). Re-planning the spot from sightings INSIDE
+    # refresh_min was measured and dropped: at 0.2 m the bearing noise is
+    # centimetres and the foot choice flipped, the spot dithered for 8 s.
+    head_down: float = 0.6
+    head_range: float = 0.9
+    head_gain: float = 0.75
+    cam_level: float = 0.197
+    cam_z: float = 0.21
+    # After a kick the ball is ahead and low: stand and look down `look_s`
+    # before searching (measured: a 9 s search spin with the ball 0.17 m
+    # ahead). A search dips the head every `search_dip_every`.
+    look_s: float = 0.8
+    look_range: float = 0.3
+    search_dip_every: float = 1.5
+    search_dip_s: float = 0.6
+    dip_range: float = 0.22
+    # Dribbling: OFF (inf). Measured — a ball pushed at 0.3 m/s for half a
+    # second rolls on at about the walking speed on this floor and the duck
+    # walks behind it without ever lining up; the kick wins. ~1.4 to try.
+    push_beyond: float = math.inf
+    push_behind: float = 0.16
+    push_speed: float = 0.3
+    push_s: float = 0.5
     # The other duck's BODY (measured over 4 traced runs: 5 of 7 falls had the
     # other duck 3–9 cm away and this one turning in place — search, blocked
     # or lining up — the walker tips over when it turns against a body it
@@ -309,45 +352,86 @@ class ChaseParams:
     duck_keepout: float = 0.4
     duck_touch: float = 0.22
     duck_bearing: float = 1.2      # rad off the nose that counts as "ahead"
-    yield_range: float = 0.0       # > 0: another duck this close and clearly nearer the ball has it: stand and wait…
-    yield_ratio: float = 0.7       # …"clearly": its range under this fraction of ours (width ranges are rough)
-    yield_s: float = 1.5           # …for at most this long
-    yield_cooldown_s: float = 3.0  # …and not again for this long
+    # Standing against something (avoid, blocked) longer than `stuck_s`:
+    # two ducks meeting at the ball otherwise stand and wait for each
+    # other (traced: 8 s nose to nose). Retreat: turn toward the freer
+    # side, then walk clear.
+    stuck_s: float = 1.5
+    retreat_turn_s: float = 1.0
+    retreat_walk_s: float = 1.2
+    # Team play (brain/team.py): a supporter stands `support_back` from the
+    # ball toward its own goal, `support_side` to the side per rank, facing
+    # the ball, and never inside `support_min` of it.
+    support_back: float = 0.7
+    support_side: float = 0.45
+    support_min: float = 0.45
+    # Yielding to a duck that clearly has the ball: OFF by default. Measured
+    # over 8 seeds × 300 s: off 1.50 goals / 8.5 kicks / 2.12 falls a run,
+    # on (0.5 m) 1.12 / 7.0 / 2.12 — it costs play and saves nothing.
+    yield_range: float = 0.0
+    yield_ratio: float = 0.7
+    yield_s: float = 1.5
+    yield_cooldown_s: float = 3.0
+
+
+def _wrap(a: float) -> float:
+    return math.atan2(math.sin(a), math.cos(a))
 
 
 class Chase:
-    """Walk at the nearest ball, line up, and KICK it with the shipped kick
-    policy (roadmap soccer, first form). Tracks the ball (brain/tracker.py)
-    while it is in view; a floor ball leaves both the camera and the ToF
-    in the last ~0.3 m, so the line-up is dead reckoning in odometry to a
-    spot `kick_ahead` behind the ball and `kick_side` to the foot's side,
-    then a 0.5 s kick window. Searches turning left. The ToF bumper reads
-    only the upper rows so the ball itself does not stop the chase."""
+    """Walk at the nearest ball, line up behind it on the line to the goal,
+    and KICK it with the shipped kick policy (roadmap soccer). Tracks the
+    ball (brain/tracker.py) with the head pitched down on the way in; a
+    floor ball leaves the camera ~0.2 m out, so the last leg is dead
+    reckoning in odometry to a spot `kick_ahead` behind the ball and
+    `kick_side` to the foot's side, then a 0.5 s kick window. Keeps off
+    the other ducks and the walls, retreats when stood against something,
+    and in a team (brain/team.py) takes the attacker's or a supporter's
+    role. Searches turning left, dipping the head for a near ball."""
 
     kind = "chase"
+    wants_head = True
     DET_MAX_AGE = 0.4
     TOF_MAX_AGE = 0.25
 
-    def __init__(self, p: ChaseParams = ChaseParams()):
+    def __init__(self, p: ChaseParams = ChaseParams(), goal: tuple[float, float] | None = None,
+                 team=None, duck_id: str = ""):
         self.p = p
+        self.goal = None if goal is None else (float(goal[0]), float(goal[1]))
+        self.team = team
+        self.duck_id = duck_id
         self.tracker = Tracker()
         self.gait = GaitWatch()
         self.reset()
 
     def reset(self) -> None:
         self.state = "search"
+        self.role = "attack"
         self.last_bearing = 0.0
         self.last_seen_t: float | None = None
         self._senses: Senses | None = None
         self.last = (0.0, 0.0, 0.0)
         self.kicks = 0
-        self.spot: tuple[float, float, str, float] | None = None   # odom-frame kicking spot, foot, kick heading
+        self.pushes = 0
+        self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"
         self.attack: float | None = None                            # heading of the goal it attacks (first odom yaw)
         self.t_state = 0.0
         self._yield_t0 = -9.0
         self._yield_end = -9.0
+        self._poses: list[tuple[float, float, float, float]] = []      # (t, x, y, yaw) over the stuck window
+        self._retreat_t0 = -9.0
+        self._retreat_sign = 1.0
+        self._look_t0 = -9.0
+        self._search_t0 = -9.0
+        self._prev_skill = None
         self.tracker.reset()
         self.gait.reset()
+
+    def _gaze(self, rng: float) -> float:
+        """head_pitch that puts a floor ball at `rng` on the camera's axis."""
+        p = self.p
+        want = math.atan2(p.cam_z - 0.035, max(rng, 0.05))
+        return float(np.clip((want - p.cam_level) / p.head_gain, 0.0, p.head_down))
 
     def inputs(self) -> dict:
         if self._senses is None:
@@ -357,39 +441,70 @@ class Chase:
             "bearing": round(self.last_bearing, 3), "range": None,
             "since": round(self._senses.t - self.last_seen_t, 2)}
         out["tracks"] = self.tracker.payload(self._senses.t)
-        out["chase"] = {"kicks": self.kicks, "spot": None if self.spot is None else
-                        [round(self.spot[0], 3), round(self.spot[1], 3), self.spot[2]]}
+        out["chase"] = {"kicks": self.kicks, "pushes": self.pushes, "role": self.role,
+                        "spot": None if self.spot is None else
+                        [round(self.spot[0], 3), round(self.spot[1], 3), self.spot[2] or self.spot[4]]}
+        if self.team is not None:
+            out["team"] = self.team.payload(self._senses.t)
         return out
 
-    def _lineup_spot(self, odom, ball) -> tuple[float, float, str, float]:
-        """Where to stand to kick a ball seen at (bearing, range): behind it
-        on the line the kick should go — toward the goal the duck attacks
-        (`self.attack`, the heading it was placed with; None = the current
-        line of sight) — offset sideways so the nearer foot meets it. The
-        left foot kicks a ball to its LEFT. Returns (x, y, foot, heading)."""
-        p = self.p
+    # -- geometry -------------------------------------------------------------
+    def _ball_xy(self, odom, ball) -> tuple[float, float]:
         x, y, yaw = odom
         a = yaw + ball.bearing
-        bx, by = x + ball.range * math.cos(a), y + ball.range * math.sin(a)
-        # Kick direction: toward the goal when that costs less than `aim_max`
-        # of detour around the ball, else along the line of sight — a full
-        # walk-around crosses walls and the other duck (measured: aimed-only
-        # lined up 4 kicks a run and fell twice; line-of-sight-only kicked 11
-        # times and fell 1.25; goals were 1.0 either way).
-        u = a
-        if self.attack is not None:
-            off = math.atan2(math.sin(self.attack - a), math.cos(self.attack - a))
-            if abs(off) < p.aim_max:
-                u = self.attack
-        # Which foot: the one that ends nearer the ball as the duck comes in
-        # behind it along u, judged from where the duck is now.
-        rel = math.atan2(math.sin(math.atan2(by - y, bx - x) - u), math.cos(math.atan2(by - y, bx - x) - u))
-        foot = "kick_left" if rel >= 0 else "kick_right"
-        side = -p.kick_side if foot == "kick_left" else p.kick_side     # stand to the ball's other side
-        sx = bx - p.kick_ahead * math.cos(u) - side * math.sin(u)
-        sy = by - p.kick_ahead * math.sin(u) + side * math.cos(u)
-        return sx, sy, foot, u
+        return x + ball.range * math.cos(a), y + ball.range * math.sin(a)
 
+    def _own_goal(self, odom) -> tuple[float, float]:
+        if self.goal is not None:
+            return -self.goal[0], self.goal[1]                  # the pitch is centred on the origin
+        a = self.attack if self.attack is not None else odom[2]
+        return odom[0] - 2.0 * math.cos(a), odom[1] - 2.0 * math.sin(a)
+
+    def _plan(self, odom, ball) -> tuple[float, float, str | None, float, str]:
+        """Where to stand to kick a ball seen at (bearing, range): behind it
+        on the line the kick should go — toward the goal (`goal`, in the
+        odometry frame; without one, the heading the duck was placed with)
+        when that costs under `aim_max` of detour, else along the line of
+        sight (a walk-round crossed walls and the other duck — measured) —
+        offset sideways so the nearer foot meets it. The left foot kicks a
+        ball to its LEFT. A far goal (`push_beyond`) makes it a push spot
+        squarely behind the ball. Returns (x, y, foot, heading, mode)."""
+        p = self.p
+        x, y, yaw = odom
+        bx, by = self._ball_xy(odom, ball)
+        los = yaw + ball.bearing
+        if self.goal is not None:
+            u = math.atan2(self.goal[1] - by, self.goal[0] - bx)
+            far = math.hypot(self.goal[0] - bx, self.goal[1] - by) > p.push_beyond
+        else:
+            u, far = (self.attack if self.attack is not None else los), False
+        if abs(_wrap(u - los)) > p.aim_max:
+            u, far = los, False
+        if far:
+            return bx - p.push_behind * math.cos(u), by - p.push_behind * math.sin(u), None, u, "push"
+        rel = _wrap(math.atan2(by - y, bx - x) - u)
+        foot = "kick_left" if rel >= 0 else "kick_right"
+        if self.spot is not None and self.spot[2] in ("kick_left", "kick_right") and abs(rel) < 0.3:
+            foot = self.spot[2]                                   # hysteresis: nearly on the line, keep the foot
+        side = -p.kick_side if foot == "kick_left" else p.kick_side     # stand to the ball's other side
+        return (bx - p.kick_ahead * math.cos(u) - side * math.sin(u),
+                by - p.kick_ahead * math.sin(u) + side * math.cos(u), foot, u, "kick")
+
+    def _servo(self, odom, target, cold, stop: float, slow_in: float = 0.2) -> tuple[float, float, float, float]:
+        """(vx, wz, dist, bearing) toward a point: turn in place first when
+        it is well off the nose, walk with steering otherwise, stop inside."""
+        p = self.p
+        dx, dy = target[0] - odom[0], target[1] - odom[1]
+        dist = math.hypot(dx, dy)
+        bearing = _wrap(math.atan2(dy, dx) - odom[2])
+        if dist <= stop:
+            return 0.0, 0.0, dist, bearing
+        if abs(bearing) > 0.5 and dist > 0.08:
+            vx, _, wz = turn(bearing, cold)
+            return vx, wz, dist, bearing
+        return (0.25 if dist < slow_in else p.speed), float(np.clip(p.k_turn * bearing, -1.0, 1.0)), dist, bearing
+
+    # -- the machine ----------------------------------------------------------
     def step(self, senses: Senses) -> Intent:
         self._senses = senses
         p = self.p
@@ -401,30 +516,49 @@ class Chase:
         self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), t, odom[2])
         ball = self.tracker.best(p.target_cls, t, min_hits=1)
         fresh = ball is not None and ball.age(t) <= self.DET_MAX_AGE
-        # The other duck: if it is close and nearer the ball than we are,
-        # it has the ball — yield rather than tangle (measured: with kicks
-        # working, the remaining falls were two ducks on one ball).
+        seen = ball is not None and ball.age(t) < p.lost_s
+        if self.team is not None:
+            self.team.claim(self.duck_id, t, ball.range if seen else math.inf,
+                            self._ball_xy(odom, ball) if seen else None)
+            self.role = self.team.role(self.duck_id, t)
         other = self.tracker.best("duck", t, min_hits=1)
         near_duck = (other is not None and other.age(t) <= 0.6 and other.range < p.duck_keepout
                      and abs(other.bearing) < p.duck_bearing)
-        # Asymmetric and time-limited, or both stand and wait for each other
-        # (measured: a symmetric yield gave 0 falls and 0.25 goals a run).
         clearly_nearer = (other is not None and other.age(t) <= p.lost_s and other.range < p.yield_range
                           and ball is not None and other.range < p.yield_ratio * ball.range
-                          and abs(math.atan2(math.sin(other.bearing - ball.bearing), math.cos(other.bearing - ball.bearing))) < 0.8)
+                          and abs(_wrap(other.bearing - ball.bearing)) < 0.8)
         if clearly_nearer and self.state != "yield" and t - self._yield_end > p.yield_cooldown_s:
             self._yield_t0 = t
         yielding = clearly_nearer and t - self._yield_t0 < p.yield_s
         if self.state == "yield" and not yielding:
             self._yield_end = t
         tof = senses.fresh_tof(self.TOF_MAX_AGE)
-        ahead = np.inf
+        ahead = left_near = right_near = np.inf
         if tof is not None:
-            ahead = float(_column_clearance(tof.depth_mm, tof.valid, WanderParams(rows=(2, 5)))[3:5].min())
+            cols = tof_clearance_3d(tof)          # body-height things only: not the floor the head looks at, not the ball
+            ahead, left_near, right_near = float(cols[3:5].min()), float(cols[0:3].min()), float(cols[5:8].min())
         skill = None
+        head = (0.0, 0.0, 0.0, 0.0)
+        gaze_at: float | None = None
+        retreating = t - self._retreat_t0 < p.retreat_turn_s + p.retreat_walk_s
+        if self._prev_skill is not None and senses.skill is None:
+            self._look_t0 = t                                   # the kick window just ended: look for the ball ahead
+        self._prev_skill = senses.skill
+        looking = t - self._look_t0 < p.look_s and not fresh
         if senses.skill is not None:
             vx, wz = 0.0, 0.0                                   # the kick owns the reflex tier
             self.state = "kick"
+        elif looking:
+            vx, wz = 0.0, 0.0
+            gaze_at = p.look_range
+            self.state = "look"
+        elif retreating:
+            if t - self._retreat_t0 < p.retreat_turn_s:
+                vx, _, wz = turn(self._retreat_sign, cold)
+            else:
+                vx, wz = p.speed, 0.0
+            self.spot = None
+            self.state = "retreat"
         elif near_duck:
             # Turn AWAY from it (the side that puts it behind us), never
             # into it, and not at all while it is touching: a stand is the
@@ -438,82 +572,158 @@ class Chase:
                 if abs(other.bearing) < 0.5:
                     vx = 0.0
             self.state = "avoid"
+        elif self.role == "support":
+            vx, wz = self._support(odom, ball, seen, cold)
         elif yielding and self.state not in ("settle",):
             vx, wz = 0.0, 0.0
             self.spot = None
             self.state = "yield"
+        elif self.state == "push":
+            _, _, _, u, _ = self.spot
+            vx, wz = p.push_speed, float(np.clip(p.k_turn * _wrap(u - odom[2]), -1.0, 1.0))
+            if t - self.t_state >= p.push_s:
+                self.spot = None
+                self.state = "search"
+                self._look_t0 = t
         elif self.state in ("lineup", "settle") and self.spot is not None:
-            # Refresh the spot while the ball is still in view, then walk it blind.
-            if fresh and ball.range < p.lineup_range:
-                self.spot = self._lineup_spot(odom, ball)
-            sx, sy, foot, u = self.spot
-            dx, dy = sx - odom[0], sy - odom[1]
-            dist = math.hypot(dx, dy)
-            bearing = math.atan2(math.sin(math.atan2(dy, dx) - odom[2]), math.cos(math.atan2(dy, dx) - odom[2]))
-            heading_err = math.atan2(math.sin(u - odom[2]), math.cos(u - odom[2]))
-            if dist <= p.lineup_tol and abs(heading_err) > p.aim_tol:
-                # On the spot but not facing the goal: square up before kicking.
-                vx, _, wz = turn(heading_err, cold)
+            # Refresh the spot while the ball is in view and not too close
+            # (see refresh_min), then walk the rest blind.
+            if fresh and self.state != "settle" and p.refresh_min <= ball.range < p.head_range:
+                self.spot = self._plan(odom, ball)
+            sx, sy, foot, u, mode = self.spot
+            vx, wz, dist, bearing = self._servo(odom, (sx, sy), cold, p.lineup_tol)
+            heading_err = _wrap(u - odom[2])
+            # Hysteresis on both: a settling duck wobbles a centimetre and a
+            # few hundredths of a radian, which flipped it between the
+            # square-up and the settle at the tolerance (measured: 22 s
+            # standing at the spot, no kick).
+            settling = self.state == "settle"
+            on_spot = dist <= p.lineup_tol + (0.03 if settling else 0.0)
+            squared = abs(heading_err) <= p.aim_tol + (0.15 if settling else 0.0)
+            if on_spot and not squared:
+                vx, _, wz = turn(heading_err, cold)            # on the spot but not facing the goal: square up
                 self.state = "lineup"
-            elif dist <= p.lineup_tol:
-                # Stand first: robotd runs a kick at the standing tuning, and a
-                # kick started mid-stride fell 4 times in 7 here. Something
-                # within `kick_clear` ahead (a wall, the other duck) means the
-                # swing lands on it: let it go and look again.
+            elif on_spot:
+                # Stand first: robotd runs a kick at the standing tuning, and
+                # a kick started mid-stride fell 4 times in 7 here. Something
+                # within `kick_clear` ahead (a wall, a duck) means the swing
+                # lands on it: let it go and look again.
                 vx, wz = 0.0, 0.0
                 if ahead < p.kick_clear:
                     self.spot = None
                     self.state = "search"
-                elif self.state != "settle":
+                elif not settling:
                     self.state = "settle"
                     self.t_state = t
                 elif t - self.t_state >= p.settle_s:
-                    skill = foot
-                    self.kicks += 1
-                    self.spot = None
-                    self.state = "kick"
+                    if mode == "push":
+                        self.pushes += 1
+                        self.state = "push"
+                        self.t_state = t
+                        vx, wz = p.push_speed, 0.0
+                    else:
+                        skill = foot
+                        self.kicks += 1
+                        self.spot = None
+                        self.state = "kick"
             elif self.state == "lineup" and t - self.t_state > p.lineup_s:
                 self.spot = None
                 self.state = "search"
                 vx, _, wz = turn(1.0, cold)
-            elif abs(bearing) > 0.5 and dist > 0.08:
-                vx, _, wz = turn(bearing, cold)
-                self.state = "lineup"
             else:
-                vx = 0.25 if dist < 0.2 else p.speed
-                wz = float(np.clip(p.k_turn * bearing, -1.0, 1.0))
                 self.state = "lineup"
-        elif ball is not None and ball.age(t) < p.lost_s:
+                if vx > 0 and fresh and ball.range < p.head_range and abs(ball.bearing) < 0.6:
+                    gaze_at = ball.range
+        elif seen:
             self.last_bearing = ball.bearing
             if fresh:
                 self.last_seen_t = t
             if fresh and ball.range < p.lineup_range and abs(ball.bearing) < 0.5:
-                self.spot = self._lineup_spot(odom, ball)
+                self.spot = self._plan(odom, ball)
                 self.state = "lineup"
                 self.t_state = t
                 vx, wz = p.speed, float(np.clip(p.k_turn * ball.bearing, -1.0, 1.0))
+                gaze_at = ball.range
             elif abs(ball.bearing) > p.turn_first:
                 vx, _, wz = turn(ball.bearing, cold)
                 self.state = "turn"
             else:
                 vx, wz = p.speed, float(np.clip(p.k_turn * ball.bearing, -1.0, 1.0))
                 self.state = "chase"
+                if fresh and ball.range < p.head_range:
+                    gaze_at = ball.range
         else:
+            if self.state != "search":
+                self._search_t0 = t
             vx, _, wz = turn(1.0, cold)
             self.state = "search"
-        if ahead < p.tof_stop and vx > 0:
+            if (t - self._search_t0) % p.search_dip_every < p.search_dip_s:
+                vx, wz = 0.0, 0.0                               # a standing look down: a near ball is below the level camera
+                gaze_at = p.dip_range
+        # A wall beside us: no turn in place toward it (measured: a line-up
+        # turning against the boards tipped over). Turn toward the side
+        # with more room — in a corner that is still a turn, the one move
+        # that gets out of a corner (standing there measured as a deadlock).
+        if vx <= TURN_KICK and wz != 0.0 and self.state != "retreat":
+            if wz > 0 and left_near < p.side_stop and right_near > left_near:
+                wz = -1.0
+            elif wz < 0 and right_near < p.side_stop and left_near > right_near:
+                wz = 1.0
+        if ahead < p.tof_stop and vx > 0 and self.state != "push":
             # A wall or the other duck right there: no walking, no cold-turn
             # creep (measured: every remaining fall was a line-up walking
             # into a wall or a kicked turn creeping into one). Turning still
             # happens — the left turn that starts from a standstill.
             vx = 0.0
-            if self.state in ("lineup", "settle"):
+            if self.state in ("lineup", "settle", "support"):
                 wz = 1.0 if wz > 0 else -1.0 if wz < 0 else 0.0
             else:
                 wz = 1.0
                 self.state = "blocked"
+        # Not moving while stood against something (avoid, blocked) for
+        # `stuck_s`, whatever the state labels say frame to frame: retreat.
+        self._poses.append((t, odom[0], odom[1], odom[2]))
+        while self._poses and t - self._poses[0][0] > p.stuck_s:
+            self._poses.pop(0)
+        if self.state in ("avoid", "blocked", "yield") and len(self._poses) > 1 \
+                and t - self._poses[0][0] >= p.stuck_s - 0.05:
+            _, x0, y0, yaw0 = self._poses[0]
+            if math.hypot(odom[0] - x0, odom[1] - y0) < 0.05 and abs(_wrap(odom[2] - yaw0)) < 0.3:
+                self._poses = []
+                self._retreat_t0 = t
+                self._retreat_sign = 1.0 if left_near >= right_near else -1.0
+        if gaze_at is not None and (vx > 0 or self.state in ("look", "search")):
+            head = (0.0, self._gaze(gaze_at), 0.0, 0.0)
         self.last = (vx, 0.0, wz)
-        return Intent(twist=self.last, note=self.state, skill=skill)
+        return Intent(twist=self.last, head=head, note=self.role if self.role != "attack" else self.state, skill=skill)
+
+    def _support(self, odom, ball, seen: bool, cold: bool) -> tuple[float, float]:
+        """A supporter: stand back from the ball toward our own goal, offset
+        sideways by rank, facing the ball. The ball's position comes from
+        my own track when I see it, else from a teammate's claim."""
+        p = self.p
+        t = self._senses.t
+        bxy = self._ball_xy(odom, ball) if seen else (self.team.ball(t) if self.team is not None else None)
+        self.spot = None
+        if bxy is None:
+            self.state = "support"
+            vx, _, wz = turn(1.0, cold)                    # nobody has it: look for it
+            return vx, wz
+        og = self._own_goal(odom)
+        gx, gy = og[0] - bxy[0], og[1] - bxy[1]
+        gn = math.hypot(gx, gy)
+        ux, uy = (gx / gn, gy / gn) if gn > 1e-6 else (-math.cos(odom[2]), -math.sin(odom[2]))
+        rank = self.team.rank(self.duck_id, t) if self.team is not None else 0
+        side = p.support_side * ((rank + 1) // 2) * (1 if rank % 2 == 0 else -1)
+        target = (bxy[0] + p.support_back * ux - side * uy, bxy[1] + p.support_back * uy + side * ux)
+        vx, wz, dist, _ = self._servo(odom, target, cold, 0.12)
+        if math.hypot(bxy[0] - odom[0], bxy[1] - odom[1]) < p.support_min and vx > 0:
+            vx = 0.0                                        # the attacker's room
+        if dist <= 0.12:
+            b = _wrap(math.atan2(bxy[1] - odom[1], bxy[0] - odom[0]) - odom[2])
+            vx, wz = (0.0, 0.0) if abs(b) < 0.3 else turn(b, cold)[::2]
+        self.state = "support"
+        return vx, wz
 
 
 def _r(v) -> float | None:

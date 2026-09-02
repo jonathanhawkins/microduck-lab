@@ -150,3 +150,24 @@ def test_shipped_brains_load_with_their_observation_version():
         out = b.step(Senses(t=0.0, det=det, det_age=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
         assert all(lo - 1e-6 <= v <= hi + 1e-6 for v, lo, hi in zip(out.twist, ACT_LOW, ACT_HIGH))
         assert b.state == "tracking"
+
+
+def test_reflex_gaze_follows_the_tracked_target_and_variety_builds():
+    """The reflex tier under a version-2 brain: the head yaws toward the
+    tracked person (gaze_gain × bearing, clipped), nothing for version 1;
+    the variety task builds two free boxes and a second duck."""
+    env = BrainEnv(FollowTask(episode_s=1.0), seed=0)
+    env.reset(seed=1)
+    from microduck_local.sensors.detector import Detection, DetectionFrame
+    env._builder.tracker.reset()
+    for k in range(2):
+        env._builder.tracker.update(DetectionFrame(env.world.t - 0.02 * (1 - k),
+                                                   [Detection("person", "p0", 0.5, 0.0, 0.3, 1.0, 0.9)]), env.world.t, 0.0)
+    assert env.gaze() == pytest.approx(0.4, abs=0.02)
+    v1 = BrainEnv(FollowTask(episode_s=1.0), seed=0, obs_version=1)
+    v1.reset(seed=1)
+    assert v1.gaze() == 0.0
+    var = BrainEnv(FollowTask(episode_s=1.0, furniture=2, distractor=True), seed=0)
+    assert len(var._box_joints) == 2 and var.distractor is not None
+    var.reset(seed=2)
+    var.step(np.zeros(3, np.float32))

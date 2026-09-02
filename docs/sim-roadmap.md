@@ -21,10 +21,15 @@ the tree, and Track 12 has its first working loop:
   odometry frame, painted on the page, with a wall-line loop closure
   against drift (5.1, 5.5: pose error under a 1.5°/s bias halved);
   the `pitch` scenario with two `chase` brains, the robot's shipped kick
-  policies as skills, goal counting and `eval-pitch` (the first of the
-  soccer track: 1.38 goals, 6.5 kicks, 0.50 falls a run over 300 s and 8
-  seeds, with a body-aware avoid of the other duck — falls were 2.1
-  before it — and kick windows at robotd's standing gain).
+  policies as skills, goal counting and `eval-pitch` (soccer, first form:
+  1.38 goals, 6.5 kicks, 0.50 falls a run over 300 s and 8 seeds, with a
+  body-aware avoid of the other duck — falls were 2.1 before it — and
+  kick windows at robotd's standing gain), then the second form — the
+  head tracks the ball on the way in, a 3D-placed ToF bumper, wall and
+  retreat rules, goal-centre aiming — at 1.12 / 11.8 / 0.50, and teams
+  (`brain/team.py`, `pitch-2v2` / `pitch-3v3`): 2v2 2.25 goals, 10.8
+  kicks, 3.0 falls a run. Dribbling, a walk-round and close-range
+  re-planning were built, measured worse, and ship off with the numbers.
   `brains/follow-v1` ships in the repo. Upstream is pinned (microduck_rl
   badc4e7, the 2026-09 CAD re-export; microduck 2c61dcc) and every
   model-dependent number above was re-measured against it — the tidy loop
@@ -336,7 +341,7 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 4.3 | **Ball perception** | Detector class `ball` (bearing, size ⇒ distance) plus ToF blob; honest label in the UI that the real robot cannot see a ball until someone trains that detector class. | S | ★★★★ |
 | 4.4 | **Striker brain (RL)** | 1v0: dribble toward the goal; reward = ball progress toward goal, being behind the ball, no collisions; discrete kick selection via 3.5. | M | ★★★★★ |
 | 4.5 | **Self-play ladder** | 1v1, then 2v2 with parameter sharing; league of past checkpoints as opponents; ELO in the scoreboard; the lesson is non-stationarity. | L | ★★★★★ |
-| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". | M | ★★★★ |
+| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". **Done (first form):** `Duck.team`, `make_pitch(per_side)`, a team blackboard with attacker/support roles (`brain/team.py`), `pitch-2v2` / `pitch-3v3` built-ins, `eval-pitch --per-side`; 2v2 measured 2.25 goals, 10.8 kicks, 3.0 falls a run. | M | ★★★★ |
 | 4.7 | **Goal / pitch sensing honesty** | Options: known pitch + drifting odometry (real-ish), or detector classes for goal markers. Expose the choice in the scenario; teach why it matters. | S | ★★★ |
 | 4.8 | **Flocking / follow-the-leader** | Upstream's sketch verbatim: RSSI holds spacing, ToF handles the duck ahead; then a learned version. Cheap once 1.2 + 1.6 exist. | S | ★★★ |
 | 4.9 | **Synchronized dance** | Shared BLE beat drives head-bobs across ducks; the speaker plays each duck's voice on the beat. Pure delight, ten lines once 1.6 and 6.x exist. | S | ★★ |

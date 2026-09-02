@@ -52,3 +52,19 @@ def test_gait_watch_and_turn_kick():
     assert g.update(Senses(t=1.02, speed=0.0, odom=(0.0, 0.0, 0.02))) is False
     assert turn(-1.0, cold=True) == (TURN_KICK, 0.0, -1.0) and turn(-1.0, cold=False) == (0.0, 0.0, -1.0)
     assert turn(+1.0, cold=True) == (TURN_KICK, 0.0, 1.0)
+
+
+def test_tracks_are_kept_in_the_body_frame_whatever_the_head_is_doing():
+    """A detection frame carries the camera's yaw relative to the body;
+    the track's bearing is the BODY bearing, so a head turned 0.4 rad left
+    seeing a person dead ahead of the lens yields a track at +0.4."""
+    tr = Tracker()
+    fr = DetectionFrame(0.0, [det("person", 0.0, 1.0, "p0")], cam_yaw=0.4)
+    tr.update(fr, 0.0, yaw=0.0)
+    tr.update(DetectionFrame(0.1, [det("person", 0.02, 1.0, "p0")], cam_yaw=0.4), 0.1, yaw=0.0)
+    p = tr.best("person", 0.1)
+    assert p is not None and abs(p.bearing - 0.41) < 0.02 and p.hits == 2
+    # The head swings back to centre and sees it at +0.4 in the lens: same track, same body bearing.
+    tr.update(DetectionFrame(0.2, [det("person", 0.4, 1.0, "p0")], cam_yaw=0.0), 0.2, yaw=0.0)
+    q = tr.best("person", 0.2)
+    assert q is not None and q.id == p.id and abs(q.bearing - 0.4) < 0.03

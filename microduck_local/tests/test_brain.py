@@ -135,8 +135,10 @@ def test_chase_brain_walks_at_a_tracked_ball_and_searches_left_without_one():
     from microduck_local.sensors.detector import Detection, DetectionFrame
     b = REGISTRY.make("chase")
     assert b.kind == "chase"
-    none = b.step(Senses(t=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
-    assert none.twist == (TURN_KICK, 0.0, 1.0) and none.note == "search"
+    dip = b.step(Senses(t=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert dip.twist == (0.0, 0.0, 0.0) and dip.note == "search" and dip.head[1] > 0.3   # a search opens with a look down
+    none = b.step(Senses(t=0.7, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert none.twist == (TURN_KICK, 0.0, 1.0) and none.note == "search" and none.head == (0.0, 0.0, 0.0, 0.0)
     fr = DetectionFrame(0.1, [Detection("ball", "ball0", 0.2, -0.3, 0.05, 1.0, 0.9)])
     seen = b.step(Senses(t=0.1, det=fr, det_age=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
     assert seen.note == "chase" and seen.twist[0] > 0.3 and seen.twist[2] > 0

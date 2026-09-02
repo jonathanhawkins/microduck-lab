@@ -53,7 +53,9 @@ def run(brain_kind: str, preset: str | None, episodes: int, seed: int, task: Fol
                      "seen": seen / n, "bumps": bumps, "falls": falls, "decisions": n})
     keys = ("return", "in_band", "dist_err", "seen", "bumps", "falls")
     summary = {k: float(np.mean([r[k] for r in rows])) for k in keys}
-    return {"brain": brain_kind, "preset": preset or "random", "episodes": episodes, **summary, "rows": rows}
+    return {"brain": brain_kind, "preset": preset or "random", "episodes": episodes,
+            "variety": bool(task.furniture or task.distractor), "reflex": bool(task.gaze_gain or task.bump_stop),
+            **summary, "rows": rows}
 
 
 def main() -> None:
@@ -63,12 +65,16 @@ def main() -> None:
     ap.add_argument("--episodes", type=int, default=6)
     ap.add_argument("--seed", type=int, default=100)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--variety", action="store_true", help="two free boxes re-scattered each episode + a duck walking a circle")
+    ap.add_argument("--no-reflex", action="store_true", help="no gaze and no bump stop under the brain")
     args = ap.parse_args()
-    res = run(args.brain, args.preset, args.episodes, args.seed)
+    task = FollowTask(furniture=2 if args.variety else 0, distractor=args.variety,
+                      gaze_gain=0.0 if args.no_reflex else 0.8, bump_stop=0.0 if args.no_reflex else 0.25)
+    res = run(args.brain, args.preset, args.episodes, args.seed, task)
     if args.json:
         print(json.dumps(res))
     else:
-        print(f"{res['brain']} @ {res['preset']}: in-band {res['in_band']:.2f} · |err| {res['dist_err']:.2f} m · "
+        print(f"{res['brain']} @ {res['preset']}{' +variety' if res['variety'] else ''}{'' if res['reflex'] else ' no-reflex'}: in-band {res['in_band']:.2f} · |err| {res['dist_err']:.2f} m · "
               f"seen {res['seen']:.2f} · bumps {res['bumps']:.1f}/ep · falls {res['falls']:.2f}/ep · return {res['return']:.1f}")
 
 

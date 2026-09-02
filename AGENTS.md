@@ -17,6 +17,15 @@ two upstream Pollen repos are cloned next to them (they are in `.gitignore`):
 
 ## Setup
 
+One command does all of the below (upstream clones at the pinned shas, `uv
+sync`, `npm install`, a smoke test) on a Mac or Linux:
+
+```bash
+git clone <this repo> microduck-workspace && cd microduck-workspace && ./scripts/setup.sh
+```
+
+By hand:
+
 ```bash
 git clone <this repo> microduck-workspace && cd microduck-workspace
 git clone https://github.com/pollen-robotics/microduck

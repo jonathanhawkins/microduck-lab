@@ -32,7 +32,7 @@ import numpy as np
 
 from .. import contract as C
 from ..sensors import DetectorNoise, TofNoise
-from ..world import Duck, Person, Scenario, World
+from ..world import Box, Duck, Person, Scenario, World
 from ..world.scenario import TOF_PRESETS
 from .runtime import Senses
 from .tracker import Tracker
@@ -163,6 +163,19 @@ class FollowTask:
     lose_penalty: float = 0.5
     bump_penalty: float = 1.0
     jerk_penalty: float = 0.05
+    # The reflex tier under the brain (both on the robot, neither learned):
+    # the head yaws toward the tracked target so the 62° camera keeps it
+    # while the body catches up (`gaze_gain` × body bearing, clipped to
+    # `gaze_max`), and a forward command is refused with something inside
+    # `bump_stop` ahead (0 = off). Version-1 observations (no tracker)
+    # get neither, so a version-1 brain sees the world it was trained in.
+    gaze_gain: float = 0.8
+    gaze_max: float = 0.6
+    bump_stop: float = 0.25
+    # Variety: `furniture` free boxes re-scattered each episode, and a
+    # second duck walking a slow circle as a moving non-target.
+    furniture: int = 0
+    distractor: bool = False
 
 
 class BrainEnv(gym.Env):
@@ -200,14 +213,26 @@ class BrainEnv(gym.Env):
 
     def _build_world(self) -> None:
         preset = self.fixed_preset or "datasheet"
-        sc = Scenario(name="brain-follow", floor=self.task.room,
-                      ducks=[Duck("d0", (0.0, 0.0, 0.0), None, preset, preset)],
+        t = self.task
+        ducks = [Duck("d0", (0.0, 0.0, 0.0), None, preset, preset)]
+        if t.distractor:
+            ducks.append(Duck("d1", (-1.5, 1.2, 0.0), None, None, None))
+        boxes = [Box((2.0 + 0.5 * i, -1.5, 0.15), (0.3, 0.3, 0.3), mass=3.0) for i in range(t.furniture)]
+        sc = Scenario(name="brain-follow", floor=t.room, ducks=ducks, boxes=boxes,
                       persons=[Person("p0", (1.0, 0.0), 0.0, path=self._random_path(),
-                                      speed=float(self.rng.uniform(*self.task.person_speed)))])
-        self.world = World(sc, infer_for={"d0": self._infer}, max_episode_s=1e9,
+                                      speed=float(self.rng.uniform(*t.person_speed)))])
+        infer = {"d0": self._infer}
+        if t.distractor:
+            infer["d1"] = self._infer
+        self.world = World(sc, infer_for=infer, max_episode_s=1e9,
                            seed=int(self.rng.integers(0, 2**31 - 1)))
         self.duck = self.world.ducks["d0"]
         self.person = self.world.persons["p0"]
+        self.distractor = self.world.ducks.get("d1")
+        self._box_joints = [j for j in range(self.world.model.njnt)
+                            if self.world.model.jnt_type[j] == 0 and "/" not in self.world.model.body(
+                                int(self.world.model.jnt_bodyid[j])).name
+                            and self.world.model.body(int(self.world.model.jnt_bodyid[j])).name.startswith("box")]
 
     def _randomize_episode(self) -> None:
         p = self.person
@@ -220,6 +245,16 @@ class BrainEnv(gym.Env):
         a = float(self.rng.uniform(-0.6, 0.6))
         p.spec.pos = (r * math.cos(a), r * math.sin(a))
         p.spec.yaw = float(self.rng.uniform(-math.pi, math.pi))
+        # Furniture lands anywhere but on the duck's start and the person's.
+        hx, hy = self.task.room[0] / 2 - 0.4, self.task.room[1] / 2 - 0.4
+        for j in self._box_joints:
+            q = int(self.world.model.jnt_qposadr[j])
+            for _ in range(20):
+                bx, by = float(self.rng.uniform(-hx, hx)), float(self.rng.uniform(-hy, hy))
+                if math.hypot(bx, by) > 0.7 and math.hypot(bx - p.spec.pos[0], by - p.spec.pos[1]) > 0.6:
+                    break
+            self._box_pending = getattr(self, "_box_pending", [])
+            self._box_pending.append((q, bx, by))
         if self.sense_dr and self.fixed_preset is None:
             name = str(self.rng.choice(TOF_PRESETS))
             self.duck.tof.noise = TofNoise.preset(name)
@@ -229,8 +264,14 @@ class BrainEnv(gym.Env):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
+        self._box_pending = []
         self._randomize_episode()
         self.world.reset()
+        for q, bx, by in self._box_pending:              # after the reset, which re-poses every free body
+            self.world.data.qpos[q:q + 3] = [bx, by, 0.15]
+            self.world.data.qpos[q + 3:q + 7] = [1.0, 0.0, 0.0, 0.0]
+            v = int(self.world.model.jnt_dofadr[[j for j in self._box_joints if int(self.world.model.jnt_qposadr[j]) == q][0]])
+            self.world.data.qvel[v:v + 6] = 0.0
         # Let the first sensor frames land before the first decision.
         for _ in range(self.decide_every):
             self.world.step()
@@ -263,10 +304,27 @@ class BrainEnv(gym.Env):
         bearing = math.atan2(math.sin(math.atan2(dy, dx) - yaw), math.cos(math.atan2(dy, dx) - yaw))
         return dist, float(bearing)
 
+    def gaze(self) -> float:
+        """The reflex tier's head yaw: toward the tracked target (version 2+)."""
+        tr = self._builder.tracker
+        if tr is None or not self.task.gaze_gain:
+            return 0.0
+        best = tr.best(self.task.target_cls, self.world.t, min_hits=1)
+        if best is None or best.age(self.world.t) > 1.0:
+            return 0.0
+        return float(np.clip(self.task.gaze_gain * best.bearing, -self.task.gaze_max, self.task.gaze_max))
+
     def step(self, action: np.ndarray):
         a = np.clip(np.asarray(action, np.float32), ACT_LOW, ACT_HIGH)
         w, d, t = self.world, self.duck, self.task
-        d.set_cmd(w.data, a)
+        if t.bump_stop and d.tof is not None and d.tof.last is not None and self._builder.tracker is not None:
+            mid = d.tof.last.depth_mm[2:6, 3:5]
+            if (mid[(mid > 0)] < t.bump_stop * 1000).any() and a[0] > 0:
+                a = a.copy()
+                a[0] = 0.0                                  # the reflex tier refuses to walk into it
+        d.set_cmd(w.data, a, (0.0, 0.0, self.gaze(), 0.0))
+        if self.distractor is not None:
+            self.distractor.set_cmd(w.data, (0.25, 0.0, 0.6))    # a slow circle (below 0.2 the walker stands)
         bumped = False
         falls0 = d.falls
         for _ in range(self.decide_every):

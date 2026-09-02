@@ -77,21 +77,25 @@ class Tracker:
         self._prev_yaw = yaw
         if frame is not None and frame.t != self._last_frame_t:
             self._last_frame_t = frame.t
-            self._associate(frame.detections, frame.t)
+            self._associate(frame.detections, frame.t, getattr(frame, "cam_yaw", 0.0))
         self.tracks = [tr for tr in self.tracks if t - tr.last_t <= p.coast_s]
         return self.tracks
 
-    def _associate(self, dets: list[Detection], t: float) -> None:
+    def _associate(self, dets: list[Detection], t: float, cam_yaw: float = 0.0) -> None:
+        """Detections come in the CAMERA's frame; tracks are kept in the
+        BODY's (a brain steers the body), so `cam_yaw` — where the head
+        was looking — is added on the way in."""
         p = self.p
         used: set[int] = set()
         hit: set[int] = set()
+        body = [math.atan2(math.sin(d.bearing + cam_yaw), math.cos(d.bearing + cam_yaw)) for d in dets]
         # Greedy nearest-first: best pairs first, one detection per track.
         pairs = []
         for i, d in enumerate(dets):
             for tr in self.tracks:
                 if tr.cls != d.cls:
                     continue
-                db = abs(math.atan2(math.sin(d.bearing - tr.bearing), math.cos(d.bearing - tr.bearing)))
+                db = abs(math.atan2(math.sin(body[i] - tr.bearing), math.cos(body[i] - tr.bearing)))
                 if db > p.gate_rad:
                     continue
                 if abs(d.range_est - tr.range) > p.gate_range_frac * max(tr.range, 0.3):
@@ -104,7 +108,7 @@ class Tracker:
             tr = next(x for x in self.tracks if x.id == tid)
             d = dets[i]
             k = p.smooth
-            tr.bearing = tr.bearing + k * math.atan2(math.sin(d.bearing - tr.bearing), math.cos(d.bearing - tr.bearing))
+            tr.bearing = tr.bearing + k * math.atan2(math.sin(body[i] - tr.bearing), math.cos(body[i] - tr.bearing))
             tr.elevation += k * (d.elevation - tr.elevation)
             tr.width += k * (d.width - tr.width)
             tr.range += k * (d.range_est - tr.range)
@@ -123,7 +127,7 @@ class Tracker:
         for i, d in enumerate(dets):
             if i in used:
                 continue
-            self.tracks.append(Track(self._next_id, d.cls, d.bearing, d.elevation, d.width, d.range_est, d.conf,
+            self.tracks.append(Track(self._next_id, d.cls, body[i], d.elevation, d.width, d.range_est, d.conf,
                                      t, t, name=d.name, names={d.name: 1} if d.name else {}))
             self._next_id += 1
 

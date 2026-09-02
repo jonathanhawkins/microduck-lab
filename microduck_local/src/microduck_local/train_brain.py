@@ -35,9 +35,10 @@ from .brain.brain_env import (
 from .brain.learned import brains_dir
 
 
-def make_env_fn(seed: int, fixed_preset: str | None):
+def make_env_fn(seed: int, fixed_preset: str | None, variety: bool = False):
     def fn():
-        return BrainEnv(FollowTask(), seed=seed, fixed_preset=fixed_preset)
+        return BrainEnv(FollowTask(furniture=2 if variety else 0, distractor=variety), seed=seed,
+                        fixed_preset=fixed_preset)
     return fn
 
 
@@ -93,6 +94,7 @@ def main() -> None:
     ap.add_argument("--init-from", default=None, help="warm-start from brains/<name>")
     ap.add_argument("--n-steps", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--variety", action="store_true", help="train with furniture and a wandering duck (eval-brain --variety)")
     args = ap.parse_args()
 
     import torch
@@ -102,7 +104,7 @@ def main() -> None:
 
     out = brains_dir() / args.run_name
     out.mkdir(parents=True, exist_ok=True)
-    fns = [make_env_fn(args.seed * 1000 + i, args.fixed_preset) for i in range(args.envs)]
+    fns = [make_env_fn(args.seed * 1000 + i, args.fixed_preset, args.variety) for i in range(args.envs)]
     venv = VecMonitor(SubprocVecEnv(fns, start_method="forkserver"))
     if args.init_from:
         prev = brains_dir() / args.init_from
@@ -140,7 +142,7 @@ def main() -> None:
         "obs_dim": BRAIN_OBS_DIM, "obs_version": BRAIN_OBS_VERSION,
         "act_low": ACT_LOW.tolist(), "act_high": ACT_HIGH.tolist(),
         "envs": args.envs, "steps": args.steps, "seed": args.seed,
-        "fixed_preset": args.fixed_preset}, indent=2))
+        "fixed_preset": args.fixed_preset, "variety": args.variety}, indent=2))
     try:
         model.learn(total_timesteps=args.steps, callback=Progress())
     finally:

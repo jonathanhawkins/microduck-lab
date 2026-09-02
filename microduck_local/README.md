@@ -45,7 +45,8 @@ behavior works here, port the env design to an mjlab cfg and retrain on GPU:
 ## Commands
 
 ```bash
-uv sync                                     # one-time (needs ../microduck_rl checked out)
+uv sync                                     # one-time (needs ../microduck_rl checked out at the pinned sha —
+                                            # ../scripts/setup.sh does the clones, the pins, uv and npm in one go)
 uv run --with pytest pytest tests/          # contract tests — run before training
 uv run bench-walk                           # raw env-stepping throughput
 uv run bench-envs                           # PPO throughput vs --envs → the right worker count
@@ -430,6 +431,44 @@ touching — measures **1.38 goals, 6.5 kicks and 0.50 falls a run** over
 the same 8 seeds. The kick window also runs at robotd's standing tuning
 now (`STANDING_GAIN_RATIO`: the walking Kp × 0.8 for the 0.5 s, the
 whole action as always), which the measured kick distances above survive.
+
+**Second form** (`pitch`, `pitch-2v2`, `pitch-3v3`; `eval-pitch
+--per-side N`). The chase brain now tracks the ball with its head: a
+gaze law pitches the camera so a floor ball sits on its axis while the
+duck walks in (measured: 0.6 of head command = 0.647 rad of camera,
+0.20 m up), which keeps the ball in view to 0.2 m instead of 0.3 and
+refreshes the line-up spot to 0.35 m before the blind leg. The ToF
+bumper places every zone's hit in 3D from the mount pose the frame
+carries and counts only body-height returns, so the head looking down
+does not read the floor as a wall and the ball never counts as one; a
+wall beside the duck turns it toward the freer side instead of into the
+boards; a duck stood against something for 1.5 s retreats (turn to the
+free side, walk clear — two attackers otherwise waited nose to nose for
+8 s); after a kick it stands and looks down before searching, and the
+search dips the head every 1.5 s (a 9 s spin once passed a ball 0.17 m
+ahead). Kicks aim at the goal's centre (`goal` in the odometry frame)
+within a 60° detour of the line of sight, else along it.
+
+Three things were built, measured and shipped OFF, with the numbers next
+to the switch: **re-planning the spot from sightings inside 0.35 m**
+(at 0.2 m the bearing noise is centimetres and the foot choice flipped;
+the spot dithered for 8 s), a **walk-round via-point** to get behind a
+ball on the wrong side (it oscillated with the re-plan and crossed the
+other duck), and **dribbling** (`push_beyond`: stand behind the ball
+and walk through it — a pushed ball rolls on at about the walking speed
+on this floor and the duck follows it without ever lining up; the kick
+and a look win). Measured 1v1 over 8 seeds × 300 s: **1.12 goals, 11.8
+kicks, 0.50 falls a run** (1.38 / 6.5 / 0.50 before: kicks nearly
+doubled, goals within the noise of eight seeds, falls held).
+
+**Teams** (`brain/team.py`): teammates share a blackboard — one message
+a second over Wi-Fi on the robot: my id, my distance to the ball, where
+I put it. The nearest attacks, the others support (0.7 m behind the
+ball toward their own goal, spread sideways by rank, facing it, never
+inside 0.45 m of it); the attacker keeps the role until a teammate is
+clearly nearer, so two ducks a centimetre apart in range do not swap
+every frame. Measured 2v2 over 4 seeds: **2.25 goals, 10.8 kicks, 3.0
+falls a run (0.75 per duck)**.
 
 ### Tidy the playroom (roadmap Track 12)
 

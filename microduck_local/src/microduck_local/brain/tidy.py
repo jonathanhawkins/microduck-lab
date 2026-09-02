@@ -33,6 +33,7 @@ import numpy as np
 from ..world.arena import PICK_REACH_AHEAD, PICK_REACH_LEFT
 from .controllers import WanderParams, _column_clearance, wander_from_tof
 from .gait import TURN_KICK, GaitWatch, turn
+from .mapping import GridSpec, OccupancyGrid
 from .runtime import REGISTRY, Intent, Senses, age_inputs
 
 
@@ -113,6 +114,12 @@ class TidyParams:
     scan_wz: float = 1.0               # the shipped walker barely turns in place below 1.0
     explore_s: float = 6.0             # wander this long after an empty scan
     min_conf: float = 0.1              # a tracked detection needs no more than this (see _trusted)
+    # Odometry drift (roadmap 1.7): every estimate here lives in the odometry
+    # frame, and a scale error or a gyro bias bends the trips. The brain
+    # keeps its own room map (brain/mapping.py) and reads the LOOP-CLOSED
+    # pose it gives back — the walls of the playroom are the anchor.
+    loop_closure: bool = True
+    map_size: tuple[float, float] = (6.0, 6.0)
     max_retries: int = 2               # pick attempts per toy before giving up on it
     done_after_scans: int = 6          # empty scans (each followed by a wander) before giving up
 
@@ -146,6 +153,7 @@ class Tidy:
         self._head_down = False
         self._head_since = -9.0
         self._cam: tuple[float, float] | None = None
+        self._cam_yaw = 0.0
         # Where toys were last seen (odom frame) — the work queue — and the
         # basket once it has been seen at all: it does not move.
         self.memory: dict[str, tuple[float, float, float]] = {}
@@ -157,6 +165,7 @@ class Tidy:
         self._backoff_t = 0.0
         self._blocked_t = -9.0
         self._gait = GaitWatch()
+        self.map = OccupancyGrid(GridSpec(size=self.p.map_size)) if self.p.loop_closure else None
         self._aim_fixes: list[tuple[float, float]] = []
         self._aim_last_t = -9.0
         self._route: list[tuple[float, float]] = []      # where to walk before the approach proper
@@ -170,10 +179,23 @@ class Tidy:
             "bearing": 0.0, "range": None, "since": round(self._senses.t - self.t_seen, 2),
             "goal": [round(v, 3) for v in self.est], "kind": self.goal_kind, "name": self.target_name}
         out["tidy"] = {"picked": self.picked, "delivered": self.delivered,
-                       "givenUp": sorted(self.given_up), "retries": dict(self.retries)}
+                       "givenUp": sorted(self.given_up), "retries": dict(self.retries),
+                       "loopClosure": None if self.map is None else
+                       {"offset": [round(float(v), 3) for v in self.map.offset], "corrections": self.map.corrections}}
         return out
 
     # -- helpers --------------------------------------------------------------
+    def _pose(self, senses: Senses) -> tuple[float, float, float]:
+        """The (x, y, yaw) the brain steers by: odometry, loop-closed against
+        the brain's own map when it has one (the map folds in each new
+        ToF frame at its raw odometry and hands back the corrected pose)."""
+        odom = senses.odom or (0.0, 0.0, 0.0)
+        if self.map is None or senses.odom is None:
+            return odom
+        if senses.tof is not None:
+            self.map.update(senses.tof, senses.odom)
+        return self.map.correct(senses.odom)
+
     def _enter(self, state: str, t: float) -> None:
         self.state = state
         self.t_state = t
@@ -293,7 +315,7 @@ class Tidy:
         depression = max(cam_pitch - det.elevation, 0.05)     # rad below horizontal
         horiz_cam = float(np.clip((cam_z - target_z) / math.tan(depression), 0.0, 4.0))
         x, y, yaw = odom
-        a = yaw + det.bearing
+        a = yaw + det.bearing + getattr(self, "_cam_yaw", 0.0)      # camera-frame bearing → body → odom
         # Beyond `far_range` the elevation says almost nothing about range
         # (at 2.3 m the map is 34 m per radian: 0.02 rad of head bob is
         # 0.7 m — measured, an estimate that hopped between 1.3 and 3.4 m
@@ -378,9 +400,10 @@ class Tidy:
     def step(self, senses: Senses) -> Intent:
         self._senses = senses
         p, t = self.p, senses.t
-        odom = senses.odom or (0.0, 0.0, 0.0)
+        odom = self._pose(senses)
         fr = senses.fresh_det(self.DET_MAX_AGE)
         self._cam = (fr.cam_z, fr.cam_pitch) if (fr is not None and fr.cam_z > 0.0) else None
+        self._cam_yaw = getattr(fr, "cam_yaw", 0.0) if fr is not None else 0.0
         self._gait.update(senses)                      # is the gait going? (see _turn)
         if self.state in ("scan", "explore", "approach"):
             self._note_basket(senses, odom, t)

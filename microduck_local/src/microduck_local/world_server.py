@@ -56,6 +56,7 @@ import re
 import time
 import traceback
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -129,9 +130,13 @@ def builtin_scenarios() -> dict[str, Scenario]:
     playroom = make_playroom(seed=0, n=6, name="playroom")
     playroom.ducks[0].policy = DEFAULT_POLICY
     pitch = make_pitch(name="pitch")
+    pitch2 = make_pitch(name="pitch-2v2", per_side=2)
+    pitch3 = make_pitch(name="pitch-3v3", per_side=3)
+    for d in pitch2.ducks + pitch3.ducks:
+        d.policy = DEFAULT_POLICY
     for d in pitch.ducks:
         d.policy = DEFAULT_POLICY
-    return {s.name: s for s in (empty, wall, room, follow, playroom, pitch)}
+    return {s.name: s for s in (empty, wall, room, follow, playroom, pitch, pitch2, pitch3)}
 
 
 BUILTIN_NAMES = frozenset(builtin_scenarios().keys())
@@ -196,6 +201,7 @@ class WorldState:
         # Auto mode: each duck runs a brain from the registry (brain/runtime.py);
         # a blind duck gets the script. Intents are remembered for the frame.
         self.brains: dict[str, object] = {}
+        self.teams: dict[str, object] = {}
         self.intents: dict[str, Intent] = {}
         # Brains may ask for a head pose; the shipped walker never trained
         # with one (roadmap 3.7), so gaze intents are REPORTED but only
@@ -235,10 +241,11 @@ class WorldState:
                 infer[d.id] = f
         world = World(scenario, infer_for=infer)
         self.brains = {}
+        self.teams = {}
         for sd in scenario.ducks:
             kind = sd.brain or ("wander" if sd.tof is not None else "script")
             try:
-                self.brains[sd.id] = REGISTRY.make(kind)
+                self.brains[sd.id] = self.make_brain(kind, sd, world)
             except ValueError as e:
                 self.events.append(f"{sd.id}: {e}; using script")
                 self.brains[sd.id] = REGISTRY.make("script")
@@ -249,6 +256,12 @@ class WorldState:
         self.maps = {sd.id: OccupancyGrid(GridSpec(size=(fx + 1.0, fy + 1.0)))
                      for sd in scenario.ducks if sd.tof is not None}
         return world
+
+    def make_brain(self, kind: str, sd, world):
+        """A brain for one duck; on a pitch a `chase` gets its goal and team."""
+        from .brain.team import brain_kwargs
+        spec = replace(sd, brain=kind)
+        return REGISTRY.make(kind, **brain_kwargs(spec, world, self.teams))
 
     def preload(self, name: str) -> None:
         """Build a world before serving (the CLI's --world). Blocking."""
@@ -319,7 +332,8 @@ class WorldState:
         w = self.world
         if w is None or duck_id not in w.ducks:
             raise KeyError(duck_id)
-        self.brains[duck_id] = REGISTRY.make(kind)
+        sd = next((d for d in self.scenario.ducks if d.id == duck_id), None) if self.scenario else None
+        self.brains[duck_id] = self.make_brain(kind, sd, w) if sd is not None else REGISTRY.make(kind)
         self.events.append(f"{duck_id} brain → {kind}")
 
     def frame(self, cmd: np.ndarray, mode: str) -> dict:

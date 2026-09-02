@@ -313,3 +313,20 @@ def test_tidy_backoff_sidesteps_left_before_turning():
     assert walk.twist == (p.approach_speed, 0.0, 0.0) and b.state == "backoff"
     b.step(Senses(t=10.0 + p.backoff_side_s + 0.5 + p.backoff_walk_s + 0.1, speed=0.0, odom=(0.0, 0.0, p.backoff_turn)))
     assert b.state == "scan"
+
+
+def test_tidy_steers_by_the_loop_closed_pose():
+    """The brain keeps its own map and reads the corrected pose (12.7 + 5.5):
+    with the map's odometry→map offset set, every estimate it makes is in
+    the corrected frame; with loop closure off it steers by raw odometry."""
+    from microduck_local.brain import Senses
+    from microduck_local.brain.tidy import Tidy, TidyParams
+    b = Tidy()
+    assert b.map is not None and b.p.loop_closure
+    b.map.offset[:] = (0.5, -0.2, 0.0)
+    s = Senses(t=0.0, odom=(1.0, 1.0, 0.0), speed=0.0)
+    assert b._pose(s) == pytest.approx((1.5, 0.8, 0.0))
+    b.step(s)
+    assert b.inputs()["tidy"]["loopClosure"]["offset"] == [0.5, -0.2, 0.0]
+    raw = Tidy(TidyParams(loop_closure=False))
+    assert raw.map is None and raw._pose(s) == (1.0, 1.0, 0.0)
