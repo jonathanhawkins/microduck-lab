@@ -171,3 +171,16 @@ def test_reflex_gaze_follows_the_tracked_target_and_variety_builds():
     assert len(var._box_joints) == 2 and var.distractor is not None
     var.reset(seed=2)
     var.step(np.zeros(3, np.float32))
+
+
+def test_eval_runs_a_brain_in_its_own_observation_version():
+    """eval-brain scores a version-1 brain with no reflex tier (the env it
+    was trained in) and everything else under version 2 (measured: v1
+    under the gaze it never saw fell 0.73 → 0.60 in band)."""
+    from microduck_local.eval_brain import obs_version_of
+    assert obs_version_of(REGISTRY.make("follow")) == BRAIN_OBS_VERSION
+    from microduck_local.brain.learned import brains_dir
+    if (brains_dir() / "follow-v1" / "brain.onnx").exists():
+        assert obs_version_of(REGISTRY.make("learned:follow-v1")) == 1
+    if (brains_dir() / "follow-v2" / "brain.onnx").exists():
+        assert obs_version_of(REGISTRY.make("learned:follow-v2")) == 2

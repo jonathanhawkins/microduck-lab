@@ -18,12 +18,21 @@ import json
 import numpy as np
 
 from .brain import REGISTRY, Senses
-from .brain.brain_env import BrainEnv, FollowTask
+from .brain.brain_env import BRAIN_OBS_VERSION, BrainEnv, FollowTask
+
+
+def obs_version_of(brain) -> int:
+    """The observation version the env should run for this brain: a learned
+    brain's own (its brain.json), so a version-1 brain — trained with no
+    tracker, no gaze, no bump stop — is scored in the world it was trained
+    in (measured: scored under the reflex tier it never saw, follow-v1 fell
+    from 0.73 to 0.60 in band); everything else gets the current version."""
+    return int(getattr(brain, "obs_version", BRAIN_OBS_VERSION))
 
 
 def run(brain_kind: str, preset: str | None, episodes: int, seed: int, task: FollowTask = FollowTask()) -> dict:
-    env = BrainEnv(task, seed=seed, fixed_preset=preset, sense_dr=preset is None)
     brain = REGISTRY.make(brain_kind)
+    env = BrainEnv(task, seed=seed, fixed_preset=preset, sense_dr=preset is None, obs_version=obs_version_of(brain))
     rows = []
     for ep in range(episodes):
         obs, _ = env.reset(seed=seed + ep)
@@ -54,7 +63,8 @@ def run(brain_kind: str, preset: str | None, episodes: int, seed: int, task: Fol
     keys = ("return", "in_band", "dist_err", "seen", "bumps", "falls")
     summary = {k: float(np.mean([r[k] for r in rows])) for k in keys}
     return {"brain": brain_kind, "preset": preset or "random", "episodes": episodes,
-            "variety": bool(task.furniture or task.distractor), "reflex": bool(task.gaze_gain or task.bump_stop),
+            "variety": bool(task.furniture or task.distractor),
+            "reflex": bool((task.gaze_gain or task.bump_stop) and env.obs_version >= 2),
             **summary, "rows": rows}
 
 
