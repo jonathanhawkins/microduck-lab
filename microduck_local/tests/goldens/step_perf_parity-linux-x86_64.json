@@ -1,0 +1,183 @@
+{
+ "data": {
+  "backflip-bam": [
+   "a12116c604244109ac37951cf7278df7d659106822cff0621f52d26717e8edbb",
+   {
+    "arch_over": "0x0.0p+0",
+    "calm_landed_penalty": "0x0.0p+0",
+    "feet_under": "0x0.0p+0",
+    "flip_progress": "0x1.3a7a3be6d132ep+0",
+    "gentle_head_penalty": "-0x1.74ca45f98f703p+1",
+    "gentle_joints_penalty": "-0x1.0d8b02ff7b9acp+2",
+    "head_rise": "0x0.0p+0",
+    "land_tall": "0x0.0p+0",
+    "landed_hold": "0x0.0p+0",
+    "lean_back": "0x1.cbcd818a00000p+2",
+    "legs_over": "0x1.95df2dd1569a6p-3",
+    "neck_kip": "0x0.0p+0",
+    "neck_pushup": "0x0.0p+0",
+    "no_jaw_parking_penalty": "0x0.0p+0",
+    "no_limit_parking_penalty": "-0x1.6b21df04e1aa6p+0",
+    "push_off": "0x1.908c457c63400p+3",
+    "save_energy_penalty": "-0x1.d74ad1199d879p+3",
+    "smooth_moves_penalty": "-0x1.e2b164bd70a3dp+3",
+    "soft_landings_penalty": "-0x1.1598bdde1789cp+0",
+    "stand_pose": "0x0.0p+0",
+    "stay_home_penalty": "-0x1.39a2920037f93p-1",
+    "stick_it_penalty": "0x0.0p+0",
+    "still_head_penalty": "-0x1.ff1b3ba737093p+2",
+    "straight_flip_penalty": "-0x1.9d9d526ba64adp+4",
+    "tuck_ball": "0x1.33ac29a47b97dp+2"
+   }
+  ],
+  "backflip-xml": [
+   "8dfaa4fa9e1ad54faa4b677d0ea4a8633372ee6c4da01e56157d852b8f8153af",
+   {
+    "arch_over": "0x0.0p+0",
+    "calm_landed_penalty": "0x0.0p+0",
+    "feet_under": "0x0.0p+0",
+    "flip_progress": "0x1.04851447b4280p-11",
+    "gentle_head_penalty": "-0x1.3673c79ba06d9p+1",
+    "gentle_joints_penalty": "-0x1.f0a9859788041p+2",
+    "head_rise": "0x0.0p+0",
+    "land_tall": "0x0.0p+0",
+    "landed_hold": "0x0.0p+0",
+    "lean_back": "0x0.0p+0",
+    "legs_over": "0x0.0p+0",
+    "neck_kip": "0x0.0p+0",
+    "neck_pushup": "0x0.0p+0",
+    "no_jaw_parking_penalty": "-0x1.306b2d652d64bp+4",
+    "no_limit_parking_penalty": "-0x1.76c2b8fee317cp+1",
+    "push_off": "0x1.ec1ccd3b2dea8p+2",
+    "save_energy_penalty": "-0x1.218f302317a7ap+3",
+    "smooth_moves_penalty": "-0x1.e2b164bd70a3dp+3",
+    "soft_landings_penalty": "-0x1.958f609eed971p-1",
+    "stand_pose": "0x0.0p+0",
+    "stay_home_penalty": "-0x1.3bbdc8e8a99c4p-3",
+    "stick_it_penalty": "0x0.0p+0",
+    "still_head_penalty": "-0x1.1c3c327cdc463p+2",
+    "straight_flip_penalty": "-0x1.3d45e3cac48f3p+4",
+    "tuck_ball": "0x0.0p+0"
+   }
+  ],
+  "imitate-xml": [
+   "9e27d1124783c4519acab7743efd819c05266779325cc952a1cf9c86f4c74d73",
+   {
+    "gentle_head_penalty": "-0x1.9defb4cf80921p+1",
+    "no_limit_parking_penalty": "-0x1.76c2b8fee317cp+1",
+    "no_slip_penalty": "0x0.0p+0",
+    "no_spin_penalty": "0x0.0p+0",
+    "on_feet": "0x0.0p+0",
+    "pose_match": "0x1.e3e7baf9dd1bbp+7",
+    "rotation_match": "0x1.9227535ffd850p+6",
+    "save_energy_penalty": "-0x1.218f302317a7ap+2",
+    "soft_landings_penalty": "-0x1.958f609eed971p-1",
+    "stick_it": "0x0.0p+0",
+    "travel": "0x0.0p+0"
+   }
+  ],
+  "one_leg-xml": [
+   "1560bd8bd36b6fd65218624f3ef99fb3e329ad1cde872b776590b3b9cc47a707",
+   {
+    "calm_body_penalty": "-0x1.14e682f84ff01p+3",
+    "face_home_penalty": "-0x1.a80ad26990e4bp+3",
+    "flat_stance_foot": "0x1.98758491ce1f9p+5",
+    "foot_in_air": "0x1.b439dc39561d0p-1",
+    "gentle_joints_penalty": "-0x1.b7452272cfe71p+3",
+    "head_up": "0x1.fecbf37c6612bp+3",
+    "head_up_pull": "0x1.ffadd915c04e0p+4",
+    "no_stall_penalty": "0x0.0p+0",
+    "one_leg_hold": "0x1.0f9ddc9a10000p+4",
+    "planted_foot": "0x1.f000000000000p+3",
+    "save_energy_penalty": "-0x1.5b58b8e29c096p+2",
+    "smooth_moves_penalty": "-0x1.642d36999999cp+4",
+    "stay_home_penalty": "-0x1.522afa0180b3fp-2",
+    "stay_put_penalty": "-0x1.c2ef7ff3e1c18p+0",
+    "stay_upright": "0x1.21ead434d68a3p+5"
+   }
+  ],
+  "run-bam": [
+   "0eeb52a33a35b7b1c4e20296c78a83d0a359ce6269bbc3c4924fc9f2a7f2ea58",
+   {
+    "air_time": "0x0.0p+0",
+    "calm_roll_penalty": "-0x1.d9053c053d5f8p+2",
+    "foot_clearance_penalty": "-0x1.ea013dfb43133p-2",
+    "head_up": "0x1.2dda93f300000p+7",
+    "keep_pace": "0x1.7f17f316e16bep+1",
+    "no_limit_parking_penalty": "-0x1.92befd8a5dab6p+0",
+    "plant_the_foot_penalty": "-0x1.e92da6b96fb6ep-5",
+    "pose": "0x1.9c39f0d3efe72p+4",
+    "smooth_moves_penalty": "-0x1.5417e7999999cp+5",
+    "stay_upright": "0x1.098a1c2646000p+6",
+    "track_turn": "0x1.a85668700a1f0p+1"
+   }
+  ],
+  "run-xml": [
+   "2d07991b3d6fe28369390548a0b7b152b22d561f6659e2eae66f69fd4860c43f",
+   {
+    "air_time": "0x0.0p+0",
+    "calm_roll_penalty": "-0x1.70bb42b61186ap+3",
+    "foot_clearance_penalty": "-0x1.cdfc74817aa1ap-1",
+    "head_up": "0x1.97c0bfae00000p+7",
+    "keep_pace": "0x1.02a20ea291a18p+5",
+    "no_limit_parking_penalty": "-0x1.f699b1e25f80ap+0",
+    "plant_the_foot_penalty": "-0x1.49d9e42c80b2ep-3",
+    "pose": "0x1.122bb4350bc70p+5",
+    "smooth_moves_penalty": "-0x1.e330c12666669p+5",
+    "stay_upright": "0x1.800cc0d4be000p+6",
+    "track_turn": "0x1.723ea6088ab2cp+3"
+   }
+  ],
+  "stand-xml": [
+   "35441f6b649901ed967e3d9f8b466fbc8beaba07a335abdc2e22c531d23df48c",
+   {
+    "both_feet": "0x1.6800000000000p+4",
+    "face_home_penalty": "-0x1.a80ad26990e4bp+2",
+    "flat_feet": "0x1.34e6f4f74ac01p+5",
+    "gentle_joints_penalty": "-0x1.24d8c1a1dfef7p+2",
+    "head_up": "0x1.89d4ef13aa5f2p+5",
+    "hold_still_penalty": "-0x1.14e682f84ff01p+4",
+    "no_limit_parking_penalty": "-0x1.949ff2d75ee7ap+1",
+    "normal_pose": "0x1.142ab9d5d4fbcp+6",
+    "save_energy_penalty": "-0x1.5b58b8e29c096p+2",
+    "smooth_moves_penalty": "-0x1.1cf0f87ae147bp+3",
+    "stand_tall": "0x1.13cc3412f85d6p+7",
+    "stay_home_penalty": "-0x1.522afa0180b3fp-2",
+    "stay_upright": "0x1.828e70467362ep+5"
+   }
+  ],
+  "walkenv-bam": [
+   "bd53063866959cc52aca0ca35221547d308ddd1796cf528e352e3d7eef37fbf6",
+   {
+    "action_rate_penalty": "-0x1.5417e7999999cp+5",
+    "ang_vel_xy_penalty": "-0x1.d9053c053d5f8p+3",
+    "feet_air_time": "0x0.0p+0",
+    "head_pose": "0x1.58f9cda800000p+6",
+    "pose": "0x1.05802897d2e77p+5",
+    "track_ang_vel": "0x1.a85668700a1f0p+1",
+    "track_lin_vel": "0x1.c5a06ecb4c5ddp+2",
+    "upright": "0x1.c74e3b0b17815p+5"
+   }
+  ],
+  "walkenv-xml": [
+   "f837046ce667e97a1242fd71fa9ad4dc720c4b248ea92d99587ae72b95284d87",
+   {
+    "action_rate_penalty": "-0x1.e330c12666669p+5",
+    "ang_vel_xy_penalty": "-0x1.70bb42b61186ap+4",
+    "feet_air_time": "0x0.0p+0",
+    "head_pose": "0x1.cb6c9b3800000p+6",
+    "pose": "0x1.544009bbe8064p+5",
+    "track_ang_vel": "0x1.6ecdc26e43bd7p+3",
+    "track_lin_vel": "0x1.ab63d92fc5099p+4",
+    "upright": "0x1.3e4054617da2dp+6"
+   }
+  ]
+ },
+ "provenance": {
+  "microduck_rl": "badc4e7ffe5507fd7acb1a21487bd2925c1afe5a",
+  "mujoco": "3.10.0",
+  "numpy": "2.5.2",
+  "platform": "Linux-6.18.44-fc-v22-x86_64-with-glibc2.39",
+  "python": "3.12.3"
+ }
+}

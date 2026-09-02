@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .brain_env import ACT_HIGH, ACT_LOW, BRAIN_OBS_DIM, onnx_infer, senses_to_obs
+from .brain_env import ACT_HIGH, ACT_LOW, BRAIN_OBS_DIM, ObsBuilder, onnx_infer
 from .runtime import Intent, Senses, age_inputs
 
 
@@ -38,6 +38,8 @@ class LearnedBrain:
         self.kind = f"learned:{name}"
         self.target_cls = meta.get("target_cls", "person")
         self.decide_every = int(decide_every or meta.get("decide_every", 5))
+        self.obs_version = int(meta.get("obs_version", 1))      # brains before the version key are version 1
+        self.builder = ObsBuilder(self.target_cls, self.obs_version)
         self.infer = onnx_infer(onnx)
         self.state = "learned"
         self.last_action = np.zeros(3, np.float32)
@@ -48,6 +50,7 @@ class LearnedBrain:
     def reset(self) -> None:
         self.last_action[:] = 0.0
         self.last_seen_t = None
+        self.builder.reset()
         self._tick = 0
         self._senses = None
 
@@ -62,7 +65,8 @@ class LearnedBrain:
     def step(self, senses: Senses) -> Intent:
         self._senses = senses
         if self._tick % self.decide_every == 0:
-            obs, self.last_seen_t = senses_to_obs(senses, self.target_cls, self.last_action, self.last_seen_t)
+            obs = self.builder(senses, self.last_action)
+            self.last_seen_t = self.builder.last_seen_t
             a = np.clip(self.infer(obs.astype(np.float32)), ACT_LOW, ACT_HIGH)
             self.last_action = a.astype(np.float32)
             seen = obs[65] > 0.5

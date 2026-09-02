@@ -70,8 +70,21 @@ class TidyParams:
     aim_settle_s: float = 0.6          # the walker needs ~0.5 s to come to rest
     aim_s: float = 1.4
     aim_align: float = 0.08            # squared up when the basket is within this of the nose (rad)
-    basket_zone: float = 0.33          # toys this close to the basket are in it or against the rim: leave them (every fall
-                                       # in 8 traced runs was an approach or back-off at the rim after a toy 0.2–0.26 m out)
+    # Toys near the basket. Inside `basket_inside` a toy is in the tray or
+    # hugging its rim: leave it. Between that and `basket_zone` it lies where
+    # every fall in 8 traced runs happened — an approach or back-off at the
+    # rim after a toy 0.2–0.26 m out — so it is approached from the OUTSIDE:
+    # walk to a staging point `stage_out` beyond it on the ray from the
+    # basket, routed around the basket disc, then come in radially, feet
+    # away from the rim (trunk 0.078 behind the toy, feet 0.034 ahead of
+    # the trunk: 4 cm clear of a 0.156 rim face at 0.2 m out).
+    basket_inside: float = 0.18
+    basket_zone: float = 0.33
+    stage_out: float = 0.45          # beyond the camera's blind range: the approach proper re-ranges the toy on the way in
+    basket_avoid: float = 0.36         # a route that passes closer than this to the basket centre gets a via-point…
+    basket_avoid_r: float = 0.45       # …this far out from it
+    route_stop: float = 0.06           # a route point counts as reached inside this
+    route_s: float = 14.0              # a route that takes longer than this is abandoned
     basket_keepout: float = 0.5        # exploring turns away from the basket inside this radius
     settle_s: float = 0.6
     backoff_turn: float = 2.6          # after a release: turn LEFT this far (rad, in place)…
@@ -128,6 +141,8 @@ class Tidy:
         self._gait = GaitWatch()
         self._aim_fixes: list[tuple[float, float]] = []
         self._aim_last_t = -9.0
+        self._route: list[tuple[float, float]] = []      # where to walk before the approach proper
+        self._route_t0 = -9.0
 
     def inputs(self) -> dict:
         if self._senses is None:
@@ -156,7 +171,75 @@ class Tidy:
 
     def _point_in_basket_zone(self, x: float, y: float) -> bool:
         return (self.basket_mem is not None and self.basket_confirmed
-                and math.hypot(x - self.basket_mem[0], y - self.basket_mem[1]) < self.p.basket_zone)
+                and math.hypot(x - self.basket_mem[0], y - self.basket_mem[1]) < self.p.basket_inside)
+
+    def _stage_point(self, x: float, y: float) -> tuple[float, float] | None:
+        """For a toy at (x, y) in the rim zone of a confirmed basket: the
+        point `stage_out` beyond it on the basket→toy ray, to come in from.
+        None when the toy is not near the basket (or the basket is unknown)."""
+        if self.basket_mem is None or not self.basket_confirmed:
+            return None
+        bx, by = self.basket_mem
+        r = math.hypot(x - bx, y - by)
+        if r < 1e-6 or r >= self.p.basket_zone:
+            return None
+        return x + self.p.stage_out * (x - bx) / r, y + self.p.stage_out * (y - by) / r
+
+    def _via_point(self, start: tuple[float, float], goal: tuple[float, float]) -> tuple[float, float] | None:
+        """A point to pass through so the straight walk from `start` to
+        `goal` does not cross the basket disc: the closest point of the
+        segment to the basket centre, pushed out to `basket_avoid_r`."""
+        if self.basket_mem is None or not self.basket_confirmed:
+            return None
+        p = self.p
+        bx, by = self.basket_mem
+        dx, dy = goal[0] - start[0], goal[1] - start[1]
+        L2 = dx * dx + dy * dy
+        if L2 < 1e-9:
+            return None
+        u = ((bx - start[0]) * dx + (by - start[1]) * dy) / L2
+        if u <= 0.0 or u >= 1.0:
+            return None                              # the basket is not between the two
+        cx, cy = start[0] + u * dx, start[1] + u * dy
+        d = math.hypot(cx - bx, cy - by)
+        if d >= p.basket_avoid:
+            return None
+        if d < 1e-6:
+            ox, oy = -dy / math.sqrt(L2), dx / math.sqrt(L2)     # dead on: go round the left
+        else:
+            ox, oy = (cx - bx) / d, (cy - by) / d
+        return bx + p.basket_avoid_r * ox, by + p.basket_avoid_r * oy
+
+    def _plan_route(self, odom, t: float) -> None:
+        """Set the route for the current toy estimate: nothing for a toy in
+        the open; for one in the rim zone, the staging point, with a
+        via-point first when the basket is in the way."""
+        self._route = []
+        stage = self._stage_point(*self.est) if self.est is not None else None
+        if stage is None:
+            return
+        via = self._via_point((odom[0], odom[1]), stage)
+        self._route = ([via] if via is not None else []) + [stage]
+        self._route_t0 = t
+
+    def _note_basket(self, senses: Senses, odom, t: float) -> None:
+        """A close look at the basket while NOT carrying (scanning, walking
+        at a toy) still fixes where it is — so the first trip's rim toys are
+        staged too, not only those after a delivery."""
+        if senses.holding or self.goal_kind == "basket":
+            return
+        det = self._nearest(senses, "basket")
+        if det is None:
+            return
+        loc = self._locate(odom, det, self.p.basket_z, t)
+        if loc is None or loc[2] >= self.p.basket_confirm_range:
+            return
+        if self.basket_mem is None or not self.basket_confirmed:
+            self.basket_mem = (loc[0], loc[1])
+        else:
+            self.basket_mem = (self.basket_mem[0] + 0.5 * (loc[0] - self.basket_mem[0]),
+                               self.basket_mem[1] + 0.5 * (loc[1] - self.basket_mem[1]))
+        self.basket_confirmed = True
 
     def _trusted(self, det) -> bool:
         """A detection worth acting on is a TRACKED one — it has an id — not
@@ -281,6 +364,8 @@ class Tidy:
         fr = senses.fresh_det(self.DET_MAX_AGE)
         self._cam = (fr.cam_z, fr.cam_pitch) if (fr is not None and fr.cam_z > 0.0) else None
         self._gait.update(senses)                      # is the gait going? (see _turn)
+        if self.state in ("scan", "explore", "approach"):
+            self._note_basket(senses, odom, t)
         twist = (0.0, 0.0, 0.0)
         head = (0.0, 0.0, 0.0, 0.0)
         beak = None
@@ -297,6 +382,7 @@ class Tidy:
                 self.goal_kind, self.target_name = "toy", toy.name
                 self.t_seen = t
                 self.scans_empty = 0
+                self._plan_route(odom, t)
                 self._enter("approach", t)
             else:
                 # Remember toys seen while turning even when they are not the
@@ -326,6 +412,7 @@ class Tidy:
                         self.est, self.goal_kind, self.target_name = (mx, my), "toy", name
                         self.t_seen = t
                         self.scans_empty = 0
+                        self._plan_route(odom, t)
                         self._enter("approach", t)
                     else:
                         self.scans_empty += 1
@@ -343,6 +430,28 @@ class Tidy:
                 if t - self.t_state > p.explore_s:
                     self._enter("scan", t)
 
+        elif self.state == "approach" and self._route:
+            # A rim toy: walk the route (via-point, staging point) head LEVEL
+            # first; the approach proper starts from the staging point, radial.
+            toy = self._nearest(senses, "toy", odom)
+            if toy is not None and toy.name == self.target_name:
+                if self._update_estimate(odom, toy, p.toy_z, t) is not None:
+                    stage = self._stage_point(*self.est)
+                    if stage is not None:
+                        self._route[-1] = stage
+            saved = self.est
+            self.est = self._route[0]
+            twist, dist, _ = self._servo(odom, p.route_stop)
+            self.est = saved
+            self.t_seen = t                              # the toy is not expected in view on the way round
+            note = f"approach · route {len(self._route)}"
+            if dist <= p.route_stop:
+                self._route.pop(0)
+            elif t - self._route_t0 > p.route_s:
+                self._route = []
+                self.est = None
+                self._enter("scan", t)
+
         elif self.state == "approach":
             toy = self._nearest(senses, "toy", odom)
             if toy is not None and toy.name == self.target_name:
@@ -352,8 +461,12 @@ class Tidy:
             head_down = twist[0] > 0 or (dist < 0.5 and abs(bearing) <= 0.35)
             if dist <= p.reach_ahead + 0.01:
                 self._enter("settle", t)
-            elif t - self.t_seen > 1.0 and dist < 0.3:
-                self._enter("blind", t)                  # it left the camera's view: dead-reckon the rest
+            elif t - self.t_seen > 1.0 and dist < 0.3 and abs(bearing) <= 0.35:
+                # It left the camera's view: dead-reckon the rest. Not while
+                # still turning to face it (after a staged route the duck
+                # arrives side-on and has not had a look yet — measured: a
+                # blind leg on a 9 cm-stale estimate, and a miss).
+                self._enter("blind", t)
             elif t - self.t_seen > 4.0 or t - self.t_state > 25.0:
                 self.est = None
                 self._enter("scan", t)

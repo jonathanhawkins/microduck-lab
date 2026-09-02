@@ -202,71 +202,16 @@ def test_delay_buffer_matches_reference_stream():
 
 # -------------------------------------------------------- golden env rollout
 
-# Captured from the pre-optimization implementation (commit state with the
-# verbatim `bam` port): 50 control steps of the exact rollout below. float.hex
-# so the comparison is to the last bit of the float64 state.
-GOLDEN_QPOS = [
-    "0x1.ad995106063adp-4", "-0x1.7450055b4da66p-3", "-0x1.a7ead23a7f1d9p-4",
-    "-0x1.a664d26eed96bp-4", "0x1.7905303229316p-1", "0x1.56524b31eba98p-1",
-    "-0x1.5285e732aafaep-7", "-0x1.38392fb21ccc1p-3", "-0x1.83c4d673ee10ap-4",
-    "-0x1.19632277d684fp-1", "-0x1.e5a0f6facf573p-3", "0x1.aa17a8f7c5d25p-3",
-    "0x1.1b584339c7650p-4", "-0x1.f8a31a9d338dap-5", "-0x1.7f707d7d1e513p-4",
-    "0x1.4aa2fe6758b88p-4", "0x1.5675afb6a27e0p-7", "-0x1.9f0232b9eafd4p-8",
-    "0x1.81026f04a2f13p-1", "0x1.3a1ee68094e31p-3", "-0x1.35a5304b4b340p-1",
-]
-GOLDEN_QVEL = [
-    "-0x1.8f31a4bdb7334p-2", "0x1.98f0fbc8e5d6cp-3", "0x1.e8e52980eeadcp-3",
-    "0x1.0668fb9541ed8p+1", "0x1.712ef56370828p+1", "0x1.02a61a5c37cfep+1",
-    "0x1.5d2f41bc5c484p+0", "0x1.a387e369da996p+0", "-0x1.ec1f121dce629p+1",
-    "-0x1.67272d6e03564p+1", "-0x1.2bd377d85f729p-1", "-0x1.67145de449559p-3",
-    "-0x1.368976a14b30bp-1", "-0x1.46d5c0dff7c56p+0", "-0x1.489a05e61546cp+2",
-    "0x1.27dd389488ff4p-1", "0x1.2df3e1533333ap-1", "0x1.aaf3a94fac540p+1",
-    "-0x1.296d48f704bebp-2", "0x1.3838764cc3ea7p+2",
-]
-GOLDEN_TAU_LAST = [
-    "0x1.c7328769accb2p-6", "0x1.8534eb8b15106p-2", "-0x1.8c97da86078c0p-4",
-    "-0x1.a3740a54d6254p-6", "0x1.d85191dcb0200p-3", "0x1.6f61eb649321cp-3",
-    "0x1.44b9895d6db8fp-4", "-0x1.6d22d6fc0dfb6p-4", "-0x1.d28567eea9fdap-3",
-    "-0x1.3534d1f289e07p-5", "0x1.7b7a2f55dd119p-2", "0x1.0c81da12a981ep-4",
-    "-0x1.40ee34eb9a59ep-3", "0x1.67a89166889f7p-2",
-]
-GOLDEN_FL_LAST = [
-    "0x1.a9a484362a46ep-6", "0x1.00c765c151daap-3", "0x1.01b5968431030p-5",
-    "0x1.a986d7dcc9b13p-5", "0x1.ca546bd4da602p-4", "0x1.031cb0acb94b1p-4",
-    "0x1.20ce61122b471p-5", "0x1.011e0174ab2d7p-5", "0x1.189ce267e9bffp-4",
-    "0x1.4a10b0f334466p-6", "0x1.cd679998a15fdp-4", "0x1.7682256049020p-6",
-    "0x1.ab91c6fa84a05p-5", "0x1.9c9dde3e27a1ep-4",
-]
-GOLDEN_TAU_SUM = "-0x1.be264284807e6p-1"
-GOLDEN_VIN_LAST = "0x1.a11962b496cf4p+2"
+# Captured from the pre-optimization implementation (the verbatim `bam`
+# port): 50 control steps of the exact rollout below, as float.hex so the
+# comparison is to the last bit of the float64 state. Stored per platform in
+# tests/goldens/bam_perf_parity-<platform>.json (golden_store.py; recorded
+# with MICRODUCK_RECORD_GOLDENS=1), recaptured 2026-09-02 on the CAD
+# re-export the upstream pin moved to.
+GOLDEN_NAME = "bam_perf_parity"
 
 
-def _hex(vals):
-    return np.array([float.fromhex(h) for h in vals], dtype=np.float64)
-
-
-def test_full_bam_rollout_matches_pre_optimization_golden_bits():
-    env = MicroduckWalkEnv(actuator="bam", obs_noise=True, domain_rand=True,
-                           action_delay=True, seed=3, terminate_on_fall=False)
-    env.reset(seed=3)
-    rng = np.random.default_rng(3)
-    tau_sum = 0.0
-    for _ in range(50):
-        env.step(rng.uniform(-1.0, 1.0, C.NUM_JOINTS).astype(np.float32))
-        tau_sum += float(np.sum(env.bam.applied_torque))
-
-    np.testing.assert_array_equal(env.data.qpos, _hex(GOLDEN_QPOS))
-    np.testing.assert_array_equal(env.data.qvel, _hex(GOLDEN_QVEL))
-    np.testing.assert_array_equal(env.bam.applied_torque, _hex(GOLDEN_TAU_LAST))
-    np.testing.assert_array_equal(env.bam.last_frictionloss, _hex(GOLDEN_FL_LAST))
-    assert env.bam.last_vin == float.fromhex(GOLDEN_VIN_LAST)
-
-
-def test_full_bam_rollout_torque_sum_matches_golden():
-    """Every applied torque over the rollout, not just the final state.
-
-    The sum was accumulated as sum-per-step-then-add in capture order, so it
-    is reproducible exactly (same additions in the same order)."""
+def _rollout():
     env = MicroduckWalkEnv(actuator="bam", obs_noise=True, domain_rand=True,
                            action_delay=True, seed=3, terminate_on_fall=False)
     env.reset(seed=3)
@@ -275,5 +220,55 @@ def test_full_bam_rollout_torque_sum_matches_golden():
     for _ in range(50):
         env.step(rng.uniform(-1.0, 1.0, C.NUM_JOINTS).astype(np.float32))
         taus.append(env.bam.applied_torque.copy())
-    total = float(np.sum(np.asarray(taus)))
-    assert total == float.fromhex(GOLDEN_TAU_SUM)
+    return env, taus
+
+
+def _capture() -> dict:
+    env, taus = _rollout()
+    hx = lambda a: [float(v).hex() for v in np.asarray(a, dtype=np.float64)]  # noqa: E731
+    return {"qpos": hx(env.data.qpos), "qvel": hx(env.data.qvel), "tau_last": hx(env.bam.applied_torque),
+            "fl_last": hx(env.bam.last_frictionloss), "vin_last": float(env.bam.last_vin).hex(),
+            # sum-per-step-then-add, in capture order: reproducible exactly
+            "tau_sum": float(sum(float(np.sum(t)) for t in taus)).hex()}
+
+
+def _golden():
+    import golden_store as gs
+    if gs.RECORD:
+        data = _capture()
+        print(f"recorded {gs.save(GOLDEN_NAME, data)}")
+        return {"provenance": gs.provenance(), "data": data}
+    return gs.load(GOLDEN_NAME)
+
+
+def _hex(vals):
+    return np.array([float.fromhex(h) for h in vals], dtype=np.float64)
+
+
+def test_full_bam_rollout_matches_pre_optimization_golden_bits():
+    import golden_store as gs
+    golden = _golden()
+    if golden is None:
+        pytest.skip(gs.skip_reason(GOLDEN_NAME))
+    g = golden["data"]
+    stale = gs.check_provenance(golden)
+    env, _ = _rollout()
+    np.testing.assert_array_equal(env.data.qpos, _hex(g["qpos"]), err_msg=stale)
+    np.testing.assert_array_equal(env.data.qvel, _hex(g["qvel"]), err_msg=stale)
+    np.testing.assert_array_equal(env.bam.applied_torque, _hex(g["tau_last"]), err_msg=stale)
+    np.testing.assert_array_equal(env.bam.last_frictionloss, _hex(g["fl_last"]), err_msg=stale)
+    assert env.bam.last_vin == float.fromhex(g["vin_last"]), stale
+
+
+def test_full_bam_rollout_torque_sum_matches_golden():
+    """Every applied torque over the rollout, not just the final state.
+
+    The sum was accumulated as sum-per-step-then-add in capture order, so it
+    is reproducible exactly (same additions in the same order)."""
+    import golden_store as gs
+    golden = _golden()
+    if golden is None:
+        pytest.skip(gs.skip_reason(GOLDEN_NAME))
+    _, taus = _rollout()
+    total = float(sum(float(np.sum(t)) for t in taus))
+    assert total == float.fromhex(golden["data"]["tau_sum"]), gs.check_provenance(golden)

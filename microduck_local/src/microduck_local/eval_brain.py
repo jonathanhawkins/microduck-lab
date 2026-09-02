@@ -1,7 +1,7 @@
 """Score a brain on the follow task under a sensor preset (roadmap 3.2):
 
     uv run eval-brain --brain follow --preset hostile --episodes 8
-    uv run eval-brain --brain learned:follow-v1 --preset hostile --episodes 8
+    uv run eval-brain --brain learned:follow-v2 --preset hostile --episodes 8
 
 Metrics per episode: fraction of decisions inside the distance band,
 mean |distance error|, fraction of time the target was in sight, bumps

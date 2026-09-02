@@ -18,10 +18,13 @@ the tree, and Track 12 has its first working loop:
   persons + possess, the brain runtime with freshness (2.1, 2.4), `Wander`
   and `Follow` (2.3), `BrainEnv` + `train-brain` + `eval-brain` (3.1, 3.2),
   odometry drift presets (1.7) and an occupancy map per duck in its own
-  odometry frame, painted on the page (the first of the mapping track);
+  odometry frame, painted on the page, with a wall-line loop closure
+  against drift (5.1, 5.5: pose error under a 1.5°/s bias halved);
   the `pitch` scenario with two `chase` brains, the robot's shipped kick
   policies as skills, goal counting and `eval-pitch` (the first of the
-  soccer track: 1.75 goals, 6.8 kicks, 1.5 falls a run over 300 s).
+  soccer track: 1.38 goals, 6.5 kicks, 0.50 falls a run over 300 s and 8
+  seeds, with a body-aware avoid of the other duck — falls were 2.1
+  before it — and kick windows at robotd's standing gain).
   `brains/follow-v1` ships in the repo. Upstream is pinned (microduck_rl
   badc4e7, the 2026-09 CAD re-export; microduck 2c61dcc) and every
   model-dependent number above was re-measured against it — the tidy loop
@@ -341,7 +344,7 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 5.2 | **Head sweep scanning** | `sweep_scan` controller: stand and yaw the head through its range, tilting to cover floor and obstacles; "lighthouse" mode; the ToF's FOV limits become visible. | S | ★★★★ |
 | 5.3 | **Truth vs estimate** | Ground-truth map from the scenario next to the built map; coverage % and error metrics on the lesson strip. | S | ★★★★ |
 | 5.4 | **Exploration** | Frontier-based explorer (scripted) then RL with a novelty grid (the idea doc's Wander memory); coverage-per-minute leaderboard. | M | ★★★★ |
-| 5.5 | **Drift correction (light SLAM)** | Scan-to-map matching to correct yaw drift; optional, the lesson is "here is why real robots need loop closure". | L | ★★★ |
+| 5.5 | **Drift correction (light SLAM)** | Scan-to-map matching to correct yaw drift; optional, the lesson is "here is why real robots need loop closure". **Done (first form):** wall-line matching per frame (`brain/mapping.py`), pose error under a 1.5°/s bias 0.21 → 0.12 m, wall cells within 10 cm 0.64 → 0.85; a correlative search was measured to trade yaw for sideways error with a 45° FOV. | L | ★★★ |
 | 5.6 | **Map export** | Save the grid + trajectory; replay a real `tof.stream` log through the same mapper (section 10). | S | ★★★ |
 
 ### Track 6: Audio and voice

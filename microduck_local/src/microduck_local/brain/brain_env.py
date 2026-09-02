@@ -35,6 +35,7 @@ from ..sensors import DetectorNoise, TofNoise
 from ..world import Duck, Person, Scenario, World
 from ..world.scenario import TOF_PRESETS
 from .runtime import Senses
+from .tracker import Tracker
 
 POLICIES_DIR = C.MICRODUCK_RL_DIR.parent / "microduck" / "policies"
 
@@ -46,37 +47,96 @@ POLICIES_DIR = C.MICRODUCK_RL_DIR.parent / "microduck" / "policies"
 #   [72]     time since the target was last seen, s (clipped 5)
 #   [73:76]  last intent twist
 #   [76]     heading speed, m/s
-#   [77:80]  reserved (zero): head intents / extra features later
+#   [77:80]  reserved (zero) in version 1; version 2 (below) fills them
+#
+# Version 2 (the tracker + odometry features, brain.json "obs_version": 2):
+#   [65:71]  the TRACK of the target (brain/tracker.py: smoothed, coasting
+#            with the body through misses): hit-this-frame(0/1), bearing,
+#            elevation, width, range (clipped 4), conf
+#   [72]     time since the track was last HIT, s (clipped 5)
+#   [77]     track coasting (0/1: a track exists but was not hit this frame)
+#   [78]     own yaw rate from odometry, rad/s (clipped ±3)
+#   [79]     track confirmed (0/1: two hits or more)
+# Same 80 floats, same walker underneath: a version-1 brain still runs on a
+# version-1 observation (LearnedBrain reads the version from brain.json).
 BRAIN_OBS_DIM = 80
+BRAIN_OBS_VERSION = 2
 BRAIN_ACT_DIM = 3          # vx, vy, wz (vy is emitted but kept small by the walker)
 ACT_LOW = np.array([-0.2, -0.3, -1.0], np.float32)
 ACT_HIGH = np.array([0.6, 0.3, 1.0], np.float32)
 
 
 def senses_to_obs(s: Senses, target_cls: str, last_action: np.ndarray,
-                  last_seen_t: float | None) -> tuple[np.ndarray, float | None]:
+                  last_seen_t: float | None, tracker: Tracker | None = None,
+                  yaw_rate: float = 0.0, det_max_age: float = 0.4) -> tuple[np.ndarray, float | None]:
     """The brain observation contract (layout above), from what a brain gets.
     Returns (obs, updated last_seen_t). Shared by BrainEnv (training) and
-    LearnedBrain (inference in the world), so the two can never drift."""
+    LearnedBrain (inference in the world), so the two can never drift.
+    With a `tracker` (version 2) the target slots come from its track of
+    the target class and the reserved slots carry the coasting flag, the
+    odometry yaw rate and the confirmation; without one, version 1."""
     o = np.zeros(BRAIN_OBS_DIM, np.float32)
     if s.tof is not None:
         o[0:64] = np.clip(s.tof.depth_mm.reshape(-1) / 1000.0, 0.0, 4.0)
         o[64] = min(s.tof_age or 0.0, 1.0)
     else:
         o[64] = 1.0
-    tgt = None
-    if s.det is not None:
-        cands = [x for x in s.det.detections if x.cls == target_cls]
-        if cands:
-            tgt = min(cands, key=lambda x: x.range_est)
-    if tgt is not None:
-        o[65:71] = [1.0, tgt.bearing, tgt.elevation, tgt.width, min(tgt.range_est, 4.0), tgt.conf]
-        last_seen_t = s.t
+    if tracker is not None:
+        det = s.fresh_det(det_max_age)
+        new_frame = det is not None and det.t != tracker._last_frame_t
+        tracker.update(det, s.t, None if s.odom is None else s.odom[2])
+        tr = tracker.best(target_cls, s.t, min_hits=1)
+        if tr is not None:
+            hit = new_frame and tr.last_t == det.t                # a NEW frame's detection updated the track
+            o[65:71] = [1.0 if hit else 0.0, tr.bearing, tr.elevation, tr.width, min(tr.range, 4.0), tr.conf]
+            o[77] = 0.0 if hit else 1.0
+            o[79] = 1.0 if tr.hits >= tracker.p.confirm_hits else 0.0
+            if hit:
+                last_seen_t = tr.last_t
+        o[78] = float(np.clip(yaw_rate, -3.0, 3.0))
+    else:
+        tgt = None
+        if s.det is not None:
+            cands = [x for x in s.det.detections if x.cls == target_cls]
+            if cands:
+                tgt = min(cands, key=lambda x: x.range_est)
+        if tgt is not None:
+            o[65:71] = [1.0, tgt.bearing, tgt.elevation, tgt.width, min(tgt.range_est, 4.0), tgt.conf]
+            last_seen_t = s.t
     o[71] = min(s.det_age if s.det_age is not None else 1.0, 1.0)
     o[72] = 5.0 if last_seen_t is None else min(s.t - last_seen_t, 5.0)
     o[73:76] = last_action
     o[76] = s.speed or 0.0
     return o, last_seen_t
+
+
+class ObsBuilder:
+    """The per-brain state `senses_to_obs` needs across calls: the tracker
+    (version 2), the last-seen clock and the previous heading for the yaw
+    rate. One in the env, one in the LearnedBrain — same code path."""
+
+    def __init__(self, target_cls: str, version: int = BRAIN_OBS_VERSION):
+        self.target_cls = target_cls
+        self.version = int(version)
+        self.tracker = Tracker() if self.version >= 2 else None
+        self.reset()
+
+    def reset(self) -> None:
+        self.last_seen_t: float | None = None
+        self._prev: tuple[float, float] | None = None       # (t, yaw)
+        if self.tracker is not None:
+            self.tracker.reset()
+
+    def __call__(self, s: Senses, last_action: np.ndarray) -> np.ndarray:
+        yaw_rate = 0.0
+        if s.odom is not None:
+            if self._prev is not None and s.t > self._prev[0]:
+                d = math.atan2(math.sin(s.odom[2] - self._prev[1]), math.cos(s.odom[2] - self._prev[1]))
+                yaw_rate = d / (s.t - self._prev[0])
+            self._prev = (s.t, s.odom[2])
+        o, self.last_seen_t = senses_to_obs(s, self.target_cls, last_action, self.last_seen_t,
+                                            self.tracker, yaw_rate)
+        return o
 
 
 def onnx_infer(path: Path) -> Callable[[np.ndarray], np.ndarray]:
@@ -110,9 +170,11 @@ class BrainEnv(gym.Env):
 
     def __init__(self, task: FollowTask = FollowTask(), walker: str | Path | None = None,
                  decide_every: int = 5, sense_dr: bool = True, seed: int | None = None,
-                 fixed_preset: str | None = None):
+                 fixed_preset: str | None = None, obs_version: int = BRAIN_OBS_VERSION):
         super().__init__()
         self.task = task
+        self.obs_version = int(obs_version)
+        self._builder = ObsBuilder(task.target_cls, self.obs_version)
         self.decide_every = int(decide_every)
         self.sense_dr = sense_dr
         self.fixed_preset = fixed_preset
@@ -174,6 +236,7 @@ class BrainEnv(gym.Env):
             self.world.step()
         self._last_action[:] = 0.0
         self._last_seen_t = None
+        self._builder.reset()
         self._steps = 0
         return self._obs(), {}
 
@@ -186,9 +249,8 @@ class BrainEnv(gym.Env):
                       speed=d.heading_speed(w.data), odom=w.odom(d))
 
     def _obs(self) -> np.ndarray:
-        o, seen_t = senses_to_obs(self.senses(), self.task.target_cls, self._last_action,
-                                  self._last_seen_t)
-        self._last_seen_t = seen_t
+        o = self._builder(self.senses(), self._last_action)
+        self._last_seen_t = self._builder.last_seen_t
         return o
 
     def _truth(self) -> tuple[float, float]:
@@ -241,5 +303,5 @@ class BrainEnv(gym.Env):
         pass
 
 
-__all__ = ["ACT_HIGH", "ACT_LOW", "BRAIN_ACT_DIM", "BRAIN_OBS_DIM", "BrainEnv", "FollowTask", "onnx_infer",
-           "senses_to_obs"]
+__all__ = ["ACT_HIGH", "ACT_LOW", "BRAIN_ACT_DIM", "BRAIN_OBS_DIM", "BRAIN_OBS_VERSION", "BrainEnv", "FollowTask",
+           "ObsBuilder", "onnx_infer", "senses_to_obs"]

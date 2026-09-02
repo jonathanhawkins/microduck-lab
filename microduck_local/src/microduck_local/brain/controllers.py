@@ -147,6 +147,12 @@ class FollowParams:
     k_speed: float = 1.2           # vx per m of distance error (0.6 could not close on a 0.35 m/s walker)
     max_speed: float = 0.5
     min_speed: float = 0.12        # alpha_walking treats slower asks as "stand"
+    turn_first: float = 0.6        # rad off the nose beyond which it turns in place before walking
+    k_lead: float = 0.0            # wz per rad/s of bearing RATE: turn toward where the target is going
+    idle_vy: float = 0.0           # sidestep this much (toward the target's side) whenever standing: keeps the gait warm
+    idle_coast: bool = False       # …also while coasting on a lost track
+    k_strafe: float = 0.0          # vy per rad of bearing, always (crab toward the target's side; overrides idle_vy)
+    coast_speed: float = 0.0       # walking speed on a coasted track (0: stand and turn, measured safer)
     lost_s: float = 2.0            # keep the last bearing this long, then search
     search_wz: float = 1.0             # the shipped walker barely turns in place below 1.0
     tof_stop: float = 0.35         # never walk into what the ToF says is right there
@@ -181,6 +187,7 @@ class Follow:
         self.last_seen_t: float | None = None
         self.last_range: float | None = None
         self.track_id: int | None = None
+        self._prev_track: tuple[float, float] | None = None     # (t, bearing) for the lead term
         self._senses: Senses | None = None
         self.last = (0.0, 0.0, 0.0)
         self.tracker.reset()
@@ -216,15 +223,20 @@ class Follow:
             cols = _column_clearance(tof.depth_mm, tof.valid, WanderParams())
             ahead = float(cols[3:5].min())
         fresh = target is not None and target.age(senses.t) <= self.DET_MAX_AGE
+        vy = 0.0
         if target is not None and (fresh or target.age(senses.t) < p.lost_s):
             self.last_bearing = target.bearing
             self.last_range = target.range
             if fresh:
                 self.last_seen_t = senses.t
-            wz = float(np.clip(p.k_turn * target.bearing, -1.0, 1.0))
+            rate = 0.0
+            if p.k_lead and self._prev_track is not None and senses.t > self._prev_track[0]:
+                rate = (target.bearing - self._prev_track[1]) / (senses.t - self._prev_track[0])
+            self._prev_track = (senses.t, target.bearing)
+            wz = float(np.clip(p.k_turn * target.bearing + p.k_lead * float(np.clip(rate, -2.0, 2.0)), -1.0, 1.0))
             err = target.range - p.distance
             vx = float(np.clip(p.k_speed * err, 0.0, p.max_speed))
-            if abs(target.bearing) > 0.6:
+            if abs(target.bearing) > p.turn_first:
                 vx, _, wz = turn(target.bearing, cold)      # turn first, walk after
             elif 0.0 < vx < p.min_speed:
                 vx = 0.0 if err < 0.1 else p.min_speed
@@ -232,27 +244,33 @@ class Follow:
                 # Coasting: face where the track says it went, but do not
                 # walk at a range nobody has measured lately (measured:
                 # walking on a coasted track bumped the person 50% more).
-                vx = 0.0
+                vx = p.coast_speed if err > 0.2 else 0.0
                 if abs(target.bearing) > 0.15:
                     vx, _, wz = turn(target.bearing, cold)
                 else:
                     wz = 0.0
             self.state = ("hold" if vx == 0.0 and abs(wz) < 0.2 else "approach") if fresh else "coast"
+            if p.k_strafe and (fresh or p.idle_coast):
+                vy = float(np.clip(p.k_strafe * target.bearing, -0.3, 0.3))
+            elif p.idle_vy and vx == 0.0 and abs(wz) < 1.0 and (fresh or p.idle_coast):
+                vy = p.idle_vy * (1.0 if target.bearing >= 0.0 else -1.0)
         else:
             self.track_id = None
+            self._prev_track = None
             vx, _, wz = turn(1.0 if self.last_bearing >= 0 else -1.0, cold)
             self.state = "search"
-        if ahead < p.tof_stop and vx > 0:
-            # Never walk into what is right there — a cold-turn kick included:
-            # blocked, the search turns LEFT without the kick (the turn that
-            # does start from a standstill, see brain/gait.py).
-            vx = 0.0
+        if ahead < p.tof_stop and (vx > 0 or vy != 0.0):
+            # Never walk into what is right there — a cold-turn kick included,
+            # the idle sidestep too: blocked, the search turns LEFT without
+            # the kick (the turn that does start from a standstill, see
+            # brain/gait.py).
+            vx, vy = 0.0, 0.0
             if self.state == "search":
                 wz = 1.0
             else:
                 self.state = "blocked"
         head_yaw = float(np.clip(p.head_yaw_gain * self.last_bearing, -0.6, 0.6)) if self.last_seen_t else 0.0
-        self.last = (vx, 0.0, wz)
+        self.last = (vx, vy, wz)
         return Intent(twist=self.last, head=(0.0, 0.0, head_yaw, 0.0), note=self.state)
 
 
@@ -279,6 +297,15 @@ class ChaseParams:
     # Yielding to a duck that clearly has the ball: OFF by default. Measured
     # over 8 seeds × 300 s: off 1.50 goals / 8.5 kicks / 2.12 falls a run,
     # on (0.5 m) 1.12 / 7.0 / 2.12 — it costs play and saves nothing.
+    # The other duck's BODY (measured over 4 traced runs: 5 of 7 falls had the
+    # other duck 3–9 cm away and this one turning in place — search, blocked
+    # or lining up — the walker tips over when it turns against a body it
+    # cannot see below its ToF rows). A tracked duck inside `duck_keepout`
+    # and ahead: nothing walks or turns toward it; inside `duck_touch` it is
+    # against us: stand until it moves.
+    duck_keepout: float = 0.4
+    duck_touch: float = 0.22
+    duck_bearing: float = 1.2      # rad off the nose that counts as "ahead"
     yield_range: float = 0.0       # > 0: another duck this close and clearly nearer the ball has it: stand and wait…
     yield_ratio: float = 0.7       # …"clearly": its range under this fraction of ours (width ranges are rough)
     yield_s: float = 1.5           # …for at most this long
@@ -375,6 +402,8 @@ class Chase:
         # it has the ball — yield rather than tangle (measured: with kicks
         # working, the remaining falls were two ducks on one ball).
         other = self.tracker.best("duck", t, min_hits=1)
+        near_duck = (other is not None and other.age(t) <= 0.6 and other.range < p.duck_keepout
+                     and abs(other.bearing) < p.duck_bearing)
         # Asymmetric and time-limited, or both stand and wait for each other
         # (measured: a symmetric yield gave 0 falls and 0.25 goals a run).
         clearly_nearer = (other is not None and other.age(t) <= p.lost_s and other.range < p.yield_range
@@ -393,6 +422,19 @@ class Chase:
         if senses.skill is not None:
             vx, wz = 0.0, 0.0                                   # the kick owns the reflex tier
             self.state = "kick"
+        elif near_duck:
+            # Turn AWAY from it (the side that puts it behind us), never
+            # into it, and not at all while it is touching: a stand is the
+            # one thing the walker does safely against another body. The
+            # cold-gait kick creeps forward, so no kick with it near the nose.
+            self.spot = None
+            if other.range < p.duck_touch:
+                vx, wz = 0.0, 0.0
+            else:
+                vx, _, wz = turn(-1.0 if other.bearing >= 0.0 else 1.0, cold)
+                if abs(other.bearing) < 0.5:
+                    vx = 0.0
+            self.state = "avoid"
         elif yielding and self.state not in ("settle",):
             vx, wz = 0.0, 0.0
             self.spot = None

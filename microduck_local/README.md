@@ -342,8 +342,17 @@ its current intent live.
 - **Room mapping** (`brain/mapping.py`): an occupancy grid per duck in its
   own odometry frame, built from the ToF frames' mount pose (each frame
   carries where the sensor was on the body) and its own pose, floor hits
-  traced as free space. The page paints it on the floor (`M`); under drift
-  it smears exactly as the robot's would.
+  traced as free space. The page paints it on the floor (`M`). Under
+  drift it **closes the loop on its own walls**: each frame's wall hits
+  are fitted with a line, the map's wall near it with another, and the
+  angle and gap between them correct the heading and position (a
+  deadband keeps line-fit noise from moving good odometry). Measured on a
+  duck walking at a corner under a 1.5°/s gyro bias (1.5× the hostile
+  preset's σ): pose error 0.21 → 0.12 m, occupied cells within 10 cm of a
+  true wall 0.64 → 0.85; under a 3°/s bias 0.42 → 0.20 m; ideal odometry
+  stays within 2 cm and 0.5°. A correlative search over cells was tried
+  first and measured to trade yaw error for sideways error — a 45° depth
+  matrix cannot tell the two apart by overlap, which is the lesson.
 - `brain/brain_env.py` turns the brain tier into a gymnasium env
   (`BrainEnv`: 80-float obs from senses, a 3-float twist action, decisions
   at 10 Hz, the shipped walker frozen underneath, domain randomization on
@@ -387,10 +396,18 @@ walk-around to kick toward the goal crossed walls and the other duck
 11 kicks, 1.25 falls and 1.0 goal, and aiming at the goal only when it
 costs under a 60° detour is **1.75 goals, 6.8 kicks and 1.5 falls a run**
 (`eval-pitch --seeds 4 --seconds 300`; over 8 seeds 1.5 goals, 8.5
-kicks, 2.1 falls). The falls are now duck-on-duck. A yield rule (stand
-when the other duck is close and clearly nearer the ball) was measured
-over the same 8 seeds and shipped OFF: 1.1 goals for the same 2.1 falls.
-The next item is a body-aware avoid, not a rule of thumb.
+kicks, 2.1 falls). The falls were then duck-on-duck: 5 of 7 falls in 4
+traced runs had the other duck 3–9 cm away and this one turning in place
+(searching, blocked, or lining up) — the walker tips over when it turns
+against a body its ToF rows do not see. A yield rule (stand when the
+other duck is close and clearly nearer the ball) was measured over the
+same 8 seeds and shipped OFF: 1.1 goals for the same 2.1 falls. The
+**body-aware avoid** that replaced it — a tracked duck inside 0.4 m and
+ahead: turn away from it, never toward it, and stand still while it is
+touching — measures **1.38 goals, 6.5 kicks and 0.50 falls a run** over
+the same 8 seeds. The kick window also runs at robotd's standing tuning
+now (`STANDING_GAIN_RATIO`: the walking Kp × 0.8 for the 0.5 s, the
+whole action as always), which the measured kick distances above survive.
 
 ### Tidy the playroom (roadmap Track 12)
 

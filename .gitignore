@@ -22,6 +22,10 @@ microduck_local/brains/*
 microduck_local/brains/follow-v1/*
 !microduck_local/brains/follow-v1/brain.onnx
 !microduck_local/brains/follow-v1/brain.json
+!microduck_local/brains/follow-v2/
+microduck_local/brains/follow-v2/*
+!microduck_local/brains/follow-v2/brain.onnx
+!microduck_local/brains/follow-v2/brain.json
 microduck_local/recordings/
 microduck_local/lab-state.json
 microduck_local/teach-weights.json

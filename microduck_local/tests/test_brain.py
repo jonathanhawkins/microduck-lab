@@ -140,3 +140,63 @@ def test_chase_brain_walks_at_a_tracked_ball_and_searches_left_without_one():
     fr = DetectionFrame(0.1, [Detection("ball", "ball0", 0.2, -0.3, 0.05, 1.0, 0.9)])
     seen = b.step(Senses(t=0.1, det=fr, det_age=0.0, speed=0.0, odom=(0.0, 0.0, 0.0)))
     assert seen.note == "chase" and seen.twist[0] > 0.3 and seen.twist[2] > 0
+
+
+def test_chase_brain_keeps_off_the_other_duck():
+    """Body-aware avoidance on the pitch: a tracked duck close ahead means
+    turn AWAY from it, never into it; one touching means stand still;
+    one far away changes nothing (measured: 5 of 7 falls over 4 traced runs
+    were this duck turning in place against the other's body)."""
+    from microduck_local.brain import REGISTRY
+    from microduck_local.brain.runtime import Senses
+    from microduck_local.sensors.detector import Detection, DetectionFrame
+
+    def duck_at(bearing, rng):
+        return Detection("duck", "d1", bearing, 0.0, 2 * 0.1 / rng, rng, 0.9)
+
+    b = REGISTRY.make("chase")
+    odom = (0.0, 0.0, 0.0)
+    # Far: the search goes on as if it were alone.
+    far = b.step(Senses(t=0.0, det=DetectionFrame(0.0, [duck_at(0.2, 1.5)]), det_age=0.0, speed=0.0, odom=odom))
+    assert far.note == "search"
+    # Close on the LEFT (+bearing): turn right, and no forward creep with it near the nose.
+    left = b.step(Senses(t=0.1, det=DetectionFrame(0.1, [duck_at(0.3, 0.35)]), det_age=0.0, speed=0.0, odom=odom))
+    assert left.note == "avoid" and left.twist == (0.0, 0.0, -1.0)
+    # Close on the right, well off the nose: turn left — cold gait, so the kick comes with it.
+    right = b.step(Senses(t=0.2, det=DetectionFrame(0.2, [duck_at(-0.8, 0.35)]), det_age=0.0, speed=0.0, odom=odom))
+    assert right.note == "avoid" and right.twist[2] == 1.0 and right.twist[0] > 0
+    # Touching: stand.
+    touch = b.step(Senses(t=0.3, det=DetectionFrame(0.3, [duck_at(0.1, 0.12)]), det_age=0.0, speed=0.0, odom=odom))
+    assert touch.note == "avoid" and touch.twist == (0.0, 0.0, 0.0)
+    # A ball in view does not override a duck on top of us — the line-up waits.
+    both = DetectionFrame(0.4, [duck_at(0.1, 0.15), Detection("ball", "ball0", 0.0, -0.3, 0.05, 0.5, 0.9)])
+    wait = b.step(Senses(t=0.4, det=both, det_age=0.0, speed=0.0, odom=odom))
+    assert wait.note == "avoid" and wait.twist == (0.0, 0.0, 0.0) and b.spot is None
+    # Gone (the track ages past 0.6 s): back to the ball.
+    b.step(Senses(t=0.5, det=DetectionFrame(0.5, [Detection("ball", "ball0", 0.0, -0.3, 0.05, 0.5, 0.9)]),
+                  det_age=0.0, speed=0.0, odom=odom))
+    resumed = b.step(Senses(t=1.1, det=DetectionFrame(1.1, [Detection("ball", "ball0", 0.0, -0.3, 0.05, 0.5, 0.9)]),
+                            det_age=0.0, speed=0.0, odom=odom))
+    assert resumed.note in ("lineup", "chase")
+
+
+def test_follow_lead_term_turns_toward_where_the_target_is_going():
+    """`k_lead`: a target whose bearing is drifting left gets more turn
+    than its bearing alone asks for; with it off the two are equal."""
+    from microduck_local.brain import Follow
+    from microduck_local.brain.controllers import FollowParams
+    from microduck_local.brain.runtime import Senses
+    from microduck_local.sensors.detector import Detection, DetectionFrame
+
+    def frames(brain):
+        out = []
+        for k in range(4):
+            t = 0.1 * k
+            det = DetectionFrame(t, [Detection("person", "p0", 0.05 + 0.05 * k, 0.0, 0.3, 1.4, 0.9)])
+            out.append(brain.step(Senses(t=t, det=det, det_age=0.0, speed=0.3, odom=(0.0, 0.0, 0.0))))
+        return out
+    plain = frames(Follow(FollowParams(k_lead=0.0)))
+    lead = frames(Follow(FollowParams(k_lead=0.5)))
+    assert plain[-1].note == "approach" and lead[-1].note == "approach"
+    assert 0 < plain[-1].twist[2] < 1.0                           # bearing ~0.2 rad: not saturated
+    assert lead[-1].twist[2] > plain[-1].twist[2] + 0.1           # …moving +0.5 rad/s: turn ahead of it

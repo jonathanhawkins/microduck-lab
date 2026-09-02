@@ -22,7 +22,9 @@ git clone <this repo> microduck-workspace && cd microduck-workspace
 git clone https://github.com/pollen-robotics/microduck
 git clone https://github.com/pollen-robotics/microduck_rl
 # The contract, golden-bit and symmetry tests are measured against specific
-# upstream models and policies — the same shas CI pins (.github/workflows/tests.yml):
+# upstream models and policies — the same shas CI pins (.github/workflows/tests.yml).
+# (The golden bits are per platform, tests/goldens/; a platform without a
+# recording skips them — record yours with MICRODUCK_RECORD_GOLDENS=1.)
 git -C microduck_rl checkout badc4e7ffe5507fd7acb1a21487bd2925c1afe5a
 git -C microduck checkout 2c61dcc1f03440541cdc0729f7a375b2a9ea3005
 cd microduck_local && uv sync            # needs https://docs.astral.sh/uv/

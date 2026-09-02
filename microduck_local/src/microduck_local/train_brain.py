@@ -1,7 +1,7 @@
 """Train a brain (roadmap 3.1/3.2): PPO over BrainEnv, then export it.
 
-    uv run train-brain --run-name follow-v1 --envs 12 --steps 400000
-    uv run eval-brain --brain learned:follow-v1 --preset hostile
+    uv run train-brain --run-name follow-v2 --envs 12 --steps 400000
+    uv run eval-brain --brain learned:follow-v2 --preset hostile
     uv run eval-brain --brain follow --preset hostile          # the scripted baseline
 
 Each PPO step here is one DECISION (five control steps of the frozen
@@ -24,7 +24,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .brain.brain_env import ACT_HIGH, ACT_LOW, BRAIN_OBS_DIM, BrainEnv, FollowTask
+from .brain.brain_env import (
+    ACT_HIGH,
+    ACT_LOW,
+    BRAIN_OBS_DIM,
+    BRAIN_OBS_VERSION,
+    BrainEnv,
+    FollowTask,
+)
 from .brain.learned import brains_dir
 
 
@@ -130,7 +137,8 @@ def main() -> None:
 
     (out / "brain.json").write_text(json.dumps({
         "name": args.run_name, "task": "follow", "target_cls": "person", "decide_every": 5,
-        "obs_dim": BRAIN_OBS_DIM, "act_low": ACT_LOW.tolist(), "act_high": ACT_HIGH.tolist(),
+        "obs_dim": BRAIN_OBS_DIM, "obs_version": BRAIN_OBS_VERSION,
+        "act_low": ACT_LOW.tolist(), "act_high": ACT_HIGH.tolist(),
         "envs": args.envs, "steps": args.steps, "seed": args.seed,
         "fixed_preset": args.fixed_preset}, indent=2))
     try:

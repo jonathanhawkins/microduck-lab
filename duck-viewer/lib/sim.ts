@@ -166,6 +166,12 @@ export interface OccupancyMap {
   frames: number;
   /** ny*nx chars, row-major from -y: '0' unknown, '1' free, '2' occupied. */
   cells: string;
+  /** Loop closure (brain/mapping.py): the odometry→map correction (x, y, yaw) the
+   *  wall-line matcher has accumulated, how many frames it corrected, and the
+   *  corrected pose the last frame was folded in at. */
+  offset?: [number, number, number];
+  corrections?: number;
+  pose?: [number, number, number] | null;
 }
 export interface WorldInfo {
   scenario: Scenario | null;

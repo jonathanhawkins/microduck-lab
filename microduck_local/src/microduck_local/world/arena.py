@@ -46,6 +46,11 @@ GROUND_PICK_END_PHI = 0.7
 # `kick_duration` (0.5 s in robotd's control.rs) with an all-zero command,
 # then back to the walker. Same protocol here.
 KICK_S = 0.5
+# …and at the STANDING tuning: robotd's standing transition fires on that
+# all-zero command, so the window runs at `standing_action_scale` (1.0 —
+# the same whole action this world always applies) and the softened
+# standing gain, `standing_gain_ratio` × the walking Kp (control.rs).
+STANDING_GAIN_RATIO = 0.8
 SKILLS = {"ground_pick": "alpha_ground_pick.onnx", "kick_left": "ball_kick_left.onnx",
           "kick_right": "ball_kick_right.onnx"}
 PICK_REACH_AHEAD = 0.078     # where the tip lands, ahead of the trunk origin (m), standing on the walker
@@ -110,6 +115,8 @@ class WorldDuck:
     skill: str | None = None
     skill_t0: float = 0.0
     skill_infer: Infer | None = None
+    kp_base: np.ndarray | None = None      # the model's actuator Kp for this duck, restored after a kick
+    gain_ratio: float = 1.0
     grasp_attempts: int = 0
     grasp_successes: int = 0
     last_grasp_err: float | None = None   # xy distance tip→nearest toy at the last close (m)
@@ -354,6 +361,7 @@ class World:
         self.release(d)
         d.skill = None
         d.skill_infer = None
+        self._set_gain_ratio(d, 1.0)
         if d.tof is not None:
             d.tof.reset()
         if d.detector is not None:
@@ -503,6 +511,18 @@ class World:
         d.holding = None
         return toy
 
+    def _set_gain_ratio(self, d: WorldDuck, ratio: float) -> None:
+        """Scale this duck's position-actuator Kp (gain and the matching
+        bias term) — the standing gain a kick window runs at on the robot."""
+        if d.kp_base is None:
+            d.kp_base = self.model.actuator_gainprm[d.adr.actuators, 0].copy()
+        if ratio == d.gain_ratio:
+            return
+        kp = d.kp_base * ratio
+        self.model.actuator_gainprm[d.adr.actuators, 0] = kp
+        self.model.actuator_biasprm[d.adr.actuators, 1] = -kp
+        d.gain_ratio = ratio
+
     def start_skill(self, d: WorldDuck, name: str) -> bool:
         """Hand the reflex tier to a skill policy for one cycle (the robot's
         own pattern: hard swap in, auto swap back): ground_pick (a phase
@@ -517,6 +537,8 @@ class World:
             self.skills[name] = onnx_infer(path)
         d.skill, d.skill_t0, d.skill_infer = name, self.t, self.skills[name]
         d._hold_yaw = None
+        if name.startswith("kick"):
+            self._set_gain_ratio(d, STANDING_GAIN_RATIO)
         if d.holding is None:
             d.beak_closed = False          # a cycle starts with an open, empty beak
         return True
@@ -552,6 +574,7 @@ class World:
             if self.t - d.skill_t0 >= KICK_S:
                 d.skill, d.skill_infer = None, None
                 d.twist_cmd[:] = 0.0
+                self._set_gain_ratio(d, 1.0)
                 return None
             d.twist_cmd[:] = 0.0                  # the kick's observation carries an all-zero command
             d.head_cmd[:] = 0.0

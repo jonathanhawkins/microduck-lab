@@ -441,7 +441,9 @@ function SimTargets({ client }: { client: SimClient }) {
 /** What a duck believes the room looks like: its occupancy grid (brain
  *  layer, in its own odometry frame) painted onto a floor-level plane.
  *  Free = faint teal, occupied = amber, unknown = clear. Under odometry
- *  drift the map smears exactly as the robot's would. */
+ *  drift the grid closes the loop on its own walls (`map.corrections`
+ *  counts the frames it nudged); what smear is left is what a 45° depth
+ *  matrix cannot fix. */
 function MapOverlay({ client, duckId, enabled }: { client: SimClient; duckId: string | null; enabled: boolean }) {
   const canvas = useMemo(() => document.createElement("canvas"), []);
   const texture = useMemo(() => {

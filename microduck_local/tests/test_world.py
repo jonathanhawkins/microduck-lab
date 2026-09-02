@@ -197,3 +197,41 @@ def test_shipped_kick_skill_sends_the_ball_flying():
             assert moved > expect, (side, by, moved)
         else:
             assert moved < expect, (side, by, moved)
+
+
+@pytest.mark.skipif(not (POLICIES_DIR / "ball_kick_left.onnx").exists(), reason="upstream policies not checked out")
+def test_kick_window_runs_at_the_standing_gain_and_hands_it_back():
+    """robotd runs a kick at the standing tuning: the walking Kp softened by
+    `standing_gain_ratio` (control.rs). Here the duck's actuators drop to
+    that ratio for the 0.5 s window — this duck's only — and come back."""
+    from microduck_local.brain.brain_env import onnx_infer
+    from microduck_local.world import Ball, Duck, Scenario, World
+    from microduck_local.world.arena import KICK_S, STANDING_GAIN_RATIO
+    sc = Scenario(name="k2", floor=(4, 4), balls=[Ball((0.08, 0.06))],
+                  ducks=[Duck("d0", (0, 0, 0), None, None, None), Duck("d1", (1.5, 0, 0), None, None, None)])
+    infer = onnx_infer(POLICIES_DIR / "alpha_walking.onnx")
+    w = World(sc, infer_for={"d0": infer, "d1": infer}, seed=0)
+    d0, d1 = w.ducks["d0"], w.ducks["d1"]
+    kp0 = w.model.actuator_gainprm[d0.adr.actuators, 0].copy()
+    kp1 = w.model.actuator_gainprm[d1.adr.actuators, 0].copy()
+    assert (kp0 > 0).all()
+    for _ in range(50):
+        for d in (d0, d1):
+            d.set_cmd(w.data, [0, 0, 0])
+        w.step()
+    assert w.start_skill(d0, "kick_left")
+    np.testing.assert_allclose(w.model.actuator_gainprm[d0.adr.actuators, 0], STANDING_GAIN_RATIO * kp0)
+    np.testing.assert_allclose(w.model.actuator_biasprm[d0.adr.actuators, 1], -STANDING_GAIN_RATIO * kp0)
+    np.testing.assert_array_equal(w.model.actuator_gainprm[d1.adr.actuators, 0], kp1)   # the other duck: untouched
+    steps = 0
+    while d0.skill is not None:
+        w.step()
+        steps += 1
+    assert abs(steps * C.CTRL_DT - KICK_S) <= C.CTRL_DT + 1e-9
+    np.testing.assert_array_equal(w.model.actuator_gainprm[d0.adr.actuators, 0], kp0)
+    np.testing.assert_array_equal(w.model.actuator_biasprm[d0.adr.actuators, 1], -kp0)
+    # A respawn mid-window (a fall) restores it too.
+    assert w.start_skill(d0, "kick_right")
+    w.reset_duck("d0")
+    assert d0.skill is None and d0.gain_ratio == 1.0
+    np.testing.assert_array_equal(w.model.actuator_gainprm[d0.adr.actuators, 0], kp0)

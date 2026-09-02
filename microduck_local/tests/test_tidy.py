@@ -5,6 +5,7 @@ beak lands."""
 
 
 import mujoco
+import numpy as np
 import pytest
 
 from microduck_local import contract as C
@@ -174,3 +175,86 @@ def test_tidy_brain_geometry_and_gating_without_physics():
     # The frame contract the stamp rides on.
     fr = DetectionFrame(t=0.0, detections=[det], cam_z=0.234, cam_pitch=0.197)
     assert fr.cam_pitch == 0.197 and DetectionFrame(t=0.0, detections=[]).cam_z == 0.0
+
+
+def test_tidy_rim_toys_are_staged_from_the_outside_and_routed_round_the_basket():
+    """Toys near the basket (12.7): inside `basket_inside` they are left
+    alone; out to `basket_zone` they get a staging point beyond them on
+    the basket→toy ray, and a via-point when the straight walk to it would
+    cross the basket disc. Pure geometry, no physics."""
+    import math
+
+    from microduck_local.brain.tidy import Tidy
+    b = Tidy()
+    p = b.p
+    assert p.basket_inside < p.basket_zone
+    # Unknown basket: nothing is special.
+    assert b._stage_point(0.2, 0.0) is None and not b._point_in_basket_zone(0.0, 0.0)
+    b.basket_mem, b.basket_confirmed = (1.0, 0.0), True
+    assert b._point_in_basket_zone(1.0 + p.basket_inside - 0.01, 0.0)          # in the tray / hugging the rim
+    assert not b._point_in_basket_zone(1.0 + p.basket_inside + 0.01, 0.0)      # rim zone: picked, from outside
+    # A toy 0.23 m north of the basket: stage 0.3 m further north.
+    st = b._stage_point(1.0, 0.23)
+    assert st is not None and abs(st[0] - 1.0) < 1e-9 and abs(st[1] - (0.23 + p.stage_out)) < 1e-9
+    assert b._stage_point(1.0, p.basket_zone + 0.01) is None                   # in the open: no staging
+    # From (0, -1) the straight walk to that stage passes 0.29 m from the
+    # basket centre: a via-point on the near side, `basket_avoid_r` out.
+    via = b._via_point((0.0, -1.0), st)
+    assert via is not None
+    assert abs(math.hypot(via[0] - 1.0, via[1]) - p.basket_avoid_r) < 1e-9 and via[1] > 0 and via[0] < 1.0
+    # From (0, 0) it passes 0.47 m out, and from due north nothing is in the way.
+    assert b._via_point((0.0, 0.0), st) is None and b._via_point((1.0, 1.5), st) is None
+    # Dead through the centre: round the left.
+    assert b._via_point((0.0, 0.0), (2.0, 0.0))[1] > 0
+    # The route for the toy: via first, then the stage; the estimate is untouched.
+    b.est = (1.0, 0.23)
+    b._plan_route((0.0, -1.0, 0.0), t=0.0)
+    assert b._route == [via, st] and b.est == (1.0, 0.23)
+    b._plan_route((0.0, 0.0, 0.0), t=0.0)
+    assert b._route == [st]
+    b.est = (1.0, 1.0)
+    b._plan_route((0.0, 0.0, 0.0), t=0.0)
+    assert b._route == []
+
+
+@pytest.mark.skipif(not (POLICIES_DIR / "alpha_ground_pick.onnx").exists(), reason="upstream policies not checked out")
+def test_tidy_picks_a_toy_behind_the_basket_without_touching_it():
+    """End to end: a toy 0.23 m past the basket, seen from the spawn with
+    the basket in between. The brain notes the basket while scanning,
+    routes round it, comes in from the far side and picks the toy — feet
+    never inside the rim's reach, no fall (measured before the staging:
+    every fall in 8 traced runs was an approach at the rim)."""
+    from microduck_local.brain import REGISTRY, Senses
+    from microduck_local.brain import tidy as _tidy  # noqa: F401
+    sc = Scenario(name="rim", floor=(4, 4),
+                  ducks=[Duck("d0", (0.0, 0.0, 0.0), None, "ideal", "ideal", brain="tidy")],
+                  pickables=[Pickable("t0", "block", (0.45, 0.23))],
+                  basket=Basket((0.45, 0.0), (0.3, 0.3), 0.06))
+    w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=0)
+    d = w.ducks["d0"]
+    brain = REGISTRY.make("tidy")
+    states, routed, nearest = [], False, 9.0
+    picked_at = None
+    for _ in range(int(60.0 / C.CTRL_DT)):
+        tof, det = d.tof.last, d.detector.last
+        s = Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
+                   det=det, det_age=None if det is None else w.t - det.t,
+                   speed=d.heading_speed(w.data), odom=w.odom(d), holding=d.holding is not None, skill=d.skill)
+        intent = brain.step(s)
+        w.apply_intent(d, intent)
+        if d.skill is None:
+            d.set_cmd(w.data, intent.twist, intent.head)
+        w.step()
+        routed |= bool(brain._route)
+        if not states or states[-1] != brain.state:
+            states.append(brain.state)
+        pos = d.trunk_pos(w.data)
+        nearest = min(nearest, float(np.hypot(pos[0] - 0.45, pos[1])))
+        if d.holding and picked_at is None:
+            picked_at = w.t
+        if brain.state == "carry":
+            break
+    assert brain.basket_confirmed and routed, states
+    assert picked_at is not None and d.holding == "t0", states
+    assert d.falls == 0
+    assert nearest > 0.19, nearest                      # the trunk stayed outside the rim's reach (0.156 + feet)
