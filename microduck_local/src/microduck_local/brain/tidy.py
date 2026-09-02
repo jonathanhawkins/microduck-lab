@@ -10,12 +10,14 @@ basket, repeat — over the senses and intents the robot actually has.
                                                                                             └──▶ scan
 
 Why the blind legs exist: the head camera looks straight ahead, so a toy
-on the floor leaves its field of view about half a metre out, and the
-basket rim about 0.4 m out. From there the brain walks a remembered point
-in odometry — exactly the "operator aims the robot, the policy is blind"
-pattern upstream ships, automated. Odometry is the truth here for now
-(roadmap 1.7 adds drift), and the real robot's is contact-anchored and
-drifts, which is why the basket is re-acquired visually every trip.
+on the floor leaves its field of view about half a metre out (the head
+pitches down while walking in, which buys a few tens of centimetres), and
+the basket's rim marker about 0.3 m out with the head level. From there
+the brain walks a remembered point in odometry — exactly the "operator
+aims the robot, the policy is blind" pattern upstream ships, automated.
+Odometry is the truth here for now (roadmap 1.7 adds drift), and the real
+robot's is contact-anchored and drifts, which is why the basket is
+re-acquired visually every trip and never released on a long-range guess.
 
 Per-toy retries and a give-up budget keep it from looping on a toy it
 cannot grasp; two clean scans with nothing seen means "done".
@@ -28,6 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .. import contract as C
 from ..world.arena import PICK_REACH_AHEAD, PICK_REACH_LEFT
 from .controllers import WanderParams, _column_clearance, wander_from_tof
 from .runtime import REGISTRY, Intent, Senses, age_inputs
@@ -39,19 +42,43 @@ class TidyParams:
     reach_left: float = PICK_REACH_LEFT
     approach_speed: float = 0.3        # the walker delivers ~half; below ~0.2 it stands still
     k_turn: float = 2.5
-    head_down: float = 0.6             # head_pitch intent while hunting: camera ~37° down
+    head_down: float = 0.6             # head_pitch intent while walking in: camera ~37° down
     cam_ahead: float = 0.064           # camera ahead of the trunk origin (m)
-    cam_z_down: float = 0.20           # camera height with the head down (m)
-    cam_pitch_down: float = 0.655      # …and its depression (rad), measured on the walker
+    # Fallbacks for detection frames that do not carry the camera pose
+    # (every frame from the lab's detector does): height / depression with
+    # the head at rest, standing…
+    cam_z_level: float = 0.234
+    cam_pitch_level: float = 0.197     # (the stand pose already looks 11° down)
+    cam_z_down: float = 0.202          # …and with head_pitch 0.6 (measured on the walker)
+    cam_pitch_down: float = 0.647
+    head_settle_s: float = 0.4         # the head takes ~0.3 s to get there: ignore detections meanwhile
     toy_z: float = 0.015               # a toy's centre height (m), class-blind
     basket_z: float = 0.08             # the basket marker's height (m)
-    basket_reach: float = 0.19         # trunk-to-basket-centre at release: feet outside a 0.3 m tray, beak over it
+    # Trunk-to-basket-centre at release. Measured on the walker: the feet
+    # reach 0.04 m ahead of the trunk, the beak tip 0.08 m (head LEVEL —
+    # pitching it down pulls the tip back to 0.053), and a held toy sits
+    # 0.005–0.023 m beyond the tip. A 0.3 m tray's rim outer face is at
+    # 0.156, so 0.225 minus the ~1 cm coast leaves the feet 2 cm outside
+    # the rim and the toy 1.5–3 cm inside it. ASSUMPTION: a 0.3 m basket.
+    # Tight on purpose: a miss is retried, a trip over the rim is a fall.
+    basket_reach: float = 0.225
+    basket_confirm_range: float = 0.6  # release only if the marker was seen from closer than this
+    aim_range: float = 0.42            # stop here, square up, stand still and re-measure the basket before the blind end
+    aim_settle_s: float = 0.6          # the walker needs ~0.5 s to come to rest
+    aim_s: float = 1.4
+    aim_align: float = 0.08            # squared up when the basket is within this of the nose (rad)
+    basket_zone: float = 0.28          # toys estimated this close to the basket are IN it (or against the rim): leave them
+    basket_keepout: float = 0.5        # exploring turns away from the basket inside this radius
     settle_s: float = 0.6
-    backoff_s: float = 2.0
+    backoff_turn: float = 2.6          # after a release: turn LEFT this far (rad, in place)…
+    backoff_walk_s: float = 1.5        # …then walk straight this long before scanning again
+    turn_kick: float = 0.2             # forward command that starts the gait for a RIGHT turn
+    detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
     scan_wz: float = 1.0               # the shipped walker barely turns in place below 1.0
     explore_s: float = 6.0             # wander this long after an empty scan
+    min_conf: float = 0.1              # a tracked detection needs no more than this (see _trusted)
     max_retries: int = 2               # pick attempts per toy before giving up on it
-    done_after_scans: int = 4          # empty scans (each followed by a wander) before giving up
+    done_after_scans: int = 6          # empty scans (each followed by a wander) before giving up
 
 
 class Tidy:
@@ -80,6 +107,23 @@ class Tidy:
         self.last = (0.0, 0.0, 0.0)
         self._senses: Senses | None = None
         self._prev_yaw: float | None = None
+        self._head_down = False
+        self._head_since = -9.0
+        self._cam: tuple[float, float] | None = None
+        # Where toys were last seen (odom frame) — the work queue — and the
+        # basket once it has been seen at all: it does not move.
+        self.memory: dict[str, tuple[float, float, float]] = {}
+        self.basket_mem: tuple[float, float] | None = None
+        self.basket_confirmed = False    # seen from close enough that the estimate is trustworthy
+        self.aimed = False               # this trip's standing re-measure of the basket is done
+        self._aim_rounds = 0
+        self._aim_turning = False
+        self._backoff_t = 0.0
+        self._blocked_t = -9.0
+        self._moving_t = -9.0            # last time the body was seen walking or turning
+        self._cold = True
+        self._aim_fixes: list[tuple[float, float]] = []
+        self._aim_last_t = -9.0
 
     def inputs(self) -> dict:
         if self._senses is None:
@@ -97,38 +141,94 @@ class Tidy:
         self.state = state
         self.t_state = t
 
-    def _nearest(self, senses: Senses, cls: str):
+    def _nearest(self, senses: Senses, cls: str, odom=None):
         det = senses.fresh_det(self.DET_MAX_AGE)
         if det is None:
             return None
-        cands = [d for d in det.detections if d.cls == cls and d.name not in self.given_up]
+        cands = [d for d in det.detections if d.cls == cls and self._trusted(d) and d.name not in self.given_up]
+        if cls == "toy" and odom is not None:
+            cands = [d for d in cands if not self._in_basket_zone(odom, d, senses.t)]
         return min(cands, key=lambda d: d.range_est) if cands else None
 
-    def _update_estimate(self, odom, det, target_z: float) -> float:
-        """Fold one detection into the odom-frame target estimate using the
-        elevation (a floor object seen from a known camera height and pitch
-        gives range far better than its apparent width). Returns the
-        horizontal range from the trunk."""
+    def _point_in_basket_zone(self, x: float, y: float) -> bool:
+        return (self.basket_mem is not None and self.basket_confirmed
+                and math.hypot(x - self.basket_mem[0], y - self.basket_mem[1]) < self.p.basket_zone)
+
+    def _trusted(self, det) -> bool:
+        """A detection worth acting on is a TRACKED one — it has an id — not
+        a confident one: a 2 cm toy at 1.5 m is 1.5° wide, found one frame
+        in six with a confidence under 0.2, and that is still a toy worth
+        walking toward (its range will be rough; the approach re-measures).
+        Ghosts have no id. The sim hands out ids for free; on the robot they
+        come from a tracker (roadmap 1.3), which is the honest boundary."""
+        return bool(det.name) and det.conf >= self.p.min_conf
+
+    def _in_basket_zone(self, odom, det, t: float) -> bool:
+        """A toy that projects onto the basket is one already delivered (or
+        lying against the rim): walking at it means walking into the rim —
+        measured: every fall in a 300 s run was an approach to a toy sitting
+        in the basket."""
+        if self.basket_mem is None or not self.basket_confirmed:
+            return False
+        loc = self._locate(odom, det, self.p.toy_z, t)
+        return loc is not None and self._point_in_basket_zone(loc[0], loc[1])
+
+    def _locate(self, odom, det, target_z: float, t: float) -> tuple[float, float, float] | None:
+        """One detection → (x, y, range) in the odom frame, from the
+        elevation: a floor object seen from a known camera height and pitch
+        gives range far better than its apparent width. None while the head
+        is still moving."""
         p = self.p
-        depression = p.cam_pitch_down - det.elevation          # rad below horizontal
-        depression = max(depression, 0.05)
-        horiz_cam = (p.cam_z_down - target_z) / math.tan(depression)
-        horiz_cam = float(np.clip(horiz_cam, 0.0, 4.0))
+        if t - self._head_since < p.head_settle_s:
+            return None
+        if self._cam is not None:
+            cam_z, cam_pitch = self._cam                       # the frame says where the camera was
+        else:
+            cam_z, cam_pitch = (p.cam_z_down, p.cam_pitch_down) if self._head_down else (p.cam_z_level, p.cam_pitch_level)
+        depression = max(cam_pitch - det.elevation, 0.05)     # rad below horizontal
+        horiz_cam = float(np.clip((cam_z - target_z) / math.tan(depression), 0.0, 4.0))
         x, y, yaw = odom
         a = yaw + det.bearing
-        tx = x + (p.cam_ahead + horiz_cam) * math.cos(a)
-        ty = y + (p.cam_ahead + horiz_cam) * math.sin(a)
+        rng = p.cam_ahead + horiz_cam
+        return x + rng * math.cos(a), y + rng * math.sin(a), rng
+
+    def _set_head(self, down: bool, t: float) -> None:
+        if down != self._head_down:
+            self._head_down = down
+            self._head_since = t
+
+    def _update_estimate(self, odom, det, target_z: float, t: float, k: float | None = None) -> float | None:
+        """Fold one detection into the odom-frame target estimate. Returns
+        the MEASURED horizontal range from the trunk, which is also how much
+        the measurement is trusted: the elevation-to-range map is steep at
+        distance (at 1 m, 0.01 rad of body pitch is 6 cm of range; walking
+        adds far more than that), so a far sighting mostly sets the
+        direction and a close one the spot; `k` overrides (a standing,
+        settled look is the best measurement there is)."""
+        p = self.p
+        loc = self._locate(odom, det, target_z, t)
+        if loc is None:
+            return None
+        tx, ty, rng = loc
         if self.est is None:
             self.est = (tx, ty)
         else:
-            k = 0.5
+            if k is None:
+                k = 0.7 if rng < p.basket_confirm_range else 0.3
             self.est = (self.est[0] + k * (tx - self.est[0]), self.est[1] + k * (ty - self.est[1]))
-        return math.hypot(self.est[0] - x, self.est[1] - y)
+        if det.cls == "toy" and det.name:
+            self.memory[det.name] = (self.est[0], self.est[1], t)
+        elif det.cls == "basket":
+            self.basket_mem = self.est
+            if rng < p.basket_confirm_range:
+                self.basket_confirmed = True
+        return rng
 
-    def _servo(self, odom, stop_at: float, left: float = 0.0) -> tuple[tuple[float, float, float], float, float]:
-        """Walk toward the estimate, turning in place first if it is far off
-        the nose, and stop `stop_at` short of it. `left` biases the aim so
-        an off-centre beak lands on the target."""
+    def _servo(self, odom, stop_at: float, left: float = 0.0,
+               align: float = 0.35) -> tuple[tuple[float, float, float], float, float]:
+        """Walk toward the estimate, turning in place first if it is more
+        than `align` off the nose, and stop `stop_at` short of it. `left`
+        biases the aim so an off-centre beak lands on the target."""
         x, y, yaw = odom
         dx, dy = self.est[0] - x, self.est[1] - y
         dist = math.hypot(dx, dy)
@@ -136,9 +236,21 @@ class Tidy:
         bearing = math.atan2(math.sin(math.atan2(dy, dx) - yaw - want), math.cos(math.atan2(dy, dx) - yaw - want))
         if dist <= stop_at:
             return (0.0, 0.0, 0.0), dist, bearing
-        if abs(bearing) > 0.35:
-            return (0.0, 0.0, 1.0 if bearing > 0 else -1.0), dist, bearing
+        if abs(bearing) > align:
+            return self._turn(bearing), dist, bearing
         return (self.p.approach_speed, 0.0, float(np.clip(self.p.k_turn * bearing, -1.0, 1.0))), dist, bearing
+
+    def _turn(self, sign: float) -> tuple[float, float, float]:
+        """Turn in place. Measured on the shipped walker: with the gait going
+        (just walked, or already turning) wz=±1 turns at ~0.6–0.8 rad/s; from
+        a standstill a right turn never starts (0.05 rad/s) and a left one
+        usually does within a second — but not always (30 s of nothing
+        after a pick, once). So a COLD turn gets a small forward command
+        as a kick (vx 0.2 with wz -1: 0.7 rad/s from cold; it creeps forward
+        a few centimetres a second, which is why the kick drops the moment
+        the body is actually turning)."""
+        wz = 1.0 if sign > 0 else -1.0
+        return (self.p.turn_kick, 0.0, wz) if self._cold else (0.0, 0.0, wz)
 
     def _bumper(self, senses: Senses) -> float:
         tof = senses.fresh_tof(self.TOF_MAX_AGE)
@@ -151,68 +263,104 @@ class Tidy:
         self._senses = senses
         p, t = self.p, senses.t
         odom = senses.odom or (0.0, 0.0, 0.0)
+        fr = senses.fresh_det(self.DET_MAX_AGE)
+        self._cam = (fr.cam_z, fr.cam_pitch) if (fr is not None and fr.cam_z > 0.0) else None
+        # Is the gait going? (see _turn) — from the odometry, not the intent.
+        if self._prev_yaw is not None:
+            dyaw = math.atan2(math.sin(odom[2] - self._prev_yaw), math.cos(odom[2] - self._prev_yaw))
+            if abs(senses.speed or 0.0) > 0.05 or abs(dyaw) > 0.3 * C.CTRL_DT:
+                self._moving_t = t
+        self._cold = t - self._moving_t > 0.4
         twist = (0.0, 0.0, 0.0)
         head = (0.0, 0.0, 0.0, 0.0)
         beak = None
         skill = None
         note = self.state
-        looking_down = self.state in ("scan", "explore", "approach", "blind", "carry", "deliver")
-        if looking_down:
-            head = (0.0, p.head_down, 0.0, 0.0)
+        # The walker cannot turn in place with its head down (measured: 0.2 rad
+        # in 5 s vs 3.1 level), so the head drops only while walking straight
+        # at a target; scanning and turning happen level.
+        head_down = False
 
         if self.state == "scan":
-            toy = self._nearest(senses, "toy")
-            if toy is not None:
-                self.est, self.goal_kind, self.target_name = None, "toy", toy.name
-                self._update_estimate(odom, toy, p.toy_z)
+            toy = self._nearest(senses, "toy", odom)
+            if toy is not None and self._update_estimate(odom, toy, p.toy_z, t) is not None:
+                self.goal_kind, self.target_name = "toy", toy.name
                 self.t_seen = t
                 self.scans_empty = 0
                 self._enter("approach", t)
             else:
+                # Remember toys seen while turning even when they are not the
+                # target: a full turn builds the work queue.
+                det = senses.fresh_det(self.DET_MAX_AGE)
+                if det is not None and t - self._head_since >= p.head_settle_s:
+                    for dd in det.detections:
+                        if dd.cls == "toy" and self._trusted(dd) and dd.name not in self.given_up \
+                                and not self._in_basket_zone(odom, dd, t):
+                            saved = self.est
+                            self.est = None
+                            self._update_estimate(odom, dd, p.toy_z, t)
+                            self.est = saved
                 twist = (0.0, 0.0, p.scan_wz)
                 if self._prev_yaw is not None:
                     d = odom[2] - self._prev_yaw
-                    self.scan_turned += abs(math.atan2(math.sin(d), math.cos(d)))
+                    self.scan_turned += math.atan2(math.sin(d), math.cos(d))   # SIGNED: the gait wobbles ±0.02 rad a step
                 if self.scan_turned >= 2 * math.pi:
                     self.scan_turned = 0.0
-                    self.scans_empty += 1
-                    self._enter("done" if self.scans_empty >= p.done_after_scans else "explore", t)
+                    remembered = [(n, m) for n, m in self.memory.items()
+                                  if n not in self.given_up and not self._point_in_basket_zone(m[0], m[1])]
+                    if remembered:
+                        # Nothing in view now, but the queue is not empty: walk
+                        # to the nearest remembered toy and re-acquire it there.
+                        x, y, _ = odom
+                        name, (mx, my, _) = min(remembered, key=lambda nm: math.hypot(nm[1][0] - x, nm[1][1] - y))
+                        self.est, self.goal_kind, self.target_name = (mx, my), "toy", name
+                        self.t_seen = t
+                        self.scans_empty = 0
+                        self._enter("approach", t)
+                    else:
+                        self.scans_empty += 1
+                        self._enter("done" if self.scans_empty >= p.done_after_scans else "explore", t)
                 note = f"scan {self.scans_empty}/{p.done_after_scans}"
 
         elif self.state == "explore":
-            if self._nearest(senses, "toy") is not None:
+            if self._nearest(senses, "toy", odom) is not None:
                 self._enter("scan", t)
             else:
                 tof = senses.fresh_tof(self.TOF_MAX_AGE)
                 # The ToF looks down with the head: only its top rows see ahead.
-                twist = wander_from_tof(tof.depth_mm, tof.valid, WanderParams(rows=(0, 3))) if tof is not None else (0.0, 0.0, 0.0)
+                twist = wander_from_tof(tof.depth_mm, tof.valid) if tof is not None else (0.0, 0.0, 0.0)
                 if twist[0] == 0.0 and twist[2] != 0.0:
-                    twist = (0.0, 0.0, 1.0 if twist[2] > 0 else -1.0)
+                    twist = self._turn(twist[2])
                 if t - self.t_state > p.explore_s:
                     self._enter("scan", t)
 
         elif self.state == "approach":
-            toy = self._nearest(senses, "toy")
+            toy = self._nearest(senses, "toy", odom)
             if toy is not None and toy.name == self.target_name:
-                self._update_estimate(odom, toy, p.toy_z)
-                self.t_seen = t
-            twist, dist, _ = self._servo(odom, p.reach_ahead + 0.01, p.reach_left)
+                if self._update_estimate(odom, toy, p.toy_z, t) is not None:
+                    self.t_seen = t
+            twist, dist, bearing = self._servo(odom, p.reach_ahead + 0.01, p.reach_left)
+            head_down = twist[0] > 0 or (dist < 0.5 and abs(bearing) <= 0.35)
             if dist <= p.reach_ahead + 0.01:
                 self._enter("settle", t)
             elif t - self.t_seen > 1.0 and dist < 0.3:
                 self._enter("blind", t)                  # it left the camera's view: dead-reckon the rest
-            elif t - self.t_seen > 3.0 or t - self.t_state > 25.0:
+            elif t - self.t_seen > 4.0 or t - self.t_state > 25.0:
+                self.est = None
                 self._enter("scan", t)
 
         elif self.state == "blind":
             twist, dist, _ = self._servo(odom, p.reach_ahead + 0.01, p.reach_left)
-            if dist <= p.reach_ahead + 0.01:
+            if self._point_in_basket_zone(*self.est):
+                self.est = None                          # it is in (or against) the basket after all
+                self._enter("scan", t)
+            elif dist <= p.reach_ahead + 0.01:
                 self._enter("settle", t)
             elif t - self.t_state > 6.0:
+                self.est = None
                 self._enter("scan", t)
 
         elif self.state == "settle":
-            head = (0.0, 0.0, 0.0, 0.0)
             if t - self.t_state >= p.settle_s:
                 skill = "ground_pick"
                 self._enter("pick", t)
@@ -222,9 +370,11 @@ class Tidy:
                 self._enter("verify", t)
 
         elif self.state == "verify":
+            self.memory.pop(self.target_name or "", None)
             if senses.holding:
                 self.picked += 1
                 self.est = None
+                self.goal_kind = None
                 self._enter("carry", t)
             else:
                 n = self.retries.get(self.target_name or "", 0) + 1
@@ -234,11 +384,30 @@ class Tidy:
                 self.est = None
                 self._enter("scan", t)
 
+        elif self.state == "carry" and not senses.holding:
+            self.est, self.goal_kind = None, None          # lost it (a fall releases the beak): start over
+            self._enter("scan", t)
+
         elif self.state == "carry":
+            self.aimed = False
+            self._aim_rounds = 0
+            # The basket does not move and odometry is the truth here, so a
+            # basket seen up close on an earlier trip beats a fresh sighting
+            # from across the room (measured: a far sighting after a fall
+            # once put the estimate 0.8 m off and stayed there for five trips).
             basket = self._nearest(senses, "basket")
-            if basket is not None:
-                self.est, self.goal_kind, self.target_name = None, "basket", "basket"
-                self._update_estimate(odom, basket, p.basket_z)
+            if self.basket_mem is not None and self.basket_confirmed:
+                self.est, self.goal_kind, self.target_name = self.basket_mem, "basket", "basket"
+                self.t_seen = t
+                self._enter("deliver", t)
+            elif basket is not None:
+                if self.goal_kind != "basket":
+                    self.est, self.goal_kind, self.target_name = None, "basket", "basket"
+                if self._update_estimate(odom, basket, p.basket_z, t) is not None:
+                    self.t_seen = t
+                    self._enter("deliver", t)
+            elif self.basket_mem is not None:
+                self.est, self.goal_kind, self.target_name = self.basket_mem, "basket", "basket"
                 self.t_seen = t
                 self._enter("deliver", t)
             else:
@@ -247,38 +416,116 @@ class Tidy:
                     self._enter("carry_explore", t)
 
         elif self.state == "carry_explore":
-            head = (0.0, p.head_down, 0.0, 0.0)
             if self._nearest(senses, "basket") is not None:
                 self._enter("carry", t)
             else:
                 tof = senses.fresh_tof(self.TOF_MAX_AGE)
-                twist = wander_from_tof(tof.depth_mm, tof.valid, WanderParams(rows=(0, 3))) if tof is not None else (0.0, 0.0, 0.0)
+                twist = wander_from_tof(tof.depth_mm, tof.valid) if tof is not None else (0.0, 0.0, 0.0)
                 if twist[0] == 0.0 and twist[2] != 0.0:
-                    twist = (0.0, 0.0, 1.0 if twist[2] > 0 else -1.0)
+                    twist = self._turn(twist[2])
                 if t - self.t_state > p.explore_s:
                     self._enter("carry", t)
 
+        elif self.state in ("deliver", "aim") and not senses.holding:
+            self.est, self.goal_kind = None, None
+            self._enter("scan", t)
+
         elif self.state == "deliver":
-            basket = self._nearest(senses, "basket")
-            if basket is not None:
-                self._update_estimate(odom, basket, p.basket_z)
-                self.t_seen = t
-            twist, dist, _ = self._servo(odom, p.basket_reach)
+            # Head LEVEL the whole way: the marker sits on the rim at 8 cm,
+            # so a level camera keeps it until ~0.3 m out (a head-down camera
+            # loses it at 0.8 m and the leg turns into dead reckoning on a
+            # long-range estimate — measured drops 0.8–1.6 m from the basket).
+            if not self.aimed:
+                basket = self._nearest(senses, "basket")
+                if basket is not None and self._update_estimate(odom, basket, p.basket_z, t) is not None:
+                    self.t_seen = t
+                twist, dist, bearing = self._servo(odom, p.basket_reach)
+                if dist <= p.aim_range:
+                    twist = (0.0, 0.0, 0.0)
+                    self._aim_fixes = []
+                    self._enter("aim", t)
+            else:
+                # The last 0.2 m after the standing look: walk with gentle
+                # steering only. Alternating turn-in-place and walk here once
+                # overran the stop by 6 cm and tripped on the rim (the plain
+                # stop coasts 1 cm); a straight leg with NO steering once
+                # walked off in whatever direction the ToF guard had left it.
+                twist, dist, bearing = self._servo(odom, p.basket_reach)
+                if twist[0] > p.turn_kick:
+                    twist = (p.approach_speed, 0.0, float(np.clip(twist[2], -0.5, 0.5)))
             if dist <= p.basket_reach:
-                self._enter("drop", t)
-            elif t - self.t_seen > 4.0 or t - self.t_state > 30.0:
+                if self.basket_confirmed:
+                    self._enter("drop", t)
+                else:
+                    # Arrived on a long-range guess without ever seeing the
+                    # basket up close: it is somewhere near — turn and look.
+                    self.est, self.goal_kind, self.basket_mem = None, None, None
+                    self._enter("carry", t)
+            elif t - self.t_state > 30.0:
+                self.est = None
+                self.goal_kind = None
+                self.basket_mem = None
+                self.basket_confirmed = False
                 self._enter("carry", t)
+
+        elif self.state == "aim":
+            # Stand still, square up, and look: walking rocks the head a few
+            # hundredths of a radian, which at 0.4 m is centimetres of range —
+            # more than the release geometry has to spare. First turn until
+            # the basket is on the nose (so the blind leg needs no steering),
+            # then a settled look (frames CAPTURED after the walker came to
+            # rest) replaces the running estimate almost entirely.
+            _, dist, bearing = self._servo(odom, p.basket_reach)
+            if abs(bearing) > p.aim_align and self._aim_rounds < 3:
+                twist = self._turn(bearing)
+                self.t_state = t                            # the look starts once squared up
+                self._aim_turning = True
+            else:
+                if self._aim_turning:
+                    self._aim_turning = False
+                    self._aim_rounds += 1
+                settled = t - self.t_state >= p.aim_settle_s
+                fr = senses.fresh_det(self.DET_MAX_AGE)
+                if settled and fr is not None and fr.t >= self.t_state + p.aim_settle_s and fr.t > self._aim_last_t:
+                    self._aim_last_t = fr.t
+                    basket = self._nearest(senses, "basket")
+                    if basket is not None:
+                        loc = self._locate(odom, basket, p.basket_z, t)
+                        if loc is not None:
+                            self._aim_fixes.append((loc[0], loc[1]))
+                            self.t_seen = t
+                if t - self.t_state >= p.aim_s:
+                    if self._aim_fixes:              # the mean of the standing looks, not the last one
+                        self.est = (float(np.mean([f[0] for f in self._aim_fixes])),
+                                    float(np.mean([f[1] for f in self._aim_fixes])))
+                        self.basket_mem, self.basket_confirmed = self.est, True
+                    self._aim_fixes = []
+                    self.aimed = True
+                    self._enter("deliver", t)
 
         elif self.state == "drop":
             beak = "open"
             if t - self.t_state > 0.6:
                 if not senses.holding:
                     self.delivered += 1
+                self.scan_turned = 0.0
+                self._backoff_t = t
                 self._enter("backoff", t)
 
         elif self.state == "backoff":
-            twist = (-0.2, 0.0, 0.0)
-            if t - self.t_state > p.backoff_s:
+            # The walker cannot walk backwards (measured: -0.3 m/s commanded,
+            # 4 mm moved in 2 s), and turning in place drifts under 2 cm, so
+            # leaving the rim is a left turn-around on the spot and a short
+            # straight walk. Scanning right at the rim once put a foot on it.
+            if self._prev_yaw is not None and self.scan_turned < p.backoff_turn:
+                d = odom[2] - self._prev_yaw
+                self.scan_turned += math.atan2(math.sin(d), math.cos(d))
+            if self.scan_turned < p.backoff_turn:
+                twist = self._turn(+1.0)
+                self._backoff_t = t
+            elif t - self._backoff_t < p.backoff_walk_s:
+                twist = (p.approach_speed, 0.0, 0.0)
+            else:
                 self.est = None
                 self.scan_turned = 0.0
                 self._enter("scan", t)
@@ -286,15 +533,47 @@ class Tidy:
         elif self.state == "done":
             twist = (0.0, 0.0, 0.0)
 
+        # The rim is 6 cm high: too low for the ToF's guard until the last
+        # 0.26 m, and the walker trips on it. Exploring never heads at a
+        # confirmed basket (measured: most falls were explore legs ending
+        # 0.2 m from its centre).
+        if twist[0] > p.turn_kick and self.state in ("explore", "carry_explore") and self.basket_mem is not None \
+                and self.basket_confirmed:
+            bdx, bdy = self.basket_mem[0] - odom[0], self.basket_mem[1] - odom[1]
+            bdist = math.hypot(bdx, bdy)
+            bb = math.atan2(math.sin(math.atan2(bdy, bdx) - odom[2]), math.cos(math.atan2(bdy, bdx) - odom[2]))
+            # A disc, not a cone: skirting the basket tangentially at 0.23 m
+            # once clipped the rim's corner. Always a LEFT turn — a right
+            # turn from a standstill does not happen (see _turn), and the
+            # kicked one creeps forward, which is the wrong way here.
+            if bdist < p.basket_keepout and abs(bb) < 1.2:
+                twist = self._turn(+1.0)
+                note += " · basket keep-out"
+
+        self._set_head(head_down, t)
+        if self._head_down:
+            head = (0.0, p.head_down, 0.0, 0.0)
         # Never walk into whatever the ToF says is right there — read only its
         # top rows while the head is down, or they report the floor.
-        if twist[0] > 0 and self.state in ("approach", "deliver", "explore", "carry_explore"):
+        guard = self.state in ("approach", "explore", "carry_explore") or (
+            self.state == "deliver" and not (self.aimed and self.est is not None
+                                             and math.hypot(self.est[0] - odom[0], self.est[1] - odom[1]) < 0.5))
+        if twist[0] > p.turn_kick and guard:
             tof = senses.fresh_tof(self.TOF_MAX_AGE)
             if tof is not None:
-                ahead = float(_column_clearance(tof.depth_mm, tof.valid, WanderParams(rows=(0, 2)))[3:5].min())
+                rows = (0, 2) if self._head_down else (2, 7)
+                ahead = float(_column_clearance(tof.depth_mm, tof.valid, WanderParams(rows=rows))[3:5].min())
                 if ahead < 0.25:
-                    twist = (0.0, 0.0, twist[2] if twist[2] else 1.0)
+                    # Turn LEFT at full rate (the servo's steering rate never
+                    # turns the walker — measured: 200 s "blocked" on one
+                    # spot), then walk one straight detour step past it
+                    # before the servo takes the wheel back.
+                    twist = self._turn(+1.0)
+                    self._blocked_t = t
                     note += " · blocked"
+                elif t - self._blocked_t < p.detour_s and self.state in ("approach", "deliver"):
+                    twist = (p.approach_speed, 0.0, 0.0)
+                    note += " · detour"
 
         self._prev_yaw = odom[2]
         self.last = twist

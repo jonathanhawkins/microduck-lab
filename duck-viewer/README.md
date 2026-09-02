@@ -149,6 +149,23 @@ page's picker). One room, many ducks, and what each duck senses:
 - **Drive** (`P`, then WASD/arrows, Q/E strafe): every duck takes your twist
   for 6 s after the last key; otherwise ToF-equipped ducks wander on the
   lab's `Wander` brain and blind ducks follow a demo script. `R` restarts.
+- **Inspector · brain**: which brain steers the selected duck (`wander`,
+  `follow`, `tidy`, `script`, or a trained `learned:<run>`), switchable live,
+  its inputs with their ages (ToF, detector, the target it is tracking), its
+  current intent, and — for `tidy` — picked/delivered counts and the toys it
+  gave up on. `head` toggles whether the brain's head intents are applied.
+- **Persons + possess**: scenarios can carry walking persons (mocap capsules
+  on waypoint paths). Possess one from the inspector and drive it with the
+  same keys; the ducks keep their brains. This is how follow-me is tested.
+- **Editor** (`E`): place walls (two clicks), boxes, balls, ducks, persons,
+  toys and the basket on the floor, set each duck's brain, then save-and-load
+  under a name (`PUT /scenarios/{name}`; built-ins are read-only, so a draft
+  of one saves as a copy).
+- **Tidy score** (top-left, `playroom` scenario): toys in the basket, what the
+  duck is carrying, picks and deliveries — the same numbers `eval-tidy`
+  prints headless.
+- **Timeline** (bottom): the lab keeps a ring buffer of recent frames; pause
+  and scrub, or save the buffer as a recording.
 - Protocol: `lib/sim.ts` (`/ws/sim` frames, `/scenarios`, `/world`).
 
 The stage is the same as the main page (merged geoms per body, DOM labels,

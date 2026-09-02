@@ -110,6 +110,14 @@ class Detection:
 class DetectionFrame:
     t: float             # sim time the frame was CAPTURED
     detections: list[Detection]
+    # The camera pose the frame was taken from — height above the floor and
+    # depression of the optical axis below horizontal (rad). On the robot
+    # this is IMU pitch + the neck/head servo positions through the known
+    # kinematics; a brain that ranges floor objects by elevation needs it,
+    # because the walking gait swings the head by ±0.02 rad and holds it
+    # 0.08 rad higher than the standing pose does (measured on the walker).
+    cam_z: float = 0.0
+    cam_pitch: float = 0.0
 
 
 NOMINAL_RADIUS = {"duck": 0.10, "person": 0.20, "ball": 0.035, "marker": 0.05, "toy": 0.02, "basket": 0.12}
@@ -133,7 +141,10 @@ class Detector:
         self._next_t = 0.0
         self._pending: deque[tuple[float, DetectionFrame]] = deque()
         self.last: DetectionFrame | None = None
+        # Everything occludes except toys (group 4, see world/compose.py):
+        # a held toy sits right in front of the lens.
         self._geomgroup = np.ones(6, dtype=np.uint8)
+        self._geomgroup[4] = 0
 
     # -- geometry ----------------------------------------------------------
     def _visible(self, data: mujoco.MjData, tgt: Target,
@@ -199,7 +210,8 @@ class Detector:
             out.append(Detection(cls, "", float(self.rng.uniform(-0.5, 0.5)) * np.deg2rad(s.fov_h_deg),
                                  float(self.rng.uniform(-0.4, 0.4)) * np.deg2rad(s.fov_v_deg), width,
                                  NOMINAL_RADIUS[cls] / np.tan(width / 2), float(self.rng.uniform(0.2, 0.5))))
-        return DetectionFrame(t=float(t), detections=out)
+        return DetectionFrame(t=float(t), detections=out, cam_z=float(origin[2]),
+                              cam_pitch=float(-np.arcsin(np.clip(R[2, 0], -1.0, 1.0))))
 
     def sample(self, data: mujoco.MjData, t: float) -> DetectionFrame | None:
         """Rate-limited capture with latency: a frame captured at t becomes

@@ -27,6 +27,12 @@ import numpy as np
 from .. import contract as C
 from .scenario import PICKABLE_KINDS, Scenario
 
+# Toys live in their own geom group: range sensors see them (they are
+# obstacles and pick targets), but the detector's line-of-sight test looks
+# through them — a 4 cm block in the beak, 2 cm in front of the camera,
+# once hid a basket for a whole run, and a real detector would look at a
+# 30 cm basket, not at a point its centre.
+PICKABLE_GROUP = 4
 ROBOT_DIR = C.MICRODUCK_RL_DIR / "src/mjlab_microduck/robot/microduck"
 ROBOT_XML = {
     "walk": ROBOT_DIR / "robot_walk.xml",
@@ -98,7 +104,7 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
         body = w.add_body(name=t.id, pos=[t.pos[0], t.pos[1], half[2] + 0.001], quat=_yaw_quat(t.yaw))
         body.add_freejoint(name=f"{t.id}_free")
         body.add_geom(name=f"{t.id}_geom", type=mujoco.mjtGeom.mjGEOM_BOX, size=half,
-                      mass=k["mass"], group=0, rgba=list(k["rgba"]),
+                      mass=k["mass"], group=PICKABLE_GROUP, rgba=list(k["rgba"]),
                       friction=[0.8, 0.005, 0.0001])
     if scenario.basket is not None:
         b = scenario.basket

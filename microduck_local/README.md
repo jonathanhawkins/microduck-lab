@@ -299,6 +299,88 @@ reproduces `MicroduckWalkEnv` step for step (`tests/test_arena.py`), and the
 world never runs rewards or domain randomization — reflex training keeps its
 own env.
 
+### Senses → intents: the brain layer (roadmap Phase 2)
+
+The policy on the robot is blind by contract; everything that *sees* is a
+separate tier that only emits intents — a twist for `robot.move`, a head
+pose, a beak open/close, a skill name. `brain/runtime.py` is that contract
+(`Senses` in, `Intent` out, every input stamped with its age so a brain can
+refuse stale data); `brain/controllers.py` has the scripted brains (`Wander`,
+`Follow`, `Script`), and the page's inspector shows each brain's inputs and
+its current intent live.
+
+- `sensors/detector.py` is a **geometric detector** in place of a neural
+  one: what a camera-side model would output (class, bearing, elevation,
+  apparent width, confidence) computed from the sim, gated by a frustum, an
+  occlusion ray and apparent size, with latency, misses and ghosts per noise
+  preset. Every frame carries the camera pose it was captured from (height
+  and depression) — on the robot that is IMU pitch plus the neck servos
+  through the kinematics — because the walking gait holds the head 0.08 rad
+  higher than the standing pose and rocks it ±0.02 rad, which is tens of
+  centimetres of range for anything ranged by elevation.
+- **Persons** are mocap capsules that walk waypoint paths; press the page's
+  possess button (or send `{"possess": "p0"}`) to drive one yourself and
+  see how a brain reacts.
+- `brain/brain_env.py` turns the brain tier into a gymnasium env
+  (`BrainEnv`: 80-float obs from senses, a 3-float twist action, decisions
+  at 10 Hz, the shipped walker frozen underneath, domain randomization on
+  the *senses* only) and `train-brain` / `eval-brain` train and score one:
+
+  ```bash
+  uv run train-brain --envs 4 --steps 400_000 --run-name follow-v1   # ~10 min on 4 cores
+  uv run eval-brain brains/follow-v1 --episodes 20                    # vs the scripted Follow
+  uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v1"
+  ```
+
+  Measured on identical follow-me episodes: the learned brain holds the
+  distance band 0.73 / 0.61 of the time under the datasheet / hostile
+  presets against the scripted controller's 0.42 / 0.41, and keeps the
+  person in sight 0.85 vs 0.39. The obs layout is a contract shared by
+  training and the in-world `LearnedBrain` (`brain/learned.py`), and the
+  exported ONNX bakes the normalizer in, like `export-walk`.
+
+### Tidy the playroom (roadmap Track 12)
+
+`playroom` is the built-in that scatters toys on the floor of a walled room
+with a low basket in a corner, and `tidy` is the brain that clears it:
+
+```bash
+uv run duck-lab --world playroom          # watch it on /sim; the tidy score is top-left
+uv run eval-tidy --seeds 3 --toys 6 --seconds 300   # the benchmark: toys in the basket
+```
+
+What is real and what is a model here, so nobody mistakes one for the other:
+
+- **Grasp is an attachment event**, not contact physics (`World.grasp`): when
+  the beak closes, the nearest toy within 4 cm of the mouth tip is welded to
+  the jaw with probability falling from 1 at zero error to 0 at the edge.
+  Release drops the weld. Contact-based grasping is roadmap 12.2's later step.
+- **The ground pick is the shipped skill**: `alpha_ground_pick.onnx` runs one
+  cycle as a hard swap of the reflex tier, exactly as the robot does, and the
+  beak closes at the phase where the tip bottoms out (measured: 2 cm up,
+  7.8 cm ahead of the trunk, 1.4 cm left). The carry needs no new reflex —
+  the shipped walker carries a 20 g block.
+- **The brain is a state machine over senses** (`brain/tidy.py`): scan,
+  approach (head down, camera 37° down), a blind last half-metre in
+  odometry, settle, pick, verify, carry, deliver (head level, the basket
+  re-measured standing still at 0.42 m, then a straight blind leg), drop,
+  back off. Every constant in it is a measurement on the walker, written
+  next to the number — the 8 cm beak overhang past the feet is why a
+  release is tight, and why the brain never walks at a toy that projects
+  into the basket.
+- Odometry is the sim's truth for now (roadmap 1.7 adds drift); the real
+  robot's drifts, which is why the basket is re-acquired by sight every trip.
+
+**Measured** (`eval-tidy --seeds 3 --toys 6 --seconds 300`, datasheet noise):
+0.67 of the toys end up in the basket within five minutes (5, 4 and 3 of
+6), 1.7 falls per run, releases land within 3 cm of where the brain
+thinks the basket is. Every step of the way there was a measurement, not a
+guess — `uv run walker-facts` re-measures them (the walker does not walk
+backwards at all; a right turn from a standstill barely happens; the head
+rides 0.08 rad higher while walking than standing) and `uv run trace-tidy`
+shows one run state by state, with every release, landing and fall in
+context. `.claude/skills/tidy-trace/SKILL.md` is the debugging guide.
+
 ## Teachable behaviors (the viewer's 🎓 teach panel)
 
 The `behaviors/` package is a library of trick recipes — plain-English reward terms over
@@ -375,9 +457,12 @@ src/microduck_local/
 ├── eval_onnx.py    # headless eval battery (fall rate, tracking error)
 ├── render_rollout.py  # offscreen rollout → mp4 + captioned contact sheet
 ├── bench.py        # steps/sec benchmark
-├── world/          # scenario contract, MjSpec composition, World (N ducks, one mjData)
-├── sensors/        # ray rig on mj_multiRay, the 8×8 ToF at the device's own rate
-├── brain/          # controllers over senses → intents (Wander is the first)
+├── world/          # scenario contract, MjSpec composition, World (N ducks, one mjData,
+│                   # persons, toys, basket, grasp-as-attachment, skills)
+├── sensors/        # ray rig on mj_multiRay, the 8×8 ToF, the geometric detector
+├── brain/          # senses → intents: runtime contract, Wander/Follow/Script, the tidy
+│                   # state machine, BrainEnv + LearnedBrain (train-brain / eval-brain)
+├── eval_tidy.py    # the playroom benchmark (eval-tidy)
 └── world_server.py # the /sim page's backend: /scenarios, /world, /ws/sim
 tests/              # contract locks: obs order, action semantics, DR non-accumulation,
                     # penalty signs, shipped-alpha-survives regression test

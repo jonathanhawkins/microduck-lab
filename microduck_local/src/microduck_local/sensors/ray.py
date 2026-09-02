@@ -25,8 +25,9 @@ import numpy as np
 
 # Geom groups a range sensor "sees": 0 = scenery (floor, walls, objects),
 # 2 = the robot's visual meshes (upstream puts the shells there), 3 = the
-# collision pads. Group 1/4/5 are left for sensor-only proxies later.
-DEFAULT_GROUPS: tuple[int, ...] = (0, 2, 3)
+# collision pads, 4 = toys (`world.compose.PICKABLE_GROUP`). Group 1/5 are
+# left for sensor-only proxies later.
+DEFAULT_GROUPS: tuple[int, ...] = (0, 2, 3, 4)
 
 
 @dataclass

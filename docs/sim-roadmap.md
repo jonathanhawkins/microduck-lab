@@ -8,10 +8,46 @@ microphones and the speaker, BLE proximity, odometry), give the ducks a
 viewer where people build worlds, watch what each duck senses, and train ducks
 to follow, map, tidy a playroom, and play soccer against each other.
 
-This document is a brainstorm and a plan. **Status:** Phase 1 is in the
-tree — `world/` (0.1–0.3), `sensors/` (1.1, 1.2, 1.8, 1.9), `world_server.py`
-+ the viewer's `/sim` route (0.4, 7.1–7.3 in first form), and `brain/Wander`
-(2.3's `avoid`) — see the READMEs of `microduck_local` and `duck-viewer`.
+This document is a brainstorm and a plan. **Status:** Phases 1 and 2 are in
+the tree, and Track 12 has its first working loop:
+
+- Phase 1: `world/` (0.1–0.3 incl. the page's editor), `sensors/` ToF (1.1,
+  1.2, 1.8, 1.9), `world_server.py` + `/sim` (0.4, 0.6 record/replay, 7.1–7.4,
+  7.8), the CI matrix (9.6, Windows runs the spawn-safe modules).
+- Phase 2: the geometric detector (1.3), persons + possess, the brain runtime
+  with freshness (2.1, 2.4), `Wander` and `Follow` (2.3), `BrainEnv` +
+  `train-brain` + `eval-brain` (3.1, 3.2). **Measured:** on identical
+  follow-me episodes the learned brain (`brains/follow-v1`, 400k decisions,
+  ~10 min on 4 cores) holds the distance band 0.73 / 0.61 of the time under
+  the datasheet / hostile presets against the scripted controller's 0.42 /
+  0.41, and keeps the person in sight 0.85 vs 0.39.
+- Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
+  a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
+  12.13). **Measured:** 0.67 of six scattered toys are in the basket after
+  five minutes (5/4/3 of 6 over three seeds, 1.7 falls a run) — up from
+  0.11 when the loop first closed. What it took, each a measurement on
+  the walker, not a tune: releases only after a standing re-measure of
+  the basket at 0.42 m (walking rocks the head 0.02 rad and holds it
+  0.08 rad higher than standing — detection frames now carry the camera
+  pose); a release geometry with 3 cm to spare (beak 8 cm past the trunk,
+  feet 4 cm, rim contact from 0.185 m); a turn-around back-off because the
+  walker does not reverse at all; a forward kick on turns from a standstill
+  because a cold right turn never starts; tracked ids instead of a
+  confidence bar (a 2 cm toy at 1.5 m is 1.5° wide and confidence 0.2); a
+  keep-out disc around the basket and "a toy that projects into the basket
+  is delivered". `walker-facts` and `trace-tidy` (skill `tidy-trace`) are
+  the tools that found each of these. The carry-walk reflex (12.5) was not
+  needed: the shipped walker carries a 20 g block. The basket is designated
+  in the scenario/editor (12.9 in first form); the tether toggle (12.10),
+  graspability learning (12.8) and VLM designation (12.12) are still plans.
+
+Numbers that shaped the design, all measured in this world: the walker only
+turns in place at a yaw command of 1.0 and stands still below ~0.2 m/s
+asked; it honours a head-pitch intent of +0.6 (camera 37° down, no falls,
+even walking) but cannot turn in place with the head down; it coasts ~1 cm
+after a stop and walks straight under the heading hold; the ground-pick
+tip bottoms 2 cm up and 7.8 cm ahead of the trunk; a 4 cm block is found by
+the simulated detector about half the time at 0.6 m and rarely beyond 1 m.
 Everything else below is still a plan. It was written after reading this repo (both checkouts), upstream
 `pollen-robotics/microduck` (the onboard Rust daemons and their design docs),
 `pollen-robotics/microduck_rl` (the official training stack), and the public

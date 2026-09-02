@@ -1,6 +1,6 @@
-# Contract tests on the three desktops the lab targets. macOS is first-class
-# (the golden-bit parity files were recorded there and run only there);
-# Ubuntu runs everything else; Windows runs the modules written spawn-safe
+# Contract tests on the three desktops the lab targets. macOS and Ubuntu run
+# everything except the golden-bit parity files (those fingerprints are
+# per-machine, see below); Windows runs the modules written spawn-safe
 # from day one (world, sensors, brain, world server) plus the pure contract
 # tests — the fork-based vec env is a known gap (docs/sim-roadmap.md §9).
 name: tests
@@ -38,9 +38,12 @@ jobs:
             uv pip install --python .venv torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
           fi
           uv pip install --python .venv -e . pytest
-      - name: "Tests (macOS: everything)"
+      # The golden-bit rollout fingerprints are recorded on the author's own
+      # Mac (they lock the numba/libm bit patterns of ONE machine) — a hosted
+      # macOS runner reproduces everything else, not those.
+      - name: "Tests (macOS: everything but the per-machine golden bits)"
         if: runner.os == 'macOS'
-        run: .venv/bin/python -m pytest tests -q -p no:cacheprovider
+        run: .venv/bin/python -m pytest tests -q -p no:cacheprovider --deselect tests/test_step_perf_parity.py --deselect tests/test_bam_perf_parity.py
       - name: "Tests (Linux: everything but the Apple-recorded golden bits)"
         if: runner.os == 'Linux'
         run: .venv/bin/python -m pytest tests -q -p no:cacheprovider --deselect tests/test_step_perf_parity.py --deselect tests/test_bam_perf_parity.py

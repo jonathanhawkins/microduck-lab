@@ -63,7 +63,9 @@ def test_wall_occludes_and_size_gates_at_range():
     found = [det.capture(d, 0.0).detections for _ in range(200)]
     hits = [f[0] for f in found if f]
     assert 0 < len(hits) < 200
-    assert all(h.conf < 0.5 for h in hits)
+    # conf = p_find × U(floor, 1) with p_find ≈ 0.66 at 2.9°: found about two
+    # times in three, never with more confidence than that.
+    assert 0.4 < len(hits) / 200 < 0.9 and all(h.conf < 0.7 for h in hits)
 
 
 def test_ball_class_and_range_from_width():
@@ -115,3 +117,28 @@ def test_noise_presets_bearing_spread_and_ghosts():
     assert miss_ho > miss_ds
     with pytest.raises(ValueError):
         DetectorNoise.preset("lidar")
+
+
+def test_frames_carry_the_camera_pose_and_toys_do_not_occlude():
+    """A detection frame says where the camera was (height, depression) —
+    the brain ranges floor objects from it — and a toy in the beak does
+    not hide the basket behind it (toys are geom group 4, see compose)."""
+    from microduck_local.world import Basket, Duck, Pickable, Scenario, World
+    sc = Scenario(name="occl", floor=(4, 4), ducks=[Duck("d0", (0, 0, 0), None, "ideal", "ideal")],
+                  pickables=[Pickable("t0", "block", (0.6, 0.0))], basket=Basket((1.5, 0.0), (0.3, 0.3), 0.06))
+    w = World(sc)
+    d = w.ducks["d0"]
+    fr = d.detector.capture(w.data, 0.0)
+    assert 0.15 < fr.cam_z < 0.3 and -0.1 < fr.cam_pitch < 0.5     # head height; level at the spawn pose
+    classes = set()
+    for _ in range(20):                                             # a 2 cm toy at 0.6 m is found ~9 frames in 10
+        classes |= {x.cls for x in d.detector.capture(w.data, 0.0).detections}
+    assert "toy" in classes and "basket" in classes
+    # Park the toy right on the line of sight to the basket marker: still seen.
+    import mujoco
+    q = w.model.jnt_qposadr[mujoco.mj_name2id(w.model, mujoco.mjtObj.mjOBJ_JOINT, "t0_free")]
+    cam = w.data.site_xpos[d.detector.site_id]
+    mk = w.data.xpos[mujoco.mj_name2id(w.model, mujoco.mjtObj.mjOBJ_BODY, "basket_marker")]
+    w.data.qpos[q:q + 3] = cam + 0.3 * (mk - cam)
+    mujoco.mj_forward(w.model, w.data)
+    assert "basket" in {x.cls for x in d.detector.capture(w.data, 0.0).detections}

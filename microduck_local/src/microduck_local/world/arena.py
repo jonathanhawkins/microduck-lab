@@ -43,7 +43,7 @@ GROUND_PICK_CLOSE_PHI = 0.38
 GROUND_PICK_END_PHI = 0.7
 PICK_REACH_AHEAD = 0.078     # where the tip lands, ahead of the trunk origin (m), standing on the walker
 PICK_REACH_LEFT = 0.014      # …and a touch to the left (the beak is not on the centreline)
-GRASP_TOL_XY = 0.03          # a toy centre within this of the tip: a clean grasp
+GRASP_TOL_XY = 0.04          # a toy centre within this of the tip can be grasped (the beak is ~2 cm wide)
 GRASP_TOL_Z = 0.045
 
 Infer = Callable[[np.ndarray], np.ndarray]
@@ -206,7 +206,11 @@ class WorldPerson:
 
 class World:
     def __init__(self, scenario: Scenario, infer_for: dict[str, Infer] | None = None,
-                 max_episode_s: float = 30.0, seed: int | None = None):
+                 max_episode_s: float | None = None, seed: int | None = None):
+        # No episode timeout by default: a world is a place, not an episode
+        # (a 30 s default once respawned a duck mid-delivery, toy and all).
+        # Training envs pass their own horizon.
+        max_episode_s = float("inf") if max_episode_s is None else max_episode_s
         self.scenario = scenario
         self.model = compose(scenario)
         self.data = mujoco.MjData(self.model)
@@ -250,7 +254,8 @@ class World:
             self.ducks[d.id] = WorldDuck(
                 id=d.id, adr=adr, spawn=d.spawn, infer=infer_for.get(d.id, zero_infer),
                 policy_id=d.policy, tof=tof, detector=det,
-                max_steps=int(round(max_episode_s / C.CTRL_DT)))
+                max_steps=(2**62 if not np.isfinite(max_episode_s)
+                           else int(round(max_episode_s / C.CTRL_DT))))
         # Body ranges per duck: the attached subtree is contiguous after the
         # trunk, so the viewer's per-duck body list is one slice.
         self.duck_bodies: dict[str, slice] = {}
@@ -394,6 +399,8 @@ class World:
             self.skills[name] = onnx_infer(path)
         d.skill, d.skill_t0, d.skill_infer = name, self.t, self.skills[name]
         d._hold_yaw = None
+        if d.holding is None:
+            d.beak_closed = False          # a cycle starts with an open, empty beak
         return True
 
     def in_basket(self, toy: str) -> bool:

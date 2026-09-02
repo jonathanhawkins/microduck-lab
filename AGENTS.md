@@ -65,6 +65,8 @@ uv run train-behavior one_leg                 # teachable tricks (behaviors/)
 uv run render-rollout --policy runs/my-run/policy.onnx --behavior stand --out /tmp/rr
 uv run bench-envs                             # the right --envs for THIS machine
 uv run duck-lab --checkpoints runs/my-run    # + viewer below → watch it in the browser
+uv run duck-lab --world playroom              # world mode: rooms, sensors, brains (the /sim page)
+uv run eval-tidy --seeds 3 --seconds 300      # Track 12 benchmark; trace-tidy / walker-facts to debug it
 
 # --- duck-viewer (run from duck-viewer/) ---
 npm run dev                                   # then open the printed localhost URL

@@ -172,3 +172,24 @@ def test_follow_me_scenario_persons_brains_and_possess(app):
             assert frame["ducks"][0]["detector"] == "hostile"
         assert c.post("/world/brain", json={"duck": "d0", "kind": "nope"}).status_code == 422
         assert c.post("/world/brain", json={"duck": "d0", "kind": "follow"}).status_code == 200
+
+
+def test_playroom_scenario_streams_toys_basket_and_tidy_state(app):
+    """Track 12 on the wire: the playroom built-in loads with the tidy brain,
+    frames carry the toys (with their in-basket flag), the basket, the tidy
+    score and the duck's beak/holding/skill state, and the brain's head
+    intents are applied (`wants_head`)."""
+    with TestClient(app) as c:
+        info = c.post("/world/load", json={"scenario": "playroom"}).json()
+        assert info["scenario"]["ducks"][0]["brain"] == "tidy" if "scenario" in info else "tidy" in info["brains"]
+        with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+            frame = None
+            for _ in range(8):
+                frame = ws.receive_json()
+            assert frame["tidy"] == {"total": 6, "inBasket": 0, "held": []}
+            toys = [o for o in frame["objects"] if o.get("toy")]
+            assert len(toys) == 6 and all(o["inBasket"] is False and o["held"] is None for o in toys)
+            d = frame["ducks"][0]
+            assert d["brainKind"] == "tidy" and d["brain"]["kind"] == "tidy" and d["headApplied"] is True
+            assert d["holding"] is None and d["skill"] is None and d["beak"] == "open"
+            assert d["brain"]["inputs"]["tidy"]["picked"] == 0

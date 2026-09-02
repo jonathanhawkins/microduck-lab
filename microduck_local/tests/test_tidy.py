@@ -126,4 +126,47 @@ def test_ground_pick_skill_picks_a_toy_at_the_measured_reach():
         d.set_cmd(w.data, [0.3, 0, 0])
         w.step()
     assert d.falls == 0 and d.trunk_pos(w.data)[0] > 0.3 and d.holding == "t0"
-    assert abs(GRASP_TOL_XY - 0.03) < 1e-9
+    assert abs(GRASP_TOL_XY - 0.04) < 1e-9
+
+
+def test_tidy_brain_geometry_and_gating_without_physics():
+    """The brain's own arithmetic (roadmap 12.7): ranging a floor object by
+    elevation from the camera pose the frame carries, trusting tracked ids
+    rather than confidence, the basket zone, and the cold-gait turn kick."""
+    import math
+
+    from microduck_local.brain.tidy import Tidy
+    from microduck_local.sensors.detector import Detection, DetectionFrame
+
+    b = Tidy()
+    # A toy centre 1.0 m ahead of a camera 0.234 m up looking 0.197 rad down
+    # (the standing pose) sits at depression atan((0.234-0.015)/1.0).
+    dep = math.atan2(0.234 - 0.015, 1.0)
+    det = Detection("toy", "t0", bearing=0.0, elevation=0.197 - dep, width=0.04, range_est=9.0, conf=0.2)
+    b._cam = (0.234, 0.197)
+    x, y, rng = b._locate((0.0, 0.0, 0.0), det, b.p.toy_z, t=1.0)
+    assert abs(rng - (1.0 + b.p.cam_ahead)) < 1e-6 and abs(x - rng) < 1e-9 and abs(y) < 1e-9
+    # The walking gait holds the head 0.08 rad higher: a frame stamped with
+    # that pose ranges the same elevation reading much farther out — which is
+    # exactly the error the stamp exists to remove.
+    b._cam = (0.241, 0.112)
+    _, _, rng_walk = b._locate((0.0, 0.0, 0.0), det, b.p.toy_z, t=1.0)
+    assert rng_walk > 1.6
+    # Tracked ids beat confidence: a faint far toy is worth walking to, a
+    # confident ghost (no id) is not.
+    assert b._trusted(Detection("toy", "t3", 0.0, 0.0, 0.03, 2.0, conf=0.15))
+    assert not b._trusted(Detection("toy", "", 0.0, 0.0, 0.03, 2.0, conf=0.49))
+    # A toy that projects into a confirmed basket is one already delivered.
+    b._cam = (0.234, 0.197)
+    b.basket_mem, b.basket_confirmed = (1.0 + b.p.cam_ahead, 0.0), True
+    assert b._in_basket_zone((0.0, 0.0, 0.0), det, 1.0)
+    b.basket_mem = (2.0, 2.0)
+    assert not b._in_basket_zone((0.0, 0.0, 0.0), det, 1.0)
+    # Cold gait: a turn gets the forward kick, either way; warm: none.
+    b._cold = True
+    assert b._turn(+1.0) == (b.p.turn_kick, 0.0, 1.0) and b._turn(-1.0) == (b.p.turn_kick, 0.0, -1.0)
+    b._cold = False
+    assert b._turn(-1.0) == (0.0, 0.0, -1.0)
+    # The frame contract the stamp rides on.
+    fr = DetectionFrame(t=0.0, detections=[det], cam_z=0.234, cam_pitch=0.197)
+    assert fr.cam_pitch == 0.197 and DetectionFrame(t=0.0, detections=[]).cam_z == 0.0
