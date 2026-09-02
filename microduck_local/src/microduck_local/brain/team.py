@@ -34,6 +34,11 @@ class Team:
     claims: dict[str, Claim] = field(default_factory=dict)
     _attacker: str | None = None
 
+    def reset(self) -> None:
+        """Kickoff: nobody has seen the ball, nobody attacks yet."""
+        self.claims.clear()
+        self._attacker = None
+
     def claim(self, duck_id: str, t: float, dist: float, ball: tuple[float, float] | None) -> None:
         self.claims[duck_id] = Claim(t, dist, ball)
 
@@ -89,4 +94,17 @@ def brain_kwargs(duck_spec, world, teams: dict[str, "Team"]) -> dict:
     return {"goal": world.goal_for(d), "team": team, "duck_id": duck_spec.id}
 
 
-__all__ = ["Claim", "Team", "brain_kwargs"]
+def kickoff_brains(brains: dict, teams: dict[str, "Team"]) -> None:
+    """After a goal (World.goal_seq moved): every brain forgets its plan —
+    the ball it was lining up on, the spot, the retreat it was in — through
+    `kickoff()` where a brain has one (Chase keeps its kick count) and
+    `reset()` otherwise; every team's blackboard is wiped."""
+    for b in brains.values():
+        fn = getattr(b, "kickoff", None) or getattr(b, "reset", None)
+        if fn is not None:
+            fn()
+    for tm in teams.values():
+        tm.reset()
+
+
+__all__ = ["Claim", "Team", "brain_kwargs", "kickoff_brains"]

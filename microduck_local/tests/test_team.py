@@ -121,3 +121,30 @@ def test_pitch_with_teams_and_brain_kwargs():
     from microduck_local.world import Duck, Scenario
     plain = Scenario(name="x", floor=(4, 4), ducks=[Duck("d0", (0, 0, 0), None, None, None, "chase")])
     assert brain_kwargs(plain.ducks[0], World(plain), {}) == {}
+
+
+def test_kickoff_forgets_the_plan_and_keeps_the_tally():
+    """A goal: the chase brain drops its spot and manoeuvre but keeps the
+    kicks it took (the benchmark counts them); the team board is wiped;
+    `kickoff_brains` does both for every brain, falling back to reset()."""
+    from microduck_local.brain.team import Team, kickoff_brains
+    b = Chase(ChaseParams(), goal=(1.5, 0.0), team=Team("left"), duck_id="d0")
+    b.kicks, b.pushes, b.state, b.spot = 3, 1, "retreat", (0.5, 0.0, "kick_left", 0.0, "kick")
+    b._poses = [(0.0, 0.0, 0.0, 0.0)]
+    b.team.claim("d0", 10.0, 0.4, (0.5, 0.0))
+    b.team.claim("d1", 10.0, 0.9, None)
+    assert b.team.attacker(10.0) == "d0"
+    kickoff_brains({"d0": b}, {"left": b.team})
+    assert b.kicks == 3 and b.pushes == 1 and b.goal == (1.5, 0.0)
+    assert b.state == "search" and b.spot is None and b._poses == []
+    assert b.team.claims == {} and b.team.attacker(10.0) is None
+
+    class Plain:
+        def __init__(self):
+            self.resets = 0
+
+        def reset(self):
+            self.resets += 1
+    other = Plain()
+    kickoff_brains({"x": other}, {})
+    assert other.resets == 1

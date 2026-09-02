@@ -155,7 +155,7 @@ def test_pitch_counts_goals_and_recentres_the_ball():
     sc = make_pitch()
     assert validate_scenario(sc.to_dict()) == sc and sc.goal_width == 0.7
     w = World(sc)
-    assert w.soccer_score() == {"left": 0, "right": 0, "ball": [0.0, 0.0]}
+    assert w.soccer_score() == {"left": 0, "right": 0, "ball": [0.0, 0.0], "lastGoal": None, "kickoff": 0.0}
     j = w._ball_joint
     q = int(w.model.jnt_qposadr[j])
     hx = sc.floor[0] / 2 - 0.25
@@ -163,11 +163,57 @@ def test_pitch_counts_goals_and_recentres_the_ball():
     mujoco.mj_forward(w.model, w.data)
     w.step()
     s = w.soccer_score()
-    assert s["left"] == 0 and s["right"] == 1 and abs(s["ball"][0]) < 0.05 and abs(s["ball"][1]) < 0.05
+    assert s["left"] == 0 and s["right"] == 1 and abs(s["ball"][0]) < 0.06 and abs(s["ball"][1]) < 0.06
+    assert s["lastGoal"] == "right" and w.goal_seq == 1
+    w.kickoff_until = -1.0                                   # skip the hold for the second probe
     w.data.qpos[q:q + 2] = [-(hx - 0.03), 0.6]               # left line but outside the posts: no goal
     mujoco.mj_forward(w.model, w.data)
     w.step()
-    assert w.soccer_score()["left"] == 0
+    assert w.soccer_score()["left"] == 0 and w.goal_seq == 1
+
+
+def test_a_goal_restarts_play_from_a_kickoff():
+    """After a goal every duck is back on its spawn, standing on a zero
+    command for the hold however hard its brain pushes, and play resumes
+    when the hold ends; the ball sits on the centre spot within its nudge."""
+    import mujoco
+
+    from microduck_local.world import World, make_pitch
+    sc = make_pitch()
+    w = World(sc, seed=3)
+    d0, d1 = (w.ducks[d.id] for d in sc.ducks)
+    j = w._ball_joint
+    q = int(w.model.jnt_qposadr[j])
+    hx = sc.floor[0] / 2 - 0.25
+    # Walk both ducks somewhere else first.
+    for d in (d0, d1):
+        x, y, yaw = d.spawn
+        from microduck_local.world.compose import spawn_duck
+        spawn_duck(w.model, w.data, d.adr, x + 0.4, y - 0.3, yaw + 1.0)
+    w.data.qpos[q:q + 2] = [-(hx - 0.03), 0.0]
+    mujoco.mj_forward(w.model, w.data)
+    w.step()
+    assert w.soccer_score()["left"] == 1 and w.in_kickoff
+    for d in (d0, d1):
+        pos = d.trunk_pos(w.data)
+        assert abs(pos[0] - d.spawn[0]) < 0.03 and abs(pos[1] - d.spawn[1]) < 0.03
+        assert abs(w.odom(d)[0] - d.spawn[0]) < 1e-6          # the odometry frame is the pitch again
+    bx, by = w.soccer_score()["ball"]
+    assert abs(bx) <= 0.05 and abs(by) <= 0.05
+    # The hold: the walker sees a zero twist even though the caller asks for full speed.
+    n = 0
+    while w.in_kickoff:
+        d0.set_cmd(w.data, (0.6, 0.0, 0.0))
+        w.step()
+        n += 1
+        assert float(d0.twist_cmd[0]) == 0.0
+    assert abs(n * C.CTRL_DT - w.kickoff_hold_s) <= 2 * C.CTRL_DT and w.goal_seq == 1
+    d0.set_cmd(w.data, (0.6, 0.0, 0.0))
+    w.step()
+    assert not w.in_kickoff and abs(float(d0.twist_cmd[0]) - 0.6) < 1e-6
+    # reset() clears the board.
+    w.reset()
+    assert w.soccer_score()["left"] == 0 and w.soccer_score()["lastGoal"] is None
 
 
 @pytest.mark.skipif(not (POLICIES_DIR / "ball_kick_left.onnx").exists(), reason="upstream policies not checked out")

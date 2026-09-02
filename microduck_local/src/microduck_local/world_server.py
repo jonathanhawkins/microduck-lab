@@ -202,6 +202,7 @@ class WorldState:
         # a blind duck gets the script. Intents are remembered for the frame.
         self.brains: dict[str, object] = {}
         self.teams: dict[str, object] = {}
+        self.goal_seq = 0                    # World.goal_seq last acted on (kickoff_brains)
         self.intents: dict[str, Intent] = {}
         # Brains may ask for a head pose; the shipped walker never trained
         # with one (roadmap 3.7), so gaze intents are REPORTED but only
@@ -242,6 +243,7 @@ class WorldState:
         world = World(scenario, infer_for=infer)
         self.brains = {}
         self.teams = {}
+        self.goal_seq = world.goal_seq
         for sd in scenario.ducks:
             kind = sd.brain or ("wander" if sd.tof is not None else "script")
             try:
@@ -322,6 +324,20 @@ class WorldState:
             if d.skill is None:              # a running skill owns the command block
                 use_head = d.id in self.head_cmds or getattr(brain, "wants_head", False)
                 d.set_cmd(w.data, intent.twist, intent.head if use_head else None)
+
+    def after_step(self) -> None:
+        """A goal restarts play: the World moved everyone (World.kickoff);
+        the brains and the team boards forget their plans here."""
+        w = self.world
+        if w is None or w.goal_seq == self.goal_seq:
+            return
+        from .brain.team import kickoff_brains
+        self.goal_seq = w.goal_seq
+        kickoff_brains(self.brains, self.teams)
+        for q in self._tether_queue.values():
+            q.clear()
+        self.intents.clear()
+        self.events.append(f"GOAL {w.last_goal} — kickoff")
 
     def brain_payload(self, d, mode: str) -> dict:
         possessed = any(p.possessed for p in self.world.persons.values()) if self.world else False
@@ -703,6 +719,7 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
             if w is not None:
                 st.drive(cmd, mode)
                 w.step()
+                st.after_step()
                 window_sim += 1.0 / TICK_HZ
                 for did, grid in st.maps.items():
                     d = w.ducks.get(did)

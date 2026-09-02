@@ -22,7 +22,7 @@ from .world import World, make_pitch
 
 
 def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
-    from .brain.team import brain_kwargs
+    from .brain.team import brain_kwargs, kickoff_brains
     sc = make_pitch(per_side=per_side)
     infer = onnx_infer(POLICIES_DIR / "alpha_walking.onnx")
     w = World(sc, infer_for={d.id: infer for d in sc.ducks}, seed=seed)
@@ -33,6 +33,7 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
     j = w._ball_joint
     q = int(w.model.jnt_qposadr[j])
     w.data.qpos[q:q + 2] = rng.uniform(-0.2, 0.2, 2)
+    goal_seq = 0
     while w.t < seconds:
         for d in w.ducks.values():
             tof, det = d.tof.last, d.detector.last
@@ -44,6 +45,9 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
             if d.skill is None:
                 d.set_cmd(w.data, intent.twist, intent.head)
         w.step()
+        if w.goal_seq != goal_seq:              # a goal: play restarts from the spawns
+            goal_seq = w.goal_seq
+            kickoff_brains(brains, teams)
     score = w.soccer_score()
     return {"seed": seed, "perSide": per_side, "left": score["left"], "right": score["right"],
             "kicks": {k: b.kicks for k, b in brains.items()}, "pushes": {k: b.pushes for k, b in brains.items()},

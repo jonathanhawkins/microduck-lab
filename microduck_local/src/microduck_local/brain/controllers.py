@@ -405,16 +405,22 @@ class Chase:
         self.reset()
 
     def reset(self) -> None:
+        self.kicks = 0
+        self.pushes = 0
+        self.attack: float | None = None                            # heading of the goal it attacks (first odom yaw)
+        self.kickoff()
+
+    def kickoff(self) -> None:
+        """Play restarts (a goal; World.kickoff put the duck back on its
+        spawn): forget the ball, the spot and whatever manoeuvre was under
+        way; keep the tally and the goal."""
         self.state = "search"
         self.role = "attack"
         self.last_bearing = 0.0
         self.last_seen_t: float | None = None
         self._senses: Senses | None = None
         self.last = (0.0, 0.0, 0.0)
-        self.kicks = 0
-        self.pushes = 0
         self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"
-        self.attack: float | None = None                            # heading of the goal it attacks (first odom yaw)
         self.t_state = 0.0
         self._yield_t0 = -9.0
         self._yield_end = -9.0

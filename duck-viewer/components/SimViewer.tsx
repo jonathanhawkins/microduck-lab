@@ -565,7 +565,7 @@ export default function SimViewer() {
   const [lessonOpen, setLessonOpen] = useState(() => loadJSON("simLessonOpen", true));
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
-  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: { left: number; right: number } | null }>({
+  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: { left: number; right: number; lastGoal: "left" | "right" | null; kickoff: number } | null }>({
     rtf: 0,
     perf: "",
     soccer: null,
@@ -1011,7 +1011,11 @@ export default function SimViewer() {
           <div style={{ fontSize: 22, fontWeight: 600 }}>
             {status.soccer.left} <span style={{ fontSize: 12, color: "#9aa5b1" }}>left</span> · {status.soccer.right} <span style={{ fontSize: 12, color: "#9aa5b1" }}>right</span>
           </div>
-          <div style={{ color: "#9aa5b1" }}>goals · two chase brains, one ball</div>
+          {status.soccer.kickoff > 0 ? (
+            <div style={{ color: "#ffd166" }}>GOAL {status.soccer.lastGoal} · kickoff in {status.soccer.kickoff.toFixed(1)} s</div>
+          ) : (
+            <div style={{ color: "#9aa5b1" }}>goals · chase brains, one ball · a goal restarts from the spawns</div>
+          )}
         </div>
       )}
       {status.tidy && (

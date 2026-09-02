@@ -284,6 +284,13 @@ class World:
         # Soccer (first form): a pitch counts goals on both short walls.
         self.goal_width = float(scenario.goal_width)
         self.goals = {"left": 0, "right": 0}
+        # A goal restarts play from a kickoff (below): this counter says one
+        # happened, for the brains that must forget their plan; the hold
+        # keeps every walker on a zero command until play restarts.
+        self.goal_seq = 0
+        self.last_goal: str | None = None
+        self.kickoff_hold_s = 1.0
+        self.kickoff_until = -1.0
         self._ball_joint: int | None = None
         if self.goal_width > 0 and scenario.balls:
             bb = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ball0")
@@ -343,6 +350,9 @@ class World:
         mujoco.mj_resetData(self.model, self.data)
         self.t = 0.0
         self.tick = 0
+        self.goals = {"left": 0, "right": 0}
+        self.last_goal = None
+        self.kickoff_until = -1.0
         for p in self.persons.values():
             p.reset(self.data)
         for d in self.ducks.values():
@@ -395,10 +405,38 @@ class World:
         x, y = float(self.data.qpos[q]), float(self.data.qpos[q + 1])
         hx = self.scenario.floor[0] / 2 - 0.25             # the walls sit 0.25 m inside the floor's edge
         if abs(y) < self.goal_width / 2 and abs(x) > hx - 0.08:
-            self.goals["right" if x > 0 else "left"] += 1
-            v = int(self.model.jnt_dofadr[j])
-            self.data.qpos[q:q + 7] = [0.0, 0.0, self.scenario.balls[0].radius + 0.005, 1.0, 0.0, 0.0, 0.0]
-            self.data.qvel[v:v + 6] = 0.0
+            side = "right" if x > 0 else "left"
+            self.goals[side] += 1
+            self.last_goal = side
+            self.goal_seq += 1
+            self.kickoff()
+
+    def kickoff(self) -> None:
+        """Restart play: the ball on the centre spot (a few centimetres of
+        random nudge, so two mirror-image ducks do not meet nose to nose),
+        every duck back on its spawn, and `kickoff_hold_s` of zero command
+        so play resumes from standing ducks and not from the heap at the
+        goal mouth. Brains are the caller's: `goal_seq` says a goal
+        happened (brain/team.py `kickoff_brains` resets what they should
+        forget and keeps what they should not — the kicks they took)."""
+        j = self._ball_joint
+        if j is None:
+            return
+        q, v = int(self.model.jnt_qposadr[j]), int(self.model.jnt_dofadr[j])
+        nx, ny = self.rng.uniform(-0.05, 0.05, 2)
+        self.data.qpos[q:q + 7] = [nx, ny, self.scenario.balls[0].radius + 0.005, 1.0, 0.0, 0.0, 0.0]
+        self.data.qvel[v:v + 6] = 0.0
+        for d in self.ducks.values():
+            self._respawn(d)
+            d.set_cmd(self.data, (0.0, 0.0, 0.0))
+        mujoco.mj_forward(self.model, self.data)
+        for d in self.ducks.values():
+            d.prev_joint_vel = d.joint_vel(self.data)
+        self.kickoff_until = self.t + self.kickoff_hold_s
+
+    @property
+    def in_kickoff(self) -> bool:
+        return self.t < self.kickoff_until
 
     def goal_for(self, d: WorldDuck) -> tuple[float, float] | None:
         """The goal this duck attacks (world = odometry-at-spawn frame): the
@@ -413,7 +451,8 @@ class World:
             return None
         q = int(self.model.jnt_qposadr[self._ball_joint])
         return {"left": self.goals["left"], "right": self.goals["right"],
-                "ball": [round(float(self.data.qpos[q]), 3), round(float(self.data.qpos[q + 1]), 3)]}
+                "ball": [round(float(self.data.qpos[q]), 3), round(float(self.data.qpos[q + 1]), 3)],
+                "lastGoal": self.last_goal, "kickoff": round(max(0.0, self.kickoff_until - self.t), 2)}
 
     # -- odometry (roadmap 1.7) ---------------------------------------------
     def _odom_reset(self, d: WorldDuck, x: float, y: float, yaw: float) -> None:
@@ -604,7 +643,10 @@ class World:
     def step(self) -> None:
         t0 = time.perf_counter()
         m, data = self.model, self.data
+        hold = self.in_kickoff
         for d in self.ducks.values():
+            if hold:                          # kickoff: stand, whatever the brain asked
+                d.set_cmd(data, (0.0, 0.0, 0.0))
             skill = self._skill_cmd(d)
             obs = d.obs(data)
             raw = np.asarray((skill or d.infer)(obs), np.float32)

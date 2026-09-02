@@ -154,7 +154,7 @@ export interface SimFrame {
   possessed: string | null;
   tidy: TidyScore | null;
   /** Soccer score on a pitch scenario (goals per short wall, ball position), else null. */
-  soccer: { left: number; right: number; ball: [number, number] } | null;
+  soccer: { left: number; right: number; ball: [number, number]; lastGoal: "left" | "right" | null; kickoff: number } | null;
   /** Brain round-trip latency applied to every intent (roadmap 12.10), ms; 0 = onboard. */
   tetherMs?: number;
   /** Occupancy maps per duck, in each duck's ODOMETRY frame (brain-layer output, ~2 Hz; null on the other frames). */
