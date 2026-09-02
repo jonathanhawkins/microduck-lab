@@ -81,8 +81,10 @@ def same_cpu(golden: dict) -> bool:
 
 def close(a, b, what: str = "") -> None:
     """assert a ≈ b (floats, hex strings, lists, dicts of those) within RTOL/ATOL."""
-    if isinstance(a, str) and isinstance(b, str):
-        a, b = float.fromhex(a), float.fromhex(b)
+    if isinstance(a, str):
+        a = float.fromhex(a)
+    if isinstance(b, str):
+        b = float.fromhex(b)
     if isinstance(a, dict):
         assert set(a) == set(b), f"{what}: keys {sorted(a)} vs {sorted(b)}"
         for k in a:
