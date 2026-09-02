@@ -86,6 +86,7 @@ uv run eval-pitch --seeds 4 --seconds 300     # soccer benchmark: two chase brai
 
 # --- duck-viewer (run from duck-viewer/) ---
 npm run dev                                   # then open the printed localhost URL
+npm test                                      # vitest: the canvas arithmetic (lib/*.test.ts)
 
 # --- upstream microduck_rl (run from microduck_rl/, GPU) ---
 uv run train <TASK> --env.scene.num-envs 64 --agent.max_iterations 5   # smoke test

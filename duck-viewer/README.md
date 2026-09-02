@@ -25,6 +25,15 @@ uv run duck-lab --checkpoints runs/first-gait ../microduck/policies/alpha_walkin
 cd duck-viewer && npm run dev     # then open the printed localhost URL
 ```
 
+```bash
+npm test        # vitest: the canvas arithmetic (lib/*.test.ts). CI runs it.
+```
+
+Unit tests here cover the maths that decides *which pixels get asked for* —
+they cannot tell you the page looks right. For that, look at it:
+`.claude/skills/sim-smoke` brings the lab and viewer up and screenshots
+`/sim`.
+
 `?lab=host:port` on the page URL points it at a different lab (a scratch
 server on another port, a scratch lab on another port — the lab binds loopback, so same machine); default `127.0.0.1:8788`.
 
@@ -159,7 +168,13 @@ page's picker). One room, many ducks, and what each duck senses:
   It is a second, scissored pass of the same scene in the same canvas (a
   priority-1 `useFrame` takes the render loop over), not a render target and
   a readback; the sensor drawings (ToF dots, rays, map) sit on a layer the
-  head camera does not see.
+  head camera does not see. The scissor rectangle goes to three in **CSS
+  pixels** — `setScissor`/`setViewport` scale by the renderer's pixel ratio
+  themselves, so measuring the box in device pixels applies it twice. That
+  shipped: on a retina Mac the pass landed 1.5× off the panel, so the inset
+  showed the main orbit view straight through a transparent div (labels and
+  boxes intact, no picture) and the main view came back zoomed 1.5×. The
+  arithmetic lives in `lib/inset.ts` and is pinned by `lib/inset.test.ts`.
 - **Drive** (`P`, then WASD/arrows, Q/E strafe): every duck takes your twist
   for 6 s after the last key; otherwise ToF-equipped ducks wander on the
   lab's `Wander` brain and blind ducks follow a demo script. `R` restarts.

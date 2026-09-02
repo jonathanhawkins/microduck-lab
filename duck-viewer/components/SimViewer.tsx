@@ -38,6 +38,7 @@ import {
   type TofPreset,
   type WorldInfo,
 } from "@/lib/sim";
+import { camAspect, insetHeight, renderInset } from "@/lib/inset";
 import { buildBodyGeometries, Duck } from "./Duck";
 import { applyFloorClick, emptyDraft, SimEditor, type EditorState } from "./SimEditor";
 import { Dynamics, StageEnvironment, Statics } from "./SimStage";
@@ -63,8 +64,7 @@ const INSPECTOR_W = 242;   // border box: the old 220 content width + PANEL padd
 const TOP_BAR_MIN_BOTTOM = 46;
 // The head-camera inset is as wide as the inspector (border-box), at the
 // camera's aspect; the inspector reserves that much room so the pair fits.
-const CAM_ASPECT = Math.tan((CAM_FOV_DEG[0] * Math.PI) / 360) / Math.tan((CAM_FOV_DEG[1] * Math.PI) / 360);
-const CAM_INSET_H = Math.round(INSPECTOR_W / CAM_ASPECT) + GAP;
+const CAM_INSET_H = insetHeight(INSPECTOR_W, CAM_FOV_DEG) + GAP;
 
 const BTN: React.CSSProperties = {
   background: "#1f242c",
@@ -161,12 +161,6 @@ function InsetRender({ scene, client, enabled }: { scene: Scene; client: SimClie
     const d = sensedDuck(f, camInset.duckId);
     const jaw = d?.bodies[jawIdx];
     if (!d || !jaw) return;
-    const r = el.getBoundingClientRect();
-    const cr = gl.domElement.getBoundingClientRect();
-    const pr = gl.getPixelRatio();
-    const x = Math.round((r.left - cr.left) * pr), y = Math.round((cr.bottom - r.bottom) * pr);
-    const w = Math.round(r.width * pr), h = Math.round(r.height * pr);
-    if (w < 8 || h < 8) return;
     const det = d.sensors?.det;
     const fov = det?.fov ?? CAM_FOV_DEG;
     // The pose the detector's frame was captured from, when there is one:
@@ -179,14 +173,10 @@ function InsetRender({ scene, client, enabled }: { scene: Scene; client: SimClie
     cam.up.set(up[0], up[2], -up[1]);
     cam.lookAt(origin[0] + forward[0], origin[2] + forward[2], -(origin[1] + forward[1]));
     cam.fov = fov[1];
-    cam.aspect = w / h;
-    cam.updateProjectionMatrix();
-    gl.setScissorTest(true);
-    gl.setScissor(x, y, w, h);
-    gl.setViewport(x, y, w, h);
-    gl.render(three, cam);
-    gl.setScissorTest(false);
-    gl.setViewport(0, 0, Math.round(size.width * pr), Math.round(size.height * pr));
+    // renderInset measures the box and shapes the camera to it: it takes the
+    // two DOMRects, not a rectangle, because the measuring is what went wrong
+    // once (a pixel ratio applied twice - lib/inset.ts, lib/inset.test.ts).
+    renderInset(gl, three, cam, el.getBoundingClientRect(), gl.domElement.getBoundingClientRect(), size);
   }, 1);
   return null;
 }
@@ -211,7 +201,7 @@ function CamInset({ client, duckId, panelRef, enabled }: { client: SimClient; du
   useEffect(() => {
     if (!enabled) return;
     let raf = 0;
-    const aspect = Math.tan((CAM_FOV_DEG[0] * Math.PI) / 360) / Math.tan((CAM_FOV_DEG[1] * Math.PI) / 360);   // a pinhole's width/height
+    const aspect = camAspect(CAM_FOV_DEG);   // a pinhole's width/height
     const paint = () => {
       raf = requestAnimationFrame(paint);
       const el = box.current;
