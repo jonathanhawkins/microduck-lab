@@ -34,7 +34,12 @@ the tree, and Track 12 has its first working loop:
   body heading for the left / right foot from the sweet spot, 4.5–15°/cm
   of side offset; compensating it in the stance measured 1.38 goals
   against 2.00 over 8 seeds and ships off: the line-up's 2–3 cm, not the
-  map, scatters the shots) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
+  map, scatters the shots; a two-stage line-up that squares up 22 cm
+  behind the spot then walks in on the line puts the ball on the sweet
+  spot — 4 lone shots in 11 against 1 in 12 — and ships off too, kicking
+  3.5 times a run against 8.4 with 0.00 kicked goals against 0.75; goals
+  are now attributed, and most are bumps: 0.75 kicked, 1.25 bumped a run
+  for the shipped brain) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
   2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
   after the traced fix (supporters turning in place against a teammate
   or the boards: the support spot stays inside the pitch and a supporter
