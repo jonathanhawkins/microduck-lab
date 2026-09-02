@@ -55,6 +55,17 @@ const PANEL: React.CSSProperties = {
   zIndex: 20,
   backdropFilter: "blur(6px)",
 };
+// Panel geometry: everything overlaid on the room is inset PAD from the edge,
+// and the inspector hangs GAP below the measured bottom of the top bar.
+const PAD = 10;
+const GAP = 8;
+const INSPECTOR_W = 242;   // border box: the old 220 content width + PANEL padding and border
+const TOP_BAR_MIN_BOTTOM = 46;
+// The head-camera inset is as wide as the inspector (border-box), at the
+// camera's aspect; the inspector reserves that much room so the pair fits.
+const CAM_ASPECT = Math.tan((CAM_FOV_DEG[0] * Math.PI) / 360) / Math.tan((CAM_FOV_DEG[1] * Math.PI) / 360);
+const CAM_INSET_H = Math.round(INSPECTOR_W / CAM_ASPECT) + GAP;
+
 const BTN: React.CSSProperties = {
   background: "#1f242c",
   color: "#e9edf1",
@@ -732,6 +743,11 @@ export default function SimViewer() {
   const [showMap, setShowMap] = useState(true);
   const [showCam, setShowCam] = useState(() => loadJSON("simCam", true));
   const inspectorRef = useRef<HTMLDivElement>(null);
+  const topBarRef = useRef<HTMLDivElement>(null);
+  // The top bar wraps to two or three rows on a narrow window; the
+  // inspector is parked under whatever height it actually ends up with,
+  // never at a guessed offset that lets it slide behind the header.
+  const [frameBox, setFrameBox] = useState({ barBottom: TOP_BAR_MIN_BOTTOM, height: 0 });
   const [selected, setSelected] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [possessed, setPossessed] = useState<string | null>(null);
@@ -758,6 +774,27 @@ export default function SimViewer() {
   drivingRef.current = driving;
 
   useEffect(() => saveJSON("simLessonOpen", lessonOpen), [lessonOpen]);
+
+  // Measure the top bar (it grows a row at a time as the window narrows) and
+  // the stage, so the inspector can be placed below the header and capped to
+  // what is left of the viewport. Read once a frame, next to the cam inset's
+  // own loop: the bar's height changes with the status text and the scenario
+  // controls, not only with the window, and a stale offset here is what used
+  // to let the inspector slide up behind the header.
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const bar = topBarRef.current;
+      const root = rootRef.current;
+      if (!bar || !root) return;
+      const barBottom = Math.round(bar.offsetTop + bar.offsetHeight);
+      const height = root.clientHeight;
+      setFrameBox((prev) => (prev.barBottom === barBottom && prev.height === height ? prev : { barBottom, height }));
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
   useEffect(() => saveJSON("simCam", showCam), [showCam]);
 
   useEffect(() => {
@@ -906,6 +943,10 @@ export default function SimViewer() {
   // While editing, the statics on stage are the DRAFT's; the ducks and
   // objects keep streaming from the loaded world underneath.
   const shown = editor ? editor.draft : scenario;
+  const inspectorTop = frameBox.barBottom + GAP;
+  const inspectorMax = frameBox.height
+    ? Math.max(120, frameBox.height - inspectorTop - PAD - (showCam ? CAM_INSET_H : 0))
+    : undefined;
 
   return (
     <div
@@ -952,7 +993,10 @@ export default function SimViewer() {
       </Canvas>
 
       {/* top bar */}
-      <div style={{ ...PANEL, top: 10, left: 10, right: 10, display: "flex", gap: 10, alignItems: "center" }}>
+      <div
+        ref={topBarRef}
+        style={{ ...PANEL, top: PAD, left: PAD, right: PAD, display: "flex", flexWrap: "wrap", gap: 10, rowGap: 6, alignItems: "center" }}
+      >
         <Link href="/" style={{ color: "#9aa5b1", textDecoration: "none" }}>
           ← lab
         </Link>
@@ -1012,19 +1056,33 @@ export default function SimViewer() {
         >
           ✎ edit
         </button>
-        <span style={{ flex: 1 }} />
-        <span style={{ color: "#9aa5b1" }}>
+        <span style={{ flex: "1 1 0", minWidth: 0 }} />
+        <span style={{ color: "#9aa5b1", minWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {scenario ? scenario.name : "no world loaded"} · t {status.t.toFixed(1)} s · RTF {status.rtf.toFixed(2)} · {status.mode} ·{" "}
           {status.kbps.toFixed(0)} kB/s
           {status.perf && (
             <span title="lab cost per 20 ms tick: physics+policies + sensors + frame encode"> · {status.perf}</span>
           )}
         </span>
-        <span style={{ color: connected ? "#43c2b8" : "#f2b632" }}>{connected ? "● live" : "○ offline"}</span>
+        <span style={{ color: connected ? "#43c2b8" : "#f2b632", flexShrink: 0 }}>{connected ? "● live" : "○ offline"}</span>
       </div>
 
       {/* inspector */}
-      <div ref={inspectorRef} style={{ ...PANEL, top: 56, right: 10, width: 220 }}>
+      <div
+        ref={inspectorRef}
+        style={{
+          ...PANEL,
+          top: inspectorTop,
+          right: PAD,
+          width: INSPECTOR_W,
+          boxSizing: "border-box",
+          // never taller than the room left under the header, minus the head-
+          // camera inset that hangs off its bottom edge when the cam is on
+          maxHeight: inspectorMax,
+          overflowY: "auto",
+          overscrollBehavior: "contain",
+        }}
+      >
         <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10, marginBottom: 6 }}>
           Inspector · sensors
         </div>
@@ -1183,6 +1241,7 @@ export default function SimViewer() {
         <SimEditor
           state={editor}
           setState={setEditor}
+          top={inspectorTop}
           onClose={() => setEditor(null)}
           onLoaded={(w) => {
             setWorld(w);
@@ -1193,7 +1252,7 @@ export default function SimViewer() {
         />
       )}
       {status.soccer && (
-        <div style={{ position: "absolute", top: 56, left: 10, background: "rgba(16,18,22,0.9)", border: "1px solid #2b313b", borderRadius: 6, color: "#e9edf1", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, padding: "8px 10px", zIndex: 20 }}>
+        <div style={{ position: "absolute", top: inspectorTop, left: PAD, maxWidth: `calc(100vw - ${INSPECTOR_W + PAD * 3}px)`, boxSizing: "border-box", background: "rgba(16,18,22,0.9)", border: "1px solid #2b313b", borderRadius: 6, color: "#e9edf1", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, padding: "8px 10px", zIndex: 20 }}>
           <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>Pitch</div>
           <div style={{ fontSize: 22, fontWeight: 600 }}>
             {status.soccer.left} <span style={{ fontSize: 12, color: "#9aa5b1" }}>left</span> · {status.soccer.right} <span style={{ fontSize: 12, color: "#9aa5b1" }}>right</span>
@@ -1206,7 +1265,7 @@ export default function SimViewer() {
         </div>
       )}
       {status.tidy && (
-        <div style={{ ...PANEL, top: 56, left: editor ? 270 : 10, color: "#c9d0d8" }}>
+        <div style={{ ...PANEL, top: inspectorTop, left: editor ? 270 : PAD, maxWidth: `calc(100vw - ${INSPECTOR_W + PAD * 3}px)`, boxSizing: "border-box", color: "#c9d0d8" }}>
           <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>Tidy score</div>
           <div style={{ fontSize: 20, fontVariantNumeric: "tabular-nums" }}>
             {status.tidy.inBasket} / {status.tidy.total} <span style={{ fontSize: 12, color: "#9aa5b1" }}>in the basket</span>

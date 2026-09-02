@@ -130,11 +130,14 @@ export function SimEditor({
   setState,
   onClose,
   onLoaded,
+  top,
 }: {
   state: EditorState;
   setState: (s: EditorState) => void;
   onClose: () => void;
   onLoaded: (w: WorldInfo) => void;
+  /** y the page's top bar actually ends at — it wraps rows on a narrow window. */
+  top?: number;
 }) {
   // Built-ins are read-only on the server, so a draft of one saves as a copy.
   const [name, setName] = useState(state.draft.name ? `${state.draft.name}-edit` : "my-room");
@@ -186,7 +189,7 @@ export function SimEditor({
     />
   );
   return (
-    <div style={PANEL}>
+    <div style={{ ...PANEL, top: top ?? PANEL.top, maxHeight: `calc(100vh - ${(top ?? 56) + 10}px)` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <span style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>World editor</span>
         <button style={BTN} onClick={onClose}>
