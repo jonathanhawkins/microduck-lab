@@ -21,6 +21,9 @@ from .brain.brain_env import POLICIES_DIR, onnx_infer
 from .world import World, make_pitch
 
 
+KICK_GOAL_S = 4.0      # a goal this soon after a kick is the kick's
+
+
 def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
     from .brain.team import brain_kwargs, kickoff_brains
     sc = make_pitch(per_side=per_side)
@@ -34,6 +37,9 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
     q = int(w.model.jnt_qposadr[j])
     w.data.qpos[q:q + 2] = rng.uniform(-0.2, 0.2, 2)
     goal_seq = 0
+    kicks_seen = {k: 0 for k in brains}
+    last_kick = -99.0
+    kick_goals = bump_goals = 0
     while w.t < seconds:
         for d in w.ducks.values():
             tof, det = d.tof.last, d.detector.last
@@ -44,12 +50,23 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
             w.apply_intent(d, intent)
             if d.skill is None:
                 d.set_cmd(w.data, intent.twist, intent.head)
+            if brains[d.id].kicks > kicks_seen[d.id]:
+                kicks_seen[d.id] = brains[d.id].kicks
+                last_kick = w.t
         w.step()
         if w.goal_seq != goal_seq:              # a goal: play restarts from the spawns
             goal_seq = w.goal_seq
             kickoff_brains(brains, teams)
+            # Attribution: a goal within `KICK_GOAL_S` of a kick is the kick's;
+            # the rest are balls walked into (a chase at 0.45 m/s sends a
+            # bumped ball rolling about as far as a kick does on this floor).
+            if w.t - last_kick <= KICK_GOAL_S:
+                kick_goals += 1
+            else:
+                bump_goals += 1
     score = w.soccer_score()
     return {"seed": seed, "perSide": per_side, "left": score["left"], "right": score["right"],
+            "kickGoals": kick_goals, "bumpGoals": bump_goals,
             "kicks": {k: b.kicks for k, b in brains.items()}, "pushes": {k: b.pushes for k, b in brains.items()},
             "falls": {k: d.falls for k, d in w.ducks.items()}, "simSeconds": round(w.t, 1)}
 
@@ -74,10 +91,11 @@ def main() -> None:
         print(json.dumps(rows))
         return
     for r in rows:
-        print(f"seed {r['seed']}: goals left {r['left']} · right {r['right']} · kicks {sum(r['kicks'].values())}"
-              f" · pushes {sum(r['pushes'].values())} · falls {r['falls']}")
+        print(f"seed {r['seed']}: goals left {r['left']} · right {r['right']} ({r['kickGoals']} kicked, {r['bumpGoals']} bumped)"
+              f" · kicks {sum(r['kicks'].values())} · pushes {sum(r['pushes'].values())} · falls {r['falls']}")
     goals = [r["left"] + r["right"] for r in rows]
-    print(f"{args.per_side}v{args.per_side}: mean goals {np.mean(goals):.2f}/run · kicks "
+    print(f"{args.per_side}v{args.per_side}: mean goals {np.mean(goals):.2f}/run ({np.mean([r['kickGoals'] for r in rows]):.2f} kicked, "
+          f"{np.mean([r['bumpGoals'] for r in rows]):.2f} bumped) · kicks "
           f"{np.mean([sum(r['kicks'].values()) for r in rows]):.1f}/run · pushes "
           f"{np.mean([sum(r['pushes'].values()) for r in rows]):.1f}/run"
           f" · falls {np.mean([sum(r['falls'].values()) for r in rows]):.2f}/run"
