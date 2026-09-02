@@ -258,3 +258,58 @@ def test_tidy_picks_a_toy_behind_the_basket_without_touching_it():
     assert picked_at is not None and d.holding == "t0", states
     assert d.falls == 0
     assert nearest > 0.19, nearest                      # the trunk stayed outside the rim's reach (0.156 + feet)
+
+
+def test_tidy_blind_end_reaches_with_the_neck_and_walks_the_last_leg_slowly():
+    """After the standing look (`aimed`) the last leg to the basket is
+    walked at `blind_speed` with the neck pitched back (measured: the tip
+    0.095 m ahead instead of 0.080), and the drop keeps that pose; before
+    the look the head is level and the neck straight."""
+    from microduck_local.brain import Senses
+    from microduck_local.brain.tidy import Tidy, TidyParams
+    assert TidyParams().neck_reach == 0.0                 # measured: it creeps into the rim at the drop; off
+    b = Tidy(TidyParams(neck_reach=-0.6))
+    p = b.p
+    b.basket_mem, b.basket_confirmed = (1.0, 0.0), True
+    b.est, b.goal_kind, b.target_name = (1.0, 0.0), "basket", "basket"
+    b.state, b.t_state, b.aimed = "deliver", 0.0, True
+    b._gait.cold = False
+    leg = b.step(Senses(t=0.02, speed=0.15, odom=(1.0 - p.basket_reach - 0.1, 0.0, 0.0), holding=True))
+    assert leg.twist == (p.blind_speed, 0.0, 0.0) and leg.head[0] == p.neck_reach and leg.head[1] == 0.0
+    arrive = b.step(Senses(t=0.04, speed=0.15, odom=(1.0 - p.basket_reach + 0.005, 0.0, 0.0), holding=True))
+    assert b.state == "drop" and arrive.head[0] == p.neck_reach
+    drop = b.step(Senses(t=0.06, speed=0.0, odom=(1.0 - p.basket_reach + 0.005, 0.0, 0.0), holding=True))
+    assert drop.beak == "open" and drop.head[0] == p.neck_reach
+    # Not yet aimed: level head, straight neck, the normal walk.
+    c = Tidy()
+    c.basket_mem, c.basket_confirmed = (1.0, 0.0), True
+    c.est, c.goal_kind, c.target_name = (1.0, 0.0), "basket", "basket"
+    c.state, c.t_state, c.aimed = "deliver", 0.0, False
+    c._gait.cold = False
+    far = c.step(Senses(t=0.02, speed=0.15, odom=(0.0, 0.0, 0.0), holding=True))
+    assert far.head == (0.0, 0.0, 0.0, 0.0) and far.twist[0] == p.approach_speed
+
+
+def test_tidy_backoff_sidesteps_left_before_turning():
+    """After a drop the duck stands with its feet a few centimetres from the
+    rim; the back-off sidesteps LEFT first (measured: the one manoeuvre that
+    never tripped standing 0.17 m from the basket centre), then turns left,
+    then walks."""
+    from microduck_local.brain import Senses
+    from microduck_local.brain.tidy import Tidy
+    b = Tidy()
+    p = b.p
+    b.state, b.t_state, b.scan_turned = "backoff", 10.0, 0.0
+    b._prev_yaw = 0.0
+    first = b.step(Senses(t=10.02, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert first.twist == (0.0, p.backoff_side_vy, 0.0) and "sidestep" in first.note
+    mid = b.step(Senses(t=10.0 + p.backoff_side_s - 0.02, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert mid.twist[1] == p.backoff_side_vy and mid.twist[0] == 0.0
+    after = b.step(Senses(t=10.0 + p.backoff_side_s + 0.02, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert after.twist[2] == 1.0 and after.twist[1] == 0.0                 # the left turn
+    # Once turned round, a straight walk, then a scan.
+    b.scan_turned = p.backoff_turn
+    walk = b.step(Senses(t=10.0 + p.backoff_side_s + 0.5, speed=0.0, odom=(0.0, 0.0, p.backoff_turn)))
+    assert walk.twist == (p.approach_speed, 0.0, 0.0) and b.state == "backoff"
+    b.step(Senses(t=10.0 + p.backoff_side_s + 0.5 + p.backoff_walk_s + 0.1, speed=0.0, odom=(0.0, 0.0, p.backoff_turn)))
+    assert b.state == "scan"

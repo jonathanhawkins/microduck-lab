@@ -16,6 +16,7 @@ next door (the shipped `alpha_walking` / `alpha_ground_pick` policies).
 uv run trace-tidy --seed 2 --seconds 300            # transitions, releases, landings, falls
 uv run trace-tidy --seed 0 --every 5                 # + a position/intent line every 5 s
 uv run trace-tidy --seed 0 --odom hostile            # under odometry drift (roadmap 1.7)
+uv run trace-tidy --seed 3 --tether-ms 250           # under a brain tether (12.10), the same queue eval-tidy uses
 uv run eval-tidy --seeds 8 --jobs 4 --tether-ms 250  # the benchmark, parallel, over a brain tether (12.10)
 ```
 
@@ -34,10 +35,15 @@ Read it like this:
   the estimate (the `aim` state should have fixed it at 0.42 m) or the leg.
 - `=== FALL` prints the two seconds before a fall (state, position,
   projected gravity, intent, head pitch, skill, ToF minimum, held toy) and
-  what was within 0.35 m. Almost every fall so far was the rim: an explore
-  or approach leg ending 0.2 m from the basket centre, or a scan/turn right
-  after a release. The keep-out disc and the turn-around back-off exist for
-  those; if they reappear, that is where to look first.
+  what was within 0.35 m; the last column is the trunk's distance to the
+  basket centre. Almost every fall so far was the rim: an explore or
+  approach leg ending 0.2 m from the basket centre, or the turn right after
+  a release (under a tether or drift the stop lands 1–3 cm closer, and a
+  turn in place with the feet 2 cm from the rim trips — measured standing
+  at 0.17–0.23 m: a left sidestep first never fell, the plain left turn
+  fell at 0.17, a kicked or right turn at every distance). The keep-out
+  disc, the staged approach for rim toys and the sidestep-then-turn
+  back-off exist for those; if they reappear, that is where to look first.
 - `--every` lines carry the intent's `note` — `blocked` (ToF guard),
   `detour`, `basket keep-out`, `scan k/6` — which is how the stalls were
   found (a duck that prints `blocked` for a minute is turning at the

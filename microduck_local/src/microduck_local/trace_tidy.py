@@ -2,6 +2,7 @@
 
     uv run trace-tidy --seed 2 --seconds 300
     uv run trace-tidy --seed 0 --every 5        # plus a position line every 5 s
+    uv run trace-tidy --seed 3 --tether-ms 250  # under a brain tether (12.10): eval-tidy's row, traced
 
 Runs the `playroom` scenario headless with the `tidy` brain — the same
 World the /sim page streams — and prints what the benchmark only counts:
@@ -46,6 +47,7 @@ def main() -> None:
     ap.add_argument("--every", type=float, default=0.0, help="print a position line every N s (0 = off)")
     ap.add_argument("--history", type=float, default=2.0, help="seconds of context printed before a fall")
     ap.add_argument("--odom", default="ideal", choices=["ideal", "datasheet", "hostile"])
+    ap.add_argument("--tether-ms", type=float, default=0.0, help="brain round-trip latency, as eval-tidy applies it")
     args = ap.parse_args()
 
     sc = make_playroom(seed=args.seed, n=args.toys)
@@ -59,18 +61,24 @@ def main() -> None:
           f"{sc.basket.size[0]:.2f}×{sc.basket.size[1]:.2f} m rim {sc.basket.rim:.2f} m")
     hist: collections.deque = collections.deque(maxlen=int(args.history * 50))
     falls, last, landings, next_print = 0, None, [], 0.0
+    queue: collections.deque = collections.deque()          # (arrival time, intent): the tether
+    delay = args.tether_ms / 1000.0
     while w.t < args.seconds:
         intent = brain.step(senses_of(w, d))
-        w.apply_intent(d, intent)
-        if d.skill is None:
-            d.set_cmd(w.data, intent.twist, intent.head)
+        queue.append((w.t + delay, intent))
+        while queue and queue[0][0] <= w.t + 1e-9:
+            _, applied = queue.popleft()
+            w.apply_intent(d, applied)
+            if d.skill is None:
+                d.set_cmd(w.data, applied.twist, applied.head)
         pos = d.trunk_pos(w.data).copy()
         g = d.projected_gravity(w.data)
         tof = d.tof.last
         tmin = None if tof is None or not (tof.depth_mm > 0).any() else int(tof.depth_mm[tof.depth_mm > 0].min())
-        hist.append((round(w.t, 2), brain.state, (round(float(pos[0]), 3), round(float(pos[1]), 3), round(float(pos[2]), 3)),
+        hist.append((round(w.t, 2), intent.note, (round(float(pos[0]), 3), round(float(pos[1]), 3), round(float(pos[2]), 3)),
                      tuple(round(float(v), 2) for v in g), tuple(round(float(v), 2) for v in intent.twist),
-                     round(float(intent.head[1]), 2), d.skill, tmin, d.holding))
+                     round(float(intent.head[1]), 2), d.skill, tmin, d.holding,
+                     round(float(np.hypot(pos[0] - bx, pos[1] - by)), 2)))
         held = d.holding
         if args.every and w.t >= next_print:
             next_print += args.every
@@ -80,7 +88,7 @@ def main() -> None:
         w.step()
         if d.falls > falls:
             falls = d.falls
-            print(f"\n=== FALL #{falls} t={w.t:.1f} state={brain.state}  (t, state, pos, gravity, twist, head, skill, tof_min_mm, holding)")
+            print(f"\n=== FALL #{falls} t={w.t:.1f} state={brain.state}  (t, note, pos, gravity, twist, head, skill, tof_min_mm, holding, basket_dist)")
             rows = list(hist)
             for h in rows[::10] + ([rows[-1]] if rows else []):
                 print("   ", h)

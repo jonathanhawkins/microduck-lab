@@ -368,12 +368,23 @@ its current intent live.
   repo, so `learned:follow-v1` works from a fresh clone; retrain to
   replace it (the SB3 checkpoint stays local).
 
-  Measured on identical follow-me episodes: the learned brain holds the
-  distance band 0.73 / 0.61 of the time under the datasheet / hostile
-  presets against the scripted controller's 0.45 / 0.40 (12 episodes;
-  0.41 / 0.39 before the tracker and the swept gains), and keeps the
-  person in sight 0.85 vs 0.38. The obs layout is a contract shared by
-  training and the in-world `LearnedBrain` (`brain/learned.py`), and the
+  Measured on identical follow-me episodes (12, the pinned model): the
+  learned brain `follow-v1` holds the distance band 0.73 / 0.60 of the
+  time under the datasheet / hostile presets against the scripted
+  controller's 0.48 / 0.38, and keeps the person in sight 0.82 / 0.67 vs
+  0.47 / 0.33. Why the scripted one loses: a probe of both on the same
+  episodes showed the learned brain sidestepping ±0.23 the whole time
+  and holding the bearing at 0.13 rad, while the scripted one stood
+  still between corrections, went cold (a standing walker cannot start a
+  right turn and starts a left one slowly) and averaged 0.82 rad off —
+  the person walked out of the frame before the body followed. An idle
+  sidestep toward the target's side plus a turn gain of 8 (swept over 8
+  episodes: 0.46 → 0.49 in band, 0.36 → 0.51 in sight) is what ships;
+  speed, lead-on-bearing-rate and crab-strafe variants all measured
+  worse. The rest of the gap is the learned brain's continuous motion,
+  which a hand-written hold-and-correct loop does not have. The obs
+  layout is a contract shared by training and the in-world
+  `LearnedBrain` (`brain/learned.py`), and the
   exported ONNX bakes the normalizer in, like `export-walk`.
 
 ### Two ducks, one ball (the soccer track's first form)

@@ -55,15 +55,24 @@ class TidyParams:
     toy_z: float = 0.015               # a toy's centre height (m), class-blind
     basket_z: float = 0.08             # the basket marker's height (m)
     # Trunk-to-basket-centre at release. Measured on the walker: the feet
-    # reach 0.04 m ahead of the trunk, the beak tip 0.08 m (head LEVEL —
-    # pitching it down pulls the tip back to 0.053), and a held toy sits
-    # 0.005–0.023 m beyond the tip. A 0.3 m tray's rim outer face is at
-    # 0.156, so 0.22 plus the 1–2 cm the stop drifts (measured on the
-    # 2026-09 model: releases landed 0.24–0.25 out at a 0.23 target and a
-    # quarter of the toys on the rim) leaves the feet ~1.5 cm outside the
-    # rim and the toy 2–4 cm inside it. ASSUMPTION: a 0.3 m basket.
-    # Tight on purpose: a miss is retried, a trip over the rim is a fall.
+    # reach 0.034 m ahead of the trunk, the beak tip 0.080 m (head LEVEL —
+    # pitching the head down pulls the tip back to 0.053), and a held toy
+    # sits 0.005–0.023 m beyond the tip. A 0.3 m tray's rim outer face is
+    # at 0.156, so 0.22 puts the feet 3 cm outside the rim and the toy
+    # 2–4 cm inside it (releases at 0.23 landed in, at 0.25 on the rim).
+    # That margin is what a brain tether spends: a stop decided 250 ms
+    # late lands 4.7 cm further at a 0.3 command and 3.0 cm at 0.25
+    # (`blind_speed`; below 0.25 the walker does not move at all), and
+    # every tethered fall was that stride meeting the rim — the slower
+    # leg took the tether row from 3.25 falls a run to 1.5. Pitching the
+    # NECK back 0.6 rad pushes the tip out to 0.095 (`neck_reach`, so the
+    # trunk could stop at 0.235) but the standing duck then creeps and
+    # pitches forward into the rim during the drop: measured 0.75 falls a
+    # run on ideal odometry against 0.50 without, so it ships OFF.
+    # ASSUMPTION: a 0.3 m basket.
     basket_reach: float = 0.22
+    neck_reach: float = 0.0            # neck_pitch intent on the blind end and the drop (measured, off)
+    blind_speed: float = 0.25          # the last leg's command: slower, so a late stop lands nearer
     basket_confirm_range: float = 0.6  # release only if the marker was seen from closer than this
     far_range: float = 1.2             # beyond this a sighting is a direction, not a range (see _locate)
     aim_range: float = 0.42            # stop here, square up, stand still and re-measure the basket before the blind end
@@ -87,8 +96,17 @@ class TidyParams:
     route_s: float = 14.0              # a route that takes longer than this is abandoned
     basket_keepout: float = 0.5        # exploring turns away from the basket inside this radius
     settle_s: float = 0.6
-    backoff_turn: float = 2.6          # after a release: turn LEFT this far (rad, in place)…
-    backoff_walk_s: float = 1.5        # …then walk straight this long before scanning again
+    # After a release: sidestep LEFT this long first (the feet stand 2–5 cm
+    # from the rim after a drop, less under a brain tether or drift, and a
+    # turn in place from there trips on it — measured standing 0.17–0.23 m
+    # from the basket centre: the plain left turn fell 3/3 at 0.17, the
+    # kicked one and a right turn 3/3 everywhere, a left sidestep first
+    # 0/3 everywhere), then turn LEFT `backoff_turn` in place, then walk
+    # straight `backoff_walk_s` before scanning again.
+    backoff_side_s: float = 1.5
+    backoff_side_vy: float = 0.3
+    backoff_turn: float = 2.6
+    backoff_walk_s: float = 1.5
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
     hold_blind_m: float = 0.12         # ToF returns closer than this while holding are the toy in the beak
@@ -578,7 +596,7 @@ class Tidy:
                     # out of a steering step lunged 2–3 cm instead of the
                     # 1 cm coast, which is the whole margin at the rim.
                     wz = 0.0 if dist < p.basket_reach + 0.06 else float(np.clip(twist[2], -0.5, 0.5))
-                    twist = (p.approach_speed, 0.0, wz)
+                    twist = (p.blind_speed, 0.0, wz)
             if dist <= p.basket_reach:
                 if self.basket_confirmed:
                     self._enter("drop", t)
@@ -641,12 +659,17 @@ class Tidy:
         elif self.state == "backoff":
             # The walker cannot walk backwards (measured: -0.3 m/s commanded,
             # 4 mm moved in 2 s), and turning in place drifts under 2 cm, so
-            # leaving the rim is a left turn-around on the spot and a short
-            # straight walk. Scanning right at the rim once put a foot on it.
+            # leaving the rim is a left sidestep, a left turn-around on the
+            # spot and a short straight walk. Scanning right at the rim once
+            # put a foot on it.
             if self._prev_yaw is not None and self.scan_turned < p.backoff_turn:
                 d = odom[2] - self._prev_yaw
                 self.scan_turned += math.atan2(math.sin(d), math.cos(d))
-            if self.scan_turned < p.backoff_turn:
+            if t - self.t_state < p.backoff_side_s:
+                twist = (0.0, p.backoff_side_vy, 0.0)
+                self._backoff_t = t
+                note += " · sidestep"
+            elif self.scan_turned < p.backoff_turn:
                 twist = self._turn(+1.0)
                 self._backoff_t = t
             elif t - self._backoff_t < p.backoff_walk_s:
@@ -679,6 +702,8 @@ class Tidy:
         self._set_head(head_down, t)
         if self._head_down:
             head = (0.0, p.head_down, 0.0, 0.0)
+        elif self.aimed and self.state in ("deliver", "drop") and p.neck_reach:
+            head = (p.neck_reach, 0.0, 0.0, 0.0)     # the beak out over the rim, the feet further from it
         # Never walk into whatever the ToF says is right there — read only its
         # top rows while the head is down, or they report the floor.
         guard = self.state in ("approach", "explore", "carry_explore") or (

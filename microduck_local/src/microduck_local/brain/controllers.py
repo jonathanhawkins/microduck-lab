@@ -143,15 +143,20 @@ class Wander:
 class FollowParams:
     target_cls: str = "person"     # what to follow ("person" or "duck")
     distance: float = 0.7          # hold this far behind, m
-    k_turn: float = 3.0            # wz per rad of bearing   (swept on 8 episodes: 3.0 loses sight less)
+    k_turn: float = 8.0            # wz per rad of bearing (swept on 8 episodes: 3.0 kept sight 0.36 of the time, 8.0 with the idle sidestep 0.51)
     k_speed: float = 1.2           # vx per m of distance error (0.6 could not close on a 0.35 m/s walker)
     max_speed: float = 0.5
     min_speed: float = 0.12        # alpha_walking treats slower asks as "stand"
     turn_first: float = 0.6        # rad off the nose beyond which it turns in place before walking
     k_lead: float = 0.0            # wz per rad/s of bearing RATE: turn toward where the target is going
-    idle_vy: float = 0.0           # sidestep this much (toward the target's side) whenever standing: keeps the gait warm
-    idle_coast: bool = False       # …also while coasting on a lost track
-    k_strafe: float = 0.0          # vy per rad of bearing, always (crab toward the target's side; overrides idle_vy)
+    # Keep the gait WARM: standing still, the walker cannot start a right
+    # turn and starts a left one slowly, so the person walks out of the
+    # frame before the body follows (measured: the learned brain sidesteps
+    # ±0.23 the whole time and holds the bearing at 0.13 rad; the scripted
+    # one stood, went cold and averaged 0.82). A sidestep toward the
+    # target's side whenever it would otherwise stand keeps the legs going.
+    idle_vy: float = 0.25
+    idle_coast: bool = True        # …also while coasting on a lost track
     coast_speed: float = 0.0       # walking speed on a coasted track (0: stand and turn, measured safer)
     lost_s: float = 2.0            # keep the last bearing this long, then search
     search_wz: float = 1.0             # the shipped walker barely turns in place below 1.0
@@ -250,9 +255,7 @@ class Follow:
                 else:
                     wz = 0.0
             self.state = ("hold" if vx == 0.0 and abs(wz) < 0.2 else "approach") if fresh else "coast"
-            if p.k_strafe and (fresh or p.idle_coast):
-                vy = float(np.clip(p.k_strafe * target.bearing, -0.3, 0.3))
-            elif p.idle_vy and vx == 0.0 and abs(wz) < 1.0 and (fresh or p.idle_coast):
+            if p.idle_vy and vx == 0.0 and abs(wz) < 1.0 and (fresh or p.idle_coast):
                 vy = p.idle_vy * (1.0 if target.bearing >= 0.0 else -1.0)
         else:
             self.track_id = None

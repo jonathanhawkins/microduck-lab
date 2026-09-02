@@ -195,8 +195,8 @@ def test_follow_lead_term_turns_toward_where_the_target_is_going():
             det = DetectionFrame(t, [Detection("person", "p0", 0.05 + 0.05 * k, 0.0, 0.3, 1.4, 0.9)])
             out.append(brain.step(Senses(t=t, det=det, det_age=0.0, speed=0.3, odom=(0.0, 0.0, 0.0))))
         return out
-    plain = frames(Follow(FollowParams(k_lead=0.0)))
-    lead = frames(Follow(FollowParams(k_lead=0.5)))
+    plain = frames(Follow(FollowParams(k_turn=3.0, k_lead=0.0)))
+    lead = frames(Follow(FollowParams(k_turn=3.0, k_lead=0.5)))
     assert plain[-1].note == "approach" and lead[-1].note == "approach"
     assert 0 < plain[-1].twist[2] < 1.0                           # bearing ~0.2 rad: not saturated
     assert lead[-1].twist[2] > plain[-1].twist[2] + 0.1           # …moving +0.5 rad/s: turn ahead of it
