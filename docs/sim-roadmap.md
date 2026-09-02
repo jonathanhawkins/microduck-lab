@@ -40,13 +40,17 @@ the tree, and Track 12 has its first working loop:
   loop is ~7% of a core), so JSON holds until rosters of four or more
   ducks make the encode the largest term. **Measured:** on identical
   follow-me episodes (12, the pinned model) the learned brains hold the
-  distance band 0.73 / 0.60 (`follow-v1`, raw detections) and 0.69 / 0.68
-  (`follow-v2`, the tracker + yaw-rate observation, retrained on the
-  pinned model) of the time under the datasheet / hostile presets against
-  the scripted controller's 0.48 / 0.38, and keep the person in sight
-  0.82 / 0.67 and 0.70 / 0.61 vs 0.47 / 0.33. The scripted one loses because
-  it stands still and goes cold; an idle sidestep took it from 0.36 to 0.51
-  in sight, and the rest of the gap is the learned brain's continuous motion.
+  distance band 0.80 / 0.63 (`follow-v2` under the reflex tier — the env
+  yaws the head toward the tracked target and refuses to walk into
+  something 0.25 m ahead; 0.69 / 0.68 without it), 0.71 / 0.63
+  (`follow-v3`, trained with the reflex tier and variety: boxes and a
+  wandering duck; best on the variety benchmark at 0.68) and 0.73 / 0.60
+  (`follow-v1`, version-1 observation, scored in the world it was trained
+  in) under the datasheet / hostile presets against the scripted
+  controller's 0.46 / 0.42; in sight 0.75 / 0.61, 0.68 / 0.57, 0.85 / 0.75
+  vs 0.53 / 0.40. The scripted one loses because it stands still and goes
+  cold; an idle sidestep took it from 0.36 to 0.51 in sight, the head gaze
+  to 0.53, and the rest of the gap is the learned brain's continuous motion.
 - Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
   a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
   12.13), the tether toggle (12.10: `--tether-ms`, `POST /world/tether`).

@@ -365,10 +365,10 @@ its current intent live.
   uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v2"
   ```
 
-  `brains/follow-v1` and `brains/follow-v2` (112 kB each, `brain.onnx`
-  + the contract in `brain.json`) ship in the repo, so `learned:follow-v1`
-  / `learned:follow-v2` work from a fresh clone; retrain to replace them
-  (the SB3 checkpoints stay local). The observation comes in two
+  `brains/follow-v1`, `follow-v2` and `follow-v3` (112 kB each,
+  `brain.onnx` + the contract in `brain.json`) ship in the repo, so
+  `learned:follow-v1` / `-v2` / `-v3` work from a fresh clone; retrain to
+  replace them (the SB3 checkpoints stay local). The observation comes in two
   versions (`brain_env.py`): v1 fed the nearest raw detection; v2 feeds
   the TRACKER's target (its bearing keeps turning with the body through
   a miss), a coasting flag, confirmation and the odometry yaw rate, in
@@ -377,27 +377,50 @@ its current intent live.
   bit-for-bit. follow-v2 is v2, trained on the pinned 2026-09 model
   (400k decisions, then 400k more warm-started).
 
-  Measured on identical follow-me episodes (12, the pinned model):
-  `follow-v1` holds the distance band 0.73 / 0.60 of the time under the
-  datasheet / hostile presets and `follow-v2` 0.69 / 0.68 — the tracker
-  features buy robustness to noise, not accuracy on the clean preset,
-  and v2 bumps the person about twice as often (27 vs 14 ToF bumps an
-  episode) — against the scripted controller's 0.48 / 0.38; in sight
-  0.82 / 0.67 (v1), 0.70 / 0.61 (v2), 0.47 / 0.33 (scripted). Why the
-  scripted one loses: a probe of both on the same
-  episodes showed the learned brain sidestepping ±0.23 the whole time
-  and holding the bearing at 0.13 rad, while the scripted one stood
-  still between corrections, went cold (a standing walker cannot start a
-  right turn and starts a left one slowly) and averaged 0.82 rad off —
-  the person walked out of the frame before the body followed. An idle
-  sidestep toward the target's side plus a turn gain of 8 (swept over 8
-  episodes: 0.46 → 0.49 in band, 0.36 → 0.51 in sight) is what ships;
-  speed, lead-on-bearing-rate and crab-strafe variants all measured
-  worse. The rest of the gap is the learned brain's continuous motion,
-  which a hand-written hold-and-correct loop does not have. The obs
-  layout is a contract shared by training and the in-world
-  `LearnedBrain` (`brain/learned.py`), and the
-  exported ONNX bakes the normalizer in, like `export-walk`.
+  Measured on identical follow-me episodes (12, the pinned model), in
+  band / in sight under the datasheet and hostile presets:
+
+  | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
+  |---|---|---|---|---|
+  | `follow-v2` + reflex tier | **0.80 / 0.75** | 0.63 / 0.61 | 0.66 / 0.77 | 0.61 / 0.59 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.71 / 0.68 | 0.63 / 0.57 | **0.68** / 0.65 | 0.61 / 0.60 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.73 / 0.85 | 0.60 / 0.75 | 0.64 / 0.78 | 0.57 / 0.70 |
+  | scripted `follow` + reflex tier | 0.46 / 0.53 | 0.42 / 0.40 | | |
+
+  The **reflex tier** is the thing that moved: under a version-2 brain
+  the env yaws the head toward the tracked target (0.8 × the body
+  bearing, ±0.6 rad — the 62° camera keeps the person while the body
+  catches up) and refuses a forward command with something inside 0.25 m
+  ahead. It took `follow-v2` from 0.69 to 0.80 in band on the datasheet
+  preset and the scripted brain from 0.47 to 0.53 in sight; hostile
+  noise moved less. Detection frames now carry the camera's yaw and the
+  tracker keeps tracks in the BODY frame, so a brain steers the body
+  whatever the head is doing. A version-1 brain is scored in the world it
+  was trained in — no tracker, no reflex (`eval-brain` runs the env at
+  the brain's observation version; measured under a gaze it never saw,
+  v1 fell from 0.73 to 0.60). `+variety` (`eval-brain --variety`,
+  `train-brain --variety`) is two free 30 cm boxes re-scattered every
+  episode and a second duck walking a slow circle: every brain loses
+  0.03–0.14 to it, v3, trained on it, loses least on the clean preset.
+  v3 is not otherwise better than v2 (600k decisions vs v2's 800k; its
+  reward was still climbing), so `follow-v2` is the follower to pick and
+  v3 the one to keep training. Bumps stay at 14–27 an episode for every
+  learned brain: the person walks through the duck as often as the duck
+  walks into the person, and a reflex stop cannot help with the first.
+
+  Why the scripted one loses: a probe of both on the same episodes showed
+  the learned brain sidestepping ±0.23 the whole time and holding the
+  bearing at 0.13 rad, while the scripted one stood still between
+  corrections, went cold (a standing walker cannot start a right turn and
+  starts a left one slowly) and averaged 0.82 rad off — the person walked
+  out of the frame before the body followed. An idle sidestep toward the
+  target's side plus a turn gain of 8 (swept over 8 episodes: 0.46 → 0.49
+  in band, 0.36 → 0.51 in sight) is what ships; speed, lead-on-bearing-
+  rate and crab-strafe variants all measured worse. The rest of the gap is
+  the learned brain's continuous motion, which a hand-written
+  hold-and-correct loop does not have. The obs layout is a contract shared
+  by training and the in-world `LearnedBrain` (`brain/learned.py`), and
+  the exported ONNX bakes the normalizer in, like `export-walk`.
 
 ### Two ducks, one ball (the soccer track's first form)
 
