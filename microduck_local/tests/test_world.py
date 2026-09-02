@@ -1,0 +1,144 @@
+"""Locks for the scenario contract and world composition (roadmap 0.1/0.3):
+a one-duck world carries the same 14-joint contract as the walk scene,
+N ducks step in one model, and bad scenarios fail loudly."""
+
+import json
+import math
+
+import mujoco
+import numpy as np
+import pytest
+
+from microduck_local import contract as C
+from microduck_local.world import (
+    Ball,
+    Box,
+    Duck,
+    Scenario,
+    Wall,
+    compose,
+    load_scenario,
+    make_room,
+    validate_scenario,
+)
+from microduck_local.world.compose import DuckAddress, spawn_duck
+from microduck_local.world.scenario import ScenarioError
+
+pytestmark = pytest.mark.skipif(
+    not C.SCENE_WALK_XML.exists(), reason="microduck_rl checkout not found")
+
+
+def test_single_duck_world_matches_the_walk_contract():
+    m = compose(Scenario(name="one", ducks=[Duck("d0", (0, 0, 0))]))
+    adr = DuckAddress.resolve(m, "d0")
+    ref = mujoco.MjModel.from_xml_path(str(C.SCENE_WALK_XML))
+    # Same joint count, same contract order, same actuator order, same limits.
+    assert m.nq == ref.nq and m.nv == ref.nv and m.nu == ref.nu
+    for k, name in enumerate(C.JOINT_NAMES):
+        j = m.joint("d0/" + name)
+        r = ref.joint(name)
+        assert int(j.qposadr[0]) == int(r.qposadr[0]) == adr.joint_qpos[k]
+        np.testing.assert_allclose(j.range, r.range)
+        assert m.actuator("d0/" + name).trnid[0] == j.id
+    assert m.opt.timestep == C.PHYSICS_DT
+    assert adr.tof_site >= 0 and adr.gyro_adr >= 0 and min(adr.foot_geoms) >= 0
+    assert m.geom_priority[adr.foot_geoms[0]] == 1
+
+
+def test_spawn_puts_duck_in_stand_pose_at_rest():
+    m = compose(Scenario(name="one", ducks=[Duck("d0", (0.3, -0.2, 1.0))]))
+    d = mujoco.MjData(m)
+    adr = DuckAddress.resolve(m, "d0")
+    spawn_duck(m, d, adr, 0.3, -0.2, 1.0)
+    mujoco.mj_forward(m, d)
+    np.testing.assert_allclose(d.qpos[adr.joint_qpos], C.DEFAULT_POSE, atol=1e-6)
+    np.testing.assert_allclose(d.xpos[adr.trunk_body][:2], [0.3, -0.2], atol=1e-6)
+    fwd = d.xmat[adr.trunk_body].reshape(3, 3)[:, 0]
+    assert fwd @ [math.cos(1.0), math.sin(1.0), 0] > 0.999
+    # Held by the servos alone (no policy), the duck stands for a while and
+    # then sags — the SAME behaviour as the reference walk env under a zero
+    # action (it terminates at ~1.0 s there too). Lock the shared truth: up
+    # at 0.4 s, and the sag matches the reference env to the millimetre.
+    z_world = []
+    for k in range(int(0.8 / C.PHYSICS_DT)):
+        mujoco.mj_step(m, d)
+        if (k + 1) % int(0.2 / C.PHYSICS_DT) == 0:
+            z_world.append(float(d.xpos[adr.trunk_body][2]))
+    assert z_world[1] > 0.10
+    from microduck_local.walk_env import MicroduckWalkEnv
+    env = MicroduckWalkEnv(obs_noise=False, domain_rand=False, action_delay=False,
+                           random_yaw=False, seed=0)
+    env.reset(seed=0)
+    # The reference reset adds ±0.03 rad pose noise and up to 1 cm of height;
+    # re-pose it exactly as spawn_duck did so the two trajectories are comparable.
+    env.data.qpos[env.joint_qpos_adr] = C.DEFAULT_POSE
+    env.data.qpos[0:3] = [0.3, -0.2, 0.12]
+    env.data.qpos[3:7] = [math.cos(0.5), 0, 0, math.sin(0.5)]
+    env.data.qvel[:] = 0
+    env.data.ctrl[:] = C.DEFAULT_POSE
+    mujoco.mj_forward(env.model, env.data)
+    z_ref = []
+    for k in range(int(0.8 / C.PHYSICS_DT)):
+        mujoco.mj_step(env.model, env.data)
+        if (k + 1) % int(0.2 / C.PHYSICS_DT) == 0:
+            z_ref.append(float(env.data.xpos[env.trunk_body_id][2]))
+    np.testing.assert_allclose(z_world, z_ref, atol=1e-3)
+
+
+def test_three_ducks_and_objects_step_in_one_model():
+    sc = Scenario(name="three", floor=(5, 5),
+                  walls=[Wall((-2, -2), (2, -2))],
+                  boxes=[Box((1, 1, 0.1), (0.2, 0.2, 0.2)), Box((-1, 1, 0.3), (0.1, 0.1, 0.1), mass=0.2)],
+                  balls=[Ball((0.6, 0.0))],
+                  ducks=[Duck(f"d{i}", (0.0, 0.5 * i, 0.0)) for i in range(3)])
+    m = compose(sc)
+    d = mujoco.MjData(m)
+    adrs = [DuckAddress.resolve(m, f"d{i}") for i in range(3)]
+    for i, a in enumerate(adrs):
+        spawn_duck(m, d, a, 0.0, 0.5 * i, 0.0)
+    mujoco.mj_forward(m, d)
+    # 3 free ducks + 1 free box + 1 ball: 5 freejoints + 42 hinges.
+    assert m.nq == 5 * 7 + 3 * 14 and m.nu == 3 * 14
+    # Distinct, non-overlapping addresses.
+    qs = np.concatenate([a.joint_qpos for a in adrs])
+    assert len(set(qs.tolist())) == 42
+    for _ in range(100):
+        mujoco.mj_step(m, d)
+    for a in adrs:
+        assert d.xpos[a.trunk_body][2] > 0.10
+    ball = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "ball0")
+    assert abs(d.xpos[ball][2] - 0.035) < 0.01     # resting on the floor
+    assert m.body_mass[ball] == pytest.approx(0.015)
+
+
+def test_scenario_roundtrip_and_validation(tmp_path):
+    sc = make_room(seed=7, n_boxes=3, n_ducks=2)
+    assert len(sc.walls) == 4 and len(sc.ducks) == 2 and sc.name == "room-7"
+    assert make_room(seed=7, n_boxes=3, n_ducks=2) == sc      # deterministic
+    p = tmp_path / "room.json"
+    sc.save(p)
+    back = load_scenario(p)
+    assert back == sc
+    raw = json.loads(p.read_text())
+    assert raw["version"] == 1 and raw["walls"][0]["from"] == list(sc.walls[0].start)
+
+    def bad(mutate):
+        r = json.loads(p.read_text())
+        mutate(r)
+        with pytest.raises(ScenarioError):
+            validate_scenario(r)
+
+    bad(lambda r: r.update(name="../etc"))
+    bad(lambda r: r["ducks"].append({"id": "d0", "spawn": [0, 0, 0]}))   # duplicate
+    bad(lambda r: r["ducks"].append({"id": "Bad Id", "spawn": [0, 0, 0]}))
+    bad(lambda r: r["ducks"][0].update(tof="lidar"))
+    bad(lambda r: r["walls"][0].update(height=float("nan")))
+    bad(lambda r: r["boxes"][0].update(size=[0, 0, 0]))
+    bad(lambda r: r.update(collision="rollers"))
+    bad(lambda r: r.update(floor={"size": [100, 1]}))
+    bad(lambda r: r["ducks"].extend({"id": f"x{i}", "spawn": [0, 0, 0]} for i in range(20)))
+
+
+def test_all_collision_robot_variant_composes():
+    m = compose(Scenario(name="all", collision="all", ducks=[Duck("d0", (0, 0, 0))]))
+    assert mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, "d0/mouth_tip") >= 0
