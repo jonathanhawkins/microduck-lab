@@ -49,4 +49,7 @@ fi
 if [ "${ok:-0}" != 1 ]; then
   echo "backend FAILED — last log lines:"; tail -8 "$LOG"; exit 1
 fi
-echo "[3/3] viewer port 63317 freed — now start it with preview_start (name: duck-viewer)."
+echo "[3/3] starting viewer (:63317) detached..."
+# Detached on purpose: the managed preview (preview_start) ties the dev server
+# to the session's tool runtime and it is reaped on a session/model switch.
+bash "$(dirname "$0")/viewer.sh" --force

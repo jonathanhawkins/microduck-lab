@@ -50,3 +50,5 @@ microduck_local/farm-state.json
 microduck_local/farm-server.log
 # backend log (restart.sh writes it)
 microduck_local/lab-server.log
+# viewer log (viewer.sh writes it)
+duck-viewer/viewer-server.log
