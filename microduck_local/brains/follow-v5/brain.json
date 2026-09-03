@@ -1,0 +1,24 @@
+{
+  "name": "follow-v5",
+  "task": "follow",
+  "target_cls": "person",
+  "decide_every": 5,
+  "obs_dim": 80,
+  "obs_version": 2,
+  "act_low": [
+    -0.20000000298023224,
+    -0.30000001192092896,
+    -1.0
+  ],
+  "act_high": [
+    0.6000000238418579,
+    0.30000001192092896,
+    1.0
+  ],
+  "envs": 12,
+  "steps": 2000000,
+  "seed": 0,
+  "fixed_preset": null,
+  "variety": true,
+  "polite": 0.55
+}

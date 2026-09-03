@@ -100,7 +100,14 @@ the tree, and Track 12 has its first working loop:
   cells by up to 0.04. v4 leads every cell — 9/10 eval seeds on the
   datasheet preset, 10/10 under hostile noise — and is the first learned
   brain to move the bump count (15.5 an episode against v2's 21.8); it is
-  the follower to pick.
+  the follower to pick. Retraining its recipe against the polite person
+  (`follow-v5`, 240 episodes a cell) did not widen the lead: level on the
+  clean preset (0.93 vs 0.94), −0.01 / −0.02 under hostile noise (ahead
+  on 2/10 and 3/10 eval seeds), 2.6 / 11.5 bumps an episode against v4's
+  0.3 / 4.2 — and 0.06–0.10 behind with double the contact when scored
+  back against the capsule that walks through. A brain the person stops
+  for learns to stand in its way; v4, trained in the harder world, stays
+  the pick.
   The scripted one loses because it stands still and goes cold; an
   idle sidestep took it from 0.36 to 0.51 in sight, the head gaze to
   0.53, and the rest of the gap is the learned brain's continuous motion.
