@@ -56,6 +56,15 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
             "falls": {k: d.falls for k, d in w.ducks.items()}, "simSeconds": round(w.t, 1)}
 
 
+def _seed_line(r: dict) -> str:
+    return (f"seed {r['seed']}: goals left {r['left']} · right {r['right']} ({r['kickGoals']} kicked, {r['bumpGoals']} bumped)"
+            f" · kicks {sum(r['kicks'].values())} · pushes {sum(r['pushes'].values())} · falls {r['falls']}")
+
+
+def _run_one_args(a: tuple) -> dict:
+    return run_one(*a)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seeds", type=int, default=4)
@@ -68,19 +77,29 @@ def main() -> None:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     seeds = [args.seed0 + k for k in range(args.seeds)]
+    # Each seed PRINTS as it finishes, rather than the battery printing at the
+    # end: a 12-seed 3v3 battery is the best part of an hour, and a machine
+    # that reclaims its container mid-run should cost one seed, not all of
+    # them (it cost all of them, twice). Resume the rest with --seed0.
+    args_list = [(sd, args.seconds, args.per_side) for sd in seeds]
+    rows = []
     if args.jobs > 1 and len(seeds) > 1:
         import multiprocessing as mp
         ctx = mp.get_context("forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
         with ctx.Pool(min(args.jobs, len(seeds))) as pool:
-            rows = pool.starmap(run_one, [(sd, args.seconds, args.per_side) for sd in seeds])
+            for r in pool.imap(_run_one_args, args_list):
+                rows.append(r)
+                if not args.json:
+                    print(_seed_line(r), flush=True)
     else:
-        rows = [run_one(sd, args.seconds, args.per_side) for sd in seeds]
+        for a in args_list:
+            r = run_one(*a)
+            rows.append(r)
+            if not args.json:
+                print(_seed_line(r), flush=True)
     if args.json:
         print(json.dumps(rows))
         return
-    for r in rows:
-        print(f"seed {r['seed']}: goals left {r['left']} · right {r['right']} ({r['kickGoals']} kicked, {r['bumpGoals']} bumped)"
-              f" · kicks {sum(r['kicks'].values())} · pushes {sum(r['pushes'].values())} · falls {r['falls']}")
     goals = [r["left"] + r["right"] for r in rows]
     print(f"{args.per_side}v{args.per_side}: mean goals {np.mean(goals):.2f}/run ({np.mean([r['kickGoals'] for r in rows]):.2f} kicked, "
           f"{np.mean([r['bumpGoals'] for r in rows]):.2f} bumped) · kicks "
