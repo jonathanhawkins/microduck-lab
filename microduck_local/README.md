@@ -758,15 +758,59 @@ kicks a run, the ones the false wall had been interrupting one way or
 another). Every soccer number below this line is on the fixed geometry;
 the tidy brain never read that helper, so its rows stand.
 
-**A wider lens, as a hardware question.** The detector's field of view is
-one constant (`DetectorSpec.fov_h_deg`, 62° × 48° as shipped — an
-assumption about a Pi-camera-class module), so the sim can price a
-wide-angle camera: at **120° × 93°**, the same 8 seeds give **2.75 goals
-(0.38 kicked), 17.1 kicks, 0.62 falls a run** against 2.38 / 7.4 / 0.38
-— the duck finds and lines up on the ball more than twice as often, the
-goals follow, and the extra kicks bring a few extra falls (90° × 70°
-measured 1.62 / 12.0 / 0.88 on the old geometry, noise-dominated). A
-wide lens is worth the money; nothing below on the head is.
+**How much can this benchmark actually resolve?** Read the event counts,
+not the per-run averages. Over 8 seeds × 300 s of 1v1 a battery contains
+roughly 50–130 kicks, ~20 goals, ~1–6 of them kicked, and **3–8 falls**.
+So kicks separate cleanly and falls barely separate at all: a baseline
+measured twice, once per clearance rule, gave 3 falls and 6 falls — the
+same brain to within 1% of its stopping decisions, and a 3/6 split of 9
+events comes up by chance half the time (p ≈ 0.5). Telling 0.38 falls a
+run from 0.75 would take dozens of seeds. Goals are nearly as bad: the
+standard error is about 0.5 a run, so anything under a goal and a half
+of difference at 8 seeds is noise. **Every claim below is stated with
+its event counts**, and a difference that does not clear them is written
+as "no effect measured", not as a result. Several rows in earlier
+revisions of this file did not clear them and have been demoted.
+
+**A wider lens, as a hardware question — the one clear win.** The
+detector's field of view is one constant (`DetectorSpec.fov_h_deg`,
+62° × 48° as shipped — an assumption about a Pi-camera-class module), so
+the sim can price a wide-angle camera. It has to price it *honestly*:
+the two apparent-width thresholds that decide whether a target is found
+were written as angles but justified in **pixels** of a 320 px frame
+over 62°, so a wider lens on the same sensor must find small distant
+things *less* often. They are derived from pixels per radian now
+(exactly unchanged at the shipped lens, verified bit-identical), which
+costs 120° a duck at 3.9 m — found 73 times in 400 against 260 at 62°.
+Paying that, over 8 seeds × 300 s of 1v1 against a 51-kick, 19-goal,
+1-kicked-goal baseline:
+
+| lens | kicks | goals | kicked goals | falls |
+|---|---|---|---|---|
+| 62° × 48° (shipped) | 51 | 19 | 1 | 6 |
+| 90° × 70° | 94 | 17 | 4 | 4 |
+| 120° × 93° | **105** | 22 | 6 | 3 |
+| 150° × 116° | **130** | 17 | 4 | 7 |
+
+Kicks scale with the lens and the effect is overwhelming (105 against
+51, p < 0.001) — a duck with a wide camera loses the ball far less often
+and spends its run playing instead of searching. Goals do not follow
+(22 against 19 is noise), and kicked goals only hint at it (6 against 1,
+p = 0.13). So the honest recommendation is: **a wider lens buys much
+more contact with the ball, and whether that becomes goals is not yet
+measured.** It is the only hardware change here that clears the noise.
+
+**Shooting only from inside the goal's cone — no effect measured.** One
+shot in four scores, and a lone shot's direction error is 28–35°, so the
+obvious move is to refuse the long ones: with `kick_cone`, a ball whose
+goal mouth subtends less than that half-angle is dribbled closer (the
+push spot) until the cone opens. It does exactly what it says and buys
+nothing. At 0.35 rad (about a metre out on a 0.7 m goal): 36 kicks, 23
+pushes, 16 goals, **1 kicked goal** against the baseline's 51 / 0 / 19 /
+1. At 0.5 rad: 47 kicks, 30 pushes, 17 goals, **0 kicked**. Kicks turn
+into pushes and the kicked goals do not move, so the shot that a
+28–35° error scatters is not scattered any less from a metre out. Ships
+at 0 (off).
 
 **The head, unlocked, still cannot help.** The chase brain had capped
 head yaw at 0.6 rad; the walker is trained to ±1.40 (upstream's head-pose
@@ -778,7 +822,28 @@ the aimed look plus a searching head that sweeps ±1.4 rad
 (`search_sweep`; old geometry) 1.88 / 6.8 / 0.38 — all against 2.38 /
 7.4 / 0.38. Fewer kicks every time: a head turned away from the walking
 line leaves the ToF bumper looking sideways, and the brain stops for
-what it then sees. All three ship off behind their flags.
+what it then sees. That last part was a real bug and is fixed
+(`tof_clearance_bearings`, below); re-measured on the fixed geometry the
+aimed look gives 61 kicks and 21 goals against a 51-kick, 19-goal
+baseline, which does not clear the noise either. All three ship off
+behind their flags — on the evidence that nothing has yet shown them
+helping, not on evidence that they hurt.
+
+**Clearance by bearing, not by sensor column.** The ToF is *in the
+head*, so calling the middle columns "ahead" only holds while the head
+looks along the walking line. Yawed 1.2 rad at boards 0.40 m away, those
+columns reported a wall at 0.52–1.19 m that was really 69° off the nose,
+and the brain stopped for it. `tof_clearance_bearings` places every hit
+in the body's heading frame and selects by bearing, so a turned head
+reads +inf ahead: honestly blind rather than confidently wrong. Ranges
+stay aperture-relative so the tuned thresholds mean what they meant, and
+a synthetic frame with no mount pose still falls back to the level-head
+columns. It ships on its mechanism, not on a score: traced against the
+column version over two full matches, the shipped brain never yaws its
+head at all (the gaze is off), the two disagree about stopping in 0.7%
+of samples, and the bearing version reads 1.2 cm nearer on average. The
+batteries agree to within their noise (19 goals / 51 kicks against 19 /
+59). What it buys is that the head experiments above are now *testable*.
 
 **The ToF sees the ball at the feet — and ships off.** The level camera
 loses a floor ball inside 0.3 m, exactly where the line-up and the kick
