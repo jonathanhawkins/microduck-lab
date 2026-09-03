@@ -747,11 +747,14 @@ class ChaseParams:
     # A bump (Senses.bumped: the body is touching another body - contacts in
     # the sim, the IMU / servo loads on the robot): no turn in place for
     # `bump_stand_s` after the contact STARTED. 12 of 13 traced 3v3 falls
-    # were standing turns beside an unseen opponent, and the rule halves the
-    # crowd's falls (4 seeds x 300 s: 3v3 5.00 -> 1.75 a run at 0.5 s, 2v2
-    # 4.00 -> 2.25) - but the first version of it also cost 1v1 1.50 goals
-    # and 1.00 falls against 2.38 / 0.38, and a trace of 838 bumps said
-    # exactly why, refuting the obvious guess on the way:
+    # were standing turns beside an unseen opponent. MEASURED, the rebuilt
+    # rule against no rule at all: 3v3 falls 5.50 -> 3.62 a run over 24
+    # paired seeds and 219 fall events, p = 0.012, better on 16 of 24, and
+    # kicks unchanged (7.00 -> 6.88). A third fewer falls, not the half a
+    # four-seed battery first promised. Goals 1.54 -> 1.08 is the one
+    # caveat and is unresolved (goals need ~146 seeds). Its first form
+    # cost 1v1 1.50 goals and 1.00 falls against 2.38 / 0.38, and a trace
+    # of 838 bumps said why, refuting the obvious guess on the way:
     #   * NOT possession. The feet meet a median 0.66 m from the ball; both
     #     ducks are inside 0.35 m of it in 18% of bumps; and two seconds
     #     later the ball is further from BOTH ducks by the same +0.074 m.

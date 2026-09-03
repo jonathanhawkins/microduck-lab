@@ -1090,17 +1090,29 @@ World reads its contact list — in the walk scene only the feet carry
 collision geometry, so a bump is feet touching feet, which is what a
 duck-duck fall is; on the robot it is the IMU and the servo loads — and a
 chase brain that has been bumped stands instead of turning in place for
-`bump_stand_s`. Over 4 seeds × 300 s it looked decisive: 3v3 falls 5.00 →
-1.75 a run, 2v2 4.00 → 2.25. **It did not replicate.** The same rule over
-twelve seeds gives 3.17 falls a run, and over twelve different seeds
-4.17, against a no-rule estimate of 5.00 that itself came from four
-seeds. The 1.75 was a low outlier and the 5.00 probably a high one; on 3v3
-a four-seed battery holds ~20 falls and ~6 goals, which is not enough to
-tell 2 falls a run from 4. The rule stays on for rosters
-(`team_bump_stand_s`, applied by `brain_kwargs`; a lone attacker keeps 0,
-where it measured worse on both counts) while a twelve-seed paired
-comparison on seeds nobody has looked at decides whether it belongs there
-at all — that comparison is the one this table is missing.
+`bump_stand_s`. Over 4 seeds × 300 s it looked decisive — 3v3 falls 5.00 →
+1.75 a run — and **that number did not replicate**: the same rule over
+twelve seeds gives 3.17 and over twelve others 4.17. So it was measured
+properly, the rebuilt rule against no rule at all, **24 paired seeds over
+two batteries, 219 fall events**:
+
+| 3v3, 24 paired seeds | no rule | rule at 0.5 s | |
+|---|---|---|---|
+| **falls a run** | 5.50 | **3.62** | −1.88 ± 0.67, **p = 0.012**, better on 16/24 |
+| kicks a run | 7.00 | 6.88 | −0.12 ± 1.04, p = 0.94 |
+| goals a run | 1.54 | 1.08 | −0.46 ± 0.27, p = 0.14 |
+
+**A third fewer falls, and it costs no kicks** — the first soccer result
+here measured at a size that can carry its own weight. It is a third, not
+the half the four-seed battery promised, which is the usual shape of an
+honest re-measurement. The goals dip is the one caveat and is unresolved:
+goals need ~146 seeds to call a shift this size, so it is neither a real
+cost nor a refuted one. The rule ships on for rosters
+(`team_bump_stand_s`, applied by `brain_kwargs`) and off for a lone
+attacker, where it measured worse on both counts. (Those two batteries
+predate `ballAdvance` / `possession`, so their rows carry falls and kicks
+only; falls is a direct high-count measure and does not need the ball
+metrics, but a re-run would add them.)
 
 Its first form did have a real defect, found by tracing 838 bumps, and
 the trace is worth more than the numbers above. The obvious premise — two
