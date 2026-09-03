@@ -81,7 +81,7 @@ def _senses(t, ball=None, tof=None, odom=(0.0, 0.0, 0.0), speed=0.3):
 
 
 def test_chase_pitches_the_head_down_walking_at_a_near_ball_and_not_when_turning():
-    b = Chase(ChaseParams(), goal=(1.5, 0.0))
+    b = Chase(ChaseParams(predict_s=3.0, head_yaw_when="always"), goal=(1.5, 0.0))   # the gaze, measured off by default
     b.step(_senses(0.0, (0.05, 1.5)))
     out = b.step(_senses(0.1, (0.05, 1.2)))
     assert out.note == "chase" and out.twist[0] > 0 and out.head[1] == 0.0      # still far: level pitch...
@@ -92,7 +92,7 @@ def test_chase_pitches_the_head_down_walking_at_a_near_ball_and_not_when_turning
     assert 0.0 < out.head[1] <= b.p.head_down and abs(out.head[1] - b._gaze(0.7)) < 0.15   # follows the range
     assert b._gaze(0.15) == b.p.head_down and b._gaze(2.0) == 0.0
     # Turning in place toward a ball off to the side: head level (the walker cannot turn with it down).
-    c = Chase(ChaseParams(), goal=(1.5, 0.0))
+    c = Chase(ChaseParams(predict_s=3.0, head_yaw_when="always"), goal=(1.5, 0.0))
     c.step(_senses(0.0, (1.2, 0.7), speed=0.0))
     out = c.step(_senses(0.1, (1.2, 0.7), speed=0.0))
     assert out.note == "turn" and out.head[1] == 0.0 and out.head[2] != 0.0   # level pitch, the head yawed to the ball

@@ -695,6 +695,30 @@ the same falls in 2v2, 0.75 more in 3v3 — and a wider support standoff
 (1.0 m back, 0.6 m to the side) 3v3 1.75 / 5.2 / 4.50: the team
 defaults stay.
 
+**Where the ball is going** (`brain/tracker.py`): every track now carries
+an odometry-frame position and, from consecutive hits, a velocity, and
+`predict(t)` rolls it forward under the floor's deceleration. Probed with
+a kicked ball: it leaves at 1.4 m/s, slows at 0.04 m/s² (it rolls 3 m, to
+the boards) and leaves the level camera at once, 30–55° off the nose, so
+the old track coasted with a stale range for two seconds and a new one
+was born when the ball was found again. The chase brain can act on the
+prediction three ways — yaw the head toward the predicted bearing
+(`predict_s`, `head_yaw_gain`; always, or only while searching), open
+the search toward the predicted side and walk the hunt to the predicted
+point (`predict_steer`) — and **all of it measured off** over the same 8
+seeds × 300 s of 1v1, against 2.25 goals / 9.4 kicks / 0.38 falls a run
+with it off: yaw always with the steering 1.12 / 10.5 / 1.62; yaw off
+with the steering 2.12 / 9.1 / 1.12; yaw while searching with the
+steering 2.12 / 10.0 / 0.75; yaw while searching without it 2.12 / 6.5 /
+0.75 (with prediction off the run is bit-identical to before the
+tracker learned positions, so the tracker itself is neutral). Why: the
+head yaws 34° at most and the searching duck's ball sits 90–120° off its
+nose (instrumented: in the frustum 3% of search time with the gaze on,
+5% without), so the gaze cannot reach it, and the steering walked blind
+lines into things. The prediction stays tracked and drawn on the /sim
+page (an orange line from the ball to where it will stop); `predict_s`
+turns it back on with the best-measured settings.
+
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where
 I put it. The nearest attacks, the others support (0.7 m behind the

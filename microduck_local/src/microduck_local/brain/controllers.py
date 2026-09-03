@@ -521,16 +521,25 @@ class ChaseParams:
     # 1.4 m/s and slows at 0.04 m/s^2 on this floor - it rolls to the
     # boards - and leaves the level camera at once, 30-55 deg off the
     # nose, so the track coasted with a stale range for two seconds and a
-    # new track was born when it was found again. The head now YAWS
-    # toward the predicted bearing (`head_yaw_gain`, to `head_yaw_max`)
-    # while a track lives, the search opens toward the predicted side,
-    # and the hunt walks to the predicted point (clamped to the pitch).
+    # new track was born when it was found again. With `predict_s` > 0
+    # the head YAWS toward the predicted bearing (`head_yaw_gain`, to
+    # `head_yaw_max`; always, or only while searching / looking), and
+    # with `predict_steer` the search opens toward the predicted side and
+    # the hunt walks to the predicted point (clamped to the pitch).
+    # Measured OFF (8 seeds x 300 s of 1v1, against 2.25 goals / 9.4 kicks
+    # / 0.38 falls a run with it off): yaw always + steer 1.12 / 10.5 /
+    # 1.62; yaw off + steer 2.12 / 9.1 / 1.12; yaw in search + steer 2.12
+    # / 10.0 / 0.75; yaw in search, no steer 2.12 / 6.5 / 0.75. The head
+    # yaws 34 deg at most and the ball sits 90-120 deg off the nose while
+    # searching, so the gaze cannot reach it; the steering walked blind
+    # lines into things. The prediction is still tracked and drawn on the
+    # /sim page; the defaults below are the best of the variants when on.
     ball_decel: float = 0.04
-    predict_s: float = 3.0         # how long a prediction is worth acting on after the last hit
+    predict_s: float = 0.0         # how long a prediction is worth acting on after the last hit (0: off)
     head_yaw_gain: float = 0.9
     head_yaw_max: float = 0.6
-    head_yaw_when: str = "always"   # or "search": yaw the head only while searching / looking, not on the ball
-    predict_steer: bool = True     # the hunt bends and the search opens toward the prediction
+    head_yaw_when: str = "search"  # or "always": yaw the head on the ball too, not only searching / looking
+    predict_steer: bool = False    # the hunt bends and the search opens toward the prediction
     search_dip_every: float = 1.5
     search_dip_s: float = 0.6
     dip_range: float = 0.22
@@ -1074,7 +1083,8 @@ class Chase:
                 self._retreat_sign = 1.0 if left_near >= right_near else -1.0
         if gaze_at is not None and (vx > 0 or self.state in ("look", "search")):
             head = (0.0, self._gaze(gaze_at), 0.0, 0.0)
-        look_at = pred_bearing if pred_bearing is not None else (ball.bearing if ball is not None and ball.age(t) <= p.predict_s else None)
+        look_at = pred_bearing if pred_bearing is not None else (
+            ball.bearing if p.predict_s > 0 and ball is not None and ball.age(t) <= p.predict_s else None)
         if look_at is not None and senses.skill is None and (p.head_yaw_when == "always" or self.state in ("search", "look")):
             head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
         self.last = (vx, 0.0, wz)
