@@ -94,6 +94,9 @@ export interface BehaviorCard {
   id: string;
   emoji: string;
   title: string;
+  /** Authored motion clip used by imitation runs. The server includes this
+   *  when the display title is specialized to `Perform “…”`. */
+  clip?: string;
   description: string;
   howItLearns: string;
   successMetric: string;
