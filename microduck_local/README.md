@@ -298,7 +298,7 @@ env).
 
 The shipped kick policies are ball-blind (upstream's `ball_kick` cfg: "the
 operator aims the robot at the ball"); `find_ball` is the aiming. It is a
-whole-body policy that sweeps for a ball it cannot see, nods down for the
+whole-body policy that sweeps (on a scan clock) for a ball it cannot see, nods down for the
 near ones (the camera is 25 cm up and level, so anything inside ~0.5 m is
 below a level gaze), steps the body round to face it, and keeps it centred
 while it rolls or jumps elsewhere. The intended handoff is the robot's own
@@ -317,6 +317,7 @@ daemon fills the slots for this brain:
 | 51 | horizontal bearing across the frame, −1 hard left … +1 hard right (`duck_detect::Detection::bearing`); 0 when not seen |
 | 52 | vertical bearing, −1 bottom … +1 top; 0 when not seen |
 | 53 | 1.0 while the detector reports the ball, else 0 |
+| 59, 60 | **scan clock**: sin/cos of a phase running at 1/4 s while the ball is lost, restarting at 0 at every loss, parked at (0, 1) while seen — the imitation recipe's phase trick, because a memoryless policy cannot sweep on its own (a sweep is a limit cycle in head yaw; 2M PPO steps produced a static gaze-vs-belief instead) but can map a phase to a sweep |
 | 54 | the daemon's **belief**: the ball's bearing in the duck's yaw frame ÷ π (+ = left) × confidence. 1.0 while seen; while lost, the last bearing dead-reckoned by the gyro yaw rate with confidence fading as exp(−t/4 s) down to a 0.15 floor. At episode start: a noisy prior at half confidence in 70% of episodes (the ball was in view before this brain took over), else the fixed convention +0.15 — "nothing known, sweep left first" |
 
 Detector realism: reports every 2 control steps (a 15–30 Hz NPU detector

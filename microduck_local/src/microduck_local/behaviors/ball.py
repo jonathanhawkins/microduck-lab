@@ -45,6 +45,17 @@ import math as _math
 #              time. On the robot the slot is one gyro integral plus a
 #              default in the daemon.
 #
+# And a SCAN CLOCK in two body slots (obs[59], obs[60] = sin, cos of a phase
+# that runs at SCAN_PERIOD while the ball is lost and restarts at zero on
+# every loss; (0, 1) while seen). The imitation recipe's phase trick: a
+# memoryless policy cannot sweep on its own — a sweep is a limit cycle in
+# head yaw, and two million steps of PPO produced a static gaze-as-a-
+# function-of-belief instead — but with a clock the sweep is a static
+# mapping from phase to head yaw and pitch, and the head's +-170 deg range
+# means one sinusoidal sweep covers nearly the whole circle. The daemon
+# runs the same clock. Period 4 s is the pace of the search; a stage may
+# tighten it.
+#
 # Detector realism: updates every DETECT_EVERY control steps (a 15-30 Hz NPU
 # detector against the 50 Hz loop), a small bearing jitter under obs_noise,
 # and an optional per-update dropout.
@@ -84,6 +95,7 @@ _BALL_KNOBS = {
     # PRIOR_PROB the daemon "remembers" the ball's bearing +- PRIOR_NOISE
     # (rad) at PRIOR_CONF; otherwise it knows nothing and the slot carries
     # the sweep-left-first convention (+0.15).
+    "MICRODUCK_BALL_SCAN_PERIOD": 4.0,   # s per sweep cycle of the scan clock
     "MICRODUCK_BALL_MEM_FLOOR": 0.15,
     "MICRODUCK_BALL_PRIOR_PROB": 0.7,
     "MICRODUCK_BALL_PRIOR_NOISE": 0.6,
@@ -121,6 +133,7 @@ def _ball_knobs(env) -> dict[str, float]:
     k["half_v"] = _math.radians(k["MICRODUCK_BALL_VFOV_DEG"]) / 2
     k["detect_every"] = max(1, int(k["MICRODUCK_BALL_DETECT_EVERY"]))
     k["mem_decay"] = _math.exp(-C.CTRL_DT / max(k["MICRODUCK_BALL_MEM_TAU"], 1e-3))
+    k["scan_rate"] = 2 * _math.pi / max(k["MICRODUCK_BALL_SCAN_PERIOD"], 0.1)
     env._ball_k = k
     return k
 
@@ -189,6 +202,7 @@ def _ball_reset(env) -> None:
     env._ball_dist = dist
     env._ball_psi = bearing
     env._ball_lost_s = 0.0
+    env._ball_scan_phase = 0.0
     env._ball_first_seen_t = None
     env._ball_seen_steps = 0
     env._ball_centred_steps = 0
@@ -316,6 +330,14 @@ def _ball_sense(env, force: bool = False) -> None:
         if was_seen:
             env._ball_losses += 1
         env._ball_lost_s += dt
+    # The scan clock runs on the DETECTOR's view (what the daemon has), from
+    # zero at every loss; it parks at phase 0 while the report says seen.
+    if det[2] > 0.5:
+        env._ball_scan_phase = 0.0
+    elif not force:
+        env._ball_scan_phase = (env._ball_scan_phase + k["scan_rate"] * dt) % (2 * _math.pi)
+    env.body_cmd[4] = _math.sin(env._ball_scan_phase)
+    env.body_cmd[5] = _math.cos(env._ball_scan_phase)
     if fresh_seen:
         # The memory is refreshed from a detector REPORT, never from the
         # truth: between reports (and while a held report goes stale) it
@@ -401,7 +423,7 @@ def _ball_caption(env) -> str:
         return (f"ball SEEN x{env._ball_bx:+.2f} y{env._ball_by:+.2f} "
                 f"d{env._ball_dist:.1f} p{p:+.0f}")
     return (f"ball LOST {env._ball_lost_s:.1f}s m{env.head_cmd[3]:+.2f} "
-            f"d{env._ball_dist:.1f} p{p:+.0f}")
+            f"d{env._ball_dist:.1f} p{p:+.0f}")   # lost time = the scan clock
 
 
 def _ball_markers(env):

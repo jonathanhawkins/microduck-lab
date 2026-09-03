@@ -1360,3 +1360,29 @@ def test_find_ball_belief_slot_is_seeded_and_never_goes_silent():
         _ball_sense(env)
     assert env._ball_mem_conf == pytest.approx(0.15)
     assert env.head_cmd[3] == pytest.approx(0.15 * 0.3 / np.pi, abs=2e-3)
+
+
+def test_find_ball_scan_clock_runs_while_lost_and_parks_while_seen():
+    """obs[59:61] is sin/cos of the scan phase: parked at (0, 1) while the
+    detector reports the ball, advancing at 2pi/SCAN_PERIOD from zero at
+    every loss — the phase a memoryless policy sweeps on."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                     "MICRODUCK_BALL_SCAN_PERIOD": "2"})
+    _ball_place(env, 1.0, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    assert env._ball_seen and obs[59] == 0.0 and obs[60] == 1.0
+    _ball_place(env, 1.0, np.pi)
+    for _ in range(25):                       # 0.5 s of a 2 s period = 90 deg
+        env.step_count += 1
+        _ball_sense(env)
+    obs = env._get_obs()
+    # (the held detector report delays the loss by up to DETECT_EVERY steps)
+    assert obs[59] == pytest.approx(1.0, abs=0.08) and abs(obs[60]) < 0.1
+    _ball_place(env, 1.0, 0.0)
+    for _ in range(3):
+        env.step_count += 1
+        _ball_sense(env)
+    obs = env._get_obs()
+    assert obs[59] == 0.0 and obs[60] == 1.0
