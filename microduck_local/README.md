@@ -780,6 +780,20 @@ the aimed look plus a searching head that sweeps ±1.4 rad
 line leaves the ToF bumper looking sideways, and the brain stops for
 what it then sees. All three ship off behind their flags.
 
+**The ToF sees the ball at the feet — and ships off.** The level camera
+loses a floor ball inside 0.3 m, exactly where the line-up and the kick
+live, and the 8×8 ToF at 45° shows a 7 cm ball at 0.3 m as a 3–6 zone
+blob 3–10 cm above the floor plane (`tof_floor_ball`: at least two
+adjacent such zones, in columns with nothing taller near — a wall or a
+duck has hits above the band in the same columns, a ball has the floor
+behind it; tested against a ball, an empty floor, a level head and the
+boards). Fed to the chase brain's tracker as a ball sighting whenever the
+camera has none (`tof_ball_m`), it measured **1.62 goals, 8.1 kicks,
+0.75 falls a run against 2.38 / 7.4 / 0.38**: a blob at the feet is as
+often the other duck's foot as the ball, and a line-up on a foot is a
+fall. The detector stays for the page and for a pitch with one duck on
+it.
+
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where
 I put it. The nearest attacks, the others support (0.7 m behind the

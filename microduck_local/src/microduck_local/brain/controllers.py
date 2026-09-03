@@ -540,6 +540,11 @@ class ChaseParams:
     # the horizon: the ball is a metre or two out by then) instead of the
     # 0.3 m dip - so the ball, which leaves the level camera at once
     # 30-55 deg off the nose, stays in the frustum long enough to track.
+    # Measured OFF (8 seeds x 300 s of 1v1, against 2.38 goals / 7.4 kicks /
+    # 0.38 falls a run): 2.25 / 6.4 / 0.50; with the gaze on the track while
+    # searching (predict_s 3) 1.88 / 4.6 / 0.25; with the search sweep
+    # 1.88 / 6.8 / 0.38. A head turned off the walking line leaves the ToF
+    # bumper looking sideways, and the brain stops for what it then sees.
     look_aim: bool = False
     look_aim_range: float = 1.5
     kick_exit_left: float = math.radians(21.6)
@@ -670,7 +675,10 @@ class ChaseParams:
     # The ToF sees the ball at the feet (tof_floor_ball): inside `tof_ball_m`
     # with the head dipped, a floor blob feeds the tracker as a ball sighting
     # when the camera has none - the level camera loses a floor ball inside
-    # 0.3 m, which is where the line-up and the kick live. 0 = off.
+    # 0.3 m, which is where the line-up and the kick live. Measured OFF at
+    # 0.5 m (8 seeds x 300 s of 1v1): 1.62 goals, 8.1 kicks, 0.75 falls a
+    # run against 2.38 / 7.4 / 0.38 - a blob at the feet is as often the
+    # other duck's foot as the ball, and a line-up on a foot is a fall.
     tof_ball_m: float = 0.0
     # A bump (Senses.bumped: the body is touching another body - contacts in
     # the sim, the IMU / servo loads on the robot): no turn in place for
