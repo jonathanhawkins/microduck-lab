@@ -752,6 +752,7 @@ class Chase:
         looking = t - self._look_t0 < p.look_s and not fresh
         if seen:
             self._last_range = ball.range
+            self.last_bearing = ball.bearing
         elif self._last_range is not None and self._last_range < p.hunt_lost_range and self.state in ("chase", "lineup", "turn"):
             self._hunt_u = odom[2]                              # walked into it: it rolled off ahead
             self._last_range = None
@@ -932,7 +933,11 @@ class Chase:
             else:
                 if self.state != "search" or self._search_t0 is None:
                     self._search_t0 = t
-                vx, _, wz = turn(1.0, cold)
+                # Toward the side the ball was last on (probed: the sweep runs
+                # at ~24 deg/s, so a ball to the right found by a left turn
+                # takes 10 s, by a right turn 4); the cold-turn kick starts
+                # the right turn the standing walker cannot.
+                vx, _, wz = turn(1.0 if self.last_bearing >= 0.0 else -1.0, cold)
                 vx = max(vx, p.search_vx)                       # a walking circle: the body actually turns
                 self.state = "search"
                 since = t - self._search_t0
