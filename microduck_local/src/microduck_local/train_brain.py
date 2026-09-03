@@ -35,9 +35,9 @@ from .brain.brain_env import (
 from .brain.learned import brains_dir
 
 
-def make_env_fn(seed: int, fixed_preset: str | None, variety: bool = False):
+def make_env_fn(seed: int, fixed_preset: str | None, variety: bool = False, polite: float = FollowTask.polite):
     def fn():
-        return BrainEnv(FollowTask(furniture=2 if variety else 0, distractor=variety), seed=seed,
+        return BrainEnv(FollowTask(furniture=2 if variety else 0, distractor=variety, polite=polite), seed=seed,
                         fixed_preset=fixed_preset)
     return fn
 
@@ -95,6 +95,8 @@ def main() -> None:
     ap.add_argument("--n-steps", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--variety", action="store_true", help="train with furniture and a wandering duck (eval-brain --variety)")
+    ap.add_argument("--polite", type=float, default=FollowTask.polite, metavar="M",
+                    help="the person stops M m short of the duck in its way (eval-brain --polite); 0: walks through it, as follow-v1..v4 were trained")
     args = ap.parse_args()
 
     import torch
@@ -104,7 +106,7 @@ def main() -> None:
 
     out = brains_dir() / args.run_name
     out.mkdir(parents=True, exist_ok=True)
-    fns = [make_env_fn(args.seed * 1000 + i, args.fixed_preset, args.variety) for i in range(args.envs)]
+    fns = [make_env_fn(args.seed * 1000 + i, args.fixed_preset, args.variety, args.polite) for i in range(args.envs)]
     venv = VecMonitor(SubprocVecEnv(fns, start_method="forkserver"))
     if args.init_from:
         prev = brains_dir() / args.init_from
@@ -142,7 +144,7 @@ def main() -> None:
         "obs_dim": BRAIN_OBS_DIM, "obs_version": BRAIN_OBS_VERSION,
         "act_low": ACT_LOW.tolist(), "act_high": ACT_HIGH.tolist(),
         "envs": args.envs, "steps": args.steps, "seed": args.seed,
-        "fixed_preset": args.fixed_preset, "variety": args.variety}, indent=2))
+        "fixed_preset": args.fixed_preset, "variety": args.variety, "polite": args.polite}, indent=2))
     try:
         model.learn(total_timesteps=args.steps, callback=Progress())
     finally:
