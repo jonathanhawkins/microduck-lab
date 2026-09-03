@@ -67,6 +67,7 @@ from pydantic import BaseModel
 
 from .brain import REGISTRY, Intent, Senses
 from .brain import runtime as brain_runtime
+from .brain.tether import Tether
 from .brain import tidy as _tidy  # noqa: F401  (registers the tidy brain)
 from .brain.mapping import GridSpec, OccupancyGrid
 from .sensors import DetectorNoise, TofNoise
@@ -196,7 +197,7 @@ class WorldState:
         # Roadmap 12.10: the brain tier "over a tether" — every intent lands
         # this long after the senses it came from. 0 = onboard.
         self.tether_ms = 0.0
-        self._tether_queue: dict[str, deque] = {}
+        self._tether_queue: dict[str, Tether] = {}
         self.task: asyncio.Task | None = None
         # Auto mode: each duck runs a brain from the registry (brain/runtime.py);
         # a blind duck gets the script. Intents are remembered for the frame.
@@ -308,17 +309,17 @@ class WorldState:
                 d.set_cmd(w.data, cmd if (manual_ducks or brain is None or possessed is None) else cmd)
                 self.intents[d.id] = Intent(twist=tuple(float(v) for v in cmd))
                 continue
-            decided = brain.step(self.senses_for(d))
             if self.tether_ms > 0:
-                # Over the tether: the intent decided now lands later; what
-                # lands now was decided tether_ms ago (senses were that old too).
-                q = self._tether_queue.setdefault(d.id, deque())
-                q.append((w.t + self.tether_ms / 1000.0, decided))
-                intent = self.intents.get(d.id, Intent())
-                while q and q[0][0] <= w.t + 1e-9:
-                    intent = q.popleft()[1]
+                # Over the tether (brain/tether.py): the senses the brain gets
+                # are half a round trip old, the intent lands half a round
+                # trip later - what a link does, and what lets a brain read
+                # its own latency off its sensor ages.
+                th = self._tether_queue.get(d.id)
+                if th is None or abs(th.delay - self.tether_ms / 1000.0) > 1e-9:
+                    th = self._tether_queue[d.id] = Tether(self.tether_ms / 1000.0)
+                intent = th.intent_out(brain.step(th.senses_in(self.senses_for(d))), w.t)
             else:
-                intent = decided
+                intent = brain.step(self.senses_for(d))
             self.intents[d.id] = intent
             w.apply_intent(d, intent)
             if d.skill is None:              # a running skill owns the command block
@@ -334,8 +335,8 @@ class WorldState:
         from .brain.team import kickoff_brains
         self.goal_seq = w.goal_seq
         kickoff_brains(self.brains, self.teams)
-        for q in self._tether_queue.values():
-            q.clear()
+        for th in self._tether_queue.values():
+            th.clear()
         self.intents.clear()
         self.events.append(f"GOAL {w.last_goal} — kickoff")
 

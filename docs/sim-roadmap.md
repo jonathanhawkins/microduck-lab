@@ -111,9 +111,11 @@ the tree, and Track 12 has its first working loop:
   minutes on the pinned 2026-09 model (16 seeds, 0.31 falls a run; 0.84 /
   0.56 under datasheet odometry drift, 0.79 / 0.75 under hostile drift —
   the same with the brain's loop-closed pose on or off, so the map is not
-  what tidying needs — 0.76 / 2.19 with a 250 ms brain tether; every
-  traced tethered fall was the stopping stride at the rim on a stop
-  decided 250 ms late) — up from
+  what tidying needs — 0.71 / 0.25 with a 250 ms brain tether, the link
+  modelled both ways (senses late, intents late) and the brain reading
+  its latency off its own sensor ages to stop that much earlier at the
+  rim; 0.76 / 2.19 before that, every traced tethered fall the stopping
+  stride at the rim on a stop decided 250 ms late) — up from
   0.88 / 0.38 before rim toys were approached from the outside, 0.67 /
   1.7 falls at the first close of the loop and 0.11 before that. What it took, each a measurement on
   the walker, not a tune: releases only after a standing re-measure of

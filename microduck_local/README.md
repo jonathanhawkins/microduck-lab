@@ -768,7 +768,7 @@ datasheet sensor noise, upstream models at the pinned shas):
 | ideal | onboard | **0.89** | 0.31 |
 | datasheet drift | onboard | 0.84 | 0.56 |
 | hostile drift | onboard | 0.79 | 0.75 |
-| ideal | 250 ms round trip | 0.76 | 2.19 |
+| ideal | 250 ms round trip | 0.71 | 0.25 |
 
 All four rows are on the 2026-09 CAD re-export (microduck_rl badc4e7),
 with the staged approach for rim toys, the sidestep-then-turn back-off,
@@ -792,11 +792,25 @@ for the drift and tether rows. A model bump is a re-measure, not a
 merge.
 
 The tether row is roadmap 12.10's answer in one line: a laptop brain over
-Wi-Fi keeps most of the tidying but trips at the rim three times as
-often — every traced tethered fall was the stopping stride at the rim,
-because the stop was decided on senses a quarter of a second old (4.7 cm
-of overshoot at a 0.3 command, 3.0 at 0.25, which is why the last leg is
-walked at 0.25). The 50 Hz reflex stays onboard either way.
+Wi-Fi keeps most of the tidying (0.71 against 0.89: every trip is slower
+by the link, and eight of sixteen seeds run out of the five minutes with
+a toy or two left) and now falls **no more than the onboard brain**
+(0.25 against 0.31). It read 0.76 / 2.19 before: every traced tethered
+fall was the stopping stride at the rim, because the stop was decided on
+senses a quarter of a second old (4.7 cm of overshoot at a 0.3 command,
+3.0 at 0.25, which is why the last leg is walked at 0.25), and the fix is
+the one thing a tethered brain *can* do about its link — know it. The
+tether is modelled honestly now (`brain/tether.py`: senses reach the
+brain half a round trip late, re-aged; its intent lands half a round
+trip later — the sim used to delay only the intent, which let the brain
+see senses it would never get), so the brain reads the link off its own
+sensor ages: the floor of the ToF age over the last second is the
+one-way lag (near zero onboard, the sensor runs at 15 Hz), twice it is
+the round trip, and the rim stop moves out by its speed times that
+(`latency_gain`; ~4 cm at 0.16 m/s and 250 ms — the margin every traced
+fall had spent). Nine of the ten falls in four traced runs were within
+0.6 s of a release with the trunk 0.22–0.24 m from the basket. The 50 Hz
+reflex stays onboard either way.
 
 Up from 0.67 and 1.7 falls a run at the first close of the loop, and 0.11
 before that. What moved it: the basket is re-measured standing still and
@@ -809,8 +823,10 @@ the servo wanted. Every step of the way there was a measurement, not a
 guess — `uv run walker-facts` re-measures them and `uv run trace-tidy`
 shows one run state by state, with every release, landing and fall in
 context. `.claude/skills/tidy-trace/SKILL.md` is the debugging guide.
-`--tether-ms` (roadmap 12.10) delays every intent by a brain round trip;
-`POST /world/tether` does the same live on the page.
+`--tether-ms` (roadmap 12.10) is a brain round trip — senses out half of
+it late, intents back the other half (`brain/tether.py`); `POST
+/world/tether` does the same live on the page, and the inspector's
+`latency` is what the tidy brain reads off its sensor ages.
 
 ## Teachable behaviors (the viewer's 🎓 teach panel)
 

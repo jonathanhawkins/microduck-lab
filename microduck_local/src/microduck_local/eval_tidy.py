@@ -30,13 +30,12 @@ from .world import World, make_playroom
 def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str = "ideal",
             tether_ms: float = 0.0, loop_closure: bool = True) -> dict:
     """`tether_ms` (roadmap 12.10): the brain runs somewhere else — a laptop
-    over Wi-Fi, a cloud model — and its intent lands on the robot this much
-    after the senses it was decided from. 0 = onboard."""
-    from collections import deque
+    over Wi-Fi, a cloud model — its senses reach it half this late and its
+    intent lands on the robot half this later (brain/tether.py). 0 = onboard."""
+    from .brain.tether import Tether
     sc = make_playroom(seed=seed, n=toys)
     sc.ducks[0].odom = odom
-    queue: deque = deque()
-    delay = tether_ms / 1000.0
+    tether = Tether(tether_ms / 1000.0)
     w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=seed)
     d = w.ducks["d0"]
     from .brain.tidy import TidyParams
@@ -49,12 +48,10 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
                    det=det, det_age=None if det is None else w.t - det.t,
                    speed=d.heading_speed(w.data), odom=w.odom(d),
                    holding=d.holding is not None, skill=d.skill)
-        queue.append((w.t + delay, brain.step(s)))
-        while queue and queue[0][0] <= w.t + 1e-9:
-            _, intent = queue.popleft()
-            w.apply_intent(d, intent)
-            if d.skill is None:
-                d.set_cmd(w.data, intent.twist, intent.head)
+        intent = tether.intent_out(brain.step(tether.senses_in(s)), w.t)
+        w.apply_intent(d, intent)
+        if d.skill is None:
+            d.set_cmd(w.data, intent.twist, intent.head)
         w.step()
         if not states or states[-1][1] != brain.state:
             states.append((round(w.t, 1), brain.state))

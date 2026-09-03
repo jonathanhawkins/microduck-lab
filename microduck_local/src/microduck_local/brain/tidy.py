@@ -25,6 +25,8 @@ cannot grasp; two clean scans with nothing seen means "done".
 
 from __future__ import annotations
 
+from collections import deque
+
 import math
 from dataclasses import dataclass
 
@@ -74,6 +76,15 @@ class TidyParams:
     basket_reach: float = 0.22
     neck_reach: float = 0.0            # neck_pitch intent on the blind end and the drop (measured, off)
     blind_speed: float = 0.25          # the last leg's command: slower, so a late stop lands nearer
+    # A tethered brain's stop lands late by its round trip. The brain can
+    # KNOW that: the floor of its ToF ages over the last second is the
+    # link's one-way lag (0 onboard - the sensor runs at 15 Hz, so fresh
+    # frames arrive with ages near zero), and the round trip is twice it.
+    # The rim stop moves out by the measured speed times that
+    # (`latency_gain` of it), so a 250 ms tether at ~0.16 m/s stops ~4 cm
+    # earlier - the margin every traced tethered fall had spent.
+    latency_gain: float = 1.0
+    latency_max_s: float = 1.0
     basket_confirm_range: float = 0.6  # release only if the marker was seen from closer than this
     far_range: float = 1.2             # beyond this a sighting is a direction, not a range (see _locate)
     aim_range: float = 0.42            # stop here, square up, stand still and re-measure the basket before the blind end
@@ -135,6 +146,9 @@ class Tidy:
         self.reset()
 
     def reset(self) -> None:
+        self._ages: deque = deque()
+        self.latency = 0.0
+        self.stop_margin = 0.0
         self.state = "scan"
         self.est: tuple[float, float] | None = None      # odom-frame estimate of the target
         self.goal_kind: str | None = None                # "toy" | "basket"
@@ -175,6 +189,7 @@ class Tidy:
         if self._senses is None:
             return {}
         out = age_inputs(self._senses, self.TOF_MAX_AGE, self.DET_MAX_AGE)
+        out["latency"] = round(self.latency, 3)
         out["target"] = None if self.est is None else {
             "bearing": 0.0, "range": None, "since": round(self._senses.t - self.t_seen, 2),
             "goal": [round(v, 3) for v in self.est], "kind": self.goal_kind, "name": self.target_name}
@@ -400,6 +415,13 @@ class Tidy:
     def step(self, senses: Senses) -> Intent:
         self._senses = senses
         p, t = self.p, senses.t
+        # The link's lag, read off the sensor ages (see latency_gain).
+        if senses.tof_age is not None:
+            self._ages.append((t, float(senses.tof_age)))
+        while self._ages and t - self._ages[0][0] > 1.0:
+            self._ages.popleft()
+        self.latency = min(p.latency_max_s, 2.0 * min((a for _, a in self._ages), default=0.0))
+        self.stop_margin = p.latency_gain * max(0.0, float(senses.speed)) * self.latency
         odom = self._pose(senses)
         fr = senses.fresh_det(self.DET_MAX_AGE)
         self._cam = (fr.cam_z, fr.cam_pitch) if (fr is not None and fr.cam_z > 0.0) else None
@@ -613,14 +635,14 @@ class Tidy:
                 # overran the stop by 6 cm and tripped on the rim (the plain
                 # stop coasts 1 cm); a straight leg with NO steering once
                 # walked off in whatever direction the ToF guard had left it.
-                twist, dist, bearing = self._servo(odom, p.basket_reach)
+                twist, dist, bearing = self._servo(odom, p.basket_reach + self.stop_margin)
                 if twist[0] > p.turn_kick:
                     # …and none at all in the last few centimetres: a stop
                     # out of a steering step lunged 2–3 cm instead of the
                     # 1 cm coast, which is the whole margin at the rim.
-                    wz = 0.0 if dist < p.basket_reach + 0.06 else float(np.clip(twist[2], -0.5, 0.5))
+                    wz = 0.0 if dist < p.basket_reach + self.stop_margin + 0.06 else float(np.clip(twist[2], -0.5, 0.5))
                     twist = (p.blind_speed, 0.0, wz)
-            if dist <= p.basket_reach:
+            if dist <= p.basket_reach + self.stop_margin:
                 if self.basket_confirmed:
                     self._enter("drop", t)
                 else:

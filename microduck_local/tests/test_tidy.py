@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from microduck_local import contract as C
+from microduck_local.brain import Senses
 from microduck_local.brain.brain_env import POLICIES_DIR, onnx_infer
 from microduck_local.world import (
     Basket,
@@ -330,3 +331,34 @@ def test_tidy_steers_by_the_loop_closed_pose():
     assert b.inputs()["tidy"]["loopClosure"]["offset"] == [0.5, -0.2, 0.0]
     raw = Tidy(TidyParams(loop_closure=False))
     assert raw.map is None and raw._pose(s) == (1.0, 1.0, 0.0)
+
+
+def test_a_tethered_brain_reads_its_latency_off_the_sensor_ages_and_stops_earlier():
+    """brain/tether.py delays senses by half the round trip and intents by
+    the other half; a tidy brain's ToF ages then floor at the one-way lag,
+    it takes twice that as its latency, and the rim stop moves out by its
+    speed times that. Onboard (no tether) the margin is zero."""
+    from microduck_local.brain.tether import Tether
+    from microduck_local.brain.tidy import Tidy, TidyParams
+    from microduck_local.sensors.tof import TofFrame
+
+    def senses(t, age):
+        f = TofFrame(t=t - age, depth_mm=np.full((8, 8), 2000, np.uint16), valid=np.ones((8, 8), bool))
+        return Senses(t=t, tof=f, tof_age=age, speed=0.16, odom=(0.0, 0.0, 0.0))
+    onboard = Tidy(TidyParams())
+    for k in range(20):
+        onboard.step(senses(0.066 * k, 0.02))
+    assert onboard.latency < 0.05 and onboard.stop_margin < 0.01
+    # Through a 250 ms tether the same 15 Hz frames arrive 125 ms older.
+    th = Tether(0.25)
+    tethered = Tidy(TidyParams())
+    for k in range(30):
+        s = th.senses_in(senses(0.066 * k, 0.02))
+        if s.tof is not None:
+            tethered.step(s)
+    assert 0.24 < tethered.latency < 0.32
+    assert 0.03 < tethered.stop_margin < 0.06                        # 0.16 m/s x ~0.27 s
+    # The intents land half a round trip later: the one applied at t is the one decided at t - 0.125.
+    from microduck_local.brain.runtime import Intent
+    out = [th.intent_out(Intent(twist=(k * 0.1, 0.0, 0.0)), 0.05 * k) for k in range(8)]
+    assert out[0].twist[0] == 0.0 and abs(out[5].twist[0] - 0.2) < 1e-9        # at t=0.25 the one from t=0.10... within a tick
