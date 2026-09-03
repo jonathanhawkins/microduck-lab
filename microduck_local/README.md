@@ -317,7 +317,7 @@ daemon fills the slots for this brain:
 | 51 | horizontal bearing across the frame, −1 hard left … +1 hard right (`duck_detect::Detection::bearing`); 0 when not seen |
 | 52 | vertical bearing, −1 bottom … +1 top; 0 when not seen |
 | 53 | 1.0 while the detector reports the ball, else 0 |
-| 54 | the ball's bearing in the duck's yaw frame ÷ π (+ = left) while seen; while lost, the last one dead-reckoned by the gyro yaw rate and faded by exp(−t/4 s) — a memoryless policy needs someone to remember which side the ball went |
+| 54 | the daemon's **belief**: the ball's bearing in the duck's yaw frame ÷ π (+ = left) × confidence. 1.0 while seen; while lost, the last bearing dead-reckoned by the gyro yaw rate with confidence fading as exp(−t/4 s) down to a 0.15 floor. At episode start: a noisy prior at half confidence in 70% of episodes (the ball was in view before this brain took over), else the fixed convention +0.15 — "nothing known, sweep left first" |
 
 Detector realism: reports every 2 control steps (a 15–30 Hz NPU detector
 against the 50 Hz loop), ±0.02 bearing jitter under `obs_noise`, and an
@@ -333,7 +333,12 @@ and earns nothing, a steady sweep pays every step. There is deliberately
 **no per-step search penalty**: falling over would then be the cheapest
 way out of a hard search. Balls spawn anywhere around the duck (0.3–1.5 m)
 and every ~3 s either teleport (a new search) or roll off at 0.3–0.9 m/s
-(a track, then a re-acquisition from the memory slot). The three-stage
+(a track, then a re-acquisition from the belief slot). The belief slot is
+also what makes the sweep learnable at all: with the ball equally likely on
+either side and no cue in the obs, turning left and right earn the same
+advantage and the mean action stays at zero while the exploration noise
+does the finding — the first stage-1 export stood and stared at a ball 42°
+off while the stochastic trainer saw it half the time. The three-stage
 curriculum ladders only the world: ball in the front 140° → anywhere,
 moving → mostly rolling. `symmetric=False` on purpose: from a symmetric
 start a mirror-consistent policy cannot choose which way to look first.

@@ -25,12 +25,25 @@ import math as _math
 #              right (duck_detect::Detection::bearing), 0 when not seen
 #   [52] by    vertical bearing, -1 bottom edge .. +1 top edge, 0 when not seen
 #   [53] seen  1.0 while the detector reports the ball, else 0.0
-#   [54] memory  where the ball IS in the duck's own yaw frame: bearing/pi
-#              (-1..+1, + = to the left) while seen; while lost, the last
-#              bearing dead-reckoned by the gyro's yaw rate and faded by
-#              exp(-t_lost / MEM_TAU). A memoryless policy needs someone to
-#              remember which side the ball went — on the robot that is one
-#              gyro integral in the daemon.
+#   [54] belief  where the daemon BELIEVES the ball is, in the duck's own yaw
+#              frame: bearing/pi (-1..+1, + = to the left) times a
+#              confidence. 1.0 while seen; while lost, the last bearing
+#              dead-reckoned by the gyro's yaw rate, confidence fading as
+#              exp(-t_lost / MEM_TAU) down to a FLOOR (a weak "it went that
+#              way" never becomes silence). At the start of an episode it is
+#              seeded the way the daemon would seed it: usually a noisy prior
+#              from before this brain took over (the ball was in view when
+#              the kick happened, then rolled off), otherwise the fixed
+#              convention +0.15 — "nothing known, sweep left first".
+#              A memoryless policy needs someone to remember which side the
+#              ball went, and it needs the tie broken when nobody knows:
+#              with the ball equally likely on either side and no cue in the
+#              obs, turning left and turning right earn the same advantage
+#              and the mean action stays at zero while the exploration noise
+#              does the finding — the stage-1 export stood and stared at a
+#              ball 42 deg off while the stochastic trainer saw it half the
+#              time. On the robot the slot is one gyro integral plus a
+#              default in the daemon.
 #
 # Detector realism: updates every DETECT_EVERY control steps (a 15-30 Hz NPU
 # detector against the 50 Hz loop), a small bearing jitter under obs_noise,
@@ -67,7 +80,20 @@ _BALL_KNOBS = {
     "MICRODUCK_BALL_JITTER": 0.02,
     "MICRODUCK_BALL_DROPOUT": 0.0,
     "MICRODUCK_BALL_MEM_TAU": 4.0,
+    # The belief slot's floor confidence, and how episodes start: with
+    # PRIOR_PROB the daemon "remembers" the ball's bearing +- PRIOR_NOISE
+    # (rad) at PRIOR_CONF; otherwise it knows nothing and the slot carries
+    # the sweep-left-first convention (+0.15).
+    "MICRODUCK_BALL_MEM_FLOOR": 0.15,
+    "MICRODUCK_BALL_PRIOR_PROB": 0.7,
+    "MICRODUCK_BALL_PRIOR_NOISE": 0.6,
+    "MICRODUCK_BALL_PRIOR_CONF": 0.5,
 }
+# "Nothing known": the belief slot reads +0.15 — bearing +pi/2 (left) at 0.3
+# confidence. A convention the daemon and the policy share, so a duck with
+# no idea always starts its sweep the same way instead of not at all.
+_BALL_NO_PRIOR_MEM = _math.pi / 2
+_BALL_NO_PRIOR_CONF = 0.3
 _BALL_KEEPOUT = 0.12          # m — a rolling ball stops at the duck's feet
 _BALL_ARENA = 2.0             # m — a rolling ball stops at the arena edge
 # Gaze coverage bins for the sweep pay: 10 deg of camera yaw x three pitch
@@ -148,7 +174,7 @@ def _ball_reset(env) -> None:
         env.ball_vel = np.zeros(3)
     _ball_knobs(env)
     dist, bearing = _ball_spawn(env)
-    env.last_spawn = f"ball {np.degrees(bearing):+.0f}° {dist:.1f}m"
+    env.last_spawn = f"ball {_math.degrees(bearing):+.0f}° {dist:.1f}m"
     env._ball_episode = env.episode_id
     env._ball_step_done = -1
     env._ball_events = 0
@@ -167,8 +193,20 @@ def _ball_reset(env) -> None:
     env._ball_seen_steps = 0
     env._ball_centred_steps = 0
     env._ball_losses = 0
-    env._ball_mem = 0.0
-    env._ball_mem_conf = 0.0
+    # Seed the belief slot (see the module header): a noisy prior from
+    # "before this brain took over", or the sweep-left-first convention.
+    k = env._ball_k
+    if env._rng.uniform() < k["MICRODUCK_BALL_PRIOR_PROB"]:
+        noise = k["MICRODUCK_BALL_PRIOR_NOISE"]
+        m = bearing + float(env._rng.uniform(-noise, noise))
+        env._ball_mem = _math.atan2(_math.sin(m), _math.cos(m))
+        env._ball_mem_conf = k["MICRODUCK_BALL_PRIOR_CONF"]
+        env._ball_prior = "prior"
+    else:
+        env._ball_mem = _BALL_NO_PRIOR_MEM
+        env._ball_mem_conf = _BALL_NO_PRIOR_CONF
+        env._ball_prior = "blind"
+    env.last_spawn += f" {env._ball_prior}"
     _ball_sense(env, force=True)
 
 
@@ -291,7 +329,8 @@ def _ball_sense(env, force: bool = False) -> None:
         m = env._ball_mem - float(env._gyro[2]) * dt
         env._ball_mem = _math.atan2(_math.sin(m), _math.cos(m))
         if det[2] < 0.5:
-            env._ball_mem_conf *= k["mem_decay"]
+            env._ball_mem_conf = max(env._ball_mem_conf * k["mem_decay"],
+                                     k["MICRODUCK_BALL_MEM_FLOOR"])
     hc = env.head_cmd
     hc[0] = det[0]
     hc[1] = det[1]

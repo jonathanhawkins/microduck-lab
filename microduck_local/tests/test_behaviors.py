@@ -1325,3 +1325,38 @@ def test_find_ball_teach_card_and_matcher():
     assert match_behavior("find the ball").id == "find_ball"
     assert match_behavior("look around for the ball").id == "find_ball"
     assert match_behavior("stand on one leg").id == "one_leg"
+
+
+def test_find_ball_belief_slot_is_seeded_and_never_goes_silent():
+    """Slot 54 starts as the daemon's prior (the ball's side, noisy, half
+    confidence) or as the sweep-left-first convention (+0.15), and while
+    the ball is lost its confidence floors at 0.15 rather than fading to
+    nothing — the cue that turns a stand-and-stare into a sweep."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env(seed=7, spawn_overrides={"MICRODUCK_BALL_PRIOR_PROB": "1",
+                                              "MICRODUCK_BALL_PRIOR_NOISE": "0",
+                                              "MICRODUCK_BALL_EVENT_RATE": "0"})
+    for _ in range(10):
+        obs, _ = env.reset()
+        if env._ball_seen:
+            continue                    # a seen ball overrides any prior
+        assert obs[54] == pytest.approx(0.5 * env._ball_psi / np.pi, abs=5e-3)
+        assert env.last_spawn.endswith("prior")
+    env = _ball_env(seed=8, spawn_overrides={"MICRODUCK_BALL_PRIOR_PROB": "0",
+                                              "MICRODUCK_BALL_EVENT_RATE": "0"})
+    for _ in range(10):
+        obs, _ = env.reset()
+        if env._ball_seen:
+            continue
+        assert obs[54] == pytest.approx(0.15, abs=1e-3)
+        assert env.last_spawn.endswith("blind")
+    # Lose it for a long time: confidence floors, the slot keeps its sign.
+    _ball_place(env, 1.0, 0.3)          # 17 deg left: inside the 24 deg half-FOV
+    _ball_sense(env, force=True)
+    assert env._ball_seen
+    _ball_place(env, 1.0, np.pi)
+    for _ in range(1000):
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_mem_conf == pytest.approx(0.15)
+    assert env.head_cmd[3] == pytest.approx(0.15 * 0.3 / np.pi, abs=2e-3)
