@@ -72,6 +72,7 @@ import gymnasium as gym
 import numpy as np
 
 from . import contract as C
+from .machine import PROFILES
 
 # Fine resolution where the curve is still moving, then two coarse points PAST
 # saturation. The tail is not decoration: `recommend` measures every point
@@ -123,6 +124,8 @@ class Point:
     setup_s: float      # venv spawn + PPO construction + warmup rollout
     overlap: bool = False  # SymmetryPPO overlap_update (update || rollout)
     task: str = "walk"     # "walk" (BehaviorEnv) | "brain" (BrainEnv)
+    profile: str = ""   # machine.py profile the point ran under
+    per_worker: int = 1  # envs packed into each worker process
 
     @property
     def steps_per_s(self) -> float:
@@ -253,6 +256,25 @@ def format_table(points, title: str = "PPO training throughput") -> str:
 # --------------------------------------------------------------------------
 
 
+def _worker_count(venv) -> int:
+    """`num_workers` from inside the VecNormalize / VecMonitor / adapter stack.
+
+    Reported so a run's JSON records how many PROCESSES actually stepped the
+    fleet — under the linux profile that is one per core, not one per env,
+    and a table without it reads like the packing never happened.
+    """
+    seen = venv
+    for _ in range(8):
+        n = getattr(seen, "num_workers", None)
+        if n:
+            return int(n)
+        nxt = getattr(seen, "venv", None) or getattr(seen, "_inner", None)
+        if nxt is None or nxt is seen:
+            break
+        seen = nxt
+    return 0
+
+
 def _run_point(envs: int, vec: str, pinned: bool, budget: int,
                behavior: str, seed: int, overlap: bool = False,
                update_device: str | None = None, task: str = "walk") -> Point:
@@ -265,6 +287,7 @@ def _run_point(envs: int, vec: str, pinned: bool, budget: int,
     five control steps of physics plus a ToF cast, roughly 20x the per-step
     cost, so the serial update is a much smaller share of the iteration.
     """
+    from .machine import phase_thread_callbacks, profile
     from .ppo_hparams import N_STEPS, configure_torch_cpu, ppo_batch_size
     from .vec_env import as_sb3_vec_env, make_vec_env
 
@@ -282,6 +305,7 @@ def _run_point(envs: int, vec: str, pinned: bool, budget: int,
 
     import torch
     from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import BaseCallback
     from stable_baselines3.common.vec_env.vec_monitor import VecMonitor
     from stable_baselines3.common.vec_env.vec_normalize import VecNormalize
 
@@ -294,9 +318,13 @@ def _run_point(envs: int, vec: str, pinned: bool, budget: int,
     if pinned:
         # The env vars above cap BLAS; this caps torch's own intra-op pool,
         # which torch sets from cpu_count() when OMP_NUM_THREADS is unset.
+        # No phase callbacks: --pin-threads is the one-thread-everywhere arm,
+        # and a callback re-threading each phase would erase what it measures.
         torch.set_num_threads(1)
+        phase_cbs = []
     else:
         configure_torch_cpu(torch)
+        phase_cbs = phase_thread_callbacks(BaseCallback)
 
     venv = VecMonitor(as_sb3_vec_env(venv))
     if brain:
@@ -339,7 +367,7 @@ def _run_point(envs: int, vec: str, pinned: bool, budget: int,
            if (overlap or update_device) else {}),
     )
     warmup = WARMUP_ROLLOUTS * model.n_steps * envs
-    model.learn(total_timesteps=warmup, progress_bar=False)
+    model.learn(total_timesteps=warmup, progress_bar=False, callback=phase_cbs)
     setup_s = time.perf_counter() - t_setup
 
     before = model.num_timesteps
@@ -347,19 +375,23 @@ def _run_point(envs: int, vec: str, pinned: bool, budget: int,
     # reset_num_timesteps=False keeps _last_obs, so this continues the warmed
     # rollout instead of paying another env reset storm.
     model.learn(total_timesteps=budget, progress_bar=False,
-                reset_num_timesteps=False)
+                reset_num_timesteps=False, callback=phase_cbs)
     seconds = time.perf_counter() - t0
     steps = int(model.num_timesteps) - int(before)
+    workers = _worker_count(venv)
     venv.close()
     return Point(envs=envs, vec=vec, pinned=pinned, steps=steps,
-                 seconds=seconds, setup_s=setup_s)
+                 seconds=seconds, setup_s=setup_s,
+                 profile=profile().name,
+                 per_worker=(envs // workers) if workers else 1)
 
 
 def _spawn_point(envs: int, vec: str, pinned: bool, budget: int,
                  behavior: str, seed: int, timeout: float,
                  overlap: bool = False,
                  update_device: str | None = None,
-                 task: str = "walk") -> Point | None:
+                 task: str = "walk",
+                 profile_name: str | None = None) -> Point | None:
     """Run one point in a fresh interpreter; parse its JSON result line."""
     env = dict(os.environ)
     for var in THREAD_ENV_VARS:
@@ -367,6 +399,10 @@ def _spawn_point(envs: int, vec: str, pinned: bool, budget: int,
             env[var] = "1"
         else:
             env.pop(var, None)
+    # The profile is process-global and read at import, so it travels to the
+    # point subprocess the same way the thread caps do: in its environment.
+    if profile_name:
+        env["MICRODUCK_PROFILE"] = profile_name
     spec = json.dumps({"envs": envs, "vec": vec, "pinned": pinned,
                        "budget": budget, "behavior": behavior, "seed": seed,
                        "overlap": overlap,
@@ -387,12 +423,14 @@ def _spawn_point(envs: int, vec: str, pinned: bool, budget: int,
 def _sweep(counts, vec: str, pinned: bool, budget: int, behavior: str,
            seed: int, timeout: float, label: str,
            order: list[int] | None = None, overlap: bool = False,
-           update_device: str | None = None, task: str = "walk") -> list[Point]:
+           update_device: str | None = None, task: str = "walk",
+           profile_name: str | None = None) -> list[Point]:
     points: list[Point] = []
     for n in (order if order is not None else list(counts)):
         print(f"  {label}: {n:>2} envs ...", end="", flush=True)
         p = _spawn_point(n, vec, pinned, budget, behavior, seed, timeout,
-                         overlap=overlap, update_device=update_device, task=task)
+                         overlap=overlap, update_device=update_device, task=task,
+                         profile_name=profile_name)
         if p:
             points.append(p)
             print(f" {p.steps_per_s:,.0f} steps/s  ({p.seconds:.1f} s run, "
@@ -403,7 +441,8 @@ def _sweep(counts, vec: str, pinned: bool, budget: int, behavior: str,
 def _best_of(counts, vec: str, pinned: bool, budget: int, behavior: str,
              seed: int, timeout: float, label: str, repeats: int,
              rng: random.Random, overlap: bool = False,
-             update_device: str | None = None, task: str = "walk") -> list[Point]:
+             update_device: str | None = None, task: str = "walk",
+             profile_name: str | None = None) -> list[Point]:
     """Repeat a comparison arm the same way the main sweep is repeated.
 
     An arm measured ONCE against a main sweep that kept its best of five is not
@@ -417,7 +456,8 @@ def _best_of(counts, vec: str, pinned: bool, budget: int, behavior: str,
         tag = label if repeats == 1 else f"{label} {r + 1}/{repeats}"
         for p in _sweep(counts, vec, pinned, budget, behavior, seed, timeout,
                         tag, order=order, overlap=overlap,
-                        update_device=update_device, task=task):
+                        update_device=update_device, task=task,
+                        profile_name=profile_name):
             if p.envs not in best or p.steps_per_s > best[p.envs].steps_per_s:
                 best[p.envs] = p
     return sorted(best.values(), key=lambda p: p.envs)
@@ -456,7 +496,15 @@ def main() -> None:
     ap.add_argument("--pin-threads", action="store_true",
                     help="cap the trainer and its workers to one BLAS/torch "
                          "thread. OFF by default because it measured 21-24%% "
-                         "SLOWER — see the module docstring")
+                         "SLOWER on a Mac — see the module docstring")
+    ap.add_argument("--profile", default=None, choices=PROFILES,
+                    help="force a machine profile (machine.py) instead of "
+                         "auto-detecting: 'mac' is the historical settings, "
+                         "'linux' adds phase-aware torch threads and worker "
+                         "packing. Mostly for --compare-profiles")
+    ap.add_argument("--compare-profiles", action="store_true",
+                    help="also measure the OTHER profile at the same env "
+                         "counts — the A/B behind the shipped default")
     ap.add_argument("--overlap", action="store_true",
                     help="measure with SymmetryPPO's overlapped update "
                          "(symmetry_coef=0, so stock PPO math + the overlap)")
@@ -491,16 +539,18 @@ def main() -> None:
         print("POINT " + json.dumps(asdict(p)))
         return
 
+    from .machine import build_profile, usable_cores
     from .vec_env import BACKENDS, resolve_backend
 
     counts = [int(x) for x in args.envs.split(",") if x.strip()]
     pinned = args.pin_threads
     backend = resolve_backend(args.backend)  # what training would pick
-    cpus = os.cpu_count() or 0
+    cpus = usable_cores()
     what = "brain (BrainEnv)" if args.task == "brain" else f"behavior={args.behavior}"
     print(f"bench-envs: {what} backend={backend} "
           f"budget={args.budget:,} steps/point cpus={cpus} "
           f"threads={'pinned to 1' if pinned else 'default'}")
+    print(build_profile(args.profile).describe())
     print("(close other heavy apps — this measures the machine, not the code)\n")
 
     # Repeats visit the env counts in a SHUFFLED order, and each count keeps
@@ -515,7 +565,7 @@ def main() -> None:
     points = _best_of(counts, backend, pinned, args.budget, args.behavior,
                       args.seed, args.timeout, "sweep", args.repeats, rng,
                       overlap=args.overlap, update_device=args.update_device,
-                      task=args.task)
+                      task=args.task, profile_name=args.profile)
     if not points:
         raise SystemExit("every data point failed — see the errors above")
 
@@ -536,6 +586,25 @@ def main() -> None:
           f"10M ~ {1e7 / at_pick.steps_per_s / 3600:.1f} h")
 
     extra: list[Point] = []
+    if args.compare_profiles:
+        this = build_profile(args.profile)
+        other_name = "mac" if this.name == "linux" else "linux"
+        print(f"\nprofile {other_name!r} vs this machine's {this.name!r}:")
+        print("  " + build_profile(other_name).describe())
+        other = _best_of(counts, backend, pinned, args.budget, args.behavior,
+                         args.seed, args.timeout, other_name,
+                         max(1, min(args.repeats, 3)), rng,
+                         profile_name=other_name)
+        extra += other
+        for o in other:
+            ref = next((p for p in points if p.envs == o.envs), None)
+            if ref:
+                delta = (ref.steps_per_s / o.steps_per_s - 1.0) * 100
+                print(f"  {o.envs:>2} envs: {this.name} {ref.steps_per_s:,.0f} "
+                      f"({ref.per_worker} env/worker) vs {other_name} "
+                      f"{o.steps_per_s:,.0f} ({o.per_worker} env/worker) "
+                      f"steps/s ({delta:+.1f}% for {this.name})")
+
     if args.compare_vec:
         # Low counts only: that is where the "are worker processes even worth
         # their IPC and spawn cost?" question is live. At 16 envs nobody

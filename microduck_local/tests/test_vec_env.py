@@ -421,7 +421,7 @@ def test_envs_per_worker_batching_matches_one_per_worker():
     b.close()
 
 
-def test_default_envs_per_worker_crosses_over_at_the_measured_knee():
+def test_the_packing_default_crosses_over_at_the_measured_knee():
     """Packing two envs into one worker halves the per-vec-step semaphore
     traffic but halves the worker processes available to fill the cores the
     serial PPO update leaves idle. Those pull opposite ways and the curve
@@ -432,17 +432,22 @@ def test_default_envs_per_worker_crosses_over_at_the_measured_knee():
           16 | 15,651 | 14,713 |  -6.0%
           32 | 19,456 | 20,536 |  +5.5%
 
-    So the default may only switch at the top, and a change to that threshold
-    has to come with new numbers."""
-    from microduck_local.vec_env import ENVS_PER_WORKER_KNEE, default_envs_per_worker
+    `Profile.envs_per_worker` is now the one place that decides this, and its
+    `n_envs > cores` rule has to keep reproducing those numbers on the mac
+    profile. A change to the threshold has to come with new numbers."""
+    from microduck_local.machine import Profile
 
-    assert ENVS_PER_WORKER_KNEE == 32, "the trainers' own default --envs"
-    for n in (1, 2, 4, 8, 12, 16, 24, 31):
-        assert default_envs_per_worker(n) == 1, f"{n} envs measured SLOWER packed"
-    for n in (32, 48, 64, 128):
-        assert default_envs_per_worker(n) == 2
+    mac18 = Profile(name="mac", cores=18, update_threads=8, rollout_threads=None,
+                    interop_threads=1, pack_workers=True)
+    for n in (1, 2, 4, 8, 12, 16, 18):
+        assert mac18.envs_per_worker(n) == 1, f"{n} envs measured SLOWER packed"
+    assert mac18.envs_per_worker(32) == 2, "32 envs measured +5.5% at k=2"
     # Never k=4: measured -8.2% against k=1 at 32 envs.
-    assert max(default_envs_per_worker(n) for n in range(1, 257)) == 2
+    assert mac18.envs_per_worker(32) != 4
+    # A profile that does not pack never does, whatever the fleet.
+    nopack = Profile(name="mac", cores=18, update_threads=8, rollout_threads=None,
+                     interop_threads=1, pack_workers=False)
+    assert max(nopack.envs_per_worker(n) for n in range(1, 257)) == 1
 
 
 def test_the_packed_default_is_only_safe_because_the_stream_is_identical():
@@ -454,8 +459,9 @@ def test_the_packed_default_is_only_safe_because_the_stream_is_identical():
 
     import microduck_local.vec_env as V
 
-    assert hasattr(V, "default_envs_per_worker")
     src = pathlib.Path(V.__file__).read_text()
+    assert "profile().envs_per_worker" in src, (
+        "the packing decision must come from the machine profile")
     assert "BIT-IDENTICAL" in src, (
         "the default's justification must stay written next to it")
     # And an explicit env var still wins in both directions.

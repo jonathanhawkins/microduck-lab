@@ -156,6 +156,104 @@ uv run bench-envs --envs 8,16,24 --repeats 3   # narrower, more repeats
 uv run bench-envs --compare-vec --compare-threads
 ```
 
+## Cloud and Linux training (`machine.py`)
+
+Every number above was measured on an 18-core M5 Max, and **that stays the
+default** — this harness is written for a Mac and advertised as one. But two
+of those tunings are wrong on a small Linux or cloud box, badly enough to
+lose a third of the machine, so `machine.py` detects which machine it is on
+and picks a profile. `uv run machine-facts` prints what yours resolved to.
+
+**What goes wrong on a 4-core cloud box.** The trainer, not the physics
+workers, eats the machine. torch's OpenMP pool spin-waits between the tiny
+batch-N policy forwards that make up a rollout, and those spinning threads
+take the cores the workers need: measured at 4 envs, the trainer process sat
+at **311% CPU while each worker got 18%**. The cores looked 90% busy and were
+mostly spinning. An M5 Max has enough cores to absorb that, which is exactly
+why `--pin-threads` measured a 21-24% *regression* there.
+
+The fix is not to pin threads — that gives the update one core, which is what
+cost 21% on the Mac. It is to give each PPO phase the threads it actually
+wants. Measured per phase at 32 envs on this box: **rollout 22.8 s, update
+2.9 s**, so the rollout is ~89% of wall time and is the phase the threads
+must not disturb.
+
+All four rows below were measured **back to back in one window** on a 4-vCPU
+Xeon container, 40k timed steps each, because this box's speed drifts far too
+much to compare across windows (see the warning after the table):
+
+| 32 envs, `behavior=run` | steps/s | CPU busy |
+|---|---:|---:|
+| mac profile (the historical settings) | 2,231 | 90% |
+| `OMP_WAIT_POLICY=PASSIVE` (no code change) | 2,678 | 71% |
+| **+ phase-aware threads: 1 rollout / N update** | **2,915** | 77% |
+| **+ worker packing (4 processes × 8 envs)** | **3,129** | 74% |
+
+> **Do not compare these to a number you measure later.** The same script and
+> configuration on this same container ran 13.1 s in one window and 19.5 s a
+> few hours later — a 49% drift from noisy neighbours and CPU-credit
+> throttling, larger than every optimization in this file. Only the ordering
+> within a window transfers; re-measure both arms together
+> (`--compare-profiles`) rather than trusting any absolute figure here.
+
+The `linux` profile is those last two, and it is the default off Darwin:
+
+- **Phase-aware torch threads.** One intra-op thread while collecting
+  rollouts, every usable core for the update. Implemented as an SB3
+  *callback* on `on_rollout_start` / `on_rollout_end` — the two hooks that
+  bracket the phase — so `train-walk`, `train-behavior` and `train-brain` all
+  get it without a vendored train loop. On the mac profile the callback list
+  is **empty**, not a no-op.
+- **Worker packing.** Once the fleet outnumbers the cores, extra processes
+  cannot run in parallel but still cost the parent two semaphore ops each per
+  vec-step, so the profile packs to one worker per core (32 envs → 4 × 8).
+  Invisible to the caller, pinned step-for-step by `test_vec_env.py`.
+- **Cores from the container, not the host.** `os.cpu_count()` reports the
+  *host's* cores inside Docker or Kubernetes, so a 4-CPU pod on a 64-core node
+  would start 64 spinning threads. `usable_cores()` takes the smallest of
+  `cpu_count`, CPU affinity and the cgroup quota.
+- **numba warmed once, in the parent.** The BAM kernels JIT on first call:
+  **528 ms** against a 0.95 ms steady step, and `cache=True` does not avoid it
+  across processes. `vec_env._warm_jit` pays it once before forking so the
+  workers inherit compiled code — the same trade as the shared `mjModel`,
+  for code. It restores every model array a warm-up step touches, so children
+  still inherit exactly the model the probe's construction left.
+
+`train-brain` also never called `configure_torch_cpu` at all, so it ran with
+torch's defaults (intra-op *and* inter-op at the core count). It does now.
+
+**What is deliberately NOT in a profile: the env count.** `--envs` sets the
+PPO batch size and therefore the learning dynamics, and this repo's rule is
+that throughput is not learning speed. It stays 32 everywhere. Both profile
+knobs are quality-neutral by construction — thread counts do not enter the
+math, and packing is a step-for-step parity test.
+
+```bash
+uv run machine-facts                           # cores + the profile they imply
+uv run bench-envs --compare-profiles           # both arms, interleaved repeats
+MICRODUCK_PROFILE=mac uv run train-behavior run   # force the historical settings
+MICRODUCK_ROLLOUT_THREADS=2 MICRODUCK_UPDATE_THREADS=6 uv run bench-envs  # try your own
+```
+
+**Sizing a cloud box.** A single trainer's ceiling is the serial parent loop,
+not the cores — the Mac numbers saturate near 27k steps/s. Past ~16 cores the
+way to use the machine is *several independent trainers* (`taskset` each to
+its own core group, each with its own `MICRODUCK_RUNS_DIR`), which is also
+what the seed-matched A/Bs this playbook demands need anyway. Per-core clock
+matters more than core count: one env steps in 0.34 ms here against 0.135 ms
+on the M5 Max, so a 4-vCPU box will not match the laptop whatever the
+threading does.
+
+Two things measured and **not** adopted: `OMP_WAIT_POLICY=PASSIVE` on top of
+phase-aware threads is a small loss (the update's threads then sleep between
+minibatches — update 3.3 s → 5.1 s at 16 envs), and pinning OpenBLAS to one
+thread is neutral, because the workers never spawn BLAS pools on 61-dim ops.
+Two known gaps: the lock file resolves CUDA torch wheels on Linux (a 7.2 GB
+venv for a CPU trainer — CI installs from the CPU index first, and a
+`[tool.uv.sources]` entry would fix `uv sync` too), and `--update-device`'s
+`auto` only knows about MPS, so a CUDA cloud box needs an explicit
+`--update-device cuda` (the code path is device-generic but unmeasured).
+
 ### The 2026-08-31 speed pass (measured, in order applied)
 
 - **Semaphore IPC in `ForkVecEnv`** (`vec_env.py`): step traffic had cost two
@@ -442,9 +540,28 @@ its current intent live.
   ```bash
   uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety   # ~15 min
   uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24   # vs `--brain follow`
+  uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24 --jobs 0   # …on every core
   uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v4"
   # …and watch the run live at http://localhost:63317/train (duck-viewer)
   ```
+
+  **An episode is a pure function of `(seed, ep)`.** `BrainEnv.reset()`
+  re-seeds every generator that outlives `world.reset()` — the ToF's, the
+  detector's and the world's own, all three seeded once at construction
+  and untouched by their `reset()` — and zeroes the commanded twist that
+  `_respawn` leaves standing, so the warm-up steps that let the first
+  sensor frames land are not driven by whatever the last episode was
+  asking for. Nothing carries from episode k-1 into episode k. That is
+  what `--jobs N` rests on: it splits a battery over N processes, one env
+  each, and returns exactly the rows `--jobs 1` returns (2.6x on 4 cores
+  for a 24-episode battery; `tests/test_eval_brain_jobs.py` pins the
+  exactness, and 7 of its 8 cases fail if a carrier ever comes back).
+  Episodes used to be chained — episode 0 reproduced, everything after it
+  continued the previous episode's noise stream. Re-measuring both follow
+  tables independently moved no cell by as much as one seed-level sigma
+  (largest in band: 0.019), so no published ranking changed; what it did
+  change is that v4's lead over v5 now clears the noise in three cells of
+  four, where under chained sampling it cleared in none.
 
   `brains/follow-v1` … `follow-v5` (112 kB each, `brain.onnx` + the
   contract in `brain.json`) ship in the repo, so `learned:follow-v1` /
@@ -475,19 +592,22 @@ its current intent live.
   0.55 m centre to centre short of a duck in its way and steps around
   after 2.5 s — **240 episodes a cell** (24 episodes x 10 eval seeds;
   every row has zero contact, falls at most 0.06), in band / in sight
-  under the datasheet and hostile presets:
+  under the datasheet and hostile presets. Re-measured on **independent
+  episodes** (below) on a 4-core Linux container; the same pass taken the
+  old chained way agreed with the M-series figures it replaces to within
+  0.02 a cell, and no cell moved by as much as one seed-level sigma:
 
   | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
   |---|---|---|---|---|
-  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.94** / 0.99 | **0.89** / 0.91 | **0.93** / 0.99 | **0.89** / 0.90 |
-  | `follow-v5` (v4's recipe against the polite person) + reflex tier | 0.93 / 0.98 | 0.88 / 0.89 | 0.93 / 0.98 | 0.87 / 0.87 |
-  | `follow-v2` + reflex tier | 0.91 / 0.98 | 0.83 / 0.92 | 0.90 / 0.98 | 0.84 / 0.93 |
-  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.91 / 0.99 | 0.83 / 0.92 | 0.90 / 0.99 | 0.82 / 0.91 |
-  | `follow-v1` (version-1 observation, no reflex tier) | 0.86 / 0.98 | 0.74 / 0.94 | 0.86 / 0.97 | 0.74 / 0.94 |
-  | scripted `follow` + reflex tier | 0.77 / 0.97 | 0.66 / 0.93 | 0.76 / 0.96 | 0.66 / 0.91 |
+  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.94** / 0.99 | **0.88** / 0.90 | **0.93** / 0.98 | **0.89** / 0.92 |
+  | `follow-v5` (v4's recipe against the polite person) + reflex tier | 0.92 / 0.97 | 0.86 / 0.86 | 0.92 / 0.97 | 0.89 / 0.89 |
+  | `follow-v2` + reflex tier | 0.91 / 0.97 | 0.83 / 0.90 | 0.90 / 0.96 | 0.84 / 0.91 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.90 / 0.98 | 0.82 / 0.92 | 0.90 / 0.97 | 0.81 / 0.90 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.86 / 0.97 | 0.74 / 0.94 | 0.86 / 0.97 | 0.75 / 0.94 |
+  | scripted `follow` + reflex tier | 0.76 / 0.96 | 0.66 / 0.91 | 0.76 / 0.95 | 0.67 / 0.90 |
 
-  v4 leads under hostile noise by 0.05 (10/10 eval seeds over v2, 9/10
-  on the variety cell) and by 0.03 on the clean preset (10/10); the
+  v4 leads under hostile noise by 0.05 (10/10 eval seeds over v2, 10/10
+  on the variety cell) and by 0.04 on the clean preset (9/10); the
   polite person lifted every band by 0.1–0.3 and took the bump counts
   from 15–27 an episode to 0.3–4.6. The capsule that walks
   through the duck (`--polite 0`) had capped every band for a reason
@@ -498,11 +618,12 @@ its current intent live.
 
   | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
   |---|---|---|---|---|
-  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.81 / 0.95** | **0.76** / 0.87 | **0.82 / 0.96** | **0.74** / 0.87 |
-  | `follow-v2` + reflex tier | 0.77 / 0.96 | 0.67 / 0.87 | 0.76 / 0.94 | 0.65 / 0.85 |
-  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.74 / 0.95 | 0.63 / 0.88 | 0.75 / 0.94 | 0.62 / 0.86 |
-  | `follow-v1` (version-1 observation, no reflex tier) | 0.72 / 0.94 | 0.57 / 0.88 | 0.69 / 0.94 | 0.58 / 0.88 |
-  | scripted `follow` + reflex tier | 0.48 / 0.83 | 0.41 / 0.74 | 0.48 / 0.82 | 0.41 / 0.74 |
+  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.84 / 0.97** | **0.73** / 0.85 | **0.83 / 0.96** | **0.74** / 0.87 |
+  | `follow-v5` (v4's recipe against the polite person) + reflex tier | 0.74 / 0.94 | 0.65 / 0.79 | 0.74 / 0.94 | 0.66 / 0.80 |
+  | `follow-v2` + reflex tier | 0.76 / 0.94 | 0.67 / 0.85 | 0.76 / 0.95 | 0.66 / 0.86 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.74 / 0.94 | 0.64 / 0.86 | 0.75 / 0.95 | 0.63 / 0.85 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.70 / 0.95 | 0.57 / 0.89 | 0.70 / 0.93 | 0.57 / 0.87 |
+  | scripted `follow` + reflex tier | 0.48 / 0.82 | 0.41 / 0.75 | 0.47 / 0.81 | 0.41 / 0.73 |
 
   (Before the legs, at 12 episodes: 0.80 / 0.75, 0.63 / 0.61; 0.71 / 0.68,
   0.63 / 0.57; 0.73 / 0.85, 0.60 / 0.75; 0.46 / 0.53, 0.42 / 0.40.)
@@ -510,7 +631,7 @@ its current intent live.
   **`follow-v4` is the follower to pick.** Every shipped brain before it was
   trained while a person vanished inside 1.2 m; v4 is the first trained in
   the world the legs detector made, and it is ahead in all four cells — by
-  0.05 on the datasheet preset and 0.09 under hostile noise, on 9/10 and
+  0.07 on the datasheet preset and 0.07 under hostile noise, on 9/10 and
   10/10 eval seeds respectively. The gap is widest exactly where the old
   brains were worst, which is the shape you would expect if the thing they
   were missing was the close-in half of the band. It also *bumps less*:
@@ -535,22 +656,33 @@ its current intent live.
   records it; v1–v4 were trained against the capsule that walks through
   the duck). It trains faster and settles higher (reward 171 from ~410k
   decisions against v4's 161 from ~610k — the polite world is the easier
-  one; 9 min at 3.7k steps/s) and comes out level with v4 on the clean
-  preset (−0.00 in band, ahead on 4/10 and 5/10 eval seeds) and a shade
-  behind under hostile noise (−0.01 and −0.02, ahead on 2/10 and 3/10 —
-  inside the ±0.03 seed spread). What it learned instead is that the
-  person stops for it: it trips the bump signal 2.6 times an episode
-  against v4's 0.3 on the datasheet preset and 11.5 against 4.2 under
-  hostile noise, is in sight less (0.89 vs 0.91) and falls more with
-  furniture about (0.06 vs 0.02). Scored back in the world v4 was
-  trained in (`--polite 0`, 240 episodes a cell) the habit shows
-  plainly: 0.75 / 0.69 in band against v4's 0.81 / 0.76 (ahead on at most
-  1/10 seeds in any cell), 30 bumps an episode against 15–21, 0.7–0.8 s of
-  contact against 0.4–0.6. A brain trained against a person who walks
-  through the duck had to keep out of the way; one trained against a
-  person who yields is paid for standing in it. **`follow-v4` stays the
-  follower to pick** — trained in the harder world, scored in the polite
-  one — and v5 ships as the measurement.
+  one; 9 min at 3.7k steps/s), and **the interesting part is where it
+  loses.** v5's TYPICAL episode is the better one: its median band is
+  level or ahead in all four cells (0.962 against v4's 0.955 on the clean
+  preset, 0.940 against 0.927 hostile) and per episode it is ahead more
+  often than not (104 of the 159 non-tied episodes on the clean preset).
+  Its BAD episodes are much worse, and that is what the means show: 15
+  episodes under 0.7 band against v4's 2 on the clean preset, 39 against
+  23 hostile, and a 10th percentile of 0.775 against 0.865 (0.579 against
+  0.705 hostile). Paired over the same 240 episodes a cell, v4's lead is
+  +0.018 / +0.020 / +0.014 / +0.007 in band and clears the seed noise in
+  three cells of four (t = 2.9 / 2.0 / 2.1, and 0.8 on +variety hostile,
+  which does not). Under the old chained sampling it cleared in NONE of
+  them (t <= 1.6) — the carried noise was hiding the tail this comparison
+  turns on.
+
+  What v5 learned instead is that the person stops for it: it trips the
+  bump signal 3.4 times an episode against v4's 0.4 on the datasheet
+  preset and 12.5 against 4.1 under hostile noise, is in sight less
+  (0.86 vs 0.90 hostile) and falls more with furniture about (0.05 vs
+  0.02). Scored back in the world v4 was trained in (`--polite 0`, 240
+  episodes a cell) the habit shows plainly: 0.74 / 0.65 in band against
+  v4's 0.84 / 0.73, ahead on at most 1/10 seeds in any cell. A brain
+  trained against a person who walks through the duck had to keep out of
+  the way; one trained against a person who yields is paid for standing
+  in it. **`follow-v4` stays the follower to pick** — trained in the
+  harder world, scored in the polite one — and v5 ships as the
+  measurement.
 
   The **reflex tier** is the thing that moved: under a version-2 brain
   the env yaws the head toward the tracked target (0.8 × the body
@@ -1027,6 +1159,119 @@ lines into things. The prediction stays tracked and drawn on the /sim
 page (an orange line from the ball to where it will stop); `predict_s`
 turns it back on with the best-measured settings.
 
+**The ToF placed by the head pose — a bug, fixed.** The body-height
+clearance (`tof_clearance_3d`, what every stop, hunt and wall rule reads)
+placed each zone's hit without the head's rotation: with the head dipped
+0.6 rad it reported a wall 0.33–0.37 m ahead in every column — the floor.
+Hits go through the mount rotation now, trunk-relative, and body height
+starts 8.7 cm above the floor (a ball is 7 cm tall). The 1v1 baseline on
+the fixed geometry, same 8 seeds × 300 s: **2.38 goals (0.25 kicked),
+7.4 kicks, 0.38 falls a run** (2.25 / 9.4 / 0.38 before — two fewer
+kicks a run, the ones the false wall had been interrupting one way or
+another). Every soccer number below this line is on the fixed geometry;
+the tidy brain never read that helper, so its rows stand.
+
+**How much can this benchmark actually resolve?** Read the event counts,
+not the per-run averages. Over 8 seeds × 300 s of 1v1 a battery contains
+roughly 50–130 kicks, ~20 goals, ~1–6 of them kicked, and **3–8 falls**.
+So kicks separate cleanly and falls barely separate at all: a baseline
+measured twice, once per clearance rule, gave 3 falls and 6 falls — the
+same brain to within 1% of its stopping decisions, and a 3/6 split of 9
+events comes up by chance half the time (p ≈ 0.5). Telling 0.38 falls a
+run from 0.75 would take dozens of seeds. Goals are nearly as bad: the
+standard error is about 0.5 a run, so anything under a goal and a half
+of difference at 8 seeds is noise. **Every claim below is stated with
+its event counts**, and a difference that does not clear them is written
+as "no effect measured", not as a result. Several rows in earlier
+revisions of this file did not clear them and have been demoted.
+
+**A wider lens, as a hardware question — the one clear win.** The
+detector's field of view is one constant (`DetectorSpec.fov_h_deg`,
+62° × 48° as shipped — an assumption about a Pi-camera-class module), so
+the sim can price a wide-angle camera. It has to price it *honestly*:
+the two apparent-width thresholds that decide whether a target is found
+were written as angles but justified in **pixels** of a 320 px frame
+over 62°, so a wider lens on the same sensor must find small distant
+things *less* often. They are derived from pixels per radian now
+(exactly unchanged at the shipped lens, verified bit-identical), which
+costs 120° a duck at 3.9 m — found 73 times in 400 against 260 at 62°.
+Paying that, over 8 seeds × 300 s of 1v1 against a 51-kick, 19-goal,
+1-kicked-goal baseline:
+
+| lens | kicks | goals | kicked goals | falls |
+|---|---|---|---|---|
+| 62° × 48° (shipped) | 51 | 19 | 1 | 6 |
+| 90° × 70° | 94 | 17 | 4 | 4 |
+| 120° × 93° | **105** | 22 | 6 | 3 |
+| 150° × 116° | **130** | 17 | 4 | 7 |
+
+Kicks scale with the lens and the effect is overwhelming (105 against
+51, p < 0.001) — a duck with a wide camera loses the ball far less often
+and spends its run playing instead of searching. Goals do not follow
+(22 against 19 is noise), and kicked goals only hint at it (6 against 1,
+p = 0.13). So the honest recommendation is: **a wider lens buys much
+more contact with the ball, and whether that becomes goals is not yet
+measured.** It is the only hardware change here that clears the noise.
+
+**Shooting only from inside the goal's cone — no effect measured.** One
+shot in four scores, and a lone shot's direction error is 28–35°, so the
+obvious move is to refuse the long ones: with `kick_cone`, a ball whose
+goal mouth subtends less than that half-angle is dribbled closer (the
+push spot) until the cone opens. It does exactly what it says and buys
+nothing. At 0.35 rad (about a metre out on a 0.7 m goal): 36 kicks, 23
+pushes, 16 goals, **1 kicked goal** against the baseline's 51 / 0 / 19 /
+1. At 0.5 rad: 47 kicks, 30 pushes, 17 goals, **0 kicked**. Kicks turn
+into pushes and the kicked goals do not move, so the shot that a
+28–35° error scatters is not scattered any less from a metre out. Ships
+at 0 (off).
+
+**The head, unlocked, still cannot help.** The chase brain had capped
+head yaw at 0.6 rad; the walker is trained to ±1.40 (upstream's head-pose
+curriculum). With the cap at 1.4: the look after a kick yawed to the
+foot's kick-map exit angle near the horizon (`look_aim`) 2.25 goals,
+6.4 kicks, 0.50 falls; that plus a gaze on the ball track while
+searching (`predict_s`, `head_yaw_when="search"`) 1.88 / 4.6 / 0.25;
+the aimed look plus a searching head that sweeps ±1.4 rad
+(`search_sweep`; old geometry) 1.88 / 6.8 / 0.38 — all against 2.38 /
+7.4 / 0.38. Fewer kicks every time: a head turned away from the walking
+line leaves the ToF bumper looking sideways, and the brain stops for
+what it then sees. That last part was a real bug and is fixed
+(`tof_clearance_bearings`, below); re-measured on the fixed geometry the
+aimed look gives 61 kicks and 21 goals against a 51-kick, 19-goal
+baseline, which does not clear the noise either. All three ship off
+behind their flags — on the evidence that nothing has yet shown them
+helping, not on evidence that they hurt.
+
+**Clearance by bearing, not by sensor column.** The ToF is *in the
+head*, so calling the middle columns "ahead" only holds while the head
+looks along the walking line. Yawed 1.2 rad at boards 0.40 m away, those
+columns reported a wall at 0.52–1.19 m that was really 69° off the nose,
+and the brain stopped for it. `tof_clearance_bearings` places every hit
+in the body's heading frame and selects by bearing, so a turned head
+reads +inf ahead: honestly blind rather than confidently wrong. Ranges
+stay aperture-relative so the tuned thresholds mean what they meant, and
+a synthetic frame with no mount pose still falls back to the level-head
+columns. It ships on its mechanism, not on a score: traced against the
+column version over two full matches, the shipped brain never yaws its
+head at all (the gaze is off), the two disagree about stopping in 0.7%
+of samples, and the bearing version reads 1.2 cm nearer on average. The
+batteries agree to within their noise (19 goals / 51 kicks against 19 /
+59). What it buys is that the head experiments above are now *testable*.
+
+**The ToF sees the ball at the feet — and ships off.** The level camera
+loses a floor ball inside 0.3 m, exactly where the line-up and the kick
+live, and the 8×8 ToF at 45° shows a 7 cm ball at 0.3 m as a 3–6 zone
+blob 3–10 cm above the floor plane (`tof_floor_ball`: at least two
+adjacent such zones, in columns with nothing taller near — a wall or a
+duck has hits above the band in the same columns, a ball has the floor
+behind it; tested against a ball, an empty floor, a level head and the
+boards). Fed to the chase brain's tracker as a ball sighting whenever the
+camera has none (`tof_ball_m`), it measured **1.62 goals, 8.1 kicks,
+0.75 falls a run against 2.38 / 7.4 / 0.38**: a blob at the feet is as
+often the other duck's foot as the ball, and a line-up on a foot is a
+fall. The detector stays for the page and for a pitch with one duck on
+it.
+
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where
 I put it. The nearest attacks, the others support (0.7 m behind the
@@ -1078,6 +1323,20 @@ walking turn bumps what it cannot see. What a crowded pitch needs is a
 sense of the bodies beside the duck — a wider ToF field, or the bump the
 IMU could read — before any rule can act on them.
 
+**A bump sense** (`Senses.bumped`) is what finally moved the crowd's
+falls. The World reads its contact list — in the walk scene only the feet
+carry collision geometry, so a bump is feet touching feet, which is what
+a duck-duck fall is; on the robot it is the IMU and the servo loads — and
+a chase brain that has been bumped stands instead of turning in place for
+`bump_stand_s`. Measured over 4 seeds × 300 s on the fixed ToF geometry:
+**3v3 falls 5.00 → 2.75 a run at 1.0 s and 1.75 at 0.5 s** (goals 1.50 →
+0.75, kicks 6.2 → 4.5 / 6.5), **2v2 4.00 → 2.00 / 2.25** (goals 1.50 →
+1.25). In 1v1 the same rule measured 1.50 goals and 1.00 falls against
+2.38 / 0.38 over 8 seeds — two attackers' feet meet at the ball, and the
+one that stands loses it and gets walked over — so `brain_kwargs` gives
+the half-second stand to rosters with teammates and leaves a lone
+attacker on the default. Per duck, 3v3 falls went 0.83 → 0.29 a run.
+
 ### Tidy the playroom (roadmap Track 12)
 
 `playroom` is the built-in that scatters toys on the floor of a walled room
@@ -1118,7 +1377,7 @@ datasheet sensor noise, upstream models at the pinned shas):
 | ideal | onboard | **0.89** | 0.31 |
 | datasheet drift | onboard | 0.84 | 0.56 |
 | hostile drift | onboard | 0.79 | 0.75 |
-| ideal | 250 ms round trip | 0.71 | 0.25 |
+| ideal | 250 ms round trip | 0.81 | 0.19 |
 
 All four rows are on the 2026-09 CAD re-export (microduck_rl badc4e7),
 with the staged approach for rim toys, the sidestep-then-turn back-off,
@@ -1142,25 +1401,28 @@ for the drift and tether rows. A model bump is a re-measure, not a
 merge.
 
 The tether row is roadmap 12.10's answer in one line: a laptop brain over
-Wi-Fi keeps most of the tidying (0.71 against 0.89: every trip is slower
-by the link, and eight of sixteen seeds run out of the five minutes with
-a toy or two left) and now falls **no more than the onboard brain**
-(0.25 against 0.31). It read 0.76 / 2.19 before: every traced tethered
-fall was the stopping stride at the rim, because the stop was decided on
-senses a quarter of a second old (4.7 cm of overshoot at a 0.3 command,
-3.0 at 0.25, which is why the last leg is walked at 0.25), and the fix is
-the one thing a tethered brain *can* do about its link — know it. The
-tether is modelled honestly now (`brain/tether.py`: senses reach the
-brain half a round trip late, re-aged; its intent lands half a round
-trip later — the sim used to delay only the intent, which let the brain
-see senses it would never get), so the brain reads the link off its own
-sensor ages: the floor of the ToF age over the last second is the
-one-way lag (near zero onboard, the sensor runs at 15 Hz), twice it is
-the round trip, and the rim stop moves out by its speed times that
-(`latency_gain`; ~4 cm at 0.16 m/s and 250 ms — the margin every traced
-fall had spent). Nine of the ten falls in four traced runs were within
-0.6 s of a release with the trunk 0.22–0.24 m from the basket. The 50 Hz
-reflex stays onboard either way.
+Wi-Fi keeps most of the tidying (0.81 against 0.89) and falls **no more
+than the onboard brain** (0.19 against 0.31). It read 0.76 / 2.19 before:
+every traced tethered fall was the stopping stride at the rim, because
+the stop was decided on senses a quarter of a second old (4.7 cm of
+overshoot at a 0.3 command, 3.0 at 0.25, which is why the last leg is
+walked at 0.25), and the fix is the one thing a tethered brain *can* do
+about its link — know it. The tether is modelled honestly now
+(`brain/tether.py`: senses reach the brain half a round trip late,
+re-aged; its intent lands half a round trip later — the sim used to
+delay only the intent, which let the brain see senses it would never
+get), so the brain reads the link off its own sensor ages: the floor of
+the ToF age over the last second is the one-way lag (near zero onboard,
+the sensor runs at 15 Hz), twice it is the round trip, and every stop
+moves out by its speed times that (`latency_gain`; ~4 cm at 0.16 m/s and
+250 ms). At the rim that was the margin every traced fall had spent
+(nine of ten falls in four traced runs were within 0.6 s of a release
+with the trunk 0.22–0.24 m from the basket): 0.71 / 0.25. At the toy it
+was the time: traced, the tethered seed 0 picked 3 toys in 8 attempts
+after its first three (onboard 5 in 5) and spent 80 s scanning, because
+the pick's stop landed late too and the beak came down past the toy —
+with the margin on the pick as well, 0.81 / 0.19. The 50 Hz reflex stays
+onboard either way.
 
 Up from 0.67 and 1.7 falls a run at the first close of the loop, and 0.11
 before that. What moved it: the basket is re-measured standing still and

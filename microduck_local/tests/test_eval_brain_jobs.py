@@ -1,184 +1,93 @@
-"""`eval-brain --jobs N`: what it keeps, and the one thing it cannot.
+"""`eval-brain --jobs N` must return exactly what `--jobs 1` returns.
 
-The episodes of one battery are chained — through the sensors' own random
-generators (`TofSensor.rng`, `Detector.rng`) and through the duck's leftover
-`twist_cmd`, none of which `BrainEnv.reset(seed=)` clears — so they cannot
-be split across processes and still come out bit-identical. These tests pin
-all three halves of that:
+That rests on one property: an episode is a pure function of (seed, ep).
+BrainEnv.reset() re-seeds every generator that outlives world.reset() and
+zeroes the commanded twist, so nothing rides from episode k-1 into episode
+k, and a worker that starts at episode 7 gets episode 7's numbers.
 
-* `--jobs 1` still runs the original serial loop, row for row;
-* every `--jobs > 1` gives the SAME answer as every other (a benchmark
-  number must never depend on the core count of the machine that took it);
-* and the chain itself, so nobody "fixes" `--jobs` by accident and quietly
-  re-bases the published follow table.
+The property is easy to lose — a new sensor with its own generator, or a
+new piece of duck state _respawn forgets, and `--jobs N` silently stops
+agreeing with `--jobs 1` while every test that only looks at one episode
+still passes. These tests are the guard: the first two pin the property
+directly, the third pins the thing it exists for.
 """
-
-from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from microduck_local.brain import REGISTRY
-from microduck_local.brain.brain_env import BrainEnv, FollowTask
-from microduck_local.eval_brain import (
-    SUMMARY_KEYS,
-    _episode,
-    _make,
-    _run_episodes,
-    obs_version_of,
-    run,
-)
+from microduck_local.brain.brain_env import FollowTask
+from microduck_local.eval_brain import _build, _chunks, _episode, run
 
-# Short episodes (40 decisions) and a fixed preset: the whole file is a few
-# seconds of simulation, and the pool start-ups dominate it.
-TASK = FollowTask(episode_s=4.0)
-PRESET, SEED, EPISODES = "hostile", 100, 4
+TASK = FollowTask(episode_s=4.0)          # short: these run in CI, not a battery
+SEED = 100
 
 
-def _rows_equal(a: list[dict], b: list[dict]) -> bool:
-    return len(a) == len(b) and all(x == y for x, y in zip(a, b))
+def test_an_episode_does_not_depend_on_what_ran_before_it():
+    """Episode k scored after episodes 0..k-1 == episode k scored alone.
+    This is the carrier test: before BrainEnv.reset() re-seeded the sensors
+    and zeroed the commanded twist, episode 0 matched and every episode
+    after it drifted."""
+    brain, env = _build("follow", "hostile", SEED, TASK, False)
+    chained = [_episode(brain, env, TASK, SEED, ep) for ep in range(3)]
+    for ep, want in enumerate(chained):
+        b2, e2 = _build("follow", "hostile", SEED, TASK, False)   # a virgin env
+        assert _episode(b2, e2, TASK, SEED, ep) == want, f"episode {ep} carried state"
 
 
-def _original_serial(brain_kind: str, preset: str | None, episodes: int, seed: int, task: FollowTask) -> list[dict]:
-    """`eval_brain.run`'s loop as it stood before `--jobs` existed, copied
-    verbatim, so `--jobs 1` is measured against the code it replaced and not
-    against itself."""
-    brain = REGISTRY.make(brain_kind)
-    env = BrainEnv(task, seed=seed, fixed_preset=preset, sense_dr=preset is None,
-                   obs_version=obs_version_of(brain))
-    rows = []
-    for ep in range(episodes):
-        obs, _ = env.reset(seed=seed + ep)
-        brain.reset()
-        in_band = err = seen = bumps = contact = 0.0
-        n = 0
-        ret = 0.0
-        falls = 0
-        while True:
-            s = env.senses()
-            intent = brain.step(s)
-            obs, r, term, trunc, info = env.step(np.array(intent.twist, np.float32))
-            ret += r
-            n += 1
-            in_band += abs(info["dist"] - task.distance) <= task.band
-            err += abs(info["dist"] - task.distance)
-            seen += info["seen"]
-            bumps += info["bumped"]
-            contact += info["contact"]
-            if term:
-                falls += 1
-            if term or trunc:
-                break
-        rows.append({"return": ret, "in_band": in_band / n, "dist_err": err / n,
-                     "seen": seen / n, "bumps": bumps, "contact": contact / 10.0, "falls": falls, "decisions": n,
-                     "dodges": int(brain.closing.count if hasattr(brain, "closing") else info.get("dodges", 0))})
-    return rows
+def test_episode_order_does_not_matter():
+    """The same env, episodes taken out of order: each still its own."""
+    brain, env = _build("follow", "hostile", SEED, TASK, False)
+    forward = [_episode(brain, env, TASK, SEED, ep) for ep in range(3)]
+    b2, e2 = _build("follow", "hostile", SEED, TASK, False)
+    backward = {ep: _episode(b2, e2, TASK, SEED, ep) for ep in (2, 1, 0)}
+    assert [backward[ep] for ep in range(3)] == forward
 
 
-def test_jobs_1_is_the_untouched_serial_path():
-    """The default takes no pool and changes no number: the same rows, and
-    the same summary means over them, as the pre-`--jobs` loop."""
-    res = run("follow", PRESET, EPISODES, SEED, TASK)
-    want = _original_serial("follow", PRESET, EPISODES, SEED, TASK)
-    assert _rows_equal(res["rows"], want)
-    for k in SUMMARY_KEYS:
-        assert res[k] == float(np.mean([r[k] for r in want])), k
-    assert res["sampling"] == "chained" and res["jobs"] == 1
+@pytest.mark.parametrize("jobs", [2, 3])
+def test_jobs_n_is_exactly_jobs_1(jobs):
+    """What --jobs is for: N processes, one env each, identical rows."""
+    serial = run("follow", "hostile", 4, SEED, TASK, jobs=1)
+    par = run("follow", "hostile", 4, SEED, TASK, jobs=jobs)
+    assert par["rows"] == serial["rows"]
+    for k in ("in_band", "seen", "dist_err", "return", "falls", "bumps"):
+        assert par[k] == serial[k], k
+    assert par["episodes"] == serial["episodes"] == 4
 
 
-def test_jobs_1_is_reproducible():
-    a = run("follow", PRESET, EPISODES, SEED, TASK)
-    b = run("follow", PRESET, EPISODES, SEED, TASK)
-    assert _rows_equal(a["rows"], b["rows"])
-    assert all(a[k] == b[k] for k in SUMMARY_KEYS)
+def test_chunks_cover_every_episode_once():
+    for episodes in (1, 4, 7, 24):
+        for jobs in (1, 2, 3, 4, 8):
+            cs = _chunks(episodes, jobs)
+            assert sorted(e for c in cs for e in c) == list(range(episodes))
+            assert len(cs) <= min(jobs, episodes)
+            assert all(cs), "no empty chunk: a worker with nothing to do is a wasted env"
 
 
-def test_a_parallel_battery_does_not_depend_on_the_core_count():
-    """The property that makes `--jobs` usable at all: 2, 3 and 4 processes
-    give one answer, bit for bit — the summary means, the charge count, and
-    the episode ORDER of the rows (the shares are dealt round robin, so a
-    worker's rows come back interleaved and have to be sorted home)."""
-    two = run("follow", PRESET, EPISODES, SEED, TASK, jobs=2)
-    three = run("follow", PRESET, EPISODES, SEED, TASK, jobs=3)
-    four = run("follow", PRESET, EPISODES, SEED, TASK, jobs=4)
-    assert _rows_equal(two["rows"], three["rows"])
-    assert _rows_equal(two["rows"], four["rows"])
-    for k in SUMMARY_KEYS:
-        assert two[k] == three[k] == four[k], k
-    assert two["charges"] == three["charges"] == four["charges"]
-    assert two["sampling"] == "independent" and two["jobs"] == 2
+def test_jobs_is_clamped_to_the_episode_count():
+    """--jobs 8 on 2 episodes must not start 8 envs to run 2 episodes."""
+    res = run("follow", "hostile", 2, SEED, TASK, jobs=8)
+    assert len(res["rows"]) == 2
+    assert res["rows"] == run("follow", "hostile", 2, SEED, TASK, jobs=1)["rows"]
 
 
-def test_parallel_is_exactly_its_own_sampling_run_on_one_process():
-    """The pool adds nothing of its own: the same episodes run one after
-    another in this process, under the same per-episode seeding, are the
-    rows the workers hand back."""
-    got = run("follow", PRESET, EPISODES, SEED, TASK, jobs=3)
-    serial = _run_episodes("follow", PRESET, list(range(EPISODES)), SEED, TASK, False)
-    assert _rows_equal(got["rows"], [row for _, row in serial["rows"]])
-    assert got["charges"] == serial["charges"]
-
-
-def test_the_summary_is_the_same_expression_over_the_same_rows():
-    """`contact` is a per-row /10 and `dodges` a per-row count — the parent
-    must not re-derive either when it aggregates a pool's rows."""
-    res = run("follow", PRESET, EPISODES, SEED, TASK, jobs=2)
-    for k in SUMMARY_KEYS:
-        assert res[k] == float(np.mean([r[k] for r in res["rows"]])), k
-    assert len(res["rows"]) == EPISODES == res["episodes"]
-
-
-def test_every_parallel_episode_is_a_pure_function_of_seed_and_index():
-    """What the fresh-env-per-episode worker buys: episode `ep` is the same
-    row wherever and whenever it is drawn, so a battery can be cut up any
-    way at all."""
-    whole = run("follow", PRESET, EPISODES, SEED, TASK, jobs=2)["rows"]
-    for ep in range(EPISODES):
-        alone = _run_episodes("follow", PRESET, [ep], SEED, TASK, False)["rows"]
-        assert alone[0][1] == whole[ep], ep
-    backwards = _run_episodes("follow", PRESET, list(reversed(range(EPISODES))), SEED, TASK, False)
-    assert _rows_equal([row for _, row in sorted(backwards["rows"])], whole)
-
-
-def test_episodes_are_chained_so_jobs_cannot_be_bit_identical():
-    """WHY `--jobs > 1` is a different number, pinned so it cannot rot.
-
-    A fresh env owns episode 0 and nothing after it. Two things ride across
-    `BrainEnv.reset()`: the sensors' generators (neither `TofSensor.reset()`
-    nor `Detector.reset()` nor `World.reset()` reseeds them) and the duck's
-    last `twist_cmd`, which `World._respawn` leaves standing and which then
-    drives the five warm-up steps `reset()` takes before the first decision.
-    If this test ever fails because the two agree, the env stopped carrying
-    state — and `--jobs > 1` can be made exact and the docstring rewritten.
-    """
-    chained = run("follow", PRESET, EPISODES, SEED, TASK)["rows"]
-    independent = run("follow", PRESET, EPISODES, SEED, TASK, jobs=2)["rows"]
-    assert chained[0] == independent[0], "a fresh env must still own episode 0"
-    assert chained[1:] != independent[1:], "the env stopped carrying state — see the docstring"
-
-    # Carrier 2, directly: the walk command outlives the reset that is
-    # supposed to put the duck back on its spawn.
-    brain, env = _make("follow", PRESET, SEED, TASK, False)
+def test_sensor_streams_restart_each_episode():
+    """The carrier itself, at the source: two resets from the same seed
+    leave the sensor generators in the same state."""
+    _, env = _build("follow", "hostile", SEED, TASK, False)
     env.reset(seed=SEED)
-    brain.reset()
-    _episode(env, brain, TASK)
-    env.world.reset()
-    assert np.any(np.asarray(env.duck.twist_cmd) != 0.0), "twist_cmd is no longer carried"
+    first = [g.rng.bit_generator.state for g in (env.duck.tof, env.duck.detector, env.world)]
+    env.reset(seed=SEED + 1)          # a different episode moves them
+    env.reset(seed=SEED)              # ... and coming back restores them
+    assert [g.rng.bit_generator.state for g in (env.duck.tof, env.duck.detector, env.world)] == first
 
 
-def test_small_batteries_and_jobs_1_never_start_a_pool(monkeypatch):
-    """One episode has nothing to split, and jobs<=1 must not touch a pool
-    at all — `--jobs 1` is the original path, not a one-worker pool."""
-    import multiprocessing as mp
-    monkeypatch.setattr(mp, "get_context", lambda *a, **k: pytest.fail("a pool was started"))
-    for jobs in (0, 1):
-        assert run("follow", PRESET, 2, SEED, TASK, jobs=jobs)["sampling"] == "chained"
-    assert run("follow", PRESET, 1, SEED, TASK, jobs=8)["episodes"] == 1
-
-
-def test_a_worker_is_single_threaded():
-    import os
-
-    from microduck_local.eval_brain import _single_threaded
-    _single_threaded()
-    assert os.environ["OMP_NUM_THREADS"] == "1" and os.environ["MKL_NUM_THREADS"] == "1"
+def test_respawn_leaves_no_command_standing():
+    """The other carrier: the warm-up steps in reset() must not be driven by
+    what the last episode was asking for."""
+    _, env = _build("follow", "hostile", SEED, TASK, False)
+    env.reset(seed=SEED)
+    env.step(np.array([0.15, 0.0, 0.5], np.float32))
+    assert np.any(env.duck.twist_cmd), "test is inert if the command never moved"
+    env.reset(seed=SEED + 1)
+    assert not np.any(env.duck.twist_cmd), "the next episode warms up on the last one's command"
+    assert not np.any(env.duck.head_cmd)

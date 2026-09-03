@@ -132,6 +132,7 @@ class WorldDuck:
     body_cmd: np.ndarray = field(default_factory=lambda: np.zeros(6, np.float32))
     falls: int = 0
     step_count: int = 0
+    bumped_t: float = -1e9             # when a body of this duck last touched another duck or a person
     episodes: int = 0
     _hold_yaw: float | None = None
 
@@ -376,6 +377,14 @@ class World:
                    if self.model.body_rootid[b] == d.adr.trunk_body]
             assert sub == list(range(sub[0], sub[-1] + 1)), "duck subtree not contiguous"
             self.duck_bodies[d.id] = slice(sub[0], sub[-1] + 1)
+        # Who owns each geom, for the bump sense: ducks 0..n-1, persons n.., -1 the rest (floor, walls, ball, toys).
+        self._geom_owner = np.full(self.model.ngeom, -1, dtype=np.int64)
+        self._owner_duck: list[WorldDuck] = list(self.ducks.values())
+        for k, d in enumerate(self._owner_duck):
+            s = self.duck_bodies[d.id]
+            self._geom_owner[(self.model.geom_bodyid >= s.start) & (self.model.geom_bodyid < s.stop)] = k
+        for k, p in enumerate(self.persons.values()):
+            self._geom_owner[self.model.geom_bodyid == p.body] = len(self._owner_duck) + k
         # Dynamic objects (free bodies that are not ducks): streamed each frame.
         self.objects: list[tuple[str, str, int]] = []
         for j in range(self.model.njnt):
@@ -669,6 +678,29 @@ class World:
         elif intent.beak == "open" and d.beak_closed:
             self.release(d)
 
+    def _sense_bumps(self) -> None:
+        """A duck touching another duck or a person: its `bumped_t` is now.
+        On the robot this is the IMU and the servo loads; here it is the
+        contact list - and in the walk scene only the FEET carry collision
+        geometry, so a bump is feet touching feet, which is what a duck-duck
+        fall is. The floor, the boards, the ball and the toys are not bodies."""
+        n = self.data.ncon
+        if n == 0 or len(self._owner_duck) == 0:
+            return
+        own = self._geom_owner
+        g1, g2 = self.data.contact.geom1[:n], self.data.contact.geom2[:n]
+        o1, o2 = own[g1], own[g2]
+        hit = (o1 >= 0) & (o2 >= 0) & (o1 != o2)
+        if not hit.any():
+            return
+        nd = len(self._owner_duck)
+        for k in set(o1[hit].tolist()) | set(o2[hit].tolist()):
+            if k < nd:
+                self._owner_duck[k].bumped_t = self.t
+
+    def bumped(self, d: WorldDuck, within: float = 0.1) -> bool:
+        return self.t - d.bumped_t <= within
+
     def _skill_cmd(self, d: WorldDuck) -> Infer | None:
         """While a skill runs, it owns the command block; returns the infer to
         use, ending the cycle at its exit phase."""
@@ -716,6 +748,7 @@ class World:
             mujoco.mj_step(m, data)
         self.t += C.CTRL_DT
         self.tick += 1
+        self._sense_bumps()
         for d in self.ducks.values():
             d.step_count += 1
             if d.fallen(data):

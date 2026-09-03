@@ -46,17 +46,101 @@ def _column_clearance(depth_mm: np.ndarray, valid: np.ndarray | None,
     return d.min(axis=0)
 
 
-def tof_clearance_3d(frame, zmin: float = 0.08, zmax: float = 0.6) -> np.ndarray:
+def tof_hits_3d(frame) -> tuple[np.ndarray, np.ndarray] | None:
+    """Every zone's hit in the body's HEADING frame, relative to the trunk
+    (the frame the mount pose is given in): (rows, cols, 3) points and the
+    (rows, cols) depths; None for a frame without a mount pose."""
+    if frame.mount_pos is None or frame.mount_rot is None or frame.dirs_local is None:
+        return None
+    d = frame.depth_mm.astype(np.float64) / 1000.0
+    dirs = frame.dirs_local @ frame.mount_rot.T
+    return frame.mount_pos[None, None, :] + dirs * d[..., None], d
+
+
+TRUNK_Z = 0.117                    # the standing trunk height (the ToF mount pose is trunk-relative)
+
+
+def tof_clearance_bearings(frame, ahead_half: float = 0.10, side_half: float = 0.40,
+                           zmin: float = -0.03, zmax: float = 0.5) -> tuple[float, float, float]:
+    """(ahead, left, right) body-height clearance selected by BEARING off the
+    body's nose, not by sensor column - because the sensor is IN THE HEAD.
+    A column is "ahead" only while the head looks along the walking line;
+    yaw the head and the middle columns report whatever is off to the side,
+    which the brain then stops for (measured: every head-gaze variant lost
+    kicks that way). Placed in the heading frame, a hit's bearing says where
+    it really is, so a head turned off the line simply returns +inf ahead -
+    honestly blind, rather than confidently wrong. `ahead_half` (5.7 deg)
+    matches the two middle columns of a 45 deg sensor, `side_half` (23 deg)
+    the outer three. Ranges are horizontal, which is what the walking
+    thresholds mean. Falls back to the level-head columns for a synthetic
+    frame with no mount pose."""
+    hits = tof_hits_3d(frame)
+    if hits is None:
+        cols = _column_clearance(frame.depth_mm, frame.valid, WanderParams(rows=(2, 5)))
+        return float(cols[3:5].min()), float(cols[0:3].min()), float(cols[5:8].min())
+    pts, _ = hits
+    z = pts[..., 2]
+    ok = frame.valid & (frame.depth_mm > 0) & (z > zmin) & (z < zmax)
+    v = pts - frame.mount_pos[None, None, :]                 # from the APERTURE, as the column version measured
+    bear = np.arctan2(v[..., 1], v[..., 0])                  # +left, the brain's convention
+    rng = np.where(ok, np.hypot(v[..., 0], v[..., 1]), np.inf)
+    ahead = rng[np.abs(bear) <= ahead_half]
+    left = rng[(bear > ahead_half) & (bear <= side_half)]
+    right = rng[(bear < -ahead_half) & (bear >= -side_half)]
+    return (float(ahead.min()) if ahead.size else np.inf,
+            float(left.min()) if left.size else np.inf,
+            float(right.min()) if right.size else np.inf)
+
+
+def tof_floor_ball(frame, r_max: float = 0.5, z_lo: float = -0.09, z_hi: float = -0.02) -> tuple[float, float] | None:
+    """A ball-sized thing on the floor inside `r_max`, seen by the ToF:
+    hits above the floor plane but below 10 cm (trunk-relative z between
+    `z_lo`, 2.7 cm up - floor hits scatter to 1.8 cm with datasheet noise -
+    and `z_hi`, 9.7 cm up; a ball is 7 cm tall), at least two adjacent
+    zones of them, in columns with NOTHING taller near (a wall or a duck
+    has hits above the band in the same columns; a ball has the floor
+    behind it) - returned as (bearing, horizontal range) of the nearest
+    such cluster, heading frame. The camera loses a floor ball inside
+    0.3 m unless the head dips; the ToF at 45 deg shows one at 0.3 m as a
+    3-6 zone blob (measured). None for a frame without a mount pose."""
+    hits = tof_hits_3d(frame)
+    if hits is None:
+        return None
+    pts, _ = hits
+    z = pts[..., 2]
+    rng = np.hypot(pts[..., 0], pts[..., 1])
+    live = frame.valid & (frame.depth_mm > 0)
+    ok = live & (z > z_lo) & (z < z_hi) & (rng < r_max)
+    if ok.sum() < 2:
+        return None
+    r, c = np.unravel_index(np.argmin(np.where(ok, rng, np.inf)), ok.shape)
+    win = np.zeros_like(ok)
+    win[max(r - 1, 0):r + 2, max(c - 1, 0):c + 2] = True
+    sel = ok & win
+    if sel.sum() < 2:
+        return None
+    cols = sel.any(axis=0)
+    tall = live & (z >= z_hi) & (rng < r_max + 0.15) & cols[None, :]
+    if tall.any():
+        return None
+    x, y = float(pts[..., 0][sel].mean()), float(pts[..., 1][sel].mean())
+    return float(math.atan2(y, x)), float(math.hypot(x, y))
+
+
+def tof_clearance_3d(frame, zmin: float = -0.03, zmax: float = 0.5) -> np.ndarray:
     """Nearest return per column that is a BODY-height thing — a wall, a
     duck, furniture — whatever the head is doing: each zone's hit is placed
-    in the body's heading frame from the mount pose the frame carries, and
-    hits on the floor (below `zmin`; a ball is 7 cm tall) or above `zmax`
-    do not count. Falls back to the level-head rows when a frame carries no
-    mount pose (synthetic frames)."""
-    if frame.mount_pos is None or frame.dirs_local is None:
+    in the body's heading frame from the mount pose the frame carries
+    (rotated by the head's pose: an unrotated placement read the FLOOR as a
+    wall 0.35 m ahead whenever the head dipped 0.6 rad, measured), and hits
+    on the floor (below `zmin`, trunk-relative: 8.7 cm above the floor, a
+    ball is 7 cm tall) or above `zmax` do not count. Falls back to the
+    level-head rows when a frame carries no mount pose (synthetic frames)."""
+    hits = tof_hits_3d(frame)
+    if hits is None:
         return _column_clearance(frame.depth_mm, frame.valid, WanderParams(rows=(2, 5)))
-    d = frame.depth_mm.astype(np.float64) / 1000.0
-    z = frame.mount_pos[2] + frame.dirs_local[..., 2] * d
+    pts, d = hits
+    z = pts[..., 2]
     ok = frame.valid & (frame.depth_mm > 0) & (z > zmin) & (z < zmax)
     return np.where(ok, d, np.inf).min(axis=0)
 
@@ -462,6 +546,15 @@ class ChaseParams:
     settle_s: float = 0.4          # stand this long on the spot before the kick (robotd kicks at standing tuning)
     kick_clear: float = 0.35       # no kick with anything closer than this ahead
     aim_tol: float = 0.25          # face the kick direction within this before kicking (rad)
+    # Shoot only from inside the goal's cone. Measured on the shipped brain:
+    # 7.4 kicks a run for 0.25 kicked goals - one shot in four - and a lone
+    # shot's direction error is 28-35 deg, so a kick from far out is a
+    # lottery whatever the line-up does. With `kick_cone` > 0 a ball whose
+    # goal mouth subtends less than that half-angle is DRIBBLED instead
+    # (the push spot, walked through toward the goal), which carries it
+    # closer until the cone opens. 0.35 rad is about a metre out on a 0.7 m
+    # goal. 0 = off (kick from anywhere).
+    kick_cone: float = 0.0
     aim_max: float = 1.05          # aim at the goal only within this of the line of sight (rad)
     # The head. Level, the camera loses a floor ball ~0.3 m out. Pitched
     # by `_gaze` (a law that puts the ball on the camera's axis: measured
@@ -482,6 +575,25 @@ class ChaseParams:
     # ahead). A search dips the head every `search_dip_every`.
     look_s: float = 0.8
     look_range: float = 0.3
+    # The kick map says where the ball goes BEFORE it moves: +21.6 deg for
+    # the left foot, -11 for the right, off the body heading. `look_aim`
+    # yaws the look after a kick to that angle, at `look_aim_range` (near
+    # the horizon: the ball is a metre or two out by then) instead of the
+    # 0.3 m dip - so the ball, which leaves the level camera at once
+    # 30-55 deg off the nose, stays in the frustum long enough to track.
+    # Measured OFF (8 seeds x 300 s of 1v1, against 2.38 goals / 7.4 kicks /
+    # 0.38 falls a run): 2.25 / 6.4 / 0.50; with the gaze on the track while
+    # searching (predict_s 3) 1.88 / 4.6 / 0.25; with the search sweep
+    # 1.88 / 6.8 / 0.38. A head turned off the walking line leaves the ToF
+    # bumper looking sideways, and the brain stops for what it then sees.
+    look_aim: bool = False
+    look_aim_range: float = 1.5
+    kick_exit_left: float = math.radians(21.6)
+    kick_exit_right: float = math.radians(-11.0)
+    # A searching head sweeps +-`search_sweep` rad (period `search_sweep_s`)
+    # while the body circles, when it has no track to look at.
+    search_sweep: float = 0.0
+    search_sweep_s: float = 4.0
     # Hunt: a ball lost right after a kick, or after being walked into
     # inside `hunt_lost_range` (the histograms: half a run is search, and
     # the ball leaves the view rolling off along a known line - the kick's,
@@ -537,7 +649,7 @@ class ChaseParams:
     ball_decel: float = 0.04
     predict_s: float = 0.0         # how long a prediction is worth acting on after the last hit (0: off)
     head_yaw_gain: float = 0.9
-    head_yaw_max: float = 0.6
+    head_yaw_max: float = 1.4          # the walker's trained head-yaw range (upstream curriculum: +-1.40 rad)
     head_yaw_when: str = "search"  # or "always": yaw the head on the ball too, not only searching / looking
     predict_steer: bool = False    # the hunt bends and the search opens toward the prediction
     search_dip_every: float = 1.5
@@ -587,6 +699,11 @@ class ChaseParams:
     # ball toward its own goal, `support_side` to the side per rank, facing
     # the ball, and never inside `support_min` of it.
     support_back: float = 0.7
+    # Where a supporter stands relative to the ball: "back" (toward our own
+    # goal - it defends, and 3v3 scores 0.75 goals a run) or "ahead" (toward
+    # the goal we attack: a poacher, in position to walk a loose ball in,
+    # which is how most goals are actually scored here).
+    support_mode: str = "back"
     support_side: float = 0.45
     support_min: float = 0.45
     # Traced over 3 seeds x 300 s of 3v3: 10 of 14 falls were supporters
@@ -601,6 +718,46 @@ class ChaseParams:
     support_margin: float = 0.35
     beside_m: float = 0.3
     beside_s: float = 1.5
+    # The ToF sees the ball at the feet (tof_floor_ball): inside `tof_ball_m`
+    # with the head dipped, a floor blob feeds the tracker as a ball sighting
+    # when the camera has none - the level camera loses a floor ball inside
+    # 0.3 m, which is where the line-up and the kick live. Measured OFF at
+    # 0.5 m (8 seeds x 300 s of 1v1): 1.62 goals, 8.1 kicks, 0.75 falls a
+    # run against 2.38 / 7.4 / 0.38 - a blob at the feet is as often the
+    # other duck's foot as the ball, and a line-up on a foot is a fall.
+    tof_ball_m: float = 0.0
+    # A bump (Senses.bumped: the body is touching another body - contacts in
+    # the sim, the IMU / servo loads on the robot): no turn in place for
+    # `bump_stand_s` after the contact STARTED. 12 of 13 traced 3v3 falls
+    # were standing turns beside an unseen opponent, and the rule halves the
+    # crowd's falls (4 seeds x 300 s: 3v3 5.00 -> 1.75 a run at 0.5 s, 2v2
+    # 4.00 -> 2.25) - but the first version of it also cost 1v1 1.50 goals
+    # and 1.00 falls against 2.38 / 0.38, and a trace of 838 bumps said
+    # exactly why, refuting the obvious guess on the way:
+    #   * NOT possession. The feet meet a median 0.66 m from the ball; both
+    #     ducks are inside 0.35 m of it in 18% of bumps; and two seconds
+    #     later the ball is further from BOTH ducks by the same +0.074 m.
+    #     Nobody is walked over. (`bump_exempt_m` was built on that guess.)
+    #   * It cancelled the ESCAPE. 70% of its firing was in `blocked`, a
+    #     state that is 12.6% of the run, where the walk is already zeroed
+    #     and the turn is the only command left. 6 of 8 falls were a stand
+    #     pressed against the other duck: the walker leans on it.
+    #   * It fed itself. Standing on a body keeps touching it, which
+    #     refreshed the timer: bumps went 44 -> 105 a run and one freeze
+    #     ran 74 s. So the window is edge-triggered now (`bump_gap_s`).
+    # 0 here; team rosters get 0.5 from brain/team.py brain_kwargs.
+    bump_stand_s: float = 0.0
+    # Only where a standing turn beside a body is the danger. Never in
+    # `blocked` / `avoid` / `retreat` (the turn IS the escape) and never in
+    # `search` (its circle WALKS at `search_vx`, and freezing that stops the
+    # one behaviour that finds the ball - 5 of 8 traced falls were there).
+    bump_stand_states: tuple[str, ...] = ("support", "lineup", "settle", "turn")
+    # A contact episode ends after this long without one; the freeze runs
+    # from its onset and is never extended by staying in contact.
+    bump_gap_s: float = 1.0
+    # Measured on the refuted premise above and kept only as its record: the
+    # stand does not apply with the ball inside this. 0 = no exemption.
+    bump_exempt_m: float = 0.0
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,
     # no hunt) and, ahead, as a duck to avoid - the camera and the ToF
@@ -646,9 +803,11 @@ class Chase:
     TOF_MAX_AGE = 0.25
 
     def __init__(self, p: ChaseParams = ChaseParams(), goal: tuple[float, float] | None = None,
-                 team=None, duck_id: str = "", bounds: tuple[float, float] | None = None):
+                 team=None, duck_id: str = "", bounds: tuple[float, float] | None = None,
+                 goal_w: float = 0.0):
         self.p = p
         self.goal = None if goal is None else (float(goal[0]), float(goal[1]))
+        self.goal_w = float(goal_w)        # the mouth's width: how wide a target the ball has (kick_cone)
         self.bounds = None if bounds is None else (float(bounds[0]), float(bounds[1]))   # the pitch's half-extents inside the boards
         self.team = team
         self.duck_id = duck_id
@@ -673,6 +832,9 @@ class Chase:
         self.last_seen_t: float | None = None
         self._senses: Senses | None = None
         self._mates: list[tuple[float, float]] = []          # (range, bearing) of live teammates, off the team board
+        self._last_foot: str | None = None                   # the foot of the last kick (the look aims by it)
+        self._bump_t = -1e9                                  # last contact
+        self._bump_t0 = -1e9                                 # onset of the current contact episode
         self.last = (0.0, 0.0, 0.0)
         self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"
         self.lined = False                      # stage two of the line-up: on the line, walking straight in
@@ -709,6 +871,9 @@ class Chase:
             "since": round(self._senses.t - self.last_seen_t, 2)}
         out["tracks"] = self.tracker.payload(self._senses.t)
         out["chase"] = {"kicks": self.kicks, "pushes": self.pushes, "role": self.role,
+                        "bumped": round(max(0.0, self._senses.t - self._bump_t), 2) if self._bump_t > -1e8 else None,
+                        "tofBall": None if getattr(self, "tof_ball", None) is None else
+                        [round(self.tof_ball[0], 2), round(self.tof_ball[1], 2)],
                         "memory": None if self.memory is None else [round(self.memory[0], 2), round(self.memory[1], 2)],
                         "predicted": None if getattr(self, "predicted", None) is None else [round(self.predicted[0], 2), round(self.predicted[1], 2)],
                         "spot": None if self.spot is None else
@@ -745,6 +910,8 @@ class Chase:
         if self.goal is not None:
             u = math.atan2(self.goal[1] - by, self.goal[0] - bx)
             far = math.hypot(self.goal[0] - bx, self.goal[1] - by) > p.push_beyond
+            if p.kick_cone > 0 and self.goal_cone(bx, by) < p.kick_cone:
+                far = True                          # too fine a target from here: dribble it closer
         else:
             u, far = (self.attack if self.attack is not None else los), False
         if abs(_wrap(u - los)) > p.aim_max:
@@ -785,7 +952,16 @@ class Chase:
         odom = senses.odom or (0.0, 0.0, 0.0)
         if self.attack is None and senses.odom is not None:
             self.attack = odom[2]                  # placed facing the goal it attacks (make_pitch does)
-        self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), t, odom[2], (odom[0], odom[1]) if senses.odom is not None else None)
+        det_in = senses.fresh_det(self.DET_MAX_AGE)
+        self.tof_ball: tuple[float, float] | None = None
+        if p.tof_ball_m > 0 and (det_in is None or not any(d.cls == "ball" for d in det_in.detections)):
+            tof_fr = senses.fresh_tof(self.TOF_MAX_AGE)
+            blob = None if tof_fr is None else tof_floor_ball(tof_fr, r_max=p.tof_ball_m)
+            if blob is not None:
+                self.tof_ball = blob
+                from ..sensors.detector import Detection, DetectionFrame
+                det_in = DetectionFrame(t=tof_fr.t, detections=[Detection("ball", "", blob[0], -0.6, 0.2, blob[1], 0.8)])
+        self.tracker.update(det_in, t, odom[2], (odom[0], odom[1]) if senses.odom is not None else None)
         ball = self.tracker.best(p.target_cls, t, min_hits=1)
         fresh = ball is not None and ball.age(t) <= self.DET_MAX_AGE
         seen = ball is not None and ball.age(t) < p.lost_s
@@ -801,6 +977,10 @@ class Chase:
             self.predicted = (px, py)
             pred_bearing = _wrap(math.atan2(py - odom[1], px - odom[0]) - odom[2])
         self._mates = []
+        if senses.bumped:
+            if t - self._bump_t > p.bump_gap_s:
+                self._bump_t0 = t                            # a NEW contact, not the same one continuing
+            self._bump_t = t
         if self.team is not None:
             self.team.claim(self.duck_id, t, ball.range if seen else math.inf,
                             self._ball_xy(odom, ball) if seen else None, (odom[0], odom[1], odom[2]))
@@ -826,8 +1006,10 @@ class Chase:
         tof = senses.fresh_tof(self.TOF_MAX_AGE)
         ahead = left_near = right_near = np.inf
         if tof is not None:
-            cols = tof_clearance_3d(tof)          # body-height things only: not the floor the head looks at, not the ball
-            ahead, left_near, right_near = float(cols[3:5].min()), float(cols[0:3].min()), float(cols[5:8].min())
+            # Body-height things only (not the floor the head looks at, not
+            # the ball), selected by bearing so a turned head cannot report
+            # a wall that is really off to the side.
+            ahead, left_near, right_near = tof_clearance_bearings(tof)
         skill = None
         head = (0.0, 0.0, 0.0, 0.0)
         gaze_at: float | None = None
@@ -871,7 +1053,7 @@ class Chase:
             self.state = "kick"
         elif looking:
             vx, wz = 0.0, 0.0
-            gaze_at = p.look_range
+            gaze_at = p.look_aim_range if p.look_aim else p.look_range
             self.state = "look"
         elif retreating:
             if t - self._retreat_t0 < p.retreat_turn_s:
@@ -992,6 +1174,7 @@ class Chase:
                         vx, wz = p.push_speed, 0.0
                     else:
                         skill = foot
+                        self._last_foot = foot
                         self.kicks += 1
                         self.spot = None
                         self.state = "kick"
@@ -1095,8 +1278,17 @@ class Chase:
             head = (0.0, self._gaze(gaze_at), 0.0, 0.0)
         look_at = pred_bearing if pred_bearing is not None else (
             ball.bearing if p.predict_s > 0 and ball is not None and ball.age(t) <= p.predict_s else None)
+        if look_at is None and self.state == "look" and p.look_aim and self._last_foot is not None:
+            look_at = p.kick_exit_left if self._last_foot == "kick_left" else p.kick_exit_right
+        elif look_at is None and self.state == "search" and p.search_sweep > 0 and self._search_t0 is not None:
+            look_at = p.search_sweep * math.sin(2.0 * math.pi * (t - self._search_t0) / p.search_sweep_s) / p.head_yaw_gain
         if look_at is not None and senses.skill is None and (p.head_yaw_when == "always" or self.state in ("search", "look")):
             head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
+        if p.bump_stand_s > 0 and t - self._bump_t0 < p.bump_stand_s and vx <= TURN_KICK and wz != 0.0 \
+                and self.state in p.bump_stand_states \
+                and not (p.bump_exempt_m > 0 and ball is not None and ball.age(t) <= p.lost_s
+                         and ball.range < p.bump_exempt_m):
+            vx, wz = 0.0, 0.0                                   # touching a body: stand, do not turn in place
         self.last = (vx, 0.0, wz)
         return Intent(twist=self.last, head=head, note=self.role if self.role != "attack" else self.state, skill=skill)
 
@@ -1112,7 +1304,8 @@ class Chase:
             self.state = "support"
             vx, _, wz = turn(1.0, cold)                    # nobody has it: look for it
             return vx, wz
-        og = self._own_goal(odom)
+        og = self._own_goal(odom) if p.support_mode == "back" else (
+            self.goal if self.goal is not None else self._own_goal(odom))
         gx, gy = og[0] - bxy[0], og[1] - bxy[1]
         gn = math.hypot(gx, gy)
         ux, uy = (gx / gn, gy / gn) if gn > 1e-6 else (-math.cos(odom[2]), -math.sin(odom[2]))
@@ -1135,6 +1328,17 @@ class Chase:
             vx, wz = 0.0, 0.0                               # a body beside us: no turning in place
         self.state = "support"
         return vx, wz
+
+    def goal_cone(self, bx: float, by: float) -> float:
+        """Half the angle the goal mouth subtends from a ball at (bx, by),
+        in the odometry frame: how fine a target this shot is. +inf off a
+        pitch or without a mouth width."""
+        if self.goal is None or self.goal_w <= 0:
+            return math.inf
+        gx = self.goal[0]
+        a1 = math.atan2(-self.goal_w / 2 - by, gx - bx)
+        a2 = math.atan2(self.goal_w / 2 - by, gx - bx)
+        return abs(_wrap(a2 - a1)) / 2.0
 
     def _boards_ahead(self, odom, margin: float) -> bool:
         """The point `margin` ahead in odometry lies outside the pitch's bounds (None off a pitch: never)."""

@@ -722,7 +722,12 @@ def _train_and_capture(tmp_path, monkeypatch, argv: list[str]) -> tuple[float, f
 
     def fake_learn(self, *a, callback=None, **k):
         trained.append(self.symmetry_coef)
-        callback.model = self  # what SB3's _setup_learn would have done
+        # What SB3's _setup_learn would have done. `callback` is a LIST since
+        # the trainer started appending the machine profile's thread callback
+        # (empty on a Mac), and SB3 wraps a list in a CallbackList that binds
+        # .model on every child — so bind them all, exactly as it would.
+        for cb in (callback if isinstance(callback, list) else [callback]):
+            cb.model = self
         return self
 
     monkeypatch.setattr(

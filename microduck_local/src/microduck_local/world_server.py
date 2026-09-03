@@ -290,7 +290,7 @@ class WorldState:
                       det=det, det_age=None if det is None else w.t - det.t,
                       speed=d.heading_speed(w.data),
                       odom=w.odom(d),
-                      holding=d.holding is not None, skill=d.skill)
+                      holding=d.holding is not None, skill=d.skill, bumped=w.bumped(d))
 
     def drive(self, cmd: np.ndarray, mode: str) -> None:
         """Set every duck's command for this tick. A possessed person takes

@@ -157,9 +157,21 @@ page's picker). One room, many ducks, and what each duck senses:
   the map — an orange line from the ball track to where the brain predicts
   it will stop (its head yaws that way and its hunt aims there), a grey
   ring on the ball memory its search would walk to, a teal ring on its
-  line-up / push spot. Every chase duck, the selected one bright. The pitch
-  panel splits the goals into kicked (within 4 s of a kick) and walked in,
-  the same attribution `eval-pitch` prints.
+  line-up / push spot, and a violet ring on the ball-sized blob its 8×8 ToF
+  sees on the floor at its feet. That blob (`tofBall`, a bearing and a range
+  in the duck's heading frame) covers the last 30 cm, where a floor ball
+  drops out of the head camera's frame; it is measured *off* as a ball
+  source for the brain — at the feet it is as often the other duck's foot,
+  and a line-up on a foot is a fall — but it is computed, so it is drawn.
+  It is placed from the duck's odometry pose, so a duck without one gets no
+  ring. Every chase duck, the selected one bright. The inspector carries
+  both as rows: that blob's bearing and range, and `bump` — how long
+  since this duck's feet last touched another duck or a person
+  (contacts here, the IMU and the servo loads on the robot), amber while it
+  is inside half a second. That is the window a bumped duck stands through
+  instead of turning in place, which took 3v3 falls from 5.00 to 1.75 a
+  run. The pitch panel splits the goals into kicked (within 4 s of a kick)
+  and walked in, the same attribution `eval-pitch` prints.
 - **Inspector** (right): the selected duck's heatmap painted straight off the
   stream, frame age (amber when stale), a noise preset select (`ideal` /
   `datasheet` / `hostile`, applied live), and which brain is steering it.

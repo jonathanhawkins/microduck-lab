@@ -47,7 +47,7 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
         s = Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
                    det=det, det_age=None if det is None else w.t - det.t,
                    speed=d.heading_speed(w.data), odom=w.odom(d),
-                   holding=d.holding is not None, skill=d.skill)
+                   holding=d.holding is not None, skill=d.skill, bumped=w.bumped(d))
         intent = tether.intent_out(brain.step(tether.senses_in(s)), w.t)
         w.apply_intent(d, intent)
         if d.skill is None:

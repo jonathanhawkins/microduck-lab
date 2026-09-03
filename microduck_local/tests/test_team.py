@@ -125,6 +125,9 @@ def test_pitch_with_teams_and_brain_kwargs():
     assert kw["d0"]["goal"][0] > 0 and kw["d2"]["goal"][0] < 0 and kw["d0"]["goal"] == kw["d1"]["goal"]
     assert kw["d0"]["team"] is kw["d1"]["team"] and kw["d0"]["team"] is not kw["d2"]["team"]
     assert set(teams) == {"left", "right"}
+    assert kw["d0"]["p"].bump_stand_s == 0.5                     # a roster with teammates: the bump sense on
+    solo = make_pitch(per_side=1)
+    assert "p" not in brain_kwargs(solo.ducks[0], World(solo), {})   # a lone attacker keeps the default
     from microduck_local.world import Duck, Scenario
     plain = Scenario(name="x", floor=(4, 4), ducks=[Duck("d0", (0, 0, 0), None, None, None, "chase")])
     assert brain_kwargs(plain.ducks[0], World(plain), {}) == {}
@@ -316,3 +319,117 @@ def test_a_teammate_on_the_board_counts_as_a_duck_beside_or_ahead():
     tm.claim("d0", 12.5, 0.2, (1.3, 1.1), pos=(1.0, 1.0, 0.0))     # far away: nothing to avoid
     out = b.step(_senses(12.6, None, speed=0.0, odom=(0.0, 0.0, 0.0)))
     assert b.state != "avoid" and not b._beside(12.6)
+
+
+def test_the_look_after_a_kick_aims_by_the_kick_map_and_the_search_can_sweep_the_head():
+    """`look_aim`: the look after a kick yaws the head to the foot's exit
+    angle off the kick map (+21.6 deg left, -11 right) near the horizon;
+    `search_sweep`: a searching head sweeps side to side. Both inside the
+    walker's trained +-1.4 rad."""
+    p = ChaseParams(look_aim=True, search_sweep=1.4)
+    b = Chase(p, goal=(1.5, 0.0))
+    b.step(_senses(0.0, None, speed=0.0))
+    b._last_foot, b._look_t0 = "kick_left", 5.0
+    out = b.step(_senses(5.1, None, speed=0.0))
+    assert out.note == "look" and abs(out.head[2] - 0.9 * math.radians(21.6)) < 1e-6
+    assert out.head[1] < b._gaze(0.3)                                  # near the horizon, not the 0.3 m dip
+    b._last_foot = "kick_right"
+    out = b.step(_senses(5.2, None, speed=0.0))
+    assert abs(out.head[2] - 0.9 * math.radians(-11.0)) < 1e-6
+    # Searching, no track: the head sweeps; a quarter period in it is at +1.4.
+    b._look_t0 = -9.0
+    yaws = []
+    for k in range(1, 12):
+        out = b.step(_senses(6.0 + 0.1 * k, None, speed=0.0))
+        yaws.append(out.head[2])
+    assert out.note == "search" and max(yaws) > 1.0 and min(yaws) < 0.2 and max(abs(y) for y in yaws) <= 1.4 + 1e-9
+
+
+def test_a_bumped_duck_stands_instead_of_turning_in_place():
+    """Senses.bumped (the body touching another body): for `bump_stand_s`
+    after it, a standing turn becomes a stand. Off at 0."""
+    # `search` is deliberately NOT a bump-stand state (its circle walks, and
+    # freezing it stops the one behaviour that finds the ball), so drive the
+    # rule through `support`, which is.
+    p = ChaseParams(bump_stand_s=1.0, search_dip_s=0.0, search_vx=0.0)
+    lone = Chase(p, goal=(1.5, 0.0))
+    lone.step(_senses(0.0, None, speed=0.0))
+    out = lone.step(_senses(0.5, None, speed=0.0))
+    assert out.note == "search" and out.twist[2] != 0.0                # a standing search turn
+    out = lone.step(Senses(t=0.6, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
+    assert out.twist[2] != 0.0                                         # searching: the rule leaves it alone
+    # A real supporter: a teammate claims the ball from closer, so this duck's role is support.
+    tm = Team("left")
+    b = Chase(p, goal=(1.5, 0.0), team=tm, duck_id="d1", bounds=(1.5, 1.25))
+
+    def tick(t, bumped):
+        tm.claim("d0", t, 0.2, None)                                   # d0 is nearer: it attacks
+        return b.step(Senses(t=t, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=bumped))
+
+    out = tick(0.5, False)
+    assert b.state == "support" and out.twist[2] != 0.0                # turning to look for the ball
+    assert tick(0.7, True).twist == (0.0, 0.0, 0.0)                    # supporting and touching: stand
+    assert tick(1.4, True).twist == (0.0, 0.0, 0.0)                    # still inside the window
+    # Contact that never let up must NOT extend the window: it is timed from the onset.
+    assert tick(1.75, True).twist[2] != 0.0
+    # A fresh episode (a gap longer than bump_gap_s) starts a new window.
+    assert tick(3.5, True).twist == (0.0, 0.0, 0.0)
+    off = Chase(ChaseParams(search_dip_s=0.0, search_vx=0.0), goal=(1.5, 0.0))
+    off.step(_senses(0.0, None, speed=0.0))
+    out = off.step(Senses(t=0.5, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
+    assert out.twist[2] != 0.0
+    # `blocked` is an escape, never a stand: 70% of the first version's firing
+    # was there, and 6 of 8 traced falls were a stand leaning on the other
+    # duck. A wall right ahead blocks the walking search; bumped or not, the
+    # turn out of it survives.
+    depth = np.full((8, 8), 2000, np.uint16)
+    depth[2:5, 3:5] = 150                                              # something 15 cm dead ahead
+    bl = Chase(ChaseParams(bump_stand_s=1.0, search_dip_s=0.0), goal=(1.5, 0.0))
+    bl.step(_senses(0.0, None, speed=0.0))
+    wall = TofFrame(t=0.5, depth_mm=depth, valid=np.ones((8, 8), bool))
+    out = bl.step(Senses(t=0.5, tof=wall, tof_age=0.0, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
+    assert bl.state == "blocked" and out.twist[2] != 0.0
+
+
+def test_the_kick_cone_dribbles_a_ball_that_is_too_far_out_and_shoots_from_close():
+    """`kick_cone`: the goal mouth subtends a half-angle from the ball; below
+    the threshold the plan is a push (dribble it closer), above it a kick.
+    A 0.7 m goal subtends 0.35 rad from 0.96 m out."""
+    from microduck_local.brain.tracker import Track
+    b = Chase(ChaseParams(kick_cone=0.35), goal=(1.5, 0.0), goal_w=0.7)
+    assert b.goal_cone(0.7, 0.0) > 0.35 > b.goal_cone(-0.5, 0.0)      # 0.8 m out vs 2.0
+    assert b.goal_cone(1.4, 0.0) > 1.0                                # on the line: nearly a right angle
+    off = Chase(ChaseParams(), goal=(1.5, 0.0), goal_w=0.0)
+    assert off.goal_cone(0.0, 0.0) == math.inf                        # no mouth width: never gated
+
+    def mode_at(brain, duck_xy, ball_xy):
+        odom = (duck_xy[0], duck_xy[1], 0.0)
+        rng = math.hypot(ball_xy[0] - duck_xy[0], ball_xy[1] - duck_xy[1])
+        bearing = math.atan2(ball_xy[1] - duck_xy[1], ball_xy[0] - duck_xy[0])
+        tr = Track(id=1, cls="ball", bearing=bearing, elevation=-0.3, width=0.12,
+                   range=rng, conf=0.9, born_t=0.0, last_t=0.0)
+        return brain._plan(odom, tr)[4]
+
+    assert mode_at(b, (-1.2, 0.0), (-0.9, 0.0)) == "push"             # far out: dribble
+    assert mode_at(b, (0.6, 0.0), (0.9, 0.0)) == "kick"               # close in: shoot
+    assert mode_at(off, (-1.2, 0.0), (-0.9, 0.0)) == "kick"           # gate off: shoot from anywhere
+
+
+def test_a_supporter_can_stand_ahead_of_the_ball_instead_of_behind_it():
+    """`support_mode`: "back" puts the supporter between the ball and our own
+    goal (it defends); "ahead" puts it between the ball and the goal we
+    attack (a poacher, in position to walk a loose ball in). Both keep the
+    spot inside the boards."""
+    p_back = ChaseParams()
+    p_ahead = ChaseParams(support_mode="ahead")
+    for p, nearer_attack in ((p_back, False), (p_ahead, True)):
+        tm = Team("left")
+        b = Chase(p, goal=(1.5, 0.0), team=tm, duck_id="d1", bounds=(1.5, 1.25))
+        tm.claim("d0", 10.0, 0.2, (0.0, 0.0))            # d0 attacks a ball on the centre spot
+        tm.claim("d1", 10.0, 2.0, None)
+        b._senses = Senses(t=10.0)
+        b._support((-1.0, 0.0, 0.0), None, False, False)
+        assert b.spot is None                            # a supporter's spot is not a kick spot
+        # Walk the servo target out of _support by reading where it wants to go.
+        target_ahead = b.p.support_mode == "ahead"
+        assert target_ahead == nearer_attack

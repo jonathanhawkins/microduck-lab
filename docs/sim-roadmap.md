@@ -54,7 +54,32 @@ the tree, and Track 12 has its first working loop:
   predicted stop measured 1.12–2.12 goals with 0.75–1.62 falls a run
   against 2.25 / 0.38 with it off — the head yaws 34° at most and the
   searching duck's ball sits 90–120° off its nose, so the gaze cannot
-  reach it; the page draws the prediction anyway) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
+  reach it; the page draws the prediction anyway). Then a bug: the ToF
+  clearance placed hits without the head's rotation, so a dipped head
+  read the floor as a wall 0.35 m ahead — fixed; a second one followed,
+  because the ToF is IN THE HEAD and calling the middle sensor columns
+  "ahead" only holds while the head looks along the walking line (yawed
+  1.2 rad, they reported a wall 0.52 m ahead that was 69° off the nose
+  and the brain stopped for it), so clearance is selected by bearing in
+  the body frame now and a turned head reads honestly blind. **The
+  round's real lesson is about the benchmark itself:** 8 seeds × 300 s
+  of 1v1 holds ~50–130 kicks but only 3–8 FALLS and ~20 goals, so falls
+  barely separate — the same baseline measured twice gave 3 and 6, a
+  chance split (p ≈ 0.5). Claims carry event counts now, and several
+  earlier rows that did not clear them were demoted, the head variants
+  among them. What survives: a wider lens buys far more contact with the
+  ball (kicks 51 → 94 → 105 → 130 at 62/90/120/150°, p < 0.001, paying
+  an honest pixel-limited size gate that costs 120° a duck at 3.9 m —
+  found 73 times in 400 against 260), though the goals do not yet
+  follow; a goal-cone kick gate turns kicks into pushes and gains
+  nothing; the ToF seeing the ball at the feet ships off (a blob at the
+  feet is as often the other duck's foot); and a bump sense (feet
+  touching feet) halves the crowd's falls — 3v3 5.00 → 1.75 a run, 2v2
+  4.00 → 2.25 — but its first form cost 1v1 both goals and falls, and a
+  trace of 838 bumps said why: it cancelled the ESCAPE turn (70% of its
+  firing in `blocked`, 6 of 8 falls a stand leaning on the other duck)
+  and fed itself (standing on a body keeps touching it: 44 → 105 bumps a
+  run, one freeze of 74 s). It is edge-triggered and state-scoped now) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
   2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
   after the traced fix (supporters turning in place against a teammate
   or the boards: the support spot stays inside the pitch and a supporter
@@ -133,10 +158,10 @@ the tree, and Track 12 has its first working loop:
   minutes on the pinned 2026-09 model (16 seeds, 0.31 falls a run; 0.84 /
   0.56 under datasheet odometry drift, 0.79 / 0.75 under hostile drift —
   the same with the brain's loop-closed pose on or off, so the map is not
-  what tidying needs — 0.71 / 0.25 with a 250 ms brain tether, the link
+  what tidying needs — 0.81 / 0.19 with a 250 ms brain tether, the link
   modelled both ways (senses late, intents late) and the brain reading
   its latency off its own sensor ages to stop that much earlier at the
-  rim; 0.76 / 2.19 before that, every traced tethered fall the stopping
+  rim and at the toy; 0.76 / 2.19 before that, every traced tethered fall the stopping
   stride at the rim on a stop decided 250 ms late) — up from
   0.88 / 0.38 before rim toys were approached from the outside, 0.67 /
   1.7 falls at the first close of the loop and 0.11 before that. What it took, each a measurement on

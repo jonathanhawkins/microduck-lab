@@ -51,6 +51,7 @@ from pathlib import Path
 import numpy as np
 
 from .behaviors import BEHAVIORS, Behavior, BehaviorEnv, is_symmetric
+from .machine import profile, with_phase_callbacks
 from .plateau import PlateauDetector
 from .plateau import env_defaults as plateau_env_defaults
 from .ppo_hparams import (
@@ -492,6 +493,7 @@ def main() -> None:
                 ramp_offset = 0
     os.environ["MICRODUCK_RAMP_OFFSET"] = str(ramp_offset)
 
+    print(profile().describe())
     venv = make_vec_env([make_env(b.id, i, args.seed, weights or None)
                          for i in range(args.envs)])
 
@@ -684,8 +686,13 @@ def main() -> None:
     # tests/test_train_resume.py.
     remaining = max(steps - start, 0)
     if remaining > 0:
-        model.learn(total_timesteps=remaining, callback=cb, progress_bar=False,
-                    reset_num_timesteps=not resume)
+        # The per-machine thread policy rides along here (and on a Mac this
+        # hands SB3 exactly `cb`, unwrapped, as before). SB3's CallbackList
+        # binds .model on every child, so cb keeps working either way —
+        # including the _snapshot() below.
+        model.learn(total_timesteps=remaining,
+                    callback=with_phase_callbacks(cb, BaseCallback),
+                    progress_bar=False, reset_num_timesteps=not resume)
 
     # Only if learn() actually ran: SB3 binds callback.model in init_callback,
     # so with remaining == 0 (an --init-from of a run already at its target,

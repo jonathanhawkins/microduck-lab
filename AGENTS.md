@@ -63,6 +63,12 @@ cd ../duck-viewer && npm install
   training (`train-walk`, `train-behavior`), eval, ONNX export, rendering,
   the lab + viewer. Linux works too (set `MUJOCO_GL=egl` for offscreen
   rendering); the MPS update path is Mac-only and auto-disables elsewhere.
+- **Linux / cloud CPU boxes:** the same commands, under a different thread
+  and worker-packing profile that `machine.py` detects (cores read from CPU
+  affinity and the cgroup quota, not `os.cpu_count()`, so a container gets
+  its real budget). Mac behavior is unchanged by it — see "Cloud and Linux
+  training" in `microduck_local/README.md` for the measurements and the
+  `--compare-profiles` A/B.
 - **Needs a CUDA GPU:** the upstream `microduck_rl` MuJoCo Warp training —
   the final sim2real step once a behavior prototyped here is worth it.
 - **Runs on the robot:** ONNX exported by `export-walk` is drop-in compatible
@@ -78,7 +84,9 @@ uv run train-walk --envs 32 --steps 3_000_000 --run-name my-run
 uv run export-walk runs/my-run && uv run eval-walk runs/my-run/policy.onnx
 uv run train-behavior one_leg                 # teachable tricks (behaviors/)
 uv run render-rollout --policy runs/my-run/policy.onnx --behavior stand --out /tmp/rr
+uv run machine-facts                          # cores + thread/packing profile for THIS machine
 uv run bench-envs                             # the right --envs for THIS machine
+uv run bench-envs --compare-profiles          # mac profile vs linux/cloud profile, interleaved
 uv run duck-lab --checkpoints runs/my-run    # + viewer below → watch it in the browser
 uv run duck-lab --world playroom              # world mode: rooms, sensors, brains (the /sim page)
 uv run eval-tidy --seeds 3 --seconds 300      # Track 12 benchmark; trace-tidy / walker-facts to debug it

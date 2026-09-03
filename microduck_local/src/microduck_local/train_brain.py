@@ -34,6 +34,8 @@ from .brain.brain_env import (
     FollowTask,
 )
 from .brain.learned import brains_dir
+from .machine import profile, with_phase_callbacks
+from .ppo_hparams import configure_torch_cpu
 from .plateau import PlateauDetector, env_defaults
 from .ppo_hparams import linear_decay, ppo_batch_size
 from .vec_env import as_sb3_vec_env, make_vec_env
@@ -217,6 +219,13 @@ def main() -> None:
     from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
 
     venv = VecMonitor(as_sb3_vec_env(venv))
+    # This trainer never called it, so it ran on torch's defaults: intra-op AND
+    # inter-op both at the machine's core count, every one of those threads
+    # spinning through rollouts made of 128-step brain decisions. Same policy
+    # as the other two trainers now (machine.py). Called here, after
+    # `make_vec_env` above has already forked the workers.
+    configure_torch_cpu(torch)
+    print(profile().describe())
     # A minibatch that DIVIDES the rollout buffer. The old `min(1024, n_steps *
     # envs)` did not at the default 12 envs: a 1536-step buffer under a 1024
     # batch made SB3 truncate every update into a 1024 and a 512 minibatch,
@@ -411,7 +420,8 @@ def main() -> None:
     cb = Progress()
     cb.venv_ref = venv
     try:
-        model.learn(total_timesteps=args.steps, callback=cb)
+        model.learn(total_timesteps=args.steps,
+                    callback=with_phase_callbacks(cb, BaseCallback))
     finally:
         # One last clamp before the artifact is written. The rollout-end
         # clamp leaves the FINAL gradient update free to push log_std back

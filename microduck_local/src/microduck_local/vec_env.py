@@ -63,6 +63,7 @@ import cloudpickle
 import gymnasium as gym
 import numpy as np
 
+from .machine import profile
 from .walk_env import shared_model_scope
 
 # Which backend `make_vec_env` picks when nobody says. "fork" shares the model
@@ -101,16 +102,6 @@ class _SharedModelEnvFn:
             return self.fn()
 
 
-# Env count from which packing two envs into one worker pays. See the
-# measured table at the use site in `make_vec_env`.
-ENVS_PER_WORKER_KNEE = 32
-
-
-def default_envs_per_worker(n_envs: int) -> int:
-    """Envs per worker process when nobody has said. 2 from the knee up."""
-    return 2 if n_envs >= ENVS_PER_WORKER_KNEE else 1
-
-
 def _prime_model_cache(env_fn: Callable[[], gym.Env]) -> tuple[gym.Space, gym.Space]:
     """Compile the model in THIS process by building one throwaway env, and
     report the spaces it declared.
@@ -128,9 +119,46 @@ def _prime_model_cache(env_fn: Callable[[], gym.Env]) -> tuple[gym.Space, gym.Sp
     """
     with shared_model_scope(exclusive=True):
         probe = env_fn()
+    _warm_jit(probe)
     spaces = (probe.observation_space, probe.action_space)
     probe.close()
     return spaces
+
+
+def _warm_jit(probe: gym.Env) -> None:
+    """Pay the BAM kernels' one-off numba compile ONCE, here in the parent.
+
+    Same trade as the shared mjModel, for compiled code instead of a model:
+    the kernels are JIT-compiled on their FIRST call, and a fork child that
+    inherits an already-compiled dispatcher never pays it. Measured on this
+    x86 box: the first BAM control step costs 528 ms against a 0.95 ms
+    steady step, and `cache=True` does not avoid it across processes. At 32
+    workers on 4 cores that was ~4 s of every run's startup — paid again on
+    every warm restart (viz_server relaunches the trainer to rescale envs)
+    and every stage of a curriculum chain.
+
+    Side-effect-free by construction: a BAM step rewrites `dof_frictionloss`
+    and `dof_damping` on the model every substep, and a reset may draw new
+    `body_mass`/`geom_friction`, so all four are snapshotted and restored.
+    The children then inherit exactly the model the probe's CONSTRUCTION
+    left, as before — only the compiled code is new. Best-effort: a factory
+    whose env cannot take a zero action is not worth failing a run over.
+    """
+    env = probe.unwrapped
+    if getattr(env, "bam", None) is None:
+        return  # the "xml" actuator path has no numba kernels to warm
+    model = env.model
+    saved = {name: getattr(model, name).copy()
+             for name in ("dof_frictionloss", "dof_damping",
+                          "body_mass", "geom_friction")}
+    try:
+        probe.reset()
+        probe.step(np.zeros(probe.action_space.shape, dtype=np.float32))
+    except Exception:
+        pass
+    finally:
+        for name, value in saved.items():
+            getattr(model, name)[:] = value
 
 
 # --------------------------------------------------------------------------
@@ -602,24 +630,19 @@ def make_vec_env(env_fns: list[Callable[[], gym.Env]],
         # fewer semaphore ops and pipes per vec-step, at the cost of longer
         # per-worker latency and fewer worker processes to fill the cores the
         # serial PPO update leaves idle. Those two pull opposite ways and the
-        # curve CROSSES, measured on this 18-core machine (bench-envs, real
-        # PPO, best of 3-4 repeats, quiet machine, 2026-09-03):
-        #
-        #   envs |  k=1    |  k=2    |
-        #      8 | 11,516  | 10,829  |  -6.0%   too few workers, cores idle
-        #     16 | 15,651  | 14,713  |  -6.0%
-        #     32 | 19,456  | 20,536  |  +5.5%   semaphore traffic dominates
-        #     32 |         | 17,824  |  -8.2% at k=4 — past the knee again
-        #
-        # So the default is k=2 from 32 envs up (the trainers' own default
-        # --envs) and 1 below. This is safe to make a default in a way most
-        # throughput changes here are NOT: the packed layout produces a
-        # BIT-IDENTICAL obs/rew/done stream, pinned by
+        # curve CROSSES at the point where the fleet outnumbers the cores,
+        # which is where `Profile.envs_per_worker` switches packing on — see
+        # the measured tables for both profiles in machine.py. On this
+        # 18-core mac that puts 8 and 16 envs at k=1 and 32 at k=2 (+5.5%).
+        # Safe to make a default in a way most throughput changes here are
+        # NOT: the packed layout produces a BIT-IDENTICAL obs/rew/done
+        # stream, pinned by
         # test_envs_per_worker_batching_matches_one_per_worker, so there is
         # no learning-quality question to A/B. $MICRODUCK_ENVS_PER_WORKER
-        # overrides in either direction.
-        env_k = os.environ.get("MICRODUCK_ENVS_PER_WORKER")
-        per_worker = int(env_k) if env_k else default_envs_per_worker(len(env_fns))
+        # overrides in either direction; measure with `bench-envs` first.
+        per_worker = int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "0") or 0)
+        if per_worker <= 0:
+            per_worker = profile().envs_per_worker(len(env_fns))
         return ForkVecEnv(wrapped, envs_per_worker=per_worker, spaces=spaces)
 
     if name == "subproc":            # forkserver: children re-import, torch-safe
