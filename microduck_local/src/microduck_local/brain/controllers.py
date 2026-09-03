@@ -488,11 +488,11 @@ class ChaseParams:
     # or the duck's own heading), is looked for by WALKING that line for
     # `hunt_s` with the head level (a floor ball is in view from 0.3 m out
     # to the camera's range) before the standing search begins.
-    # OFF (0): measured over 8 seeds it found the ball (kicked goals 0.38,
-    # bumped 2.00 a run) and walked into things - falls 1.50 a run against
-    # 0.25 - a line walked at speed with the head level is a line walked
-    # into the other duck.
-    hunt_s: float = 0.0
+    # ON, with its stops (below). Without them it walked into things (1.50
+    # falls a run); with them, over 8 seeds x 300 s of 1v1: 8.6 kicks a
+    # run against 8.4, 0.12 falls against 0.50, goals within the noise of
+    # eight seeds (1.50 against 2.00, 0.25 kicked against 0.75).
+    hunt_s: float = 3.0
     hunt_lost_range: float = 0.6
     # The hunt's own stops (traced: it walked at 0.45 m/s turning at full
     # rate into the boards, where the ToF returns nothing inside 3 cm, and
@@ -508,6 +508,13 @@ class ChaseParams:
     search_dip_every: float = 1.5
     search_dip_s: float = 0.6
     dip_range: float = 0.22
+    # The search is a slow WALKING circle (`search_vx` forward with the
+    # turn), not a turn in place: instrumented over 300 s, during search
+    # the ball was inside the camera's frustum 1% of the time and detected
+    # 0% - it sat 90-120 degrees off the nose, and a standing turn barely
+    # turns the walker (the cold-turn kick fires once, the next dip stands
+    # it still again). Walking, the body rotates and the camera sweeps.
+    search_vx: float = TURN_KICK
     # Dribbling: OFF (inf). Measured — a ball pushed at 0.3 m/s for half a
     # second rolls on at about the walking speed on this floor and the duck
     # walks behind it without ever lining up; the kick wins. ~1.4 to try.
@@ -926,6 +933,7 @@ class Chase:
                 if self.state != "search" or self._search_t0 is None:
                     self._search_t0 = t
                 vx, _, wz = turn(1.0, cold)
+                vx = max(vx, p.search_vx)                       # a walking circle: the body actually turns
                 self.state = "search"
                 since = t - self._search_t0
                 if since % p.search_dip_every < p.search_dip_s:
