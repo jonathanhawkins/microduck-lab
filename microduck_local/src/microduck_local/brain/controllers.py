@@ -604,8 +604,15 @@ class ChaseParams:
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,
     # no hunt) and, ahead, as a duck to avoid - the camera and the ToF
-    # cannot see one beside or behind me, and most 3v3 falls were that.
-    mate_keepout: float = 0.4
+    # cannot see one beside or behind me. Measured OFF (3v3, 4 seeds x
+    # 300 s: 1.50 goals, 4.5 kicks, 5.25 falls a run with it at 0.4
+    # against 1.50 / 5.0 / 4.50 without): a fresh trace put 12 of 13
+    # falls beside an OPPONENT, which no board carries, turning in place.
+    mate_keepout: float = 0.0
+    # A supporter at its spot turns to face the ball WALKING (`support_turn_vx`
+    # > 0, like the search circle) instead of standing: the traced 3v3
+    # falls were standing turns beside a body nothing had seen.
+    support_turn_vx: float = 0.2
     # Yielding to a duck that clearly has the ball: OFF by default. Measured
     # over 8 seeds × 300 s: off 1.50 goals / 8.5 kicks / 2.12 falls a run,
     # on (0.5 m) 1.12 / 7.0 / 2.12 — it costs play and saves nothing.
@@ -1119,6 +1126,8 @@ class Chase:
         if dist <= 0.12:
             b = _wrap(math.atan2(bxy[1] - odom[1], bxy[0] - odom[0]) - odom[2])
             vx, wz = (0.0, 0.0) if abs(b) < 0.3 else turn(b, cold)[::2]
+            if wz != 0.0:
+                vx = max(vx, p.support_turn_vx)
         if vx <= TURN_KICK and wz != 0.0 and self._beside(t):
             vx, wz = 0.0, 0.0                               # a body beside us: no turning in place
         self.state = "support"

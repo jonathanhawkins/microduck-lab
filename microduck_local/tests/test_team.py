@@ -301,7 +301,7 @@ def test_a_teammate_on_the_board_counts_as_a_duck_beside_or_ahead():
     """Teammates share their poses on the board (brain/team.py `mates`): a
     teammate inside `mate_keepout` that no sensor can see - beside me - means
     no turn in place, and one ahead is avoided like a seen duck."""
-    p = ChaseParams()
+    p = ChaseParams(mate_keepout=0.4)                             # measured off by default (3v3: no fewer falls)
     tm = Team("left")
     b = Chase(p, goal=(1.5, 0.0), team=tm, duck_id="d1", bounds=(1.5, 1.25))
     tm.claim("d0", 10.0, 0.2, (1.3, 1.1), pos=(0.0, 0.25, 0.0))   # d0 attacks; it is 25 cm to my left
