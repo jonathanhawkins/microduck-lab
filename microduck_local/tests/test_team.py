@@ -651,3 +651,43 @@ def test_a_line_up_already_on_the_kick_line_walks_straight_in():
     off = Chase(ChaseParams(two_stage=True), goal=(3.0, 0.0))      # the knob off: the shipped two-stage path
     it = at(off, (0.35, 0.05, 0.0))
     assert not off.lined and it.twist[0] <= TURN_KICK and abs(it.twist[2]) == 1.0   # turning back to the pre-spot
+
+
+def test_a_bumped_duck_can_back_out_of_the_contact_instead_of_standing():
+    """`bump_back`: standing is what the rule does today and standing does not
+    END the contact — measured from 0.10 m of separation, 16 trials, a standing
+    duck was still at 0.099 m four seconds later and cleared 0.30 m in 0 of
+    them, where a straight reverse cleared it in a median 1.6 s. It shares the
+    stand's gate exactly, so a battery between them measures the ACTION and not
+    a second change of trigger. Untried against the stand, so it ships at 0;
+    this pins the wiring, not a result."""
+    from microduck_local.brain.gait import BACK_SPEED
+
+    spot = (0.5, 0.06, "kick_right", 0.0, "kick")
+
+    def run(p, times, odom=(0.35, 0.05, 0.6), state="lineup", touch=True):
+        """Step ONE brain along `times`, holding the contact — the window is
+        edge-triggered off the contact's onset, so a fresh brain at t = 0.9
+        would simply open a new episode."""
+        b = Chase(p, goal=(3.0, 0.0))
+        out = []
+        for t in times:
+            b._senses = Senses(t=t)
+            b.state, b.t_state, b.lined = state, 0.0, True
+            b.spot = spot
+            out.append(b.step(Senses(t=t, odom=odom, bumped=touch)).twist)
+        return out
+
+    assert ChaseParams().bump_back == 0.0                                   # ships off
+    back, stand = ChaseParams(bump_back=0.5), ChaseParams(bump_stand_s=0.5)
+    inside, outside = run(back, (0.0, 0.2, 0.9))[1:]
+    assert inside[0] == BACK_SPEED and inside[2] == 0.0                     # in the window: reverse, no turn
+    assert outside[0] != BACK_SPEED                                         # past it: the state's own command
+    assert run(stand, (0.0, 0.2))[1] == (0.0, 0.0, 0.0)                     # the arm it has to beat: stand
+    assert run(back, (0.0, 0.2), touch=False)[1][0] != BACK_SPEED           # never bumped: nothing fires
+    assert run(back, (0.0, 0.2), state="blocked")[1][0] != BACK_SPEED       # a state the rule is kept out of
+    # The same gate as the stand: only a TURN IN PLACE is replaced, never a
+    # walk-in, so the two arms differ in the command and in nothing else.
+    straight = {"odom": (0.35, 0.05, 0.0)}
+    assert run(back, (0.0, 0.2), **straight)[1][0] > 0
+    assert run(stand, (0.0, 0.2), **straight)[1][0] > 0
