@@ -174,3 +174,54 @@ def test_a_person_is_seen_by_its_legs_up_close_and_a_point_target_is_not():
     from dataclasses import replace
     assert d.detector._visible(w.data, replace(tgt, height=0.0), origin, R) is None
     assert d.detector._visible(w.data, tgt, origin, R) is not None
+
+
+def test_size_gate_thresholds_are_pixel_widths_read_through_the_lens():
+    """The two apparent-width thresholds are ~5 px and ~21 px of the NPU's
+    320 px frame, so they belong to the SENSOR and not to the angle. At the
+    shipped 62° / 320 px they come back bit-for-bit as the shipped 1° and 4°
+    (no measurement on record moves); the same 320 px behind a 120° lens
+    resolves 1.94× coarser, so both thresholds widen 1.94× — to 1.94° and
+    7.74°. Pixels buy the resolution back; an explicit angle still wins."""
+    from dataclasses import replace
+
+    s = DetectorSpec()
+    assert s.px_h == 320 and s.px_per_rad == pytest.approx(295.72, abs=0.01)
+    assert s.w_none == float(np.deg2rad(1.0)) and s.w_full == float(np.deg2rad(4.0))   # bit-for-bit
+    assert (s.w_none, s.w_full) == (s.w_none_rad, s.w_full_rad) and s._px_coarseness == 1.0
+    wide = DetectorSpec(fov_h_deg=120.0, fov_v_deg=93.0)
+    assert wide.w_none / s.w_none == pytest.approx(120.0 / 62.0)      # ~2×, from the pixels alone
+    assert wide.w_full / s.w_full == pytest.approx(120.0 / 62.0)
+    assert np.rad2deg(wide.w_none) == pytest.approx(1.935, abs=1e-3)
+    assert np.rad2deg(wide.w_full) == pytest.approx(7.742, abs=1e-3)
+    assert DetectorSpec(fov_h_deg=120.0, px_h=640).w_none < s.w_none  # a 640 px sensor sees finer than shipped
+    assert DetectorSpec(w_none_rad=np.deg2rad(2.0)).w_none == pytest.approx(np.deg2rad(2.0))
+    # `replace` carries the pixel meaning — it is how a field-of-view sweep patches the spec.
+    assert replace(s, fov_h_deg=120.0, fov_v_deg=93.0).w_none == wide.w_none
+
+
+def test_a_wide_lens_on_the_same_320_px_sensor_finds_a_distant_duck_less_often():
+    """Measured, 400 captures a spec at seed 0: a duck at 3.9 m is 2.99°
+    wide and is found 260/400 through the shipped 62° lens but only 73/400
+    through a 120° one on the same 320 px. At 2.0 m (5.90° wide) the
+    shipped lens is certain, 400/400, and the wide one is not, 271/400. A
+    wider lens spends the same pixels over twice the angle: it buys field,
+    not sight. (An earlier 120° sweep held the angular gate fixed and so
+    charged the wide lens for neither.)"""
+    shipped, wide = DetectorSpec(), DetectorSpec(fov_h_deg=120.0, fov_v_deg=93.0)
+
+    def found(m, d, tg, spec, n=400):
+        det = Detector(m, site="a/head_camera", spec=spec, targets=tg, seed=0)
+        return sum(bool(det.capture(d, 0.0).detections) for _ in range(n))
+
+    m, d = world([("a", (0, 0, 0)), ("b", (3.9, 0.0, math.pi))])
+    tg = targets(m, ducks=("b",))
+    far_shipped, far_wide = found(m, d, tg, shipped), found(m, d, tg, wide)
+    assert 0.55 < far_shipped / 400 < 0.75            # p_find ≈ 0.65 at 2.99° through the 1°/4° gate
+    assert 0.10 < far_wide / 400 < 0.28               # ≈ 0.18 through the widened 1.94°/7.74° one
+    assert far_wide < far_shipped / 2
+    # Closer in, the shipped lens is past `w_full` and certain; the wide one is not.
+    m, d = world([("a", (0, 0, 0)), ("b", (2.0, 0.0, math.pi))])
+    tg = targets(m, ducks=("b",))
+    assert found(m, d, tg, shipped) == 400
+    assert 0.55 < found(m, d, tg, wide) / 400 < 0.80

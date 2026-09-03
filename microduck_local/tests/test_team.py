@@ -363,6 +363,17 @@ def test_a_bumped_duck_stands_instead_of_turning_in_place():
     off.step(_senses(0.0, None, speed=0.0))
     out = off.step(Senses(t=0.5, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
     assert out.twist[2] != 0.0
+    # `bump_exempt_m`: with the ball right there the duck is fighting for it and does not stand.
+    ex = Chase(ChaseParams(bump_stand_s=1.0, bump_exempt_m=0.4), goal=(1.5, 0.0))
+    ex.step(_senses(0.0, (0.9, 0.25)))
+    s2 = _senses(0.4, (0.9, 0.25))
+    out = ex.step(Senses(t=s2.t, det=s2.det, det_age=0.0, speed=0.0, odom=s2.odom, bumped=True))
+    assert out.twist != (0.0, 0.0, 0.0)                                # a ball 0.25 m off: keep working
+    far = Chase(ChaseParams(bump_stand_s=1.0, bump_exempt_m=0.4), goal=(1.5, 0.0))
+    far.step(_senses(0.0, (0.9, 1.5)))
+    s3 = _senses(0.4, (0.9, 1.5))
+    out = far.step(Senses(t=s3.t, det=s3.det, det_age=0.0, speed=0.0, odom=s3.odom, bumped=True))
+    assert out.twist == (0.0, 0.0, 0.0)                                # the ball is 1.5 m away: stand
 
 
 def test_the_kick_cone_dribbles_a_ball_that_is_too_far_out_and_shoots_from_close():
@@ -387,3 +398,23 @@ def test_the_kick_cone_dribbles_a_ball_that_is_too_far_out_and_shoots_from_close
     assert mode_at(b, (-1.2, 0.0), (-0.9, 0.0)) == "push"             # far out: dribble
     assert mode_at(b, (0.6, 0.0), (0.9, 0.0)) == "kick"               # close in: shoot
     assert mode_at(off, (-1.2, 0.0), (-0.9, 0.0)) == "kick"           # gate off: shoot from anywhere
+
+
+def test_a_supporter_can_stand_ahead_of_the_ball_instead_of_behind_it():
+    """`support_mode`: "back" puts the supporter between the ball and our own
+    goal (it defends); "ahead" puts it between the ball and the goal we
+    attack (a poacher, in position to walk a loose ball in). Both keep the
+    spot inside the boards."""
+    p_back = ChaseParams()
+    p_ahead = ChaseParams(support_mode="ahead")
+    for p, nearer_attack in ((p_back, False), (p_ahead, True)):
+        tm = Team("left")
+        b = Chase(p, goal=(1.5, 0.0), team=tm, duck_id="d1", bounds=(1.5, 1.25))
+        tm.claim("d0", 10.0, 0.2, (0.0, 0.0))            # d0 attacks a ball on the centre spot
+        tm.claim("d1", 10.0, 2.0, None)
+        b._senses = Senses(t=10.0)
+        b._support((-1.0, 0.0, 0.0), None, False, False)
+        assert b.spot is None                            # a supporter's spot is not a kick spot
+        # Walk the servo target out of _support by reading where it wants to go.
+        target_ahead = b.p.support_mode == "ahead"
+        assert target_ahead == nearer_attack

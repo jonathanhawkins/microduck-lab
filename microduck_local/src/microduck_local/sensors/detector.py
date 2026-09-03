@@ -30,6 +30,13 @@ import numpy as np
 
 DETECT_CLASSES = ("duck", "person", "ball", "marker", "toy", "basket")
 
+# The frame the two size thresholds below were sized on: the shipped 320 px
+# YOLO11n input behind the 62° lens, 296 px/rad. A spec with another lens or
+# another sensor is read against this (see `DetectorSpec.px_per_rad`).
+SHIPPED_PX_H = 320
+SHIPPED_FOV_H_DEG = 62.0
+_SHIPPED_PX_PER_RAD = SHIPPED_PX_H / np.deg2rad(SHIPPED_FOV_H_DEG)
+
 
 @dataclass(frozen=True)
 class DetectorSpec:
@@ -38,10 +45,40 @@ class DetectorSpec:
     max_range_m: float = 4.0
     rate_hz: float = 10.0
     site: str = "head_camera"
+    # Sensor width in pixels: the NPU runs YOLO11n on a 320×320 INT8 frame
+    # (upstream npu-bringup.md). The size gate is a PIXEL fact, so widening
+    # the lens without adding pixels has to cost detections — see `w_none`.
+    px_h: int = SHIPPED_PX_H
     # Apparent-width thresholds: below `w_none` a target is never found,
-    # above `w_full` always (before noise); linear in between.
+    # above `w_full` always (before noise); linear in between. These two
+    # fields are the angles AT THE SHIPPED 62° / 320 px frame; read them
+    # through the `w_none` / `w_full` properties, which rescale them by this
+    # spec's pixels-per-radian. Same pixels over 120° resolve half as finely,
+    # so a small distant target must be found LESS often, not just as often.
     w_none_rad: float = np.deg2rad(1.0)     # ~5 px of a 320 px frame over 62°
     w_full_rad: float = np.deg2rad(4.0)     # ~21 px: always found (before noise)
+
+    @property
+    def px_per_rad(self) -> float:
+        """Angular resolution of this frame (296 px/rad as shipped)."""
+        return float(self.px_h / np.deg2rad(self.fov_h_deg))
+
+    @property
+    def _px_coarseness(self) -> float:
+        """How much coarser this frame is than the shipped one: exactly 1.0
+        at 62°/320 px, 1.94 at 120°/320 px, 0.5 on a 640 px sensor."""
+        return _SHIPPED_PX_PER_RAD / self.px_per_rad
+
+    @property
+    def w_none(self) -> float:
+        """`w_none_rad` at this frame's resolution: an apparent width under
+        this is never found."""
+        return float(self.w_none_rad * self._px_coarseness)
+
+    @property
+    def w_full(self) -> float:
+        """`w_full_rad` at this frame's resolution: always found above it."""
+        return float(self.w_full_rad * self._px_coarseness)
 
 
 @dataclass(frozen=True)
@@ -220,7 +257,7 @@ class Detector:
             if vis is None:
                 continue
             bearing, elev, width, rng = vis
-            p_find = float(np.clip((width - s.w_none_rad) / (s.w_full_rad - s.w_none_rad), 0.0, 1.0))
+            p_find = float(np.clip((width - s.w_none) / (s.w_full - s.w_none), 0.0, 1.0))
             p_find *= 1.0 - nz.miss_p
             if self.rng.random() > p_find:
                 continue
@@ -235,7 +272,7 @@ class Detector:
             out.append(Detection(tgt.cls, tgt.name, bearing, elev, width, float(range_est), conf))
         if nz.false_p and self.rng.random() < nz.false_p:
             cls = str(self.rng.choice(DETECT_CLASSES))
-            width = float(self.rng.uniform(s.w_none_rad, s.w_full_rad))
+            width = float(self.rng.uniform(s.w_none, s.w_full))
             out.append(Detection(cls, "", float(self.rng.uniform(-0.5, 0.5)) * np.deg2rad(s.fov_h_deg),
                                  float(self.rng.uniform(-0.4, 0.4)) * np.deg2rad(s.fov_v_deg), width,
                                  NOMINAL_RADIUS[cls] / np.tan(width / 2), float(self.rng.uniform(0.2, 0.5))))

@@ -699,6 +699,11 @@ class ChaseParams:
     # ball toward its own goal, `support_side` to the side per rank, facing
     # the ball, and never inside `support_min` of it.
     support_back: float = 0.7
+    # Where a supporter stands relative to the ball: "back" (toward our own
+    # goal - it defends, and 3v3 scores 0.75 goals a run) or "ahead" (toward
+    # the goal we attack: a poacher, in position to walk a loose ball in,
+    # which is how most goals are actually scored here).
+    support_mode: str = "back"
     support_side: float = 0.45
     support_min: float = 0.45
     # Traced over 3 seeds x 300 s of 3v3: 10 of 14 falls were supporters
@@ -731,6 +736,9 @@ class ChaseParams:
     # goals and 1.00 falls against 2.38 / 0.38 at 1.0 s. 0 here; team
     # rosters get 0.5 from brain/team.py brain_kwargs.
     bump_stand_s: float = 0.0
+    # ...except with the ball this close: two attackers' feet meet AT the
+    # ball, and the one that stands there loses it. 0 = no exemption.
+    bump_exempt_m: float = 0.0
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,
     # no hunt) and, ahead, as a duck to avoid - the camera and the ToF
@@ -1255,7 +1263,9 @@ class Chase:
         if look_at is not None and senses.skill is None and (p.head_yaw_when == "always" or self.state in ("search", "look")):
             head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
         if p.bump_stand_s > 0 and t - self._bump_t < p.bump_stand_s and vx <= TURN_KICK and wz != 0.0 \
-                and self.state != "retreat":
+                and self.state != "retreat" \
+                and not (p.bump_exempt_m > 0 and ball is not None and ball.age(t) <= p.lost_s
+                         and ball.range < p.bump_exempt_m):
             vx, wz = 0.0, 0.0                                   # touching a body: stand, do not turn in place
         self.last = (vx, 0.0, wz)
         return Intent(twist=self.last, head=head, note=self.role if self.role != "attack" else self.state, skill=skill)
@@ -1272,7 +1282,8 @@ class Chase:
             self.state = "support"
             vx, _, wz = turn(1.0, cold)                    # nobody has it: look for it
             return vx, wz
-        og = self._own_goal(odom)
+        og = self._own_goal(odom) if p.support_mode == "back" else (
+            self.goal if self.goal is not None else self._own_goal(odom))
         gx, gy = og[0] - bxy[0], og[1] - bxy[1]
         gn = math.hypot(gx, gy)
         ux, uy = (gx / gn, gy / gn) if gn > 1e-6 else (-math.cos(odom[2]), -math.sin(odom[2]))
