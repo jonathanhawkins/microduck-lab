@@ -470,6 +470,24 @@ class Follow:
 
 @dataclass(frozen=True)
 class ChaseParams:
+    """The chase brain's constants. Most were measured INTO their value; a
+    good few were measured OFF and keep their number in the comment beside
+    them, because "we tried it and it was worse" is the expensive part and
+    deleting it invites the next person to spend the afternoon again.
+
+    Shipping OFF (0 / False), with their measurements below: `two_stage`
+    and `search_walk_after` (line-up precision), `kick_deflect_*` (the kick
+    map in the stance), `kick_cone` (shoot only from close), `predict_s`,
+    `head_yaw_when`, `predict_steer`, `look_aim`, `search_sweep` (what the
+    head does about the ball), `tof_ball_m` (the ToF seeing a ball at the
+    feet), `seek_s` (a ball memory), `push_beyond` (deliberate bumping),
+    `search_sided`, `mate_keepout` (teammates' poses as obstacles),
+    `support_turn_vx`, `support_mode="ahead"` (a poacher supporter, found
+    then killed by fresh seeds). Read the numbers before re-trying one -
+    and read the README's note on what 8 seeds can and cannot resolve
+    first, because several of those "worse" verdicts are inside the noise
+    and say only "not shown to help".
+    """
     target_cls: str = "ball"
     speed: float = 0.45            # walk at the ball
     k_turn: float = 3.0
@@ -737,7 +755,9 @@ class ChaseParams:
     #   * NOT possession. The feet meet a median 0.66 m from the ball; both
     #     ducks are inside 0.35 m of it in 18% of bumps; and two seconds
     #     later the ball is further from BOTH ducks by the same +0.074 m.
-    #     Nobody is walked over. (`bump_exempt_m` was built on that guess.)
+    #     Nobody is walked over - so the "exempt the duck at the ball"
+    #     knob this once carried is GONE, not merely defaulted off: a knob
+    #     on a premise the data refuted only invites someone to try it.
     #   * It cancelled the ESCAPE. 70% of its firing was in `blocked`, a
     #     state that is 12.6% of the run, where the walk is already zeroed
     #     and the turn is the only command left. 6 of 8 falls were a stand
@@ -745,8 +765,10 @@ class ChaseParams:
     #   * It fed itself. Standing on a body keeps touching it, which
     #     refreshed the timer: bumps went 44 -> 105 a run and one freeze
     #     ran 74 s. So the window is edge-triggered now (`bump_gap_s`).
-    # 0 here; team rosters get 0.5 from brain/team.py brain_kwargs.
+    # 0 for a lone attacker; a roster with teammates gets
+    # `team_bump_stand_s` through brain/team.py's brain_kwargs.
     bump_stand_s: float = 0.0
+    team_bump_stand_s: float = 0.5
     # Only where a standing turn beside a body is the danger. Never in
     # `blocked` / `avoid` / `retreat` (the turn IS the escape) and never in
     # `search` (its circle WALKS at `search_vx`, and freezing that stops the
@@ -755,9 +777,6 @@ class ChaseParams:
     # A contact episode ends after this long without one; the freeze runs
     # from its onset and is never extended by staying in contact.
     bump_gap_s: float = 1.0
-    # Measured on the refuted premise above and kept only as its record: the
-    # stand does not apply with the ball inside this. 0 = no exemption.
-    bump_exempt_m: float = 0.0
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,
     # no hunt) and, ahead, as a duck to avoid - the camera and the ToF
@@ -1285,9 +1304,7 @@ class Chase:
         if look_at is not None and senses.skill is None and (p.head_yaw_when == "always" or self.state in ("search", "look")):
             head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
         if p.bump_stand_s > 0 and t - self._bump_t0 < p.bump_stand_s and vx <= TURN_KICK and wz != 0.0 \
-                and self.state in p.bump_stand_states \
-                and not (p.bump_exempt_m > 0 and ball is not None and ball.age(t) <= p.lost_s
-                         and ball.range < p.bump_exempt_m):
+                and self.state in p.bump_stand_states:
             vx, wz = 0.0, 0.0                                   # touching a body: stand, do not turn in place
         self.last = (vx, 0.0, wz)
         return Intent(twist=self.last, head=head, note=self.role if self.role != "attack" else self.state, skill=skill)

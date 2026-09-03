@@ -1336,19 +1336,48 @@ walking turn bumps what it cannot see. What a crowded pitch needs is a
 sense of the bodies beside the duck — a wider ToF field, or the bump the
 IMU could read — before any rule can act on them.
 
-**A bump sense** (`Senses.bumped`) is what finally moved the crowd's
-falls. The World reads its contact list — in the walk scene only the feet
-carry collision geometry, so a bump is feet touching feet, which is what
-a duck-duck fall is; on the robot it is the IMU and the servo loads — and
-a chase brain that has been bumped stands instead of turning in place for
-`bump_stand_s`. Measured over 4 seeds × 300 s on the fixed ToF geometry:
-**3v3 falls 5.00 → 2.75 a run at 1.0 s and 1.75 at 0.5 s** (goals 1.50 →
-0.75, kicks 6.2 → 4.5 / 6.5), **2v2 4.00 → 2.00 / 2.25** (goals 1.50 →
-1.25). In 1v1 the same rule measured 1.50 goals and 1.00 falls against
-2.38 / 0.38 over 8 seeds — two attackers' feet meet at the ball, and the
-one that stands loses it and gets walked over — so `brain_kwargs` gives
-the half-second stand to rosters with teammates and leaves a lone
-attacker on the default. Per duck, 3v3 falls went 0.83 → 0.29 a run.
+**A bump sense** (`Senses.bumped`), and a lesson about four seeds. The
+World reads its contact list — in the walk scene only the feet carry
+collision geometry, so a bump is feet touching feet, which is what a
+duck-duck fall is; on the robot it is the IMU and the servo loads — and a
+chase brain that has been bumped stands instead of turning in place for
+`bump_stand_s`. Over 4 seeds × 300 s it looked decisive: 3v3 falls 5.00 →
+1.75 a run, 2v2 4.00 → 2.25. **It did not replicate.** The same rule over
+twelve seeds gives 3.17 falls a run, and over twelve different seeds
+4.17, against a no-rule estimate of 5.00 that itself came from four
+seeds. The 1.75 was a low outlier and the 5.00 probably a high one; on 3v3
+a four-seed battery holds ~20 falls and ~6 goals, which is not enough to
+tell 2 falls a run from 4. The rule stays on for rosters
+(`team_bump_stand_s`, applied by `brain_kwargs`; a lone attacker keeps 0,
+where it measured worse on both counts) while a twelve-seed paired
+comparison on seeds nobody has looked at decides whether it belongs there
+at all — that comparison is the one this table is missing.
+
+Its first form did have a real defect, found by tracing 838 bumps, and
+the trace is worth more than the numbers above. The obvious premise — two
+attackers' feet meet at the ball and the one that stands loses it — is
+**false**: the feet meet a median 0.66 m from the ball, both ducks are
+inside 0.35 m of it in 18% of bumps, and two seconds later the ball is
+further from *both* by the same 7.4 cm. What the rule actually did was
+cancel the *escape*: 70% of its firing was in `blocked`, a state that is
+12.6% of the run, where the walk is already zeroed and the turn is the
+only command left — 6 of 8 falls were a stand leaning on the other duck —
+and 5 more were in `search`, whose circle walks. And it fed itself:
+standing on a body keeps touching it, so the timer never expired, bumps
+went 44 → 105 a run and one freeze ran 74 s. It is edge-triggered from
+the onset of a contact and scoped to the states where a standing turn
+beside a body is the danger.
+
+**A poacher supporter — found, confirmed, then killed by fresh seeds.**
+Supporters shadow the ball (traced: 0.89 m from it on median, 29% of
+their time inside 0.5 m, while 41% of the run has no duck at all within
+0.3 m of it), so standing them between the ball and the goal they attack
+looked obvious. It scored 10 goals against 3 over four seeds, then 21
+against 12 over twelve. On twelve seeds nobody had looked at, it
+**reversed**: 13 against 19. Pooled over all 24, 34 against 31, p = 0.80.
+The middle battery was never independent — it contained the four seeds
+the effect was found on. `support_mode="ahead"` stays as the record of
+it.
 
 ### Tidy the playroom (roadmap Track 12)
 
@@ -1359,6 +1388,19 @@ with a low basket in a corner, and `tidy` is the brain that clears it:
 uv run duck-lab --world playroom          # watch it on /sim; the tidy score is top-left
 uv run eval-tidy --seeds 3 --toys 6 --seconds 300   # the benchmark: toys in the basket
 ```
+
+**Long batteries are resumable.** A 16-seed tidy battery or a 12-seed 3v3
+one is well over an hour, so `eval-tidy` and `eval-pitch` print each seed
+the moment it lands and, given `--out FILE`, append it there as a JSON
+line and skip on a later run whatever the file already holds. Re-running
+the *same command* after an interruption continues it; `--seed0` extends a
+finished battery onto fresh seeds instead of redoing the same ones. The
+brain's own parameters never appear in a row, so `--tag` says which
+variant a file belongs to and a resume **refuses** a file written under a
+different tag, roster or run length rather than fabricating a comparison
+out of two halves. This was written after a cloud container was reclaimed
+twice mid-battery and, because the results were buffered to the end, took
+about ninety minutes of measurement with it both times.
 
 What is real and what is a model here, so nobody mistakes one for the other:
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 
 import numpy as np
@@ -61,11 +62,22 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
             break
     score = w.tidy_score()
     return {"seed": seed, "toys": toys, "odom": odom, "tetherMs": tether_ms, "loopClosure": loop_closure,
+            "seconds": seconds,
             "inBasket": score["inBasket"], "picked": brain.picked,
             "delivered": brain.delivered, "falls": d.falls, "attempts": d.grasp_attempts,
             "grasps": d.grasp_successes, "givenUp": sorted(brain.given_up),
             "simSeconds": round(w.t, 1), "wallSeconds": round(time.time() - t0, 1),
             "done": brain.state == "done", "transitions": len(states)}
+
+
+def _seed_line(r: dict) -> str:
+    return (f"seed {r['seed']}: {r['inBasket']}/{r['toys']} in the basket · picked {r['picked']} · delivered {r['delivered']}"
+            f" · grasps {r['grasps']}/{r['attempts']} · falls {r['falls']} · {r['simSeconds']} s sim"
+            f"{' · done' if r['done'] else ''}{' · gave up ' + ','.join(r['givenUp']) if r['givenUp'] else ''}")
+
+
+def _run_one_args(a: tuple) -> dict:
+    return run_one(*a)
 
 
 def main() -> None:
@@ -75,6 +87,9 @@ def main() -> None:
     ap.add_argument("--toys", type=int, default=6)
     ap.add_argument("--seconds", type=float, default=240.0)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--out", help="append each seed's result here as a JSON line AND resume from it: "
+                                  "seeds already in the file are not re-run (see eval_pitch.load_done)")
+    ap.add_argument("--tag", default="", help="recorded in --out rows; a resume refuses to mix tags")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--jobs", type=int, default=1, help="seeds run in this many processes (each is single-threaded)")
     ap.add_argument("--odom", default="ideal", choices=["ideal", "datasheet", "hostile"],
@@ -85,23 +100,47 @@ def main() -> None:
                     help="steer by raw odometry instead of the brain's own loop-closed pose (5.5)")
     args = ap.parse_args()
     seeds = [args.seed0 + k for k in range(args.seeds)]
-    if args.jobs > 1 and len(seeds) > 1:
-        import multiprocessing as mp
-        # spawn/forkserver: no forked ONNX runtime or MuJoCo state (the Windows-safe rule).
-        ctx = mp.get_context("forkserver" if hasattr(mp, "get_context") and "forkserver" in mp.get_all_start_methods() else "spawn")
-        with ctx.Pool(min(args.jobs, len(seeds))) as pool:
-            rows = pool.starmap(run_one, [(sd, args.toys, args.seconds, True, args.odom, args.tether_ms,
-                                           not args.no_loop_closure) for sd in seeds])
-    else:
-        rows = [run_one(sd, args.toys, args.seconds, quiet=not args.verbose, odom=args.odom, tether_ms=args.tether_ms,
-                        loop_closure=not args.no_loop_closure) for sd in seeds]
+    # Resumable, and each seed prints as it lands: a 16-seed battery is well
+    # over an hour, and a machine that reclaims its container mid-run should
+    # cost the seed it was on, not the battery (see eval_pitch.load_done).
+    from .eval_pitch import load_done
+    key = f"{args.odom}/{args.tether_ms}/{not args.no_loop_closure}/{args.toys}|{args.tag}"
+    done = load_done(args.out, key, args.toys, args.seconds)
+    rows = [done[sd] for sd in seeds if sd in done]
+    if not args.json:
+        for r in rows:
+            print(_seed_line(r) + "  (already measured)", flush=True)
+    todo = [sd for sd in seeds if sd not in done]
+    out = open(args.out, "a") if args.out else None
+
+    def keep(r: dict) -> None:
+        rows.append(r)
+        if out is not None:
+            out.write(json.dumps({**r, "tag": key, "perSide": args.toys}) + "\n")
+            out.flush()
+        if not args.json:
+            print(_seed_line(r), flush=True)
+
+    args_list = [(sd, args.toys, args.seconds, True, args.odom, args.tether_ms,
+                  not args.no_loop_closure) for sd in todo]
+    try:
+        if args.jobs > 1 and len(todo) > 1:
+            import multiprocessing as mp
+            # spawn/forkserver: no forked ONNX runtime or MuJoCo state (the Windows-safe rule).
+            ctx = mp.get_context("forkserver" if hasattr(mp, "get_context") and "forkserver" in mp.get_all_start_methods() else "spawn")
+            with ctx.Pool(min(args.jobs, len(todo))) as pool:
+                for r in pool.imap(_run_one_args, args_list):
+                    keep(r)
+        else:
+            for a in args_list:
+                keep(run_one(*a[:3], quiet=not args.verbose, odom=a[4], tether_ms=a[5], loop_closure=a[6]))
+    finally:
+        if out is not None:
+            out.close()
+    rows.sort(key=lambda r: r["seed"])
     if args.json:
         print(json.dumps(rows))
         return
-    for r in rows:
-        print(f"seed {r['seed']}: {r['inBasket']}/{r['toys']} in the basket · picked {r['picked']} · delivered {r['delivered']}"
-              f" · grasps {r['grasps']}/{r['attempts']} · falls {r['falls']} · {r['simSeconds']} s sim"
-              f"{' · done' if r['done'] else ''}{' · gave up ' + ','.join(r['givenUp']) if r['givenUp'] else ''}")
     frac = float(np.mean([r["inBasket"] / r["toys"] for r in rows]))
     print(f"mean tidied {frac:.2f} · falls {np.mean([r['falls'] for r in rows]):.2f}/run")
 

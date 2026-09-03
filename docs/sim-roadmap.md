@@ -73,10 +73,18 @@ the tree, and Track 12 has its first working loop:
   found 73 times in 400 against 260), though the goals do not yet
   follow; a goal-cone kick gate turns kicks into pushes and gains
   nothing; the ToF seeing the ball at the feet ships off (a blob at the
-  feet is as often the other duck's foot); and a bump sense (feet
-  touching feet) halves the crowd's falls — 3v3 5.00 → 1.75 a run, 2v2
-  4.00 → 2.25 — but its first form cost 1v1 both goals and falls, and a
-  trace of 838 bumps said why: it cancelled the ESCAPE turn (70% of its
+  feet is as often the other duck's foot). Two 3v3 results then failed
+  to replicate, which is the round's second lesson: a bump sense (feet
+  touching feet) looked like it halved the crowd's falls over 4 seeds
+  (5.00 → 1.75) and gives 3.17 and 4.17 a run over two twelve-seed
+  batteries; and a poacher supporter scored 10 goals against 3 over four
+  seeds, 21 against 12 over twelve — then **reversed** on twelve fresh
+  ones, 13 against 19, for 34 against 31 over all 24 (p = 0.80). The
+  middle battery shared the seeds the effect was found on and was never
+  independent. What the bump work did leave is a trace of 838 bumps
+  refuting its own premise (the feet meet a median 0.66 m from the ball,
+  and afterwards it is further from BOTH ducks by the same 7.4 cm) and
+  finding the real defect: it cancelled the ESCAPE turn (70% of its
   firing in `blocked`, 6 of 8 falls a stand leaning on the other duck)
   and fed itself (standing on a body keeps touching it: 44 → 105 bumps a
   run, one freeze of 74 s). It is edge-triggered and state-scoped now) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
