@@ -752,6 +752,18 @@ without): more goals in 3v3, more falls in both — four seeds of six
 ducks walking blind lines through a crowd. `hunt_s` and `search_vx`
 switch them off per brain if a roster prefers it.
 
+**Teammates on the board** (`Team.mates`): every claim now carries the
+claimant's own pose too — the same one-message-a-second — because a
+teammate beside or behind a duck is invisible to its camera and its ToF.
+The chase brain can treat a teammate inside `mate_keepout` as a duck
+beside it (no turn in place, no hunt) and, ahead, as a duck to avoid.
+**Measured off** (3v3, 4 seeds × 300 s): 1.50 goals, 4.5 kicks, 5.25
+falls a run with it at 0.4 m against 1.50 / 5.0 / 4.50 without. A fresh
+trace of two seeds (13 falls) said why: 12 were beside an *opponent* —
+which no board carries — and all but one were standing turns, most of
+them a supporter at its spot turning to face the ball. The poses stay on
+the board (the inspector shows them); the keep-out ships at 0.
+
 ### Tidy the playroom (roadmap Track 12)
 
 `playroom` is the built-in that scatters toys on the floor of a walled room
