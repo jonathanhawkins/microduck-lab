@@ -44,6 +44,7 @@ bench-envs = "microduck_local.bench_envs:main"
 duck-lab = "microduck_local.viz_server:main"
 train-behavior = "microduck_local.train_behavior:main"
 render-rollout = "microduck_local.render_rollout:main"
+eval-find-ball = "microduck_local.eval_find_ball:main"
 
 [tool.ruff]
 # Keep lint minimal and uncontroversial: pyflakes correctness + import order.

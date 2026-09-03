@@ -1387,3 +1387,20 @@ def test_find_ball_scan_clock_runs_while_lost_and_parks_while_seen():
         _ball_sense(env)
     obs = env._get_obs()
     assert obs[59] == 0.0 and obs[60] == 1.0
+
+
+def test_find_ball_facing_slopes_all_the_way_round():
+    """The facing pay must have a gradient with the ball straight behind —
+    a Gaussian wide layer paid ~0.04 there and the export dithered around
+    "directly behind" instead of turning (see _ball_face)."""
+    env = _ball_env()
+    face = {t.key: t for t in BEHAVIORS["find_ball"].terms}["face_the_ball"].fn
+    env._ball_seen = True
+    vals = []
+    for deg in (0, 45, 90, 135, 170, 180):
+        env._ball_psi = np.radians(deg)
+        vals.append(face(env))
+    assert vals[0] == pytest.approx(1.0)
+    assert all(a > b for a, b in zip(vals, vals[1:]))   # strictly decreasing
+    assert vals[-2] - vals[-1] > 0.001                   # still sloping at 170 deg
+    assert vals[-1] == pytest.approx(0.0, abs=1e-6)

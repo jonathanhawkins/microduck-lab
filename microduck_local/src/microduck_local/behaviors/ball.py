@@ -387,16 +387,20 @@ def _ball_in_view(env) -> float:
 
 
 def _ball_face(env) -> float:
-    """Body pointed at the ball. Paid in full while seen and by memory
-    confidence while lost (the policy sees the same estimate in slot 54);
-    the wide layer keeps a gradient alive with the ball straight behind,
-    where the head can already see it (head_yaw reaches ±170 deg) but the
-    kick needs the BODY square to it."""
+    """Body pointed at the ball. Paid in full while seen and by belief
+    confidence while lost (the policy sees the same estimate in slot 54).
+
+    Wide layer = raised cosine, not a Gaussian: a std-1.5 rad Gaussian paid
+    0.04 with the ball straight behind and sloped nowhere the policy was —
+    the stage-2 export dithered +-25 deg around "ball directly behind" for
+    8 s and never committed to the turn (the foot-flatness lesson again:
+    price the escapable part). (1 + cos psi) / 2 slopes all the way round;
+    the tight layer squares the body up for the kick."""
     gate = 1.0 if env._ball_seen else env._ball_mem_conf
     if gate < 0.05:
         return 0.0
-    p2 = env._ball_psi ** 2
-    return gate * (0.5 * _math.exp(-p2 / 1.5 ** 2) + 0.5 * _math.exp(-p2 / 0.4 ** 2))
+    psi = env._ball_psi
+    return gate * (0.25 * (1.0 + _math.cos(psi)) + 0.5 * _math.exp(-psi * psi / 0.4 ** 2))
 
 
 def _ball_new_ground(env) -> float:
