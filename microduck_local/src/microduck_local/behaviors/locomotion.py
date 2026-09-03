@@ -366,6 +366,8 @@ _register(Behavior(
     success_metric="metres per second sustained without falling",
     episode_s=20.0,
     forward_cmd=0.6,
+    # The GPU stack has no z-kill; a bouncing stride dips through 0.07 m.
+    height_termination=False,
 ))
 
 

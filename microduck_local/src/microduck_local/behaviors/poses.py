@@ -191,6 +191,81 @@ _register(Behavior(
     success_metric="how close the body height sits to the crouch target",
 ))
 
+# --- deep squat -------------------------------------------------------------
+# Started life as a contributed tutorial recipe (PR #1) targeting 0.082 m,
+# 3 mm under crouch's 0.085 m: its height term paid within 1% at either depth,
+# so a policy could not tell the two tricks apart. The walk env's z-kill at
+# FALL_HEIGHT (0.07 m) is what pinned it there — any deeper target ends the
+# episode on arrival. This version puts the target UNDER the line and turns
+# height termination off (Behavior.height_termination); the tilt rule still
+# ends a real fall. A/B at 2M steps, one seed each: with the kill ON the
+# policy keeps a 6 mm safety margin and parks at 0.076 m; with it OFF it
+# settles on the line at 0.070-0.071 m with 22% more reward. Neither reaches
+# 0.065: the last 5 mm cost more torque/limit tax than the tight layer pays.
+
+SQUAT_DROP = 0.055   # m below standing -> 0.065 m, 5 mm under FALL_HEIGHT
+
+
+def _squat_target_z(env) -> float:
+    """Trunk height the squat aims for. A level, flat-footed pose at this
+    height needs ~1.0 rad of knee (measured kinematically on the model; the
+    +-1.57 rad joints bottom out near 0.05 m), clear of the limit-parking
+    band, so no_limit_parking does not tax the goal pose."""
+    return env.stand_z - SQUAT_DROP
+
+
+def _squat_z(env) -> float:
+    """Two-layer height target (wide pull + tight polish), like _crouch_height.
+    The wide std equals the stand->target distance, so standing still pays
+    ~0.18 and the slope is alive from the first step; the tight 15 mm layer
+    makes the target the clear argmax. Measured: standing 0.18, crouch depth
+    ~0.5, the fall line ~0.94, target 1.0."""
+    z = float(env._trunk_xpos[2])
+    d2 = (z - _squat_target_z(env)) ** 2
+    return (0.5 * float(np.exp(-d2 / SQUAT_DROP ** 2))
+            + 0.5 * float(np.exp(-d2 / 0.015 ** 2)))
+
+
+_register(Behavior(
+    id="deep_squat",
+    emoji="🐸",
+    title="Deep squat",
+    description=(
+        "Sink into a deep squat about 5.5 cm below normal standing, under the "
+        "walk env's fall line, and hold it calmly with both feet flat and the head up."
+    ),
+    how_it_learns=(
+        "Like crouch, but the target sits under the height the walk env normally "
+        "calls a fall, so this recipe switches that rule off and keeps only the "
+        "tilt rule. Points flow for the body near the squat height while level, "
+        "with both feet flat; thrashing and drifting cost points. PPO finds the "
+        "crouch first, then keeps folding the knees because the height term "
+        "keeps paying more the lower it gets, right up to the target."
+    ),
+    keywords=("deep squat", "squat deep", "squat low", "深蹲", "下蹲", "蹲下去"),
+    terms=(
+        RewardTerm("squat_height", "Big points for the body near the deep-squat height", 3.0, _squat_z),
+        RewardTerm("feet_planted", "Points for keeping both feet on the ground", 1.0, _both_feet_down),
+        RewardTerm("flat_feet", "Points for keeping the feet flat on the floor", 1.0, _flat_feet),
+        RewardTerm("head_up", "Points for holding the head up in its natural pose", 0.8, _head_up_blend),
+        _upright_term(1.0),
+        RewardTerm("calm_body", "Penalty for wobbling and thrashing the body", 1.0,
+                   _still_body_pen, is_penalty=True),
+        RewardTerm("stay_home", "Penalty for wandering away from the starting spot", 1.0,
+                   _stay_home_pen, is_penalty=True),
+        RewardTerm("no_limit_parking", "Penalty for grinding joints against their end stops", 1.0,
+                   _limit_parking_pen, is_penalty=True),
+        *_BASE_REGULARIZERS,
+    ),
+    default_steps=2_000_000,
+    success_metric="unbroken seconds held near the squat height on both feet",
+    episode_s=12.0,   # a hold: surviving the clip must not be the same as settling
+    # The whole point: the target is under FALL_HEIGHT, so the z-kill must be
+    # off or the goal state ends the episode. The tilt rule stays on.
+    height_termination=False,
+))
+
+
 _register(Behavior(
     id="spin",
     emoji="🌀",

@@ -112,8 +112,7 @@ def make_env(behavior_id: str, rank: int, seed: int,
         # subset, random yaw. Tricks stay on the cheap XML/no-DR path —
         # they don't saturate the servos the way a run does.
         if b.forward_cmd:
-            kw.update(domain_rand=True, random_yaw=True, actuator="bam",
-                      height_termination=False)
+            kw.update(domain_rand=True, random_yaw=True, actuator="bam")
         return BehaviorEnv(behavior_id, weight_overrides=weight_overrides, **kw)
     return _init
 
