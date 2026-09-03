@@ -41,6 +41,7 @@ from .brain.brain_env import (
     BrainEnv,
     FollowTask,
 )
+from .brain.learned import brains_dir
 from .brain.striker import (
     S_ACT_HIGH,
     S_ACT_LOW,
@@ -49,7 +50,6 @@ from .brain.striker import (
     StrikerEnv,
     StrikerTask,
 )
-from .brain.learned import brains_dir
 from .machine import profile, with_phase_callbacks
 from .ppo_hparams import configure_torch_cpu
 

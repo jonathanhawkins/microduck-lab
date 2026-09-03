@@ -20,6 +20,19 @@ advance PER KICK, which says whether each touch was worth anything. And
 read the event counts: at 8 seeds a battery holds tens of kicks but a
 handful of goals and falls, so goals here are reported, not judged.
 
+TWO WARNINGS FROM THE FIRST BATTERY RUN THROUGH THIS.
+(1) `kickGoals` / `bumpGoals` come from the World, which attributes a goal
+to "kicked" if ANY kick started within 4 s of it. Against a brain that
+kicks every two seconds that attribution says nothing: striker-v1's 1v1
+battery reads 50 kicked / 0 bumped where the scripted arm on the same seeds
+reads 3 / 34. Do not read it as "it scored by kicking".
+(2) The seed split matters here as much as anywhere. Swapping the left duck
+for striker-v1 looked like it RAISED the untouched scripted opponent's
+`ballAdvance` by +0.26 m/min over seeds 0-23 (t=+4.39, 20 seeds up of 24) -
+and on twelve fresh seeds the same contrast was +0.002 (t=+0.01, 6 up of
+12). It did not replicate; the opponent's falls (11 -> 3, then 2 -> 1) did.
+`--seed0` is how you find that out.
+
 The `left`/`right` keys of `goals` are goal MOUTHS, not teams: a ball
 crossing at +x lands in `goals["right"]` and the LEFT team attacks +x, so
 a row's `right` count is what the left team scored. `metrics` keys are
@@ -30,8 +43,6 @@ from __future__ import annotations
 
 import argparse
 import json
-
-
 from dataclasses import replace
 
 import numpy as np

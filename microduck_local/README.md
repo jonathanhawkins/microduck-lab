@@ -749,6 +749,26 @@ what killed each:
 | two-stage line-up | loses to the shipped brain on goals, 45 v 71 over 24 seeds |
 | `lineup_lat` (that line-up made 21% faster) | first block promised +26% kicks; fresh block gave +5% |
 | **the bump-stand rule** | **the last one standing, and it failed too: −1.88 on its own 12 layouts, +0.25 on 12 fresh ones** |
+| `bump_back` (reverse out of a contact instead of standing) | a *closed* null: it cuts contact time 43% and moves falls by exactly 0.00 |
+| **a learned striker** (roadmap 4.4) | **loses to the scripted brain: it carries the ball toward its OWN goal** |
+
+The learned striker is the sharpest of these, because it is the one that
+was supposed to sidestep the hand-written brain entirely. `striker-v1`
+(88 obs, a kick logit per foot, reward = the benchmark's own signed
+`ballProgress`, 600k decisions) against the scripted `Chase` on identical
+seeds: **1v0**, 24 paired seeds — advance 0.86 → 0.31 (paired −0.550,
+t = −5.74, down on 22 of 24), possession 11.8 → 5.9 s/min, falls 0 → 14.
+**1v1**, 36 paired seeds (24 + 12 fresh) — signed progress **+0.10 →
+−0.16**, and the sign is the finding: the scripted brain carries the ball
+toward the goal it attacks and this one toward its own, with both halves
+agreeing (−0.068 discovery, −0.067 fresh). Rendered and read: it never
+reaches the ball, drifting at a fifth of the walker's pace and firing the
+kick at empty floor — 3612 kicks against 116, and 43× less ball moved per
+touch. Not a reward problem (the same reward pays the scripted brain +6.3
+an episode and this one −0.5) but an approach problem. And the training
+curve climbed the whole way, on the assisted distribution, while the
+exported brain carried the ball backwards on the honest pitch — the
+playbook's first verification rule, demonstrated again.
 
 What *has* survived is of three kinds, and none of it is a brain idea:
 **bugs fixed** (the ToF placed hits without the head's rotation; clearance

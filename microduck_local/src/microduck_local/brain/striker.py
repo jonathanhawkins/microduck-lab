@@ -40,6 +40,44 @@ already on a kicking foot's sweet spot, so the state where a kick is worth
 (AGENTS.md "Reward design rules": if the skill is not in the rollouts,
 change the world, not the reward). Every family is scored by the identical
 terms.
+
+MEASURED, AND IT LOSES. `striker-v1` (600k decisions, 8 envs, ~30 min on a
+4-core Linux box) against the scripted `Chase` on identical seeds, via
+`eval_striker`:
+
+  1v0 solo pitch, 24 paired seeds x 300 s
+                    advance      progress      adv/kick   poss   kicks  goals  falls
+    scripted chase  0.86+-0.39   +0.42+-0.44     0.451     11.8    229    35      0
+    striker-v1      0.31+-0.20   +0.14+-0.28     0.016      5.9   2350    19     14
+    paired striker-chase: advance -0.550 m/min (t=-5.74, 22 of 24 seeds DOWN)
+
+  1v1 against a scripted chase, 36 paired seeds (24 + 12 FRESH) x 300 s,
+  reading the SWAPPED side: advance -0.068 (t=-2.57), signed progress
+  -0.26 m/min (t=-4.63) - and the sign is the finding: the scripted brain
+  carries the ball toward the goal it attacks (+0.10 m/min) and this one
+  carries it toward its own (-0.16). Both halves agree (-0.067 fresh,
+  -0.068 discovery), which is what makes it a result and not a seed.
+
+What it does, from the contact sheets (`render_striker`): it does not reach
+the ball. It drifts at ~0.04 m/s - a fifth of the walker's pace - and fires
+the kick option at whatever rate the tier allows (3612 kicks against the
+scripted brain's 116, advance per kick 0.012 m against 0.512, i.e. 43x less
+ball moved per touch). The ball simply never moves in most episodes. The
+per-kick number is the one that says so: `ballAdvance` alone would read as
+merely "a bit lower", because advance is inflated by churn and this brain is
+nothing but churn.
+
+Two failures were diagnosed and fixed along the way and both were in the
+WORLD, not the pay (the constants above carry the numbers): a kick fired
+mid-stride is the fall mode, and a kick that can re-fire immediately is a
+LOCK that stops the duck walking at all. What is left is not a reward
+problem either - the reward pays the scripted brain +6.3 an episode and this
+one about -0.5 - it is that 600k decisions of PPO over an 88-float
+observation did not find "walk to the ball, line up, kick toward the goal",
+which the scripted brain spends 900 lines being told. The next lever is the
+approach: a striker that reached the ball as often as `Chase` does
+(possession 11.8 s/min against 5.9) would be worth measuring; this one is
+not.
 """
 
 from __future__ import annotations
@@ -50,15 +88,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import gymnasium as gym
-import numpy as np
-
 import mujoco
+import numpy as np
 
 from .. import contract as C
 from ..sensors import DetectorNoise, TofNoise
 from ..world import Ball, Duck, Scenario, Wall, World
 from ..world.scenario import TOF_PRESETS
-from .brain_env import BRAIN_OBS_DIM, ObsBuilder, onnx_infer, POLICIES_DIR
+from .brain_env import BRAIN_OBS_DIM, POLICIES_DIR, ObsBuilder, onnx_infer
 from .controllers import tof_clearance_bearings
 from .runtime import Intent, Senses
 

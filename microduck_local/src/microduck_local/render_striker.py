@@ -34,7 +34,11 @@ import numpy as np
 
 from .brain import REGISTRY
 from .brain.striker import LearnedStriker, StrikerEnv, StrikerTask
-from .render_rollout import build_sheet, grid_cols, sheet_indices  # noqa: F401  (grid_cols: build_sheet's layout)
+from .render_rollout import (  # noqa: F401  (grid_cols: build_sheet's layout)
+    build_sheet,
+    grid_cols,
+    sheet_indices,
+)
 
 
 def action_of(intent) -> np.ndarray:

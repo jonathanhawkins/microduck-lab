@@ -34,8 +34,8 @@ from .. import contract as C
 from ..sensors import DetectorNoise, TofNoise
 from ..world import Box, Duck, Person, Scenario, World
 from ..world.scenario import TOF_PRESETS
-from .runtime import Senses
 from .controllers import ClosingWatch
+from .runtime import Senses
 from .tracker import Tracker
 
 POLICIES_DIR = C.MICRODUCK_RL_DIR.parent / "microduck" / "policies"
