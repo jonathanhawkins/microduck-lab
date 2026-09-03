@@ -732,6 +732,40 @@ its current intent live.
   by training and the in-world `LearnedBrain` (`brain/learned.py`), and
   the exported ONNX bakes the normalizer in, like `export-walk`.
 
+### Where the soccer track actually stands (read this before the rest)
+
+The sections below are chronological and they read like a run of wins.
+They are not. **Of everything tried at the brain tier, nothing has
+survived a confirmation on layouts it was not found on.** The list, with
+what killed each:
+
+| tried | how it died |
+|---|---|
+| poacher supporter | reversed on 12 fresh seeds (10 v 3, then 21 v 12, then 13 v 19) |
+| ball memory (`seek_s`) | dissolved over 48 seeds |
+| seven shelved knobs, re-screened | nothing came back; the one p < 0.05 was a false positive |
+| a searching head sweep | that false positive — and it makes the body turn MORE, 5/5 seeds |
+| kick cone, ToF floor ball, aimed look, head gaze | never cleared the noise |
+| two-stage line-up | loses to the shipped brain on goals, 45 v 71 over 24 seeds |
+| `lineup_lat` (that line-up made 21% faster) | first block promised +26% kicks; fresh block gave +5% |
+| **the bump-stand rule** | **the last one standing, and it failed too: −1.88 on its own 12 layouts, +0.25 on 12 fresh ones** |
+
+What *has* survived is of three kinds, and none of it is a brain idea:
+**bugs fixed** (the ToF placed hits without the head's rotation; clearance
+read by sensor column instead of by bearing), **hardware questions
+answered** (kicks scale with lens width, p < 0.001, but only if the pixels
+scale too — the shipped camera is adequate), and **measurement
+discipline** (event counts, paired reads, power, `--out`/`--tag` resume,
+and the rule that catches all of the above: confirm on seeds the effect
+was not found on).
+
+The measured reason is in "Where the run actually goes" below: **the duck
+spends 47% of a 1v1 run rotating on the spot**, at the walker's ceiling of
+0.655 rad/s, with the command range already asking for everything it has.
+A brain that decides better still has to wait for the body to point. That
+is why roadmap 3.7 was rewritten from head-pose to turn rate, and why the
+next thing worth spending a GPU on is the walker, not the brain.
+
 ### Two ducks, one ball (the soccer track's first form)
 
 `pitch` is a walled 3 × 2.5 m room with a ball in the middle and two ducks
