@@ -402,3 +402,47 @@ def test_the_chase_brain_tracks_a_ball_the_tof_sees_at_its_feet():
     off = Chase(ChaseParams(), goal=(1.5, 0.0))
     off.step(senses)
     assert off.tof_ball is None and off.tracker.best("ball", w.t, min_hits=1) is None
+
+
+def test_clearance_is_selected_by_bearing_so_a_turned_head_cannot_report_a_wall_beside_it():
+    """The ToF is IN THE HEAD: yaw it and the middle columns report whatever
+    is off to the side. `tof_clearance_bearings` picks hits by their bearing
+    in the body's heading frame instead, so a head turned off the walking
+    line reads +inf ahead - honestly blind - where the column version read a
+    wall 0.52 m ahead that was really 69 deg off the nose."""
+    import mujoco
+    import numpy as np
+
+    from microduck_local.brain.brain_env import POLICIES_DIR, onnx_infer
+    from microduck_local.brain.controllers import tof_clearance_3d, tof_clearance_bearings
+    from microduck_local.world import World, make_pitch
+    sc = make_pitch(per_side=1)
+    w = World(sc, infer_for={d.id: onnx_infer(POLICIES_DIR / "alpha_walking.onnx") for d in sc.ducks}, seed=0)
+    d = w.ducks["d0"]
+    q0 = d.adr.root_qpos
+    hx = sc.floor[0] / 2 - 0.25
+
+    def settle(head):                                   # pinned 0.40 m off the boards, facing them
+        w.data.qpos[q0:q0 + 2] = [hx - 0.40, 0.0]
+        w.data.qpos[q0 + 3:q0 + 7] = [1.0, 0.0, 0.0, 0.0]
+        mujoco.mj_forward(w.model, w.data)
+        for _ in range(60):
+            d.set_cmd(w.data, (0.0, 0.0, 0.0), head)
+            w.step()
+            w.data.qpos[q0:q0 + 2] = [hx - 0.40, 0.0]
+            w.data.qpos[q0 + 3:q0 + 7] = [1.0, 0.0, 0.0, 0.0]
+        return d.tof.last
+
+    fr = settle((0.0, 0.0, 0.0, 0.0))
+    ahead, left, right = tof_clearance_bearings(fr)
+    assert 0.25 < ahead < 0.36 and abs(ahead - float(tof_clearance_3d(fr)[3:5].min())) < 0.03   # the old range, kept
+    fr = settle((0.0, 0.0, 1.2, 0.0))                   # head 69 deg off the line
+    assert float(tof_clearance_3d(fr)[3:5].min()) < 1.1                      # the column version: a "wall" ahead
+    assert tof_clearance_bearings(fr) == (np.inf, np.inf, np.inf)            # the truth: nothing is ahead
+    # A synthetic frame carries no mount pose: the level-head columns, as before.
+    from microduck_local.sensors.tof import TofFrame
+    depth = np.full((8, 8), 2000, np.uint16)
+    depth[2:5, 0:3] = 150
+    syn = TofFrame(t=0.0, depth_mm=depth, valid=np.ones((8, 8), bool))
+    a2, l2, r2 = tof_clearance_bearings(syn)
+    assert abs(l2 - 0.15) < 1e-9 and abs(a2 - 2.0) < 1e-9 and abs(r2 - 2.0) < 1e-9

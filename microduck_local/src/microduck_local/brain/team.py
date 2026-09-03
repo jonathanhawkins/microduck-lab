@@ -104,7 +104,8 @@ def brain_kwargs(duck_spec, world, teams: dict[str, "Team"]) -> dict:
     if duck_spec.team:
         team = teams.setdefault(duck_spec.team, Team(duck_spec.team))
     hx, hy = world.scenario.floor[0] / 2 - 0.25, world.scenario.floor[1] / 2 - 0.25   # the boards sit 0.25 m in
-    out = {"goal": world.goal_for(d), "team": team, "duck_id": duck_spec.id, "bounds": (hx, hy)}
+    out = {"goal": world.goal_for(d), "team": team, "duck_id": duck_spec.id, "bounds": (hx, hy),
+           "goal_w": world.goal_width}
     # A roster with teammates plays in a crowd: the bump sense stands the
     # duck for half a second after its feet touch another body (measured,
     # 4 seeds x 300 s: 3v3 falls 5.00 -> 1.75 a run, 2v2 4.00 -> 2.25, at

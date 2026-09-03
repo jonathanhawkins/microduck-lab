@@ -363,3 +363,27 @@ def test_a_bumped_duck_stands_instead_of_turning_in_place():
     off.step(_senses(0.0, None, speed=0.0))
     out = off.step(Senses(t=0.5, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
     assert out.twist[2] != 0.0
+
+
+def test_the_kick_cone_dribbles_a_ball_that_is_too_far_out_and_shoots_from_close():
+    """`kick_cone`: the goal mouth subtends a half-angle from the ball; below
+    the threshold the plan is a push (dribble it closer), above it a kick.
+    A 0.7 m goal subtends 0.35 rad from 0.96 m out."""
+    from microduck_local.brain.tracker import Track
+    b = Chase(ChaseParams(kick_cone=0.35), goal=(1.5, 0.0), goal_w=0.7)
+    assert b.goal_cone(0.7, 0.0) > 0.35 > b.goal_cone(-0.5, 0.0)      # 0.8 m out vs 2.0
+    assert b.goal_cone(1.4, 0.0) > 1.0                                # on the line: nearly a right angle
+    off = Chase(ChaseParams(), goal=(1.5, 0.0), goal_w=0.0)
+    assert off.goal_cone(0.0, 0.0) == math.inf                        # no mouth width: never gated
+
+    def mode_at(brain, duck_xy, ball_xy):
+        odom = (duck_xy[0], duck_xy[1], 0.0)
+        rng = math.hypot(ball_xy[0] - duck_xy[0], ball_xy[1] - duck_xy[1])
+        bearing = math.atan2(ball_xy[1] - duck_xy[1], ball_xy[0] - duck_xy[0])
+        tr = Track(id=1, cls="ball", bearing=bearing, elevation=-0.3, width=0.12,
+                   range=rng, conf=0.9, born_t=0.0, last_t=0.0)
+        return brain._plan(odom, tr)[4]
+
+    assert mode_at(b, (-1.2, 0.0), (-0.9, 0.0)) == "push"             # far out: dribble
+    assert mode_at(b, (0.6, 0.0), (0.9, 0.0)) == "kick"               # close in: shoot
+    assert mode_at(off, (-1.2, 0.0), (-0.9, 0.0)) == "kick"           # gate off: shoot from anywhere

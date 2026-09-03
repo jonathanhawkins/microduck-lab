@@ -60,6 +60,38 @@ def tof_hits_3d(frame) -> tuple[np.ndarray, np.ndarray] | None:
 TRUNK_Z = 0.117                    # the standing trunk height (the ToF mount pose is trunk-relative)
 
 
+def tof_clearance_bearings(frame, ahead_half: float = 0.10, side_half: float = 0.40,
+                           zmin: float = -0.03, zmax: float = 0.5) -> tuple[float, float, float]:
+    """(ahead, left, right) body-height clearance selected by BEARING off the
+    body's nose, not by sensor column - because the sensor is IN THE HEAD.
+    A column is "ahead" only while the head looks along the walking line;
+    yaw the head and the middle columns report whatever is off to the side,
+    which the brain then stops for (measured: every head-gaze variant lost
+    kicks that way). Placed in the heading frame, a hit's bearing says where
+    it really is, so a head turned off the line simply returns +inf ahead -
+    honestly blind, rather than confidently wrong. `ahead_half` (5.7 deg)
+    matches the two middle columns of a 45 deg sensor, `side_half` (23 deg)
+    the outer three. Ranges are horizontal, which is what the walking
+    thresholds mean. Falls back to the level-head columns for a synthetic
+    frame with no mount pose."""
+    hits = tof_hits_3d(frame)
+    if hits is None:
+        cols = _column_clearance(frame.depth_mm, frame.valid, WanderParams(rows=(2, 5)))
+        return float(cols[3:5].min()), float(cols[0:3].min()), float(cols[5:8].min())
+    pts, _ = hits
+    z = pts[..., 2]
+    ok = frame.valid & (frame.depth_mm > 0) & (z > zmin) & (z < zmax)
+    v = pts - frame.mount_pos[None, None, :]                 # from the APERTURE, as the column version measured
+    bear = np.arctan2(v[..., 1], v[..., 0])                  # +left, the brain's convention
+    rng = np.where(ok, np.hypot(v[..., 0], v[..., 1]), np.inf)
+    ahead = rng[np.abs(bear) <= ahead_half]
+    left = rng[(bear > ahead_half) & (bear <= side_half)]
+    right = rng[(bear < -ahead_half) & (bear >= -side_half)]
+    return (float(ahead.min()) if ahead.size else np.inf,
+            float(left.min()) if left.size else np.inf,
+            float(right.min()) if right.size else np.inf)
+
+
 def tof_floor_ball(frame, r_max: float = 0.5, z_lo: float = -0.09, z_hi: float = -0.02) -> tuple[float, float] | None:
     """A ball-sized thing on the floor inside `r_max`, seen by the ToF:
     hits above the floor plane but below 10 cm (trunk-relative z between
@@ -514,6 +546,15 @@ class ChaseParams:
     settle_s: float = 0.4          # stand this long on the spot before the kick (robotd kicks at standing tuning)
     kick_clear: float = 0.35       # no kick with anything closer than this ahead
     aim_tol: float = 0.25          # face the kick direction within this before kicking (rad)
+    # Shoot only from inside the goal's cone. Measured on the shipped brain:
+    # 7.4 kicks a run for 0.25 kicked goals - one shot in four - and a lone
+    # shot's direction error is 28-35 deg, so a kick from far out is a
+    # lottery whatever the line-up does. With `kick_cone` > 0 a ball whose
+    # goal mouth subtends less than that half-angle is DRIBBLED instead
+    # (the push spot, walked through toward the goal), which carries it
+    # closer until the cone opens. 0.35 rad is about a metre out on a 0.7 m
+    # goal. 0 = off (kick from anywhere).
+    kick_cone: float = 0.0
     aim_max: float = 1.05          # aim at the goal only within this of the line of sight (rad)
     # The head. Level, the camera loses a floor ball ~0.3 m out. Pitched
     # by `_gaze` (a law that puts the ball on the camera's axis: measured
@@ -735,9 +776,11 @@ class Chase:
     TOF_MAX_AGE = 0.25
 
     def __init__(self, p: ChaseParams = ChaseParams(), goal: tuple[float, float] | None = None,
-                 team=None, duck_id: str = "", bounds: tuple[float, float] | None = None):
+                 team=None, duck_id: str = "", bounds: tuple[float, float] | None = None,
+                 goal_w: float = 0.0):
         self.p = p
         self.goal = None if goal is None else (float(goal[0]), float(goal[1]))
+        self.goal_w = float(goal_w)        # the mouth's width: how wide a target the ball has (kick_cone)
         self.bounds = None if bounds is None else (float(bounds[0]), float(bounds[1]))   # the pitch's half-extents inside the boards
         self.team = team
         self.duck_id = duck_id
@@ -800,6 +843,9 @@ class Chase:
             "since": round(self._senses.t - self.last_seen_t, 2)}
         out["tracks"] = self.tracker.payload(self._senses.t)
         out["chase"] = {"kicks": self.kicks, "pushes": self.pushes, "role": self.role,
+                        "bumped": round(max(0.0, self._senses.t - self._bump_t), 2) if self._bump_t > -1e8 else None,
+                        "tofBall": None if getattr(self, "tof_ball", None) is None else
+                        [round(self.tof_ball[0], 2), round(self.tof_ball[1], 2)],
                         "memory": None if self.memory is None else [round(self.memory[0], 2), round(self.memory[1], 2)],
                         "predicted": None if getattr(self, "predicted", None) is None else [round(self.predicted[0], 2), round(self.predicted[1], 2)],
                         "spot": None if self.spot is None else
@@ -836,6 +882,8 @@ class Chase:
         if self.goal is not None:
             u = math.atan2(self.goal[1] - by, self.goal[0] - bx)
             far = math.hypot(self.goal[0] - bx, self.goal[1] - by) > p.push_beyond
+            if p.kick_cone > 0 and self.goal_cone(bx, by) < p.kick_cone:
+                far = True                          # too fine a target from here: dribble it closer
         else:
             u, far = (self.attack if self.attack is not None else los), False
         if abs(_wrap(u - los)) > p.aim_max:
@@ -928,8 +976,10 @@ class Chase:
         tof = senses.fresh_tof(self.TOF_MAX_AGE)
         ahead = left_near = right_near = np.inf
         if tof is not None:
-            cols = tof_clearance_3d(tof)          # body-height things only: not the floor the head looks at, not the ball
-            ahead, left_near, right_near = float(cols[3:5].min()), float(cols[0:3].min()), float(cols[5:8].min())
+            # Body-height things only (not the floor the head looks at, not
+            # the ball), selected by bearing so a turned head cannot report
+            # a wall that is really off to the side.
+            ahead, left_near, right_near = tof_clearance_bearings(tof)
         skill = None
         head = (0.0, 0.0, 0.0, 0.0)
         gaze_at: float | None = None
@@ -1245,6 +1295,17 @@ class Chase:
             vx, wz = 0.0, 0.0                               # a body beside us: no turning in place
         self.state = "support"
         return vx, wz
+
+    def goal_cone(self, bx: float, by: float) -> float:
+        """Half the angle the goal mouth subtends from a ball at (bx, by),
+        in the odometry frame: how fine a target this shot is. +inf off a
+        pitch or without a mouth width."""
+        if self.goal is None or self.goal_w <= 0:
+            return math.inf
+        gx = self.goal[0]
+        a1 = math.atan2(-self.goal_w / 2 - by, gx - bx)
+        a2 = math.atan2(self.goal_w / 2 - by, gx - bx)
+        return abs(_wrap(a2 - a1)) / 2.0
 
     def _boards_ahead(self, odom, margin: float) -> bool:
         """The point `margin` ahead in odometry lies outside the pitch's bounds (None off a pitch: never)."""

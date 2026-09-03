@@ -446,9 +446,18 @@ function DetOverlay({ scene, client, enabled }: { scene: Scene; client: SimClien
  *  the ball track's motion as a line from where the ball is to where the
  *  brain predicts it will stop (orange — the head yaws that way and the
  *  hunt aims there), the ball memory its search would walk to (grey ring),
- *  and its line-up / push spot (teal). Every chase duck, the selected one
- *  bright; under the sensors toggle (T). */
-const MAX_CHASE = 16 * 32;
+ *  its line-up / push spot (teal), and the ball-sized blob its ToF sees on
+ *  the floor at its feet (violet — `tofBall` arrives in the duck's heading
+ *  frame, so it needs the duck's odometry pose to land here, and is skipped
+ *  without one). Every chase duck, the selected one bright; under the
+ *  sensors toggle (T). */
+const MAX_CHASE = 16 * 40;
+/** A bump is live for half a second — the window the brain stands through
+ *  instead of turning — and the ToF's floor ball gets a violet of its own,
+ *  distinct from the predicted-stop orange, memory grey and line-up teal. */
+const BUMP_LIVE_S = 0.5;
+const TOF_BALL_COLOR = "#b06cd9";
+const TOF_BALL_DIM = "#4f3162";
 function ChaseOverlay({ client, enabled }: { client: SimClient; enabled: boolean }) {
   const lines = useRef<THREE.LineSegments>(null);
   useEffect(() => {
@@ -492,6 +501,12 @@ function ChaseOverlay({ client, enabled }: { client: SimClient; enabled: boolean
         }
         if (ch.memory) ring(ch.memory, 0.06, dim ? "#3d4450" : "#9aa5b1", 8);
         if (ch.spot) ring([ch.spot[0], ch.spot[1]], 0.04, dim ? "#1f5a55" : "#43c2b8", 8);
+        // The ToF blob is a bearing/range off the duck's nose; the overlay
+        // is odometry-frame, so it only lands with a pose to hang it on.
+        if (ch.tofBall && d.odomEst) {
+          const a = d.odomEst[2] + ch.tofBall[0], r = ch.tofBall[1];
+          ring([d.odomEst[0] + r * Math.cos(a), d.odomEst[1] + r * Math.sin(a)], 0.03, dim ? TOF_BALL_DIM : TOF_BALL_COLOR, 8);
+        }
       }
     }
     (ls.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
@@ -1208,6 +1223,32 @@ export default function SimViewer() {
                       {selDuck.brain.inputs.chase.predicted ? ` · ball → ${selDuck.brain.inputs.chase.predicted[0].toFixed(2)}, ${selDuck.brain.inputs.chase.predicted[1].toFixed(2)}` : ""}
                       {selDuck.brain.inputs.chase.memory ? ` · memory ${selDuck.brain.inputs.chase.memory[0].toFixed(2)}, ${selDuck.brain.inputs.chase.memory[1].toFixed(2)}` : ""}
                     </span>
+                    {selDuck.brain.inputs.chase.bumped !== undefined && (
+                      <>
+                        <span>bump</span>
+                        <span
+                          style={{ color: selDuck.brain.inputs.chase.bumped !== null && selDuck.brain.inputs.chase.bumped < BUMP_LIVE_S ? "#ffd166" : "#9aa5b1" }}
+                          title="how long since this duck's feet last touched another duck or a person — the contact list here, the IMU and the servo loads on the robot. Inside half a second it stands instead of turning in place."
+                        >
+                          {selDuck.brain.inputs.chase.bumped === null
+                            ? "never"
+                            : selDuck.brain.inputs.chase.bumped < BUMP_LIVE_S
+                              ? `● being bumped · ${selDuck.brain.inputs.chase.bumped.toFixed(2)} s`
+                              : `${selDuck.brain.inputs.chase.bumped.toFixed(1)} s ago`}
+                        </span>
+                      </>
+                    )}
+                    {selDuck.brain.inputs.chase.tofBall && (
+                      <>
+                        <span>tof ball</span>
+                        <span
+                          style={{ color: TOF_BALL_COLOR }}
+                          title="a ball-sized blob the 8×8 ToF sees on the floor at the duck's feet, in its heading frame — the last 30 cm the head camera loses a floor ball in. Drawn as a violet ring on the floor; not fed to the brain as a ball (a blob at the feet is as often the other duck's foot)."
+                        >
+                          {(selDuck.brain.inputs.chase.tofBall[0] * 57.3).toFixed(0)}° · {selDuck.brain.inputs.chase.tofBall[1].toFixed(2)} m
+                        </span>
+                      </>
+                    )}
                   </>
                 )}
               </div>

@@ -117,8 +117,19 @@ export interface BrainInputs {
   tracks?: { id: number; cls: string; name: string; bearing: number; range: number; hits: number; age: number; xy?: [number, number]; vel?: [number, number] }[];
   /** A chase brain's plan, in its odometry frame: where it predicts the
    *  ball will stop (it looks and hunts that way), the ball memory its
-   *  search walks to, and its line-up / push spot. */
-  chase?: { kicks: number; pushes: number; role: string; memory: [number, number] | null; predicted: [number, number] | null; spot: [number, number, string] | null };
+   *  search walks to, and its line-up / push spot.
+   *
+   *  Two signals about its own body ride along. `bumped` is how long ago
+   *  (s) its feet last touched another duck or a person — the contact list
+   *  here, the IMU and the servo loads on the robot; null until it ever
+   *  happens. Under half a second the duck is being bumped, and it stands
+   *  instead of turning in place (3v3 falls: 5.00 → 1.75 a run). `tofBall`
+   *  is a ball-sized blob the 8×8 ToF sees on the floor at its feet,
+   *  [bearing, range] in the duck's HEADING frame (+left, metres) — the
+   *  blind last 30 cm the head camera loses a floor ball in. It is measured
+   *  OFF as a ball source for the brain (a blob at the feet is as often the
+   *  other duck's foot) and computed either way. */
+  chase?: { kicks: number; pushes: number; role: string; memory: [number, number] | null; predicted: [number, number] | null; spot: [number, number, string] | null; bumped?: number | null; tofBall?: [number, number] | null };
 }
 export interface SimDuck {
   id: string;
