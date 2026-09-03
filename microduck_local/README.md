@@ -390,11 +390,27 @@ its current intent live.
   world. `follow-v4` is the first brain TRAINED in it; v1–v3 are scored in
   it but were trained before it.
 
-  Measured on identical follow-me episodes, in band / in sight under the
-  datasheet and hostile presets. **240 episodes a cell** (24 episodes x 10
-  eval seeds) — the whole table is one sample, six seeds deeper than the
-  12-episode figures it replaces, which moved some cells by up to 0.04 and
-  narrowed the seed spread to +-0.02..0.04:
+  Measured on identical follow-me episodes (12, the pinned model) with
+  the **polite person that is now the benchmark's default** — it stops
+  0.55 m centre to centre short of a duck in its way and steps around
+  after 2.5 s; every row has zero contact and no falls — in band / in
+  sight under the datasheet and hostile presets:
+
+  | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
+  |---|---|---|---|---|
+  | `follow-v4` (retrained on the legs detector) + reflex tier | 0.91 / 1.00 | **0.92** / 0.94 | 0.88 / 0.91 | **0.90** / 0.91 |
+  | `follow-v2` + reflex tier | **0.92 / 1.00** | 0.85 / 0.90 | 0.90 / 0.97 | 0.85 / 0.94 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.90 / 1.00 | 0.82 / 0.91 | **0.91** / 0.99 | 0.86 / 0.91 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.86 / 0.96 | 0.77 / 0.93 | 0.85 / 0.96 | 0.79 / 0.94 |
+  | scripted `follow` + reflex tier | 0.76 / 0.97 | 0.67 / 0.91 | 0.76 / 0.93 | 0.68 / 0.89 |
+
+  v4 leads under hostile noise by 0.07 and on the hostile variety cell by
+  0.04; on the clean preset v2 and v4 are level. The capsule that walks
+  through the duck (`--polite 0`) had capped every band for a reason
+  that has nothing to do with following; measured with it, and much
+  deeper — **240 episodes a cell** (24 episodes x 10 eval seeds), six
+  seeds deeper than 12-episode figures, which moved some cells by up to
+  0.04 and narrowed the seed spread to +-0.02..0.04 — the table is:
 
   | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
   |---|---|---|---|---|

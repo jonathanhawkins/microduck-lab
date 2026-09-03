@@ -76,7 +76,11 @@ the tree, and Track 12 has its first working loop:
   and 0.72 / 0.57 (`follow-v1`, version-1 observation, scored in the world
   it was trained in) under the datasheet / hostile presets against the
   scripted controller's 0.48 / 0.41; in sight 0.95 / 0.87, 0.96 / 0.87,
-  0.95 / 0.88, 0.94 / 0.88 vs 0.83 / 0.74. Re-measured at 240 episodes a
+  0.95 / 0.88, 0.94 / 0.88 vs 0.83 / 0.74 — measured with the capsule
+  that walks through the duck; with the polite person that is now the
+  benchmark's default (stops short, steps around; zero contact) the
+  bands are 0.91 / 0.92 (v4), 0.92 / 0.85 (v2), 0.90 / 0.82 (v3), 0.86 /
+  0.77 (v1) vs 0.76 / 0.67 at 12 episodes. Re-measured at 240 episodes a
   cell (24 x 10 eval seeds), which moved some of the earlier 12-episode
   cells by up to 0.04. v4 leads every cell — 9/10 eval seeds on the
   datasheet preset, 10/10 under hostile noise — and is the first learned
