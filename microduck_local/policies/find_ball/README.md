@@ -29,6 +29,24 @@ turning (2/40 in the battery,
 fall-free choice is the s4 recipe (no turn term), which found 30% of back
 balls; retrain longer before putting either near a real duck.
 
+## `policy_s4_pre_turn_term.onnx` — the A/B baseline
+
+The stage-4 export: identical recipe minus `turn_to_belief`, and with the
+old three-band gaze coverage. It is here because `docs/roadmap.md` queues an
+A/B of that term and this is its "before" arm — the container it was trained
+in is ephemeral, and regenerating it means rerunning the whole chain.
+
+| ball starts | found | time to first sight (median) | falls |
+|---|---:|---:|---:|
+| front | 100% | 0.03 s | 0 |
+| side | 85% | 0.62 s | 0 |
+| back | 30% | 3.16 s | 0 |
+
+Read against `policy.onnx` (s5) it is the whole trade the term bought: back
+found rate 30% → 60% and median 3.16 s → 0.94 s, at the cost of the chain's
+only falls (0 → 2 per 40). Which way that trade should go is the open
+question. Delete this file once the A/B has answered it.
+
 To seat it in the lab as a run: `cp -r policies/find_ball runs/find_ball`
 (the palette lists `run:find_ball`); to look at it:
 `uv run render-rollout --policy policies/find_ball/policy.onnx --out /tmp/rr-fb`.
