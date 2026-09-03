@@ -122,7 +122,7 @@ class TidyParams:
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
     hold_blind_m: float = 0.12         # ToF returns closer than this while holding are the toy in the beak
-    scan_wz: float = 1.0               # the shipped walker barely turns in place below 1.0
+    scan_wz: float = 1.0               # below 1.0 a COLD walker does not turn at all (exactly 0, both ways)
     explore_s: float = 6.0             # wander this long after an empty scan
     min_conf: float = 0.1              # a tracked detection needs no more than this (see _trusted)
     # Odometry drift (roadmap 1.7): every estimate here lives in the odometry
@@ -705,11 +705,18 @@ class Tidy:
                 self._enter("backoff", t)
 
         elif self.state == "backoff":
-            # The walker cannot walk backwards (measured: -0.3 m/s commanded,
-            # 4 mm moved in 2 s), and turning in place drifts under 2 cm, so
-            # leaving the rim is a left sidestep, a left turn-around on the
+            # Leaving the rim is a left sidestep, a left turn-around on the
             # spot and a short straight walk. Scanning right at the rim once
             # put a foot on it.
+            #
+            # This was justified by "the walker cannot walk backwards", and
+            # THAT WAS WRONG: -0.3 m/s is the dead band's inside, and -0.40
+            # backs up at 0.23 m/s (`walker-facts`, `gait.back_up`). A
+            # straight reverse clears 0.30 m of separation in a median 1.6 s
+            # against this sequence's ~7 s, so `backoff` is the first place
+            # to spend the new fact. Not changed here because the sequence is
+            # what the tidy benchmark's fall and tether rows were measured
+            # on, and swapping it re-opens both: it needs its own A/B.
             if self._prev_yaw is not None and self.scan_turned < p.backoff_turn:
                 d = odom[2] - self._prev_yaw
                 self.scan_turned += math.atan2(math.sin(d), math.cos(d))

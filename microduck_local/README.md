@@ -441,10 +441,47 @@ its current intent live.
   detector also hands out true names; the tracker keeps them for the tools,
   its ids are its own.
 - `brain/gait.py` holds the **walker facts every brain shares** (measured
-  with `walker-facts`): it does not walk backwards, a right turn from a
-  standstill never starts and a left one sometimes does not, so a cold
-  turn gets a 0.2 m/s forward kick that is dropped as soon as the body is
-  turning. `GaitWatch` decides "cold" from odometry, never from the intent.
+  with `walker-facts`): from a standstill NO turn starts below the full
+  ±1.0 command — not a weak turn, an exactly zero one, in both directions —
+  so a cold turn gets a 0.2 m/s forward kick that starts the gait and is
+  dropped as soon as the body is turning. `GaitWatch` decides "cold" from
+  odometry, never from the intent. **And it walks backwards, faster than it
+  walks forwards** — see below.
+- **A locomotion "fact" that was a dead band, and cost three brains a
+  workaround each.** `gait.py` said "it does not walk backwards (a -0.3 m/s
+  command moves 4 mm in 2 s)" and every brain believed it: `tidy.py` leaves
+  a rim with a ~7 s sidestep-turn-around-walk, the chase brain retreats by
+  turning away, and the line-up gives up on any pre-spot behind the duck.
+  The measurement was right and the fact was wrong — **-0.3 is the inside
+  of a dead band**. One notch past it:
+
+  | vx command | −0.40 | −0.35 | −0.30 | −0.25 | +0.20 | +0.25 | +0.30 | +0.40 |
+  |---|---|---|---|---|---|---|---|---|
+  | steady m/s | **−0.23** | **−0.20** | −0.00 | +0.00 | −0.00 | +0.11 | +0.13 | +0.19 |
+
+  The walker reverses at 0.23 m/s — **faster than it moves in any other
+  direction**, on an empty floor, over six start headings, with no falls.
+  The turn is the same shape: cold, every |wz| below 1.0 is exactly zero
+  and so is −1.0, while warm the rate is roughly linear (0.15 / 0.28 /
+  0.47 / 0.61 rad/s at +0.25…+1). And `TURN_KICK = 0.2` is inside the
+  forward dead band as well: it starts the gait for a cold turn, but a
+  brain that "walks" at 0.2 moves 9 mm in 6 s.
+
+  Three things came out of this beyond the numbers. `walker-facts` now
+  **sweeps the command ranges** instead of sampling one value each
+  (`command_deadbands()`), on an empty floor — `make_room`'s 3.0 × 2.5 m
+  room with four boxes cannot hold the 1.3 m a 6 s reverse covers, so
+  measuring the gait in it measures the boxes, which is how the first
+  re-measurement of this came out wrong too. `gait.back_up()` hands out a
+  reverse clamped past the dead band's edge, because a brain that politely
+  asks for −0.3 gets 4 mm and no error. And `tests/test_walker_facts.py`
+  locks the edge as well as the inside, so the next walker that changes
+  this breaks a test instead of a benchmark six months later. **The general
+  rule: a locomotion limit read off a single command value is a reading of
+  the dead band, not of the robot.** The brains still use their old
+  workarounds — swapping `tidy`'s backoff re-opens the fall and tether rows
+  it was measured on, so that is its own A/B, not a drive-by.
+
 - **Odometry drift** (roadmap 1.7): the `(x, y, yaw)` a brain gets is dead
   reckoning — a per-run distance scale, a gyro bias, per-step noise — under
   the same `ideal` / `datasheet` / `hostile` presets (`Duck.odom`, the
@@ -859,7 +896,9 @@ with **0.75 falls against 0.38** — the deliberate bump scores no more
 than the accidental one and falls twice as often; and a **ball memory**
 (`seek_s`: the centre spot at a kickoff, every fresh sighting, the end
 of a hunted line, walked to before the circle) at 2.38 goals, 7.8 kicks
-and 0.75 falls — the goals did not move and the blind walks fell. For
+and 0.75 falls — the goals did not move and the blind walks fell. (Both
+were re-screened later on fresh seeds with the continuous metrics, and
+neither came back: "The shelf, re-screened", below.) For
 the rosters (4 seeds): with the hunt and the circle off, 2v2 1.00 goals,
 8.8 kicks, 3.50 falls and 3v3 0.75 / 7.0 / 3.75 against 1.50 / 9.8 /
 3.50 and 1.50 / 5.0 / 4.50 with them on — more goals with them in both,
@@ -917,7 +956,75 @@ its event counts**, and a difference that does not clear them is written
 as "no effect measured", not as a result. Several rows in earlier
 revisions of this file did not clear them and have been demoted.
 
-**A wider lens, as a hardware question — the one clear win.** The
+**So the benchmark grew two continuous metrics** (`world/metrics.py`,
+re-exported by `eval_pitch`; both accumulated per team at the 50 Hz
+control tick). Goals are ~2.5 a run and no amount of care in the
+reporting fixes that; what the ducks do thousands of times a run is
+*reach the ball* and *move it*:
+
+- **`possession`** — seconds a minute the duck nearest the ball is ours
+  and within `POSSESSION_R` = 0.25 m (about twice the kick spot's 0.12 m,
+  and inside the 0.40 m at which the chase brain starts avoiding the
+  other duck). No carry: one of ours was on the ball or it was not.
+  `possessionWide` runs the same clock at 0.40 m as a robustness check.
+- **`ballAdvance`** — metres a minute of the ball's displacement toward
+  the goal the team attacks, summed over the ticks that team is in
+  control, control persisting `CARRY_S` = 2 s past the last touch so a
+  kick's roll counts for the kicker. **`ballProgress`** is the same sum
+  *signed*, so a team that shoves the ball back toward its own goal is
+  charged for it. Attributing per possession is what keeps the signed sum
+  from telescoping into "goals in disguise": summed over a whole run and
+  both teams it collapses to the ball's net start-to-end position, which
+  after every kickoff recentring is goals again, with goals' variance.
+
+Measured 16 seeds an arm (two independent 8-seed batteries that agree),
+with each metric's coefficient of variation and the seeds ONE ARM needs
+to resolve a 25% shift at p < 0.05 and 80% power — the metric's own
+noise, with the size of that particular contrast divided out:
+
+| metric | CV | seeds for a 25% shift | r with goals (32 runs) |
+|---|---|---|---|
+| goals | 0.76 | **146** | — |
+| kicks | 0.49 | 62 | 0.30 [−0.06, +0.59] |
+| falls | 1.22 | **376** | 0.07 [−0.29, +0.40] |
+| `ballAdvance` | 0.40 | **43** | **0.50 [+0.19, +0.72]** |
+| `possession` | 0.16 | **9** | 0.33 [−0.02, +0.61] |
+| `possessionWide` | 0.11 | 6 | 0.23 [−0.13, +0.53] |
+| `ballProgress` (run total) | 4.20 | — | 0.11 [−0.25, +0.44] |
+
+So `ballAdvance` is the discriminator — the only metric here, `kicks`
+included, whose association with goals is resolved away from zero, at
+about a third of goals' seeds — `possession` is the cheap screen that
+says two variants differ *at all*, and goals stay reported and stop being
+the judge. Nine seeds against a hundred and forty-six is the difference
+between a screen that runs in an afternoon and one that never runs.
+
+**Never quote `ballAdvance` alone.** It keeps only the forward part of
+each step, so anything that makes the ball move MORE scores higher on it
+without moving the ball anywhere, and that caught a wrong conclusion the
+day the metric shipped: the attacker-claim fix below raised advance
+**+0.18 ± 0.06 (2.9 σ)** with kicks +64%, while signed `ballProgress`
+stayed **flat (−0.003 ± 0.136, 0.0 σ)** and the advance PER KICK
+**halved, 0.202 → 0.106**. The ball moved more and got no nearer the
+goal. Read advance, signed progress and advance-per-kick together or
+read none of them — and for any new metric, ask first which cheap
+behaviour maximises it.
+
+**The `left` / `right` keys of a row are goal MOUTHS, not team scores**
+(documented, not renamed): `World._check_goal` files a ball crossing at
++x under `right`, and `World.goal_for` sends the LEFT team at +x, so a
+row's `right` count is what the left team scored. Run totals are
+unaffected — the failed replications below compared totals between arms
+of identical brains — but every per-side reading is inverted if it is
+missed, and reading it the natural way flipped the sign of a whole
+correlation table here before it was caught.
+
+The lab ticks the same `PitchMetrics` on its own step, so the /sim pitch
+panel shows the three per-team rates live (the signed one in red when a
+team is losing ground) and a number on the page is the number the battery
+reports.
+
+**The camera, as a hardware question — three batteries, one answer.** The
 detector's field of view is one constant (`DetectorSpec.fov_h_deg`,
 62° × 48° as shipped — an assumption about a Pi-camera-class module), so
 the sim can price a wide-angle camera. It has to price it *honestly*:
@@ -927,8 +1034,9 @@ over 62°, so a wider lens on the same sensor must find small distant
 things *less* often. They are derived from pixels per radian now
 (exactly unchanged at the shipped lens, verified bit-identical), which
 costs 120° a duck at 3.9 m — found 73 times in 400 against 260 at 62°.
-Paying that, over 8 seeds × 300 s of 1v1 against a 51-kick, 19-goal,
-1-kicked-goal baseline:
+The first battery is soccer, where the wide lens wins: paying that gate,
+over 8 seeds × 300 s of 1v1 against a 51-kick, 19-goal, 1-kicked-goal
+baseline:
 
 | lens | kicks | goals | kicked goals | falls |
 |---|---|---|---|---|
@@ -943,10 +1051,10 @@ and spends its run playing instead of searching. Goals do not follow
 (22 against 19 is noise), and kicked goals only hint at it (6 against 1,
 p = 0.13).
 
-**Then the same lens was pointed at the tidy task, and it lost.** Soccer
-wants a wide view of a big orange ball; tidying wants to resolve a 3 cm
-brick across a room, and the honest size gate takes that away. 24 seeds a
-lens, paired on the same layouts, `--toys 6`:
+**The second battery pointed the same lens at the tidy task, and it
+lost.** Soccer wants a wide view of a big orange ball; tidying wants to
+resolve a 3 cm brick across a room, and the honest size gate takes that
+away. 24 seeds a lens, paired on the same layouts, `--toys 6`:
 
 | lens, same 320 px | tidied | vs shipped, per seed |
 |---|---|---|
@@ -967,13 +1075,29 @@ into "bump into things": scanning goes from 8% of the run to 40%, and at
 0.42 m before any release), grasp success is unchanged (0.87 vs 0.85),
 falls are identical (8 vs 8), and release accuracy is if anything better.
 
-So the recommendation is **not** "buy a wide lens", it is **buy
-resolution**: at 640 px the 120° lens tidies within the noise of the
-shipped one, because 305 px/rad is what the shipped 62°/320 px frame
-already had. Field of view is what soccer wanted; pixels per radian is
-what the robot actually needs, and `DetectorSpec.px_h` is the knob that
-says so. A 320 px sensor spread over 120° is a downgrade wearing a
-wide-angle badge.
+**Then the third battery: more pixels at the lens the robot already
+has.** 62° on a 640 px sensor is 591 px/rad against the shipped 296, the
+size gate halving with it, and it buys **nothing**. Soccer, 12 seeds
+paired against the same baseline: possession 17.5 → 17.0 s/min
+(−0.49 ± 0.70, p = 0.50), `ballAdvance` +0.74 → +0.64 m/min
+(−0.10 ± 0.10, p = 0.36), signed progress −0.01 → −0.06 m/min, 28 goal
+events against 26 and 71 kicks against 97 (kicks −2.17 ± 1.15, p = 0.09 —
+if anything fewer). Tidying, the same 12 layouts as the shipped lens:
+0.917 against 0.875 (66 of 72 toys against 63), +0.25 toys a seed, better
+on 5 seeds and worse on 2 — inside the noise on the cheap screen and on
+the discriminator both.
+
+So the whole recommendation, as one finding: **the shipped camera is
+adequate, and what breaks it is widening the lens without adding pixels.**
+Doubling the resolution at 62° changes neither task; spreading the same
+320 px over 120° takes the tidy rate from 0.889 to 0.632 (worse on 24 of
+24 seeds, sign p = 1e-7); and 120° on 640 px — 305 px/rad, which is what
+the shipped 62°/320 px frame already had — tidies back inside the shipped
+lens's noise. The variable is pixels per radian, and `DetectorSpec.px_h` is the
+knob that says so. A wide lens is worth buying only WITH the sensor to
+pay for it, and then what it buys is the soccer contact above, not a
+robot that sees better. A 320 px sensor spread over 120° is a downgrade
+wearing a wide-angle badge.
 
 **Shooting only from inside the goal's cone — no effect measured.** One
 shot in four scores, and a lone shot's direction error is 28–35°, so the
@@ -1002,7 +1126,10 @@ what it then sees. That last part was a real bug and is fixed
 aimed look gives 61 kicks and 21 goals against a 51-kick, 19-goal
 baseline, which does not clear the noise either. All three ship off
 behind their flags — on the evidence that nothing has yet shown them
-helping, not on evidence that they hurt.
+helping, not on evidence that they hurt. All three were re-screened on
+12 fresh seeds with `possession` and `ballAdvance` ("The shelf,
+re-screened", below); the sweeping head is the false positive in that
+table.
 
 **Clearance by bearing, not by sensor column.** The ToF is *in the
 head*, so calling the middle columns "ahead" only holds while the head
@@ -1032,7 +1159,8 @@ camera has none (`tof_ball_m`), it measured **1.62 goals, 8.1 kicks,
 0.75 falls a run against 2.38 / 7.4 / 0.38**: a blob at the feet is as
 often the other duck's foot as the ball, and a line-up on a foot is a
 fall. The detector stays for the page and for a pitch with one duck on
-it.
+it, and the knob was re-screened on 12 fresh seeds below without coming
+back.
 
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where
@@ -1048,7 +1176,8 @@ kicks, 4.75 falls a run (0.79 per duck)** on a pitch that grows 0.4 ×
 (0.25 → 0.69 → 0.79) as the avoid and retreat rules fire against three
 bodies at once, and the supporters' spots overlap the opponents'
 attackers. The next form is positional play — supporters that mark
-rather than shadow — and a scoreboard that counts possession.
+rather than shadow. The scoreboard that counts possession exists now
+(`world/metrics.py`, above); positional play does not.
 
 **3v3 falls, traced** (3 seeds × 300 s, 14 falls): 10 were supporters
 turning in place with a teammate 5–28 cm away or against the boards —
@@ -1085,6 +1214,52 @@ walking turn bumps what it cannot see. What a crowded pitch needs is a
 sense of the bodies beside the duck — a wider ToF field, or the bump the
 IMU could read — before any rule can act on them.
 
+**The attacker claim is a predicted TIME to the ball, not a distance**
+(`brain/team.py`). Traced, the role churned: it changed hands **14.0
+times a duck a run** with a **median tenure of 4.30 s**, a fifth of the
+spells lasted under a second, and the duck the board called the attacker
+was the team's actually-nearest one only **56.1%** of the time. A
+straight line was wrong in three ways the trace named. It **ignores the
+turn** — this walker turns in place at ~0.7 rad/s once the gait is going
+and walks at 0.45 m/s (`walker-facts`, `ChaseParams.speed`), so a duck
+facing away at 0.4 m is 4.7 s from the ball and one facing it at 0.6 m is
+1.0 s, and the line sent the second one back to its support spot. It read
+**losing sight as resignation** — the chase brain claims `inf` when its
+track goes cold, and the level camera loses a floor ball inside 0.3 m,
+which is exactly where an attacker lines up, so the duck ON the ball
+handed the role to one a metre away and walked off. And **a stale claim
+competed on equal terms**. The cost is now a predicted time built from
+those measured walker facts; a duck that cannot see the ball is costed
+off the board's freshest fix plus `blind_s`; age is priced at `age_rate`
+a second and stops counting past `stale_s`; and the role moves only for a
+challenger `switch_s` = 0.6 s quicker held `hold_s` = 1.2 s continuously,
+unless it is `give_up_s` = 2.0 s quicker (the incumbent is out of the
+play — fallen, or the ball kicked past it).
+
+Measured over 6 seeds × 300 s of 3v3, **516 attacker spells against
+365**, and replicated on three seeds it was not tuned on: **handovers
+14.0 → 9.8 a duck a run, median tenure 4.30 → 6.96 s**, spells under a
+second 21.3% → 10.4%, **the attacker really the nearest duck 56.1% →
+68.2%** and really the quickest 68.4% → 79.3%.
+
+**What it does not do, stated plainly.** It does not improve the play:
+over 16 paired seeds kicks rose 64% and `ballAdvance` +0.18 ± 0.06 (2.9
+σ), but that metric keeps only forward motion and churn inflates it —
+signed `ballProgress` is **flat** (−0.003 ± 0.136, 0.0 σ), advance per
+kick **halved** (0.202 → 0.106) and possession is down 13%. The ball
+moves more and gets no nearer the goal. And it does not fix the crowding
+the defect report opened with: nobody within 0.3 m of the ball 41.2% →
+40.9%, two teammates inside 0.5 m of it 24.5% → 23.7%. Role churn was not
+what kept six robots off the ball. Aiming the claim at an intercept
+(`lead_max_s`: ball velocity plus lead) was measured **worse**, not
+merely unhelpful — 18.2 handovers a duck a run against 12.3, a median
+spell of 3.0 s against 5.8, 31% of spells under a second against 13%,
+over the 3 seeds the hysteresis was swept on — because the board's
+velocity is differenced from fixes a walking duck drags between frames;
+it ships at 0. So this change stands on role stability and correctness,
+measured on hundreds of events and replicated, and claims nothing about
+the score.
+
 **A bump sense** (`Senses.bumped`), and a lesson about four seeds. The
 World reads its contact list — in the walk scene only the feet carry
 collision geometry, so a bump is feet touching feet, which is what a
@@ -1093,26 +1268,37 @@ chase brain that has been bumped stands instead of turning in place for
 `bump_stand_s`. Over 4 seeds × 300 s it looked decisive — 3v3 falls 5.00 →
 1.75 a run — and **that number did not replicate**: the same rule over
 twelve seeds gives 3.17 and over twelve others 4.17. So it was measured
-properly, the rebuilt rule against no rule at all, **24 paired seeds over
-two batteries, 219 fall events**:
+properly, the rebuilt rule against no rule at all, on **twelve fresh
+layouts, 219 fall events** — and then measured *again* on the same twelve,
+which is where the honest number comes from. **Two batteries over the same
+twelve seeds are twelve layouts measured twice, not 24 seeds**, so they
+average per layout rather than pool:
 
-| 3v3, 24 paired seeds | no rule | rule at 0.5 s | |
+| 3v3, 12 layouts (2 batteries each) | no rule | rule at 0.5 s | |
 |---|---|---|---|
-| **falls a run** | 5.50 | **3.62** | −1.88 ± 0.67, **p = 0.012**, better on 16/24 |
+| **falls a run** | 5.50 | **3.62** | −1.88 ± 0.84, p = 0.055, better on 10/12 |
 | kicks a run | 7.00 | 6.88 | −0.12 ± 1.04, p = 0.94 |
 | goals a run | 1.54 | 1.08 | −0.46 ± 0.27, p = 0.14 |
 
-**A third fewer falls, and it costs no kicks** — the first soccer result
-here measured at a size that can carry its own weight. It is a third, not
-the half the four-seed battery promised, which is the usual shape of an
-honest re-measurement. The goals dip is the one caveat and is unresolved:
-goals need ~146 seeds to call a shift this size, so it is neither a real
-cost nor a refuted one. The rule ships on for rosters
+The batteries alone give −1.58 ± 0.92 (p = 0.14) and −2.17 ± 1.01
+(p = 0.060): the rule is ahead in both, by about the same amount, and
+neither clears 0.05 on its own. Pooling the two as 24 independent seeds
+would say −1.88 ± 0.67, p = 0.012 — **that is repeated measures, not
+replication**, and it is the error this README warns about elsewhere. A
+third fewer falls, consistent across two independent measurements of the
+same twelve layouts and costing no kicks, is the claim the data supports;
+"p < 0.05" is not, until it is confirmed on layouts nobody has run
+(a battery on seeds 200–211 is what settles it). The goals dip is
+unresolved either way: goals need ~146 seeds to call a shift this size, so
+it is neither a real cost nor a refuted one. The rule ships on for rosters
 (`team_bump_stand_s`, applied by `brain_kwargs`) and off for a lone
-attacker, where it measured worse on both counts. (Those two batteries
-predate `ballAdvance` / `possession`, so their rows carry falls and kicks
-only; falls is a direct high-count measure and does not need the ball
-metrics, but a re-run would add them.)
+attacker, where it measured worse on both counts. (The second battery
+carries `ballAdvance` / `possession` and they say the falls are not bought
+with the ball: possession 27.91 → 26.96 s/min (−0.95 ± 1.32, p = 0.47),
+`ballAdvance` +0.74 → +0.68 m/min (−0.07 ± 0.12, p = 0.58), signed
+progress −0.57 → −0.41 (+0.16 ± 0.19, p = 0.42) — every one of them flat
+over its twelve seeds. Falls is a direct high-count measure and does not
+need the ball metrics anyway.)
 
 Its first form did have a real defect, found by tracing 838 bumps, and
 the trace is worth more than the numbers above. The obvious premise — two
@@ -1139,6 +1325,55 @@ against 12 over twelve. On twelve seeds nobody had looked at, it
 The middle battery was never independent — it contained the four seeds
 the effect was found on. `support_mode="ahead"` stays as the record of
 it.
+
+**The shelf, re-screened — and nothing came back.** Most of the knobs in
+the index at the top of `ChaseParams` ship off on differences that never
+cleared the noise: "measured off" meant "not shown to help", and they were
+judged on goals at 8 seeds, which resolves nothing. `possession` resolves
+a 25% shift in 9 seeds, so re-screening them is an afternoon. Seven
+knobs and a baseline, eight batteries of **12 seeds × 300 s of 1v1 each,
+on seeds 40–51 — fresh ground, and the same seeds for every arm so every
+reading is paired** — the baseline run interleaved in the same window on
+the same code (2.17 goals, 8.08 kicks, 0.67 falls a run; possession
+17.50 s/min, signed progress −0.01 m/min, advance +0.74 m/min, 0.091 m of
+advance per kick):
+
+| knob (what it is) | possession Δ (s/min) | signed progress Δ (m/min) | advance Δ (m/min) | advance / kick | kicks Δ (a run) |
+|---|---|---|---|---|---|
+| `predict_s` 3.0 (head gaze at the predicted ball) | +2.04 ± 1.69 (p = 0.25) | +0.01 | +0.00 | 0.091 → 0.083 | +0.83 |
+| `look_aim` (the look after a kick aims by the kick map) | +0.21 ± 1.41 (p = 0.88) | +0.07 | +0.01 | → 0.105 | −1.00 |
+| `search_sweep` 1.4 (a searching head that sweeps ±1.4 rad) | **+3.75 ± 1.21 (p = 0.010)**, up on 10/12 | +0.11 | −0.01 | → 0.073 | +1.83 |
+| `tof_ball_m` 0.5 (the ToF's ball at the feet) | +1.83 ± 1.81 (p = 0.33) | +0.21 | +0.17 | → 0.118 | −0.33 |
+| `seek_s` 8.0 (a ball memory the search walks to) | +1.68 ± 1.85 (p = 0.38) | +0.34 ± 0.29 (p = 0.26) | +0.26 | → 0.148 | −1.33 |
+| `two_stage` (the two-stage line-up) | −3.47 ± 1.98 (p = 0.11) | +0.04 | −0.24 ± 0.10 (p = 0.034) | → 0.163 | **−5.00 (p < 0.001)** |
+| `push_beyond` 1.4 (deliberate dribbling) | +2.30 ± 1.86 (p = 0.24) | +0.12 | −0.04 | → 0.136 | −2.92 (p = 0.047) |
+
+**The one arm that cleared p < 0.05 is the instructive row, and it is a
+false positive.** The head sweep took possession from 17.50 to 21.25
+s/min — +3.75 ± 1.21, p = 0.010, up on 10 of 12 seeds — and every reading
+churn cannot inflate says *worse*: `ballAdvance` −0.01 (flat), advance per
+kick 0.091 → 0.073, goals 2.17 → 1.17 a run (−1.00 ± 0.52) and falls 0.67
+→ 1.67 (+1.00 ± 0.49, 8 events against 20). A duck whose head sweeps
+stays near the ball and does less with it, which is precisely what
+possession pays for. That is the metric working as designed — it detected
+a real behavioural difference — and it is why possession is the screen and
+never the verdict. Seven arms tested at p < 0.05 also carry a
+30% chance of throwing at least one "significant" result from nothing at
+all; this is what one looks like from the inside.
+
+**Ball memory, the last candidate: dead at 48 seeds.** `seek_s` was the
+only arm whose signed progress looked like anything (+0.34 on the twelve
+discovery seeds), so it was carried onto fresh ground twice: **+0.20 over
+the next twelve seeds, then −0.11 over the twenty-four after that.**
+Pooled over all 48 paired seeds: **+0.08 ± 0.10, p = 0.45, up on 25 of
+48** — a coin flip. It never reversed the way the poacher did; it
+dissolved, which is what a null effect looks like when seeds keep being
+added to it. (Run together with `tof_ball_m` on the second twelve, the
+pair measured worse than either alone: −0.13 m/min of signed progress
+against the baseline's −0.05.) **Nothing on the shelf was rehabilitated**,
+and every knob above still ships off — now on a paired 12-seed reading
+with a metric that could have found an effect, which is a different and
+better kind of "off" than the one they had before.
 
 ### Tidy the playroom (roadmap Track 12)
 

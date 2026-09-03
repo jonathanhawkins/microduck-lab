@@ -1,13 +1,26 @@
 """What every brain needs to know about the reflex walker underneath it —
 measured on the shipped `alpha_walking` (`uv run walker-facts`):
 
-- it does not walk backwards (a -0.3 m/s command moves 4 mm in 2 s);
-- from a standstill a RIGHT turn never starts (0.05 rad/s) and a LEFT one
-  usually does within a second, but not always — with the gait already
-  going, either turns at 0.6–0.8 rad/s;
+**Every one of these is a DEAD BAND, not a limit** — which is how this file
+asserted for months that the walker cannot reverse. A locomotion fact read
+off a single command value is a reading of the dead band.
+
+- it walks backwards **faster than it walks forwards**: -0.35 and -0.40
+  back up at 0.20 and 0.23 m/s, against 0.13 and 0.19 at +0.30 and +0.40.
+  Everything from -0.30 in is dead (4 mm in 6 s) — and -0.30 is exactly
+  where this file used to measure. `back_up()` hands out the command;
+- from a standstill NO turn starts below |wz| = 1.0 — not a weak turn, an
+  exactly zero one, in both directions — and a cold RIGHT turn is zero even
+  at -1.0. Only wz = +1 breaks through cold, at 0.57 rad/s;
+- with the gait going the rate is roughly linear in the command and tops
+  out at what the command range allows: 0.15 / 0.28 / 0.47 / 0.61 rad/s at
+  wz +0.25…+1, and -0.00 / -0.42 / -0.57 / -0.78 at -0.25…-1. The walker's
+  ~0.6–0.8 rad/s ceiling and `ANG_VEL_Z_RANGE`'s ±1.0 are the same wall:
+  at full command there is nothing left to ask for;
 - a small forward command (0.2 m/s) starts the gait, so a cold turn with
-  that kick turns at ~0.7 rad/s at the cost of creeping forward a few
-  centimetres a second.
+  that kick turns at ~0.7 rad/s. It does NOT move the robot: +0.2 is inside
+  the forward dead band too (9 mm in 6 s), so `TURN_KICK` is a gait starter
+  and never a way to travel — a brain that walks at 0.2 stands still.
 
 `GaitWatch` tells a brain whether the gait is going, from what the robot
 itself can measure (odometry yaw rate and speed), and `turn` hands out the
@@ -22,8 +35,10 @@ import math
 from .. import contract as C
 from .runtime import Senses
 
-TURN_KICK = 0.2            # forward command that starts the gait for a cold turn
+TURN_KICK = 0.2            # forward command that starts the gait for a cold turn (it does NOT travel)
 COLD_AFTER_S = 0.4         # standing this long counts as cold
+BACK_MIN = -0.35           # the reverse dead band's edge: -0.30 moves 4 mm in 6 s, -0.35 backs up at 0.20 m/s
+BACK_SPEED = -0.40         # and -0.40 at 0.23 m/s, the fastest this walker moves in any direction
 
 
 class GaitWatch:
@@ -55,4 +70,17 @@ def turn(sign: float, cold: bool, kick: float = TURN_KICK) -> tuple[float, float
     return (kick, 0.0, wz) if cold else (0.0, 0.0, wz)
 
 
-__all__ = ["COLD_AFTER_S", "TURN_KICK", "GaitWatch", "turn"]
+def back_up(wz: float = 0.0, speed: float = BACK_SPEED) -> tuple[float, float, float]:
+    """A reverse the walker will actually perform — for backing off a rim, a
+    wall or another duck's feet without turning away from what you were
+    looking at.
+
+    `speed` is CLAMPED past the dead band's edge, because a brain that asks
+    politely for -0.3 gets 4 mm in 6 s and no error. Combines with a turn.
+    Measured escape from contact at 0.10 m: a reverse clears 0.30 m in a
+    median 1.6 s, against 2.7 s for turn-90-and-walk and 3.2 s for
+    turn-180-and-walk — and unlike either, it keeps the target in frame."""
+    return (max(C.LIN_VEL_X_RANGE[0], min(float(speed), BACK_MIN)), 0.0, float(wz))
+
+
+__all__ = ["BACK_MIN", "BACK_SPEED", "COLD_AFTER_S", "TURN_KICK", "GaitWatch", "back_up", "turn"]

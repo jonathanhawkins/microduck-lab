@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from microduck_local.brain.controllers import Chase, ChaseParams
+from microduck_local.brain.gait import TURN_KICK
 from microduck_local.brain.runtime import Senses
 from microduck_local.brain.team import Team, brain_kwargs
 from microduck_local.brain.tracker import Track
@@ -590,3 +591,63 @@ def test_a_supporter_can_stand_ahead_of_the_ball_instead_of_behind_it():
         # Walk the servo target out of _support by reading where it wants to go.
         target_ahead = b.p.support_mode == "ahead"
         assert target_ahead == nearer_attack
+
+
+def test_chase_params_read_a_variant_off_the_environment():
+    """`MICRODUCK_CHASE` is how a battery says which variant it measured
+    (`--tag` only names the file). It applies to a brain built WITHOUT
+    params — the benchmark's and the lab's path — never over params a
+    caller passed, and a name or a value it cannot read raises rather than
+    silently measuring the default."""
+    import os
+
+    from microduck_local.brain.controllers import ChaseParams as CP
+    assert CP.from_env("") == CP() and CP.from_env("  ") == CP()
+    p = CP.from_env("two_stage=1, approach_back=0.15 ,head_yaw_when=always")
+    assert p.two_stage is True and p.approach_back == 0.15 and p.head_yaw_when == "always"
+    assert p.approach_speed == CP().approach_speed                  # untouched knobs keep the shipped value
+    assert CP.from_env("two_stage=off").two_stage is False
+    for bad in ("nope=1", "two_stage", "two_stage=maybe", "bump_stand_states=lineup"):
+        with pytest.raises(ValueError):
+            CP.from_env(bad)
+    old = os.environ.get("MICRODUCK_CHASE")
+    os.environ["MICRODUCK_CHASE"] = "two_stage=1"
+    try:
+        assert Chase().p.two_stage is True                          # no params: the environment is read
+        assert Chase(ChaseParams()).p.two_stage is False            # params given: never overridden
+    finally:
+        if old is None:
+            del os.environ["MICRODUCK_CHASE"]
+        else:
+            os.environ["MICRODUCK_CHASE"] = old
+
+
+def test_a_line_up_already_on_the_kick_line_walks_straight_in():
+    """`lineup_lat`: stage one's job is to put the duck ON the kick line,
+    squared up, short of the spot — so a duck already there starts stage two
+    where it stands. With it off (the shipped 0) the very same pose sends it
+    back to a pre-spot it has already walked past, which on this walker is a
+    turn in place with the ball at its feet, not a step backwards."""
+    p = ChaseParams(two_stage=True, lineup_lat=0.06)
+    spot = (0.5, 0.06, "kick_right", 0.0, "kick")             # kick spot, line along +x
+
+    def at(brain, odom, t=1.0):
+        brain._senses = Senses(t=t)
+        brain.state, brain.t_state, brain.lined = "lineup", 0.0, False
+        brain.spot = spot
+        return brain.step(Senses(t=t, odom=odom))
+
+    b = Chase(p, goal=(3.0, 0.0))
+    it = at(b, (0.35, 0.05, 0.0))                             # on the line, 15 cm short, squared
+    assert b.lined and it.twist[0] == p.approach_speed and abs(it.twist[2]) < 0.1
+    at(b, (0.35, 0.25, 0.0))
+    assert not b.lined                                        # 19 cm off the line: stage one takes it there
+    at(b, (0.35, 0.05, 0.5))
+    assert not b.lined                                        # squared to 0.5 rad: not squared enough
+    at(b, (0.15, 0.06, 0.0))
+    assert not b.lined                                        # further back than the pre-spot: walk to it first
+    at(b, (0.49, 0.06, 0.0))
+    assert not b.lined                                        # inside `lineup_tol` of the spot: the settle's job
+    off = Chase(ChaseParams(two_stage=True), goal=(3.0, 0.0))      # the knob off: the shipped two-stage path
+    it = at(off, (0.35, 0.05, 0.0))
+    assert not off.lined and it.twist[0] <= TURN_KICK and abs(it.twist[2]) == 1.0   # turning back to the pre-spot
