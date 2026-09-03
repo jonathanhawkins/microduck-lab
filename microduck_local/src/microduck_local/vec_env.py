@@ -58,7 +58,6 @@ import gymnasium as gym
 import numpy as np
 
 from . import contract as C
-from .machine import profile
 from .walk_env import shared_model_scope
 
 # Which backend `make_vec_env` picks when nobody says. "fork" shares the model
@@ -595,14 +594,14 @@ def make_vec_env(env_fns: list[Callable[[], gym.Env]],
         wrapped = [_SharedModelEnvFn(fn, exclusive=True) for fn in env_fns]
         # >1 packs several envs per worker process (stepped serially there):
         # fewer semaphore ops and pipes per vec-step, at the cost of longer
-        # per-worker latency. Worth it once the fleet outnumbers the cores,
-        # which is why the LINUX profile packs to one worker per core and the
-        # mac profile (18 cores, 32 envs, and the numbers this repo is tuned
-        # on) does not. Explicit env var always wins; measure with
-        # `bench-envs` before changing either.
-        per_worker = int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "0") or 0)
-        if per_worker <= 0:
-            per_worker = profile().envs_per_worker(len(env_fns))
+        # per-worker latency. Default 1 on EVERY machine. Packing to one
+        # worker per core was tried as a Linux-profile default and measured
+        # off again: four interleaved reps put it behind 1:1 at every env
+        # count (-1.7% at 8, -3.9% at 16, -2.6% at 32), and its startup
+        # advantage turned out to be the per-worker numba JIT that
+        # `_warm_jit` now removes for every layout. Still here as a manual
+        # knob for env counts far above these — measure with `bench-envs`.
+        per_worker = int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "1") or 1)
         return ForkVecEnv(wrapped, envs_per_worker=per_worker)
 
     if name == "subproc":            # forkserver: children re-import, torch-safe

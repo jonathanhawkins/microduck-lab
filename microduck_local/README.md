@@ -172,16 +172,19 @@ wants. Measured per phase at 32 envs on this box: **rollout 22.8 s, update
 2.9 s**, so the rollout is ~89% of wall time and is the phase the threads
 must not disturb.
 
-All four rows below were measured **back to back in one window** on a 4-vCPU
-Xeon container, 40k timed steps each, because this box's speed drifts far too
-much to compare across windows (see the warning after the table):
+Medians of **four interleaved repetitions** on a 4-vCPU Xeon container — the
+arms measured back to back with their order rotated each rep, 40k timed steps
+per point — because this box drifts far too much to compare across windows
+(see the warning below):
 
-| 32 envs, `behavior=run` | steps/s | CPU busy |
-|---|---:|---:|
-| mac profile (the historical settings) | 2,231 | 90% |
-| `OMP_WAIT_POLICY=PASSIVE` (no code change) | 2,678 | 71% |
-| **+ phase-aware threads: 1 rollout / N update** | **2,915** | 77% |
-| **+ worker packing (4 processes × 8 envs)** | **3,129** | 74% |
+| envs | mac profile | phase-aware threads | gain |
+|---:|---:|---:|---:|
+| 8 | 892 | **1,420** | +59% |
+| 16 | 1,228 | **1,727** | +41% |
+| 32 (the default) | 1,764 | **2,155** | +22% |
+
+Per-arm spread across the four reps was 4-8%, and the mac arm reproduced
+within 4% at 32 envs, so the machine held still for this run.
 
 > **Do not compare these to a number you measure later.** The same script and
 > configuration on this same container ran 13.1 s in one window and 19.5 s a
@@ -190,7 +193,7 @@ much to compare across windows (see the warning after the table):
 > within a window transfers; re-measure both arms together
 > (`--compare-profiles`) rather than trusting any absolute figure here.
 
-The `linux` profile is those last two, and it is the default off Darwin:
+The `linux` profile is that thread split, and it is the default off Darwin:
 
 - **Phase-aware torch threads.** One intra-op thread while collecting
   rollouts, every usable core for the update. Implemented as an SB3
@@ -198,10 +201,6 @@ The `linux` profile is those last two, and it is the default off Darwin:
   bracket the phase — so `train-walk`, `train-behavior` and `train-brain` all
   get it without a vendored train loop. On the mac profile the callback list
   is **empty**, not a no-op.
-- **Worker packing.** Once the fleet outnumbers the cores, extra processes
-  cannot run in parallel but still cost the parent two semaphore ops each per
-  vec-step, so the profile packs to one worker per core (32 envs → 4 × 8).
-  Invisible to the caller, pinned step-for-step by `test_vec_env.py`.
 - **Cores from the container, not the host.** `os.cpu_count()` reports the
   *host's* cores inside Docker or Kubernetes, so a 4-CPU pod on a 64-core node
   would start 64 spinning threads. `usable_cores()` takes the smallest of
@@ -216,11 +215,25 @@ The `linux` profile is those last two, and it is the default off Darwin:
 `train-brain` also never called `configure_torch_cpu` at all, so it ran with
 torch's defaults (intra-op *and* inter-op at the core count). It does now.
 
+**Worker packing was measured and rejected.** Packing the fleet into one
+process per core (32 envs as 4 × 8) is the obvious companion optimization —
+extra processes cannot run in parallel anyway, and each costs the parent two
+semaphore ops per vec-step — and a single unreplicated point made it look
+like a +7% win. Four interleaved repetitions put it slightly *behind* one
+process per env at every count: **−1.7%** at 8 envs, **−3.9%** at 16,
+**−2.6%** at 32, never once ahead. Its other claimed advantage, faster
+startup, turned out to be the per-worker numba JIT that `_warm_jit` now
+removes for every layout (32-env setup 7.5 s unpacked vs 7.2 s packed). So no
+profile packs; `MICRODUCK_ENVS_PER_WORKER` remains the manual knob it always
+was, worth re-measuring only at env counts far above these. This is the
+second time here that one measurement disagreed with four — see the drift
+warning above.
+
 **What is deliberately NOT in a profile: the env count.** `--envs` sets the
 PPO batch size and therefore the learning dynamics, and this repo's rule is
-that throughput is not learning speed. It stays 32 everywhere. Both profile
-knobs are quality-neutral by construction — thread counts do not enter the
-math, and packing is a step-for-step parity test.
+that throughput is not learning speed. It stays 32 everywhere. The one knob a
+profile does carry is quality-neutral by construction: thread counts do not
+enter the PPO math.
 
 ```bash
 uv run machine-facts                           # cores + the profile they imply

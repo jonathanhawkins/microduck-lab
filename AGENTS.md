@@ -63,10 +63,10 @@ cd ../duck-viewer && npm install
   training (`train-walk`, `train-behavior`), eval, ONNX export, rendering,
   the lab + viewer. Linux works too (set `MUJOCO_GL=egl` for offscreen
   rendering); the MPS update path is Mac-only and auto-disables elsewhere.
-- **Linux / cloud CPU boxes:** the same commands, under a different thread
-  and worker-packing profile that `machine.py` detects (cores read from CPU
-  affinity and the cgroup quota, not `os.cpu_count()`, so a container gets
-  its real budget). Mac behavior is unchanged by it — see "Cloud and Linux
+- **Linux / cloud CPU boxes:** the same commands, under a different torch
+  thread policy that `machine.py` detects (cores read from CPU affinity and
+  the cgroup quota, not `os.cpu_count()`, so a container gets its real
+  budget). Mac behavior is unchanged by it — see "Cloud and Linux
   training" in `microduck_local/README.md` for the measurements and the
   `--compare-profiles` A/B.
 - **Needs a CUDA GPU:** the upstream `microduck_rl` MuJoCo Warp training —
@@ -84,7 +84,7 @@ uv run train-walk --envs 32 --steps 3_000_000 --run-name my-run
 uv run export-walk runs/my-run && uv run eval-walk runs/my-run/policy.onnx
 uv run train-behavior one_leg                 # teachable tricks (behaviors/)
 uv run render-rollout --policy runs/my-run/policy.onnx --behavior stand --out /tmp/rr
-uv run machine-facts                          # cores + thread/packing profile for THIS machine
+uv run machine-facts                          # cores + thread profile for THIS machine
 uv run bench-envs                             # the right --envs for THIS machine
 uv run bench-envs --compare-profiles          # mac profile vs linux/cloud profile, interleaved
 uv run duck-lab --checkpoints runs/my-run    # + viewer below → watch it in the browser
