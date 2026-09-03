@@ -228,8 +228,11 @@ def test_after_a_kick_the_duck_looks_then_hunts_the_kick_line_then_searches():
     # ...then hunt: walk the kick line at speed, steering onto its heading.
     it = b.step(Senses(t=1.1 + p.look_s + 0.05, odom=(0.0, 0.06, 0.2)))
     assert it.note == "hunt" and it.twist[0] == p.hunt_speed and it.twist[2] > 0
-    # ...and only then the standing search.
+    # ...and only then the search - which first walks to where the hunted line pointed (the memory).
     it = b.step(Senses(t=1.1 + p.look_s + p.hunt_s + 0.1, odom=(1.0, 0.3, 0.3)))
+    assert it.note == "seek" and b.memory is not None
+    b.memory = None
+    it = b.step(Senses(t=1.1 + p.look_s + p.hunt_s + 0.2, odom=(1.0, 0.3, 0.3)))
     assert it.note == "search"
 
 
@@ -264,3 +267,27 @@ def test_the_hunt_ends_for_the_tof_a_duck_beside_and_the_boards():
     b = hunting_duck()
     it = b.step(Senses(t=0.5, odom=(1.3, 0.0, 0.0)))
     assert it.note != "hunt"
+
+
+def test_the_search_walks_to_where_the_ball_was_before_circling():
+    """A ball memory in odometry: the centre spot at a kickoff, every fresh
+    sighting, the end of a hunted line. A search with a memory further
+    than seek_min away walks there first ("seek"); arriving with nothing
+    seen forgets it, and the circle begins."""
+    p = ChaseParams()
+    b = Chase(p, goal=(1.5, 0.0), bounds=(1.5, 1.25))
+    assert b.memory is not None and b.memory[:2] == (0.0, 0.0)        # a pitch: the centre spot
+    # Nothing seen, standing 1 m from the centre spot facing it: seek, walking.
+    it = b.step(Senses(t=0.5, odom=(-1.0, 0.0, 0.0)))
+    assert it.note == "seek" and it.twist[0] > 0
+    # Arrived (inside seek_tol), still nothing: the memory goes, the search circles.
+    it = b.step(Senses(t=1.0, odom=(-0.1, 0.0, 0.0)))
+    assert b.memory is None
+    it = b.step(Senses(t=1.1, odom=(-0.1, 0.0, 0.0)))
+    assert it.note == "search"
+    # A fresh sighting 0.5 m ahead-left is remembered where it was seen.
+    det = DetectionFrame(2.0, [Detection("ball", "ball0", 0.3, 0.0, 0.14, 0.5, 0.9)])
+    b.step(Senses(t=2.0, odom=(0.0, 0.0, 0.0), det=det, det_age=0.0))
+    assert b.memory is not None and abs(b.memory[0] - 0.5 * math.cos(0.3)) < 1e-6 and abs(b.memory[1] - 0.5 * math.sin(0.3)) < 1e-6
+    # Off a pitch there is no centre spot to remember.
+    assert Chase(p).memory is None

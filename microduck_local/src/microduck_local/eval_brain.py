@@ -87,7 +87,7 @@ def main() -> None:
     ap.add_argument("--no-reflex", action="store_true", help="no gaze and no bump stop under the brain")
     ap.add_argument("--charge", type=float, default=0.0, metavar="S", help="the person walks straight at the duck every S seconds")
     ap.add_argument("--avoid", action="store_true", help="the dodge (ClosingWatch): the scripted follow's own, or the reflex tier's under a learned brain")
-    ap.add_argument("--polite", type=float, default=0.0, metavar="M", help="the person stops M m short of the duck in its way and steps around after 2.5 s")
+    ap.add_argument("--polite", type=float, default=0.55, metavar="M", help="the person stops M m (centre to centre) short of the duck in its way and steps around after 2.5 s; 0: walks through it")
     args = ap.parse_args()
     task = FollowTask(furniture=2 if args.variety else 0, distractor=args.variety,
                       gaze_gain=0.0 if args.no_reflex else 0.8, bump_stop=0.0 if args.no_reflex else 0.25,

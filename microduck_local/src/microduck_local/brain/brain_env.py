@@ -184,10 +184,13 @@ class FollowTask:
     # closes on the duck faster than its own walk), version-2 only.
     charge: float = 0.0
     avoid: bool = False
-    # A polite person stops this far short of the duck in its way and steps
-    # on to its next waypoint after 2.5 s, instead of walking through it
-    # (a mocap capsule does). 0: walks through.
-    polite: float = 0.0
+    # A polite person stops this far short of the duck in its way (centre
+    # to centre; its surface 0.35 m from the duck at 0.55) and steps on to
+    # its next waypoint after 2.5 s, instead of walking through it as a
+    # mocap capsule does. The default, because real people stop; 0 is the
+    # capsule that walks through, measured to cap every brain's band for
+    # a reason that has nothing to do with following.
+    polite: float = 0.55
 
 
 class BrainEnv(gym.Env):

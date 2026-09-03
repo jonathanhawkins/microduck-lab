@@ -505,6 +505,15 @@ class ChaseParams:
     hunt_wz: float = 0.5
     hunt_stop: float = 0.45
     hunt_margin: float = 0.35
+    # A ball memory in odometry: the last sighting, the end of a hunted
+    # line, the centre spot at a kickoff. A search with a memory further
+    # than `seek_min` away WALKS there first (the hunt's speed and stops)
+    # instead of circling on the spot - with the hunt and the circle,
+    # 107 s of a 300 s run were still search. Forgotten after `seek_s` or
+    # once there with nothing seen. 0: off.
+    seek_s: float = 20.0
+    seek_min: float = 0.4
+    seek_tol: float = 0.25
     search_dip_every: float = 1.5
     search_dip_s: float = 0.6
     dip_range: float = 0.22
@@ -611,7 +620,8 @@ class Chase:
     def kickoff(self) -> None:
         """Play restarts (a goal; World.kickoff put the duck back on its
         spawn): forget the ball, the spot and whatever manoeuvre was under
-        way; keep the tally and the goal."""
+        way; keep the tally and the goal. On a pitch the ball is on the
+        centre spot: remember that."""
         self.state = "search"
         self.role = "attack"
         self.last_bearing = 0.0
@@ -629,6 +639,9 @@ class Chase:
         self._look_t0 = -9.0
         self._hunt_t0 = -9.0
         self._hunt_u: float | None = None           # the line to walk (odometry heading)
+        self.memory: tuple[float, float, float] | None = None   # (x, y, t) where the ball was, odometry frame
+        if self.goal is not None:
+            self.memory = (0.0, 0.0, 0.0)           # a pitch: play starts from the centre spot
         self._last_range: float | None = None
         self._search_t0: float | None = None
         self._prev_skill = None
@@ -650,6 +663,7 @@ class Chase:
             "since": round(self._senses.t - self.last_seen_t, 2)}
         out["tracks"] = self.tracker.payload(self._senses.t)
         out["chase"] = {"kicks": self.kicks, "pushes": self.pushes, "role": self.role,
+                        "memory": None if self.memory is None else [round(self.memory[0], 2), round(self.memory[1], 2)],
                         "spot": None if self.spot is None else
                         [round(self.spot[0], 3), round(self.spot[1], 3), self.spot[2] or self.spot[4]]}
         if self.team is not None:
@@ -759,16 +773,33 @@ class Chase:
         if seen:
             self._last_range = ball.range
             self.last_bearing = ball.bearing
+            if fresh:
+                bx_, by_ = self._ball_xy(odom, ball)
+                self.memory = (bx_, by_, t)
         elif self._last_range is not None and self._last_range < p.hunt_lost_range and self.state in ("chase", "lineup", "turn"):
             self._hunt_u = odom[2]                              # walked into it: it rolled off ahead
             self._last_range = None
         if self.state == "look" and not looking and not fresh and self._hunt_u is not None:
             self._hunt_t0 = t                                   # the look after the kick found nothing: hunt the line
         hunting = p.hunt_s > 0 and t - self._hunt_t0 < p.hunt_s and not seen and self._hunt_u is not None
+        if p.hunt_s > 0 and self._hunt_u is not None and not seen and t - self._hunt_t0 >= p.hunt_s \
+                and self.state == "hunt":
+            # The hunt ran its course without a sighting: the ball is further
+            # along the line - remember a point there and forget the line.
+            self.memory = (odom[0] + 0.6 * math.cos(self._hunt_u), odom[1] + 0.6 * math.sin(self._hunt_u), t)
+            self._hunt_u = None
         if hunting and (ahead < p.hunt_stop or self._beside(t) or self._boards_ahead(odom, p.hunt_margin)):
             hunting = False                                     # the hunt ends here; the search takes over
             self._hunt_t0 = -1e9
             self._hunt_u = None
+        if (not seen and not hunting and self.memory is not None
+                and (t - self.memory[2] > p.seek_s
+                     or math.hypot(self.memory[0] - odom[0], self.memory[1] - odom[1]) <= p.seek_min)):
+            self.memory = None                                  # stale, or here with nothing seen: forget it
+        seeking = p.seek_s > 0 and not seen and not hunting and self.memory is not None
+        if seeking and (ahead < p.hunt_stop or self._beside(t)):
+            seeking = False                                     # something in the way: circle here instead
+            self.memory = None
         if senses.skill is not None:
             vx, wz = 0.0, 0.0                                   # the kick owns the reflex tier
             self.state = "kick"
@@ -929,6 +960,13 @@ class Chase:
         elif hunting:
             vx, wz = p.hunt_speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -p.hunt_wz, p.hunt_wz))
             self.state = "hunt"
+        elif seeking and self.state not in ("look",):
+            # Walk to where the ball was, head level, at the hunt's pace.
+            vx, wz, sdist, sbear = self._servo(odom, self.memory[:2], cold, p.seek_tol)
+            vx = min(vx, p.hunt_speed) if abs(sbear) <= 0.5 else vx
+            if sdist <= p.seek_tol:
+                self.memory = None                              # here, and nothing seen: forget it
+            self.state = "seek"
         else:
             if p.hunt_s > 0 and self._hunt_u is not None and self.state not in ("search", "hunt", "look") \
                     and self._last_range is None and t - self._hunt_t0 >= p.hunt_s \

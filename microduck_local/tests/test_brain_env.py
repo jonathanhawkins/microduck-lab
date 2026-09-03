@@ -80,7 +80,7 @@ def test_obs_version_2_tracks_and_coasts_while_version_1_is_unchanged():
 
 
 def test_env_reset_step_and_bounds():
-    env = BrainEnv(FollowTask(episode_s=2.0), seed=0)
+    env = BrainEnv(FollowTask(episode_s=2.0, polite=0.0), seed=0)   # the capsule walks through: the bounds test walks at it
     obs, _ = env.reset(seed=3)
     assert obs.shape == (BRAIN_OBS_DIM,)
     assert env.action_space.shape == (3,)
