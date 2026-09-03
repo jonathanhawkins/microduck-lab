@@ -40,7 +40,7 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
             tof, det = d.tof.last, d.detector.last
             s = Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
                        det=det, det_age=None if det is None else w.t - det.t,
-                       speed=d.heading_speed(w.data), odom=w.odom(d), skill=d.skill)
+                       speed=d.heading_speed(w.data), odom=w.odom(d), skill=d.skill, bumped=w.bumped(d))
             intent = brains[d.id].step(s)
             w.apply_intent(d, intent)
             if d.skill is None:

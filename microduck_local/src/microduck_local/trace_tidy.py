@@ -36,7 +36,7 @@ def senses_of(w: World, d) -> Senses:
     return Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
                   det=det, det_age=None if det is None else w.t - det.t,
                   speed=d.heading_speed(w.data), odom=w.odom(d),
-                  holding=d.holding is not None, skill=d.skill)
+                  holding=d.holding is not None, skill=d.skill, bumped=w.bumped(d))
 
 
 def main() -> None:
@@ -61,16 +61,14 @@ def main() -> None:
           f"{sc.basket.size[0]:.2f}×{sc.basket.size[1]:.2f} m rim {sc.basket.rim:.2f} m")
     hist: collections.deque = collections.deque(maxlen=int(args.history * 50))
     falls, last, landings, next_print = 0, None, [], 0.0
-    queue: collections.deque = collections.deque()          # (arrival time, intent): the tether
-    delay = args.tether_ms / 1000.0
+    from .brain.tether import Tether
+    tether = Tether(args.tether_ms / 1000.0)                # both ways, as eval-tidy applies it
     while w.t < args.seconds:
-        intent = brain.step(senses_of(w, d))
-        queue.append((w.t + delay, intent))
-        while queue and queue[0][0] <= w.t + 1e-9:
-            _, applied = queue.popleft()
-            w.apply_intent(d, applied)
-            if d.skill is None:
-                d.set_cmd(w.data, applied.twist, applied.head)
+        intent = brain.step(tether.senses_in(senses_of(w, d)))
+        applied = tether.intent_out(intent, w.t)
+        w.apply_intent(d, applied)
+        if d.skill is None:
+            d.set_cmd(w.data, applied.twist, applied.head)
         pos = d.trunk_pos(w.data).copy()
         g = d.projected_gravity(w.data)
         tof = d.tof.last

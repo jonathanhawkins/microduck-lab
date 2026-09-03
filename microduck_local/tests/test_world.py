@@ -308,3 +308,97 @@ def test_a_polite_person_stops_short_of_a_duck_and_steps_around():
     polite = run(0.4)
     assert 0.3 < polite[0] < 0.45 and polite[2] == 1               # stopped short, then gave the waypoint up
     assert polite[1] >= 2.4
+
+
+def test_the_world_senses_a_bump_between_two_ducks_and_the_tof_places_hits_by_the_head_pose():
+    """Two ducks stood touching: both are `bumped`; a lone duck is not, and
+    the ball does not count. With the head dipped 0.6 rad the ToF's
+    body-height clearance still reads the boards, not the floor (the
+    unrotated placement read the floor as a wall 0.35 m ahead)."""
+    import mujoco
+
+    from microduck_local.brain.brain_env import POLICIES_DIR, onnx_infer
+    from microduck_local.brain.controllers import tof_clearance_3d
+    from microduck_local.world import World, make_pitch
+    sc = make_pitch(per_side=1)
+    infer = onnx_infer(POLICIES_DIR / "alpha_walking.onnx")
+    w = World(sc, infer_for={d.id: infer for d in sc.ducks}, seed=0)
+    d0, d1 = w.ducks["d0"], w.ducks["d1"]
+    for _ in range(30):
+        d0.set_cmd(w.data, (0.0, 0.0, 0.0), (0.0, 0.6, 0.0, 0.0))
+        w.step()
+    assert not w.bumped(d0) and not w.bumped(d1)
+    assert tof_clearance_3d(d0.tof.last).min() > 0.8                  # the boards, not the floor under the dipped head
+    # Put d1 right against d0: only the FEET collide in the walk scene, so the
+    # trunks sit 5 cm apart (feet touching is what a duck-duck fall is).
+    q0 = d1.adr.root_qpos
+    p0 = d0.trunk_pos(w.data)
+    w.data.qpos[q0:q0 + 2] = [p0[0] + 0.05, p0[1]]
+    mujoco.mj_forward(w.model, w.data)
+    w.step()
+    assert w.bumped(d0) and w.bumped(d1)
+
+
+def test_the_tof_sees_a_ball_at_the_feet_when_the_head_dips():
+    """tof_floor_ball: a floor ball 0.3 m ahead of a duck with its head
+    dipped 0.6 rad is a cluster of low hits above the floor plane; with no
+    ball there, nothing; a level head sees nothing either (it looks over it)."""
+    import mujoco
+
+    from microduck_local.brain.brain_env import POLICIES_DIR, onnx_infer
+    from microduck_local.brain.controllers import tof_floor_ball
+    from microduck_local.world import World, make_pitch
+    sc = make_pitch(per_side=1)
+    w = World(sc, infer_for={d.id: onnx_infer(POLICIES_DIR / "alpha_walking.onnx") for d in sc.ducks}, seed=0)
+    d = w.ducks["d0"]
+    q = int(w.model.jnt_qposadr[w._ball_joint])
+
+    def settle(head, ball_xy):
+        w.data.qpos[q:q + 2] = ball_xy
+        mujoco.mj_forward(w.model, w.data)
+        for _ in range(40):
+            d.set_cmd(w.data, (0.0, 0.0, 0.0), head)
+            w.step()
+        return tof_floor_ball(d.tof.last)
+
+    p0, yaw = d.trunk_pos(w.data), d.yaw(w.data)
+    ahead = (p0[0] + 0.30 * math.cos(yaw), p0[1] + 0.30 * math.sin(yaw))
+    seen = settle((0.0, 0.6, 0.0, 0.0), ahead)
+    assert seen is not None and abs(seen[0]) < 0.25 and 0.2 < seen[1] < 0.4
+    assert settle((0.0, 0.6, 0.0, 0.0), (0.0, 1.0)) is None                  # the ball far away: nothing on the floor ahead
+    assert settle((0.0, 0.0, 0.0, 0.0), ahead) is None                       # level head: the ToF looks over it
+    # Stood 0.35 m from the boards with the head dipped: a wall has hits above the band in the same columns - not a ball.
+    hx = sc.floor[0] / 2 - 0.25
+    q0 = d.adr.root_qpos
+    w.data.qpos[q0:q0 + 2] = [hx - 0.35, 0.0]
+    w.data.qpos[q0 + 3:q0 + 7] = [1.0, 0.0, 0.0, 0.0]                        # facing +x, at the right boards
+    assert settle((0.0, 0.6, 0.0, 0.0), (0.0, 1.0)) is None
+
+
+def test_the_chase_brain_tracks_a_ball_the_tof_sees_at_its_feet():
+    """`tof_ball_m`: with no ball in the camera frame, the ToF's floor blob
+    becomes a ball sighting for the tracker; off, the brain has no ball."""
+    import mujoco
+
+    from microduck_local.brain import Senses
+    from microduck_local.brain.brain_env import POLICIES_DIR, onnx_infer
+    from microduck_local.brain.controllers import Chase, ChaseParams
+    from microduck_local.world import World, make_pitch
+    sc = make_pitch(per_side=1)
+    w = World(sc, infer_for={d.id: onnx_infer(POLICIES_DIR / "alpha_walking.onnx") for d in sc.ducks}, seed=1)
+    d = w.ducks["d0"]
+    q = int(w.model.jnt_qposadr[w._ball_joint])
+    p0, yaw = d.trunk_pos(w.data), d.yaw(w.data)
+    w.data.qpos[q:q + 2] = [p0[0] + 0.28 * math.cos(yaw), p0[1] + 0.28 * math.sin(yaw)]
+    mujoco.mj_forward(w.model, w.data)
+    for _ in range(40):
+        d.set_cmd(w.data, (0.0, 0.0, 0.0), (0.0, 0.6, 0.0, 0.0))
+        w.step()
+    tof = d.tof.last
+    senses = Senses(t=w.t, tof=tof, tof_age=w.t - tof.t, det=None, det_age=None, speed=0.0, odom=w.odom(d))
+    on = Chase(ChaseParams(tof_ball_m=0.5), goal=(1.5, 0.0))
+    on.step(senses)
+    assert on.tof_ball is not None and on.tracker.best("ball", w.t, min_hits=1) is not None
+    off = Chase(ChaseParams(), goal=(1.5, 0.0))
+    off.step(senses)
+    assert off.tof_ball is None and off.tracker.best("ball", w.t, min_hits=1) is None

@@ -46,17 +46,69 @@ def _column_clearance(depth_mm: np.ndarray, valid: np.ndarray | None,
     return d.min(axis=0)
 
 
-def tof_clearance_3d(frame, zmin: float = 0.08, zmax: float = 0.6) -> np.ndarray:
+def tof_hits_3d(frame) -> tuple[np.ndarray, np.ndarray] | None:
+    """Every zone's hit in the body's HEADING frame, relative to the trunk
+    (the frame the mount pose is given in): (rows, cols, 3) points and the
+    (rows, cols) depths; None for a frame without a mount pose."""
+    if frame.mount_pos is None or frame.mount_rot is None or frame.dirs_local is None:
+        return None
+    d = frame.depth_mm.astype(np.float64) / 1000.0
+    dirs = frame.dirs_local @ frame.mount_rot.T
+    return frame.mount_pos[None, None, :] + dirs * d[..., None], d
+
+
+TRUNK_Z = 0.117                    # the standing trunk height (the ToF mount pose is trunk-relative)
+
+
+def tof_floor_ball(frame, r_max: float = 0.5, z_lo: float = -0.09, z_hi: float = -0.02) -> tuple[float, float] | None:
+    """A ball-sized thing on the floor inside `r_max`, seen by the ToF:
+    hits above the floor plane but below 10 cm (trunk-relative z between
+    `z_lo`, 2.7 cm up - floor hits scatter to 1.8 cm with datasheet noise -
+    and `z_hi`, 9.7 cm up; a ball is 7 cm tall), at least two adjacent
+    zones of them, in columns with NOTHING taller near (a wall or a duck
+    has hits above the band in the same columns; a ball has the floor
+    behind it) - returned as (bearing, horizontal range) of the nearest
+    such cluster, heading frame. The camera loses a floor ball inside
+    0.3 m unless the head dips; the ToF at 45 deg shows one at 0.3 m as a
+    3-6 zone blob (measured). None for a frame without a mount pose."""
+    hits = tof_hits_3d(frame)
+    if hits is None:
+        return None
+    pts, _ = hits
+    z = pts[..., 2]
+    rng = np.hypot(pts[..., 0], pts[..., 1])
+    live = frame.valid & (frame.depth_mm > 0)
+    ok = live & (z > z_lo) & (z < z_hi) & (rng < r_max)
+    if ok.sum() < 2:
+        return None
+    r, c = np.unravel_index(np.argmin(np.where(ok, rng, np.inf)), ok.shape)
+    win = np.zeros_like(ok)
+    win[max(r - 1, 0):r + 2, max(c - 1, 0):c + 2] = True
+    sel = ok & win
+    if sel.sum() < 2:
+        return None
+    cols = sel.any(axis=0)
+    tall = live & (z >= z_hi) & (rng < r_max + 0.15) & cols[None, :]
+    if tall.any():
+        return None
+    x, y = float(pts[..., 0][sel].mean()), float(pts[..., 1][sel].mean())
+    return float(math.atan2(y, x)), float(math.hypot(x, y))
+
+
+def tof_clearance_3d(frame, zmin: float = -0.03, zmax: float = 0.5) -> np.ndarray:
     """Nearest return per column that is a BODY-height thing — a wall, a
     duck, furniture — whatever the head is doing: each zone's hit is placed
-    in the body's heading frame from the mount pose the frame carries, and
-    hits on the floor (below `zmin`; a ball is 7 cm tall) or above `zmax`
-    do not count. Falls back to the level-head rows when a frame carries no
-    mount pose (synthetic frames)."""
-    if frame.mount_pos is None or frame.dirs_local is None:
+    in the body's heading frame from the mount pose the frame carries
+    (rotated by the head's pose: an unrotated placement read the FLOOR as a
+    wall 0.35 m ahead whenever the head dipped 0.6 rad, measured), and hits
+    on the floor (below `zmin`, trunk-relative: 8.7 cm above the floor, a
+    ball is 7 cm tall) or above `zmax` do not count. Falls back to the
+    level-head rows when a frame carries no mount pose (synthetic frames)."""
+    hits = tof_hits_3d(frame)
+    if hits is None:
         return _column_clearance(frame.depth_mm, frame.valid, WanderParams(rows=(2, 5)))
-    d = frame.depth_mm.astype(np.float64) / 1000.0
-    z = frame.mount_pos[2] + frame.dirs_local[..., 2] * d
+    pts, d = hits
+    z = pts[..., 2]
     ok = frame.valid & (frame.depth_mm > 0) & (z > zmin) & (z < zmax)
     return np.where(ok, d, np.inf).min(axis=0)
 
@@ -482,6 +534,20 @@ class ChaseParams:
     # ahead). A search dips the head every `search_dip_every`.
     look_s: float = 0.8
     look_range: float = 0.3
+    # The kick map says where the ball goes BEFORE it moves: +21.6 deg for
+    # the left foot, -11 for the right, off the body heading. `look_aim`
+    # yaws the look after a kick to that angle, at `look_aim_range` (near
+    # the horizon: the ball is a metre or two out by then) instead of the
+    # 0.3 m dip - so the ball, which leaves the level camera at once
+    # 30-55 deg off the nose, stays in the frustum long enough to track.
+    look_aim: bool = False
+    look_aim_range: float = 1.5
+    kick_exit_left: float = math.radians(21.6)
+    kick_exit_right: float = math.radians(-11.0)
+    # A searching head sweeps +-`search_sweep` rad (period `search_sweep_s`)
+    # while the body circles, when it has no track to look at.
+    search_sweep: float = 0.0
+    search_sweep_s: float = 4.0
     # Hunt: a ball lost right after a kick, or after being walked into
     # inside `hunt_lost_range` (the histograms: half a run is search, and
     # the ball leaves the view rolling off along a known line - the kick's,
@@ -537,7 +603,7 @@ class ChaseParams:
     ball_decel: float = 0.04
     predict_s: float = 0.0         # how long a prediction is worth acting on after the last hit (0: off)
     head_yaw_gain: float = 0.9
-    head_yaw_max: float = 0.6
+    head_yaw_max: float = 1.4          # the walker's trained head-yaw range (upstream curriculum: +-1.40 rad)
     head_yaw_when: str = "search"  # or "always": yaw the head on the ball too, not only searching / looking
     predict_steer: bool = False    # the hunt bends and the search opens toward the prediction
     search_dip_every: float = 1.5
@@ -601,6 +667,17 @@ class ChaseParams:
     support_margin: float = 0.35
     beside_m: float = 0.3
     beside_s: float = 1.5
+    # The ToF sees the ball at the feet (tof_floor_ball): inside `tof_ball_m`
+    # with the head dipped, a floor blob feeds the tracker as a ball sighting
+    # when the camera has none - the level camera loses a floor ball inside
+    # 0.3 m, which is where the line-up and the kick live. 0 = off.
+    tof_ball_m: float = 0.0
+    # A bump (Senses.bumped: the body is touching another body - contacts in
+    # the sim, the IMU / servo loads on the robot): no turn in place for
+    # `bump_stand_s` after the last one; a stand is the one thing the walker
+    # does safely against a body, and 12 of 13 traced 3v3 falls were
+    # standing turns beside an unseen opponent. 0 = off.
+    bump_stand_s: float = 0.0
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,
     # no hunt) and, ahead, as a duck to avoid - the camera and the ToF
@@ -673,6 +750,8 @@ class Chase:
         self.last_seen_t: float | None = None
         self._senses: Senses | None = None
         self._mates: list[tuple[float, float]] = []          # (range, bearing) of live teammates, off the team board
+        self._last_foot: str | None = None                   # the foot of the last kick (the look aims by it)
+        self._bump_t = -1e9
         self.last = (0.0, 0.0, 0.0)
         self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"
         self.lined = False                      # stage two of the line-up: on the line, walking straight in
@@ -785,7 +864,16 @@ class Chase:
         odom = senses.odom or (0.0, 0.0, 0.0)
         if self.attack is None and senses.odom is not None:
             self.attack = odom[2]                  # placed facing the goal it attacks (make_pitch does)
-        self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), t, odom[2], (odom[0], odom[1]) if senses.odom is not None else None)
+        det_in = senses.fresh_det(self.DET_MAX_AGE)
+        self.tof_ball: tuple[float, float] | None = None
+        if p.tof_ball_m > 0 and (det_in is None or not any(d.cls == "ball" for d in det_in.detections)):
+            tof_fr = senses.fresh_tof(self.TOF_MAX_AGE)
+            blob = None if tof_fr is None else tof_floor_ball(tof_fr, r_max=p.tof_ball_m)
+            if blob is not None:
+                self.tof_ball = blob
+                from ..sensors.detector import Detection, DetectionFrame
+                det_in = DetectionFrame(t=tof_fr.t, detections=[Detection("ball", "", blob[0], -0.6, 0.2, blob[1], 0.8)])
+        self.tracker.update(det_in, t, odom[2], (odom[0], odom[1]) if senses.odom is not None else None)
         ball = self.tracker.best(p.target_cls, t, min_hits=1)
         fresh = ball is not None and ball.age(t) <= self.DET_MAX_AGE
         seen = ball is not None and ball.age(t) < p.lost_s
@@ -801,6 +889,8 @@ class Chase:
             self.predicted = (px, py)
             pred_bearing = _wrap(math.atan2(py - odom[1], px - odom[0]) - odom[2])
         self._mates = []
+        if senses.bumped:
+            self._bump_t = t
         if self.team is not None:
             self.team.claim(self.duck_id, t, ball.range if seen else math.inf,
                             self._ball_xy(odom, ball) if seen else None, (odom[0], odom[1], odom[2]))
@@ -871,7 +961,7 @@ class Chase:
             self.state = "kick"
         elif looking:
             vx, wz = 0.0, 0.0
-            gaze_at = p.look_range
+            gaze_at = p.look_aim_range if p.look_aim else p.look_range
             self.state = "look"
         elif retreating:
             if t - self._retreat_t0 < p.retreat_turn_s:
@@ -992,6 +1082,7 @@ class Chase:
                         vx, wz = p.push_speed, 0.0
                     else:
                         skill = foot
+                        self._last_foot = foot
                         self.kicks += 1
                         self.spot = None
                         self.state = "kick"
@@ -1095,8 +1186,15 @@ class Chase:
             head = (0.0, self._gaze(gaze_at), 0.0, 0.0)
         look_at = pred_bearing if pred_bearing is not None else (
             ball.bearing if p.predict_s > 0 and ball is not None and ball.age(t) <= p.predict_s else None)
+        if look_at is None and self.state == "look" and p.look_aim and self._last_foot is not None:
+            look_at = p.kick_exit_left if self._last_foot == "kick_left" else p.kick_exit_right
+        elif look_at is None and self.state == "search" and p.search_sweep > 0 and self._search_t0 is not None:
+            look_at = p.search_sweep * math.sin(2.0 * math.pi * (t - self._search_t0) / p.search_sweep_s) / p.head_yaw_gain
         if look_at is not None and senses.skill is None and (p.head_yaw_when == "always" or self.state in ("search", "look")):
             head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
+        if p.bump_stand_s > 0 and t - self._bump_t < p.bump_stand_s and vx <= TURN_KICK and wz != 0.0 \
+                and self.state != "retreat":
+            vx, wz = 0.0, 0.0                                   # touching a body: stand, do not turn in place
         self.last = (vx, 0.0, wz)
         return Intent(twist=self.last, head=head, note=self.role if self.role != "attack" else self.state, skill=skill)
 

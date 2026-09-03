@@ -520,9 +520,12 @@ class Tidy:
             if toy is not None and toy.name == self.target_name:
                 if self._update_estimate(odom, toy, p.toy_z, t) is not None:
                     self.t_seen = t
-            twist, dist, bearing = self._servo(odom, p.reach_ahead + 0.01, p.reach_left)
+            # The stop lands late by the link (stop_margin, see latency_gain): a
+            # tethered pick overshot the toy and came up empty - traced: 3
+            # picks in 6 attempts after the first three toys, 80 s of scans.
+            twist, dist, bearing = self._servo(odom, p.reach_ahead + 0.01 + self.stop_margin, p.reach_left)
             head_down = twist[0] > 0 or (dist < 0.5 and abs(bearing) <= 0.35)
-            if dist <= p.reach_ahead + 0.01:
+            if dist <= p.reach_ahead + 0.01 + self.stop_margin:
                 self._enter("settle", t)
             elif t - self.t_seen > 1.0 and dist < 0.3 and abs(bearing) <= 0.35:
                 # It left the camera's view: dead-reckon the rest. Not while
@@ -535,11 +538,11 @@ class Tidy:
                 self._enter("scan", t)
 
         elif self.state == "blind":
-            twist, dist, _ = self._servo(odom, p.reach_ahead + 0.01, p.reach_left)
+            twist, dist, _ = self._servo(odom, p.reach_ahead + 0.01 + self.stop_margin, p.reach_left)
             if self._point_in_basket_zone(*self.est):
                 self.est = None                          # it is in (or against) the basket after all
                 self._enter("scan", t)
-            elif dist <= p.reach_ahead + 0.01:
+            elif dist <= p.reach_ahead + 0.01 + self.stop_margin:
                 self._enter("settle", t)
             elif t - self.t_state > 6.0:
                 self.est = None

@@ -39,6 +39,7 @@ class Senses:
     odom: tuple[float, float, float] | None = None
     holding: bool = False
     skill: str | None = None
+    bumped: bool = False                 # the body is touching another body (contacts here; IMU / servo loads on the robot)
 
     def fresh_tof(self, max_age: float) -> TofFrame | None:
         return self.tof if (self.tof is not None and self.tof_age is not None

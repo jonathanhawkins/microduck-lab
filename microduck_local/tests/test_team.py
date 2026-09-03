@@ -316,3 +316,47 @@ def test_a_teammate_on_the_board_counts_as_a_duck_beside_or_ahead():
     tm.claim("d0", 12.5, 0.2, (1.3, 1.1), pos=(1.0, 1.0, 0.0))     # far away: nothing to avoid
     out = b.step(_senses(12.6, None, speed=0.0, odom=(0.0, 0.0, 0.0)))
     assert b.state != "avoid" and not b._beside(12.6)
+
+
+def test_the_look_after_a_kick_aims_by_the_kick_map_and_the_search_can_sweep_the_head():
+    """`look_aim`: the look after a kick yaws the head to the foot's exit
+    angle off the kick map (+21.6 deg left, -11 right) near the horizon;
+    `search_sweep`: a searching head sweeps side to side. Both inside the
+    walker's trained +-1.4 rad."""
+    p = ChaseParams(look_aim=True, search_sweep=1.4)
+    b = Chase(p, goal=(1.5, 0.0))
+    b.step(_senses(0.0, None, speed=0.0))
+    b._last_foot, b._look_t0 = "kick_left", 5.0
+    out = b.step(_senses(5.1, None, speed=0.0))
+    assert out.note == "look" and abs(out.head[2] - 0.9 * math.radians(21.6)) < 1e-6
+    assert out.head[1] < b._gaze(0.3)                                  # near the horizon, not the 0.3 m dip
+    b._last_foot = "kick_right"
+    out = b.step(_senses(5.2, None, speed=0.0))
+    assert abs(out.head[2] - 0.9 * math.radians(-11.0)) < 1e-6
+    # Searching, no track: the head sweeps; a quarter period in it is at +1.4.
+    b._look_t0 = -9.0
+    yaws = []
+    for k in range(1, 12):
+        out = b.step(_senses(6.0 + 0.1 * k, None, speed=0.0))
+        yaws.append(out.head[2])
+    assert out.note == "search" and max(yaws) > 1.0 and min(yaws) < 0.2 and max(abs(y) for y in yaws) <= 1.4 + 1e-9
+
+
+def test_a_bumped_duck_stands_instead_of_turning_in_place():
+    """Senses.bumped (the body touching another body): for `bump_stand_s`
+    after it, a standing turn becomes a stand. Off at 0."""
+    b = Chase(ChaseParams(bump_stand_s=1.0, search_dip_s=0.0, search_vx=0.0), goal=(1.5, 0.0))   # no dips: a plain standing turn
+    b.step(_senses(0.0, None, speed=0.0))
+    out = b.step(_senses(0.5, None, speed=0.0))
+    assert out.note == "search" and out.twist[2] != 0.0                # a standing search turn
+    s = _senses(0.6, None, speed=0.0)
+    out = b.step(Senses(t=s.t, speed=0.0, odom=s.odom, bumped=True))
+    assert out.twist == (0.0, 0.0, 0.0)
+    out = b.step(_senses(1.2, None, speed=0.0))                        # still inside the hold
+    assert out.twist == (0.0, 0.0, 0.0)
+    out = b.step(_senses(1.8, None, speed=0.0))                        # the hold is over
+    assert out.twist[2] != 0.0
+    off = Chase(ChaseParams(search_dip_s=0.0, search_vx=0.0), goal=(1.5, 0.0))
+    off.step(_senses(0.0, None, speed=0.0))
+    out = off.step(Senses(t=0.5, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
+    assert out.twist[2] != 0.0
