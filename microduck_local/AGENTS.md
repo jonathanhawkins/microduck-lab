@@ -96,11 +96,18 @@ and later reversed; several "measured off" verdicts turned out to be noise.
 4. **Prefer a paired reading.** Both arms run the same seed layouts, so
    report per-seed wins/losses alongside the totals; it is strictly more
    powerful than comparing two means.
-5. **"Measured off" usually means "not shown to help".** Say which one you
+5. **Ask what would inflate your metric.** `ballAdvance` keeps only the
+   forward part of the ball's motion, so anything that makes the ball move
+   MORE scores higher without moving it anywhere: the handover fix raised
+   it 2.9 sigma while signed `ballProgress` stayed flat (0.0 sigma) and the
+   advance per kick halved. Read advance, signed progress and per-kick
+   together, and for any metric ask first which cheap behaviour maximises
+   it.
+6. **"Measured off" usually means "not shown to help".** Say which one you
    mean. Several knobs in `ChaseParams` ship off on differences that never
    cleared the noise; re-screening them with `possession` is cheap and at
    least one of those verdicts is probably wrong.
-6. **A battery must survive the machine.** Use `--out FILE --tag TAG`:
+7. **A battery must survive the machine.** Use `--out FILE --tag TAG`:
    every seed is appended as it lands and a re-run of the same command
    skips what is already there. A cloud container reclaimed mid-run cost
    about ninety minutes of 3v3 twice before the benchmarks streamed. The

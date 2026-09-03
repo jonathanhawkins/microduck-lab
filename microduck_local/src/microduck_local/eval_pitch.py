@@ -23,6 +23,17 @@ and the seeds an arm needs to resolve a 25% shift in the metric at p<0.05 /
 80% power — i.e. the metric's own noise, with the size of this particular
 contrast divided out:
 
+READ `ballAdvance` WITH `ballProgress` BESIDE IT. Advance keeps only the
+forward part (max(0, dx)), so it is INFLATED BY CHURN: a change that merely
+makes the ball move more scores higher on it without sending the ball
+anywhere. Measured, the attacker-handover fix: kicks +64%, advance +0.18
++/- 0.06 (2.9 sigma) — and signed `ballProgress` FLAT at -0.003 +/- 0.136
+(0.0 sigma) with advance per kick HALVED, 0.202 -> 0.106. The ball moved
+more and no further toward the goal. So: advance is the sensitive
+instrument, signed progress is the one that says the motion had a
+direction, and advance-per-kick says whether each touch was worth more.
+Quote all three or none.
+
     goals            CV 0.76   146 seeds     r with goals   —
     kicks            CV 0.49    62 seeds     r  0.30 [-0.06, +0.59]
     falls            CV 1.22   376 seeds     r  0.07 [-0.29, +0.40]

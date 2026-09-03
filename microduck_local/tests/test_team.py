@@ -17,23 +17,180 @@ from microduck_local.sensors.tof import TofFrame
 
 
 def test_team_roles_hysteresis_and_shared_ball():
+    """The board's shape: the quickest live claim attacks, the rest support
+    and rank by id, the ball is the freshest sighting, and a claim nobody
+    refreshes falls off after `stale_s`."""
     tm = Team("left")
     assert tm.attacker(0.0) is None and tm.role("d0", 0.0) == "attack"      # nobody: everyone attacks
     tm.claim("d0", 1.0, 0.9, (0.5, 0.0))
     tm.claim("d1", 1.0, 0.5, (0.52, 0.01))
     assert tm.attacker(1.0) == "d1" and tm.role("d0", 1.0) == "support" and tm.rank("d0", 1.0) == 0
-    # d0 gets a little nearer: not clearly, so d1 keeps the ball.
+    # d0 gets a little nearer: not clearly enough, and not for long enough.
     tm.claim("d0", 1.1, 0.42, (0.5, 0.0))
     tm.claim("d1", 1.1, 0.5, None)
     assert tm.attacker(1.1) == "d1"
     tm.claim("d0", 1.2, 0.2, (0.5, 0.0))
-    assert tm.attacker(1.2) == "d0" and tm.role("d1", 1.2) == "support"
+    assert tm.attacker(1.2) == "d1"                                     # 0.67 s quicker, but only just now
+    for k in range(1, 15):                                              # …held past `hold_s`: the role moves
+        tm.claim("d0", 1.2 + 0.1 * k, 0.2, (0.5, 0.0))
+        tm.claim("d1", 1.2 + 0.1 * k, 0.5, None)
+        tm.attacker(1.2 + 0.1 * k)                                      # read every tick, as a duck does
+    assert tm.attacker(2.6) == "d0" and tm.role("d1", 2.6) == "support"
     # The ball position is the freshest sighting; a stale claim drops out.
-    assert tm.ball(1.2) == (0.5, 0.0)
-    tm.claim("d0", 2.0, 0.3, None)
-    assert tm.members(2.5) == ["d0"] and tm.attacker(2.5) == "d0"        # d1's claim went stale
+    assert tm.ball(2.6) == (0.5, 0.0)
+    tm.claim("d0", 2.7, 0.3, None)
+    assert tm.members(3.65) == ["d0"] and tm.attacker(3.65) == "d0"      # d1's claim went stale
     assert tm.members(9.0) == [] and tm.attacker(9.0) is None
-    assert "attacker" in tm.payload(1.2)
+    assert "attacker" in tm.payload(2.6) and "cost" in tm.payload(2.6)["claims"]["d0"]
+
+
+def test_the_claim_is_the_time_to_reach_the_ball_not_the_distance_to_it():
+    """Measured on this walker (`walker-facts`): it walks at 0.45 m/s
+    (`ChaseParams.speed`) and a turn in place runs at ~0.7 rad/s once the
+    gait is kicked, 0.25 rad in the first cold second — so turning round
+    costs seconds that a straight line charges nothing for. A duck facing
+    the ball 0.6 m away is 1.0 s from it; one facing away 0.4 m away is
+    4.7 s from it, and it is the first that should be sent."""
+    tm = Team("left")
+    tm.claim("facing", 1.0, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))         # 0.6 m, nose on the ball
+    tm.claim("turned", 1.0, 0.4, (0.0, 0.0), (0.0, 0.4, math.pi / 2))     # 0.4 m, nose the other way
+    assert tm.cost("facing", 1.0) == pytest.approx((0.6 - tm.reach) / tm.speed, abs=1e-6)
+    assert tm.cost("turned", 1.0) == pytest.approx(
+        (math.pi - tm.turn_free) / tm.turn_rate + tm.cold_s + (0.4 - tm.reach) / tm.speed, abs=1e-6)
+    assert tm.attacker(1.0) == "facing"                                   # …though "turned" is 0.2 m nearer
+    # A claim with no pose to turn from is still the straight-line time.
+    tm.claim("blindfold", 1.0, 0.9, None, None)
+    assert tm.cost("blindfold", 1.0) == pytest.approx(0.9 / tm.speed, abs=1e-6)
+
+
+def test_a_duck_that_has_lost_sight_of_the_ball_does_not_resign_the_role():
+    """The chase brain claims `inf` the moment its ball track goes cold, and
+    the level camera loses a floor ball inside ~0.3 m — exactly where the
+    attacker lines up. The board now costs a blind duck off its OWN pose and
+    the freshest sighting anyone has, plus `blind_s`: on the ball and blind
+    still beats seeing it from a metre away, and a teammate that is really
+    quicker still takes over."""
+    tm = Team("left")
+    tm.claim("watcher", 1.0, 1.2, (0.0, 0.0), (1.2, 0.0, math.pi))        # sees it, 1.2 m out
+    tm.claim("onball", 1.0, math.inf, None, (0.2, 0.0, math.pi))          # lost it — it is at its feet
+    assert tm.cost("onball", 1.0) == pytest.approx((0.2 - tm.reach) / tm.speed + tm.blind_s, abs=1e-6)
+    assert tm.attacker(1.0) == "onball" and tm.role("watcher", 1.0) == "support"
+    # Nobody has ever seen the ball: a blind claim has nothing to cost.
+    empty = Team("right")
+    empty.claim("d0", 1.0, math.inf, None, (0.0, 0.0, 0.0))
+    assert empty.cost("d0", 1.0) == math.inf
+    # A teammate that really is quicker (0.3 m, facing it) still wins the
+    # role — it just has to hold the margin for `hold_s`.
+    for k in range(0, 15):
+        t = 1.0 + 0.1 * k
+        tm.claim("watcher", t, 0.3, (0.0, 0.0), (0.3, 0.0, math.pi))
+        tm.claim("onball", t, math.inf, None, (0.2, 0.0, math.pi))
+        tm.attacker(t)                                                    # read every tick, as a duck does
+    assert tm.attacker(2.4) == "watcher"
+
+
+def test_a_stale_claim_does_not_beat_a_fresh_one():
+    """One message a second over Wi-Fi means half the claims on the board are
+    the older one. A claim is worth `age_rate` seconds of cost per second of
+    age, so a duck that has not spoken for most of a second has to be that
+    much quicker to be believed — and past `stale_s` it stops counting."""
+    tm = Team("left")
+    tm.claim("fresh", 2.0, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))
+    tm.claim("old", 1.4, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))            # the same claim, 0.6 s ago
+    assert tm.cost("old", 2.0) == pytest.approx(tm.cost("fresh", 2.0) + 0.6 * tm.age_rate, abs=1e-6)
+    assert tm.attacker(2.0) == "fresh"
+    # "old" is really quicker — 0.5 s of it — but it said so 0.8 s ago, and
+    # the age eats the whole margin: the fresh incumbent keeps the role.
+    tm.claim("fresh", 3.0, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))
+    assert tm.attacker(3.0) == "fresh"
+    tm.claim("old", 3.2, 0.375, (0.0, 0.0), (0.375, 0.0, math.pi))        # 0.5 s quicker…
+    tm.claim("fresh", 4.0, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))
+    assert tm.cost("old", 4.0) > tm.cost("fresh", 4.0)                    # …but it said so 0.8 s ago
+    assert tm.attacker(4.0) == "fresh"
+    # Said afresh, and held, the same claim takes the role.
+    for k in range(0, 15):
+        t = 4.4 + 0.1 * k
+        tm.claim("fresh", t, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))
+        tm.claim("old", t, 0.3, (0.0, 0.0), (0.3, 0.0, math.pi))
+        tm.attacker(t)
+    assert tm.attacker(5.8) == "old"
+
+
+def test_the_role_moves_only_when_a_challenger_is_clearly_quicker_for_long_enough():
+    """The churn this replaces: over 3 seeds x 300 s of 3v3 the role changed
+    hands 11.6 times a duck a run and a quarter of the spells were under a
+    second. A challenger must be `switch_s` quicker and STAY that quick for
+    `hold_s`; a margin that lapses restarts the clock; `give_up_s` (the
+    incumbent out of the play) and a claim gone stale still move it at once."""
+    def board():
+        tm = Team("left")
+        tm.claim("a", 0.0, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))
+        tm.claim("b", 0.0, 1.2, (0.0, 0.0), (1.2, 0.0, math.pi))
+        assert tm.attacker(0.0) == "a"
+        return tm
+
+    # b becomes 0.78 s quicker (past `switch_s`) and holds it: the role moves
+    # only after `hold_s`, and never sooner.
+    tm = board()
+    for k in range(1, 20):
+        t = 0.1 * k
+        tm.claim("a", t, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))
+        tm.claim("b", t, 0.25, (0.0, 0.0), (0.25, 0.0, math.pi))
+        assert tm.attacker(t) == ("a" if t < 0.1 + tm.hold_s - 1e-9 else "b")
+    # A margin that lapses restarts the clock: alternating half-ticks never
+    # accumulate `hold_s` of pressure.
+    tm = board()
+    for k in range(1, 40):
+        t = 0.1 * k
+        tm.claim("a", t, 0.6, (0.0, 0.0), (0.6, 0.0, math.pi))
+        near = 0.25 if k % 2 else 0.62
+        tm.claim("b", t, near, (0.0, 0.0), (near, 0.0, math.pi))
+        assert tm.attacker(t) == "a"
+    # `give_up_s`: the incumbent turned away 2 m off is out of the play, and
+    # the role moves on the tick, without waiting.
+    tm = board()
+    tm.claim("a", 0.1, 2.0, (0.0, 0.0), (2.0, 0.0, 0.0))
+    tm.claim("b", 0.1, 0.3, (0.0, 0.0), (0.3, 0.0, math.pi))
+    assert tm.cost("a", 0.1) - tm.cost("b", 0.1) > tm.give_up_s and tm.attacker(0.1) == "b"
+    # A stale incumbent (nothing heard for `stale_s`) is replaced at once.
+    tm = board()
+    tm.claim("b", 1.5, 1.2, (0.0, 0.0), (1.2, 0.0, math.pi))
+    assert tm.members(1.5) == ["b"] and tm.attacker(1.5) == "b"
+
+
+def test_the_board_carries_the_balls_own_motion_into_the_cost():
+    """A kicked ball leaves at 1.4 m/s and slows at 0.04 m/s^2 on this floor,
+    so where it IS and where it will BE when a duck arrives are different
+    places. The board keeps a velocity from consecutive fixes by the same
+    duck (differencing across ducks is noise) and aims at the intercept: of
+    two ducks a metre away and both facing the ball, the one it is rolling
+    toward is far quicker than the one chasing it, where a straight line
+    calls them equal. Off — which is the SHIPPED default, measured: the
+    intercept churned the role worse than the straight fix — they are equal
+    again."""
+    def board(lead):
+        tm = Team("left", lead_max_s=lead)
+        for t, y in ((0.0, 0.0), (0.2, 0.2), (0.4, 0.4)):                 # a scout, 1.0 m/s along +y
+            tm.claim("scout", t, 2.0, (0.0, y), (0.0, -2.0, 0.0))
+        tm.claim("ahead", 0.4, math.inf, None, (0.0, 1.4, -math.pi / 2))
+        tm.claim("behind", 0.4, math.inf, None, (0.0, -0.6, math.pi / 2))
+        return tm
+
+    assert Team("left").lead_max_s == 0.0                                 # shipped off (measured)
+    on = board(1.5)
+    assert on._vel_hits >= 2 and on._vel[1] == pytest.approx(1.0, abs=1e-6)
+    assert on.cost("ahead", 0.4) < on.cost("behind", 0.4) - 2.0
+    off = board(0.0)
+    assert off.cost("ahead", 0.4) == pytest.approx(off.cost("behind", 0.4), abs=1e-6)
+    # A ball nobody has seen move twice, or moving slower than `vel_use`
+    # (the walking speed drags a coasting track's fix along with the duck),
+    # is aimed at where it is.
+    slow = Team("left", lead_max_s=1.5)
+    for t, y in ((0.0, 0.0), (0.2, 0.04), (0.4, 0.08)):                   # 0.2 m/s: noise, not a roll
+        slow.claim("scout", t, 2.0, (0.0, y), (0.0, -2.0, 0.0))
+    slow.claim("ahead", 0.4, math.inf, None, (0.0, 1.08, -math.pi / 2))
+    slow.claim("behind", 0.4, math.inf, None, (0.0, -0.92, math.pi / 2))
+    assert slow.cost("ahead", 0.4) == pytest.approx(slow.cost("behind", 0.4), abs=1e-6)
 
 
 def _ball(bearing, rng):
