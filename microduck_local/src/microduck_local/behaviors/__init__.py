@@ -19,14 +19,13 @@ from . import airflip as _airflip
 from . import backflip as _backflip
 from . import core as _core
 from . import env as _envm
-from . import first_squat as _first_squat
 from . import headstand as _headstand
 from . import imitate as _imitate
 from . import locomotion as _locomotion
 from . import poses as _poses
 
-_SUBMODULES = [_core, _poses, _headstand, _backflip, _airflip, _first_squat,
-               _imitate, _locomotion, _envm]
+_SUBMODULES = [_core, _poses, _headstand, _backflip, _airflip, _imitate,
+               _locomotion, _envm]
 
 # The BARE submodule names. `from . import core as _core` binds `_core` here
 # AND pins `core` on the package (the import system does that for every

@@ -87,6 +87,12 @@ class Behavior:
     scene: str = "walk"
     # Inverted tricks ARE what the walk env calls "fallen" — disable for them.
     terminate_on_fall: bool = True
+    # The walk env's second fall rule ends an episode when the trunk drops
+    # under FALL_HEIGHT (0.07 m). Right for standing tricks — a trunk that low
+    # has collapsed — but wrong when the GOAL is down there (a deep squat) and
+    # for locomotion (the GPU stack has no z-kill; a bouncing stride dips
+    # through it without falling). False keeps only the tilt rule.
+    height_termination: bool = True
     # Reverse curriculum: fraction of episodes spawned already IN the trick's
     # end state (playbook: the reliable fix for "learns the start, never the
     # last mile" — the goal state otherwise gets no on-policy data).

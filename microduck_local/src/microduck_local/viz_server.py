@@ -1915,7 +1915,7 @@ def env_kwargs_for_behavior(b) -> dict:
     ep = getattr(b, "episode_s", None)
     if ep and ep > 10.0:
         kw["max_episode_s"] = float(ep)
-    if getattr(b, "forward_cmd", 0.0):
+    if not getattr(b, "height_termination", True):
         kw["height_termination"] = False
     return kw
 
