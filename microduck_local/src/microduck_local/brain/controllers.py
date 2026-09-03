@@ -745,8 +745,10 @@ class ChaseParams:
     #   * It fed itself. Standing on a body keeps touching it, which
     #     refreshed the timer: bumps went 44 -> 105 a run and one freeze
     #     ran 74 s. So the window is edge-triggered now (`bump_gap_s`).
-    # 0 here; team rosters get 0.5 from brain/team.py brain_kwargs.
+    # 0 for a lone attacker; a roster with teammates gets
+    # `team_bump_stand_s` through brain/team.py's brain_kwargs.
     bump_stand_s: float = 0.0
+    team_bump_stand_s: float = 0.5
     # Only where a standing turn beside a body is the danger. Never in
     # `blocked` / `avoid` / `retreat` (the turn IS the escape) and never in
     # `search` (its circle WALKS at `search_vx`, and freezing that stops the

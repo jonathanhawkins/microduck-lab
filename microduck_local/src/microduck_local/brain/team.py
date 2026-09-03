@@ -106,16 +106,18 @@ def brain_kwargs(duck_spec, world, teams: dict[str, "Team"]) -> dict:
     hx, hy = world.scenario.floor[0] / 2 - 0.25, world.scenario.floor[1] / 2 - 0.25   # the boards sit 0.25 m in
     out = {"goal": world.goal_for(d), "team": team, "duck_id": duck_spec.id, "bounds": (hx, hy),
            "goal_w": world.goal_width}
-    # A roster with teammates plays in a crowd: the bump sense stands the
-    # duck for half a second after its feet touch another body (measured,
-    # 4 seeds x 300 s: 3v3 falls 5.00 -> 1.75 a run, 2v2 4.00 -> 2.25, at
-    # 0.75 and 1.25 goals against 1.50; in 1v1 the same rule measured
-    # 1.50 goals and 1.00 falls against 2.38 / 0.38, so a lone attacker
-    # keeps the default).
+    # A roster with teammates plays in a crowd, so it gets the bump sense
+    # (`ChaseParams.team_bump_stand_s`) where a lone attacker does not - in
+    # 1v1 the rule measured worse on both goals and falls. Taken off the
+    # LIVE defaults with `replace`, so a caller that overrides ChaseParams
+    # (a measurement sweep) is not silently overridden back.
     mates = sum(1 for x in world.scenario.ducks if duck_spec.team and x.team == duck_spec.team)
     if mates > 1:
+        from dataclasses import replace
+
         from .controllers import ChaseParams
-        out["p"] = ChaseParams(bump_stand_s=0.5)
+        base = ChaseParams()
+        out["p"] = replace(base, bump_stand_s=base.team_bump_stand_s)
     return out
 
 
