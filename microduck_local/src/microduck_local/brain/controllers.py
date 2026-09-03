@@ -516,6 +516,19 @@ class ChaseParams:
     seek_s: float = 0.0
     seek_min: float = 0.4
     seek_tol: float = 0.25
+    # The ball's trajectory (tracker: an odometry-frame position and
+    # velocity from consecutive hits). Measured: a kicked ball leaves at
+    # 1.4 m/s and slows at 0.04 m/s^2 on this floor - it rolls to the
+    # boards - and leaves the level camera at once, 30-55 deg off the
+    # nose, so the track coasted with a stale range for two seconds and a
+    # new track was born when it was found again. The head now YAWS
+    # toward the predicted bearing (`head_yaw_gain`, to `head_yaw_max`)
+    # while a track lives, the search opens toward the predicted side,
+    # and the hunt walks to the predicted point (clamped to the pitch).
+    ball_decel: float = 0.04
+    predict_s: float = 3.0         # how long a prediction is worth acting on after the last hit
+    head_yaw_gain: float = 0.9
+    head_yaw_max: float = 0.6
     search_dip_every: float = 1.5
     search_dip_s: float = 0.6
     dip_range: float = 0.22
@@ -670,6 +683,7 @@ class Chase:
         out["tracks"] = self.tracker.payload(self._senses.t)
         out["chase"] = {"kicks": self.kicks, "pushes": self.pushes, "role": self.role,
                         "memory": None if self.memory is None else [round(self.memory[0], 2), round(self.memory[1], 2)],
+                        "predicted": None if getattr(self, "predicted", None) is None else [round(self.predicted[0], 2), round(self.predicted[1], 2)],
                         "spot": None if self.spot is None else
                         [round(self.spot[0], 3), round(self.spot[1], 3), self.spot[2] or self.spot[4]]}
         if self.team is not None:
@@ -744,10 +758,21 @@ class Chase:
         odom = senses.odom or (0.0, 0.0, 0.0)
         if self.attack is None and senses.odom is not None:
             self.attack = odom[2]                  # placed facing the goal it attacks (make_pitch does)
-        self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), t, odom[2])
+        self.tracker.update(senses.fresh_det(self.DET_MAX_AGE), t, odom[2], (odom[0], odom[1]) if senses.odom is not None else None)
         ball = self.tracker.best(p.target_cls, t, min_hits=1)
         fresh = ball is not None and ball.age(t) <= self.DET_MAX_AGE
         seen = ball is not None and ball.age(t) < p.lost_s
+        # Where the ball is going: its predicted position, and the bearing
+        # to it from here (the head looks there; the search opens there).
+        self.predicted: tuple[float, float] | None = None
+        pred_bearing: float | None = None
+        if ball is not None and ball.xy is not None and ball.age(t) <= p.predict_s:
+            px, py = ball.predict(t, p.ball_decel)
+            if self.bounds is not None:
+                px = float(np.clip(px, -self.bounds[0] + 0.1, self.bounds[0] - 0.1))
+                py = float(np.clip(py, -self.bounds[1] + 0.1, self.bounds[1] - 0.1))
+            self.predicted = (px, py)
+            pred_bearing = _wrap(math.atan2(py - odom[1], px - odom[0]) - odom[2])
         if self.team is not None:
             self.team.claim(self.duck_id, t, ball.range if seen else math.inf,
                             self._ball_xy(odom, ball) if seen else None)
@@ -964,6 +989,8 @@ class Chase:
                 if fresh and ball.range < p.head_range:
                     gaze_at = ball.range
         elif hunting:
+            if self.predicted is not None:                      # the line bends to where the ball is going
+                self._hunt_u = math.atan2(self.predicted[1] - odom[1], self.predicted[0] - odom[0])
             vx, wz = p.hunt_speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -p.hunt_wz, p.hunt_wz))
             self.state = "hunt"
         elif seeking and self.state not in ("look",):
@@ -987,7 +1014,8 @@ class Chase:
                 # at ~24 deg/s, so a ball to the right found by a left turn
                 # takes 10 s, by a right turn 4); the cold-turn kick starts
                 # the right turn the standing walker cannot.
-                vx, _, wz = turn(1.0 if (self.last_bearing >= 0.0 or not p.search_sided) else -1.0, cold)
+                side = pred_bearing if pred_bearing is not None else (self.last_bearing if p.search_sided else 1.0)
+                vx, _, wz = turn(1.0 if side >= 0.0 else -1.0, cold)
                 vx = max(vx, p.search_vx)                       # a walking circle: the body actually turns
                 self.state = "search"
                 since = t - self._search_t0
@@ -1030,6 +1058,9 @@ class Chase:
                 self._retreat_sign = 1.0 if left_near >= right_near else -1.0
         if gaze_at is not None and (vx > 0 or self.state in ("look", "search")):
             head = (0.0, self._gaze(gaze_at), 0.0, 0.0)
+        look_at = pred_bearing if pred_bearing is not None else (ball.bearing if ball is not None and ball.age(t) <= p.predict_s else None)
+        if look_at is not None and senses.skill is None:
+            head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
         self.last = (vx, 0.0, wz)
         return Intent(twist=self.last, head=head, note=self.role if self.role != "attack" else self.state, skill=skill)
 

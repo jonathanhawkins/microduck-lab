@@ -84,7 +84,8 @@ def test_chase_pitches_the_head_down_walking_at_a_near_ball_and_not_when_turning
     b = Chase(ChaseParams(), goal=(1.5, 0.0))
     b.step(_senses(0.0, (0.05, 1.5)))
     out = b.step(_senses(0.1, (0.05, 1.2)))
-    assert out.note == "chase" and out.twist[0] > 0 and out.head == (0.0, 0.0, 0.0, 0.0)   # still far: level
+    assert out.note == "chase" and out.twist[0] > 0 and out.head[1] == 0.0      # still far: level pitch...
+    assert abs(out.head[2] - 0.9 * 0.05) < 0.02                                   # ...but the head yaws toward the ball
     for k in range(3):                                                      # the track smooths in
         out = b.step(_senses(0.2 + 0.1 * k, (0.05, 0.7)))
     assert out.note in ("chase", "lineup") and out.twist[0] > 0
@@ -94,7 +95,7 @@ def test_chase_pitches_the_head_down_walking_at_a_near_ball_and_not_when_turning
     c = Chase(ChaseParams(), goal=(1.5, 0.0))
     c.step(_senses(0.0, (1.2, 0.7), speed=0.0))
     out = c.step(_senses(0.1, (1.2, 0.7), speed=0.0))
-    assert out.note == "turn" and out.head == (0.0, 0.0, 0.0, 0.0)
+    assert out.note == "turn" and out.head[1] == 0.0 and out.head[2] != 0.0   # level pitch, the head yawed to the ball
 
 
 def test_chase_wall_rule_turns_away_from_a_wall_beside_it():

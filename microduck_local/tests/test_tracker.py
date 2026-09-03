@@ -1,3 +1,4 @@
+import math
 """The tracker over detection frames (roadmap 1.3) and the gait facts every
 brain shares (brain/gait.py): ids persist across frames, a track coasts
 through misses with its bearing turning with the body, a one-frame ghost
@@ -68,3 +69,30 @@ def test_tracks_are_kept_in_the_body_frame_whatever_the_head_is_doing():
     tr.update(DetectionFrame(0.2, [det("person", 0.4, 1.0, "p0")], cam_yaw=0.0), 0.2, yaw=0.0)
     q = tr.best("person", 0.2)
     assert q is not None and q.id == p.id and abs(q.bearing - 0.4) < 0.03
+
+
+def test_a_rolling_ball_gets_a_position_and_a_velocity_and_a_prediction():
+    """With the body's odometry position passed in, each hit places the
+    track in the odometry frame; consecutive hits give a velocity; predict()
+    runs it forward, to a stop under a deceleration."""
+    from microduck_local.brain.tracker import Tracker
+    from microduck_local.sensors.detector import Detection, DetectionFrame
+    tr_ = Tracker()
+    # A ball 1.0 m ahead rolling left at 0.5 m/s, seen from a duck at the origin facing +x, 10 Hz.
+    for k in range(5):
+        t = 0.1 * k
+        y = 0.5 * t
+        f = DetectionFrame(t, [Detection("ball", "ball0", math.atan2(y, 1.0), 0.0, 0.07, math.hypot(1.0, y), 0.9)])
+        tr_.update(f, t, 0.0, (0.0, 0.0))
+    tr = tr_.best("ball", 0.4)
+    assert tr.xy is not None and abs(tr.xy[0] - 1.0) < 0.05 and abs(tr.xy[1] - 0.2) < 0.05   # smoothed: a few cm behind
+    assert tr.vel_hits >= 2 and abs(tr.vel[0]) < 0.05 and 0.35 < tr.vel[1] < 0.6
+    # A second later it is 0.5 m further left; with a deceleration it stops short of that.
+    px, py = tr.predict(1.4)
+    assert abs(px - 1.0) < 0.05 and abs(py - 0.7) < 0.12
+    px2, py2 = tr.predict(1.4, decel=0.4)
+    assert 0.2 < py2 < py
+    # Without the position nothing is placed, and the old call shape still works.
+    plain = Tracker()
+    plain.update(DetectionFrame(0.0, [Detection("ball", "ball0", 0.0, 0.0, 0.07, 1.0, 0.9)]), 0.0, 0.0)
+    assert plain.best("ball", 0.0, min_hits=1).xy is None and plain.best("ball", 0.0, min_hits=1).predict(1.0) is None
