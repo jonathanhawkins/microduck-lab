@@ -213,7 +213,7 @@ def test_after_a_kick_the_duck_looks_then_hunts_the_kick_line_then_searches():
     """A kicked ball rolls off along the kick line: after the look finds
     nothing the duck WALKS that line for `hunt_s` (head level, the ball in
     view from 0.3 m out) before the standing search."""
-    p = ChaseParams(hunt_s=3.0)
+    p = ChaseParams(hunt_s=3.0, seek_s=20.0)
     b = Chase(p, goal=(3.0, 0.0))
     # A settle that fires the kick: on the spot, squared, settled.
     b._senses = Senses(t=0.0)
