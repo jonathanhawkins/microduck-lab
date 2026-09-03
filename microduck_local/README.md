@@ -1387,7 +1387,33 @@ withdrawn.** This is the poacher's shape exactly — found, reproduced on
 its own seeds, gone on fresh ones — and the rule that catches it is this
 repo's own third: confirm on seeds the effect was NOT found on.
 
-The rule still ships on for rosters (`team_bump_stand_s`), and that is a
+**And backing out instead of standing changes nothing either — which is
+the most closed null here.** Standing was measured never to end a
+contact (from 0.10 m of separation, 16 trials, a standing duck is still
+at 0.099 m four seconds later and clears 0.30 m in 0 of them, where a
+straight reverse clears it in a median 1.6 s), and the walker reverses at
+0.23 m/s once you leave the dead band. So `bump_back` backs out on
+exactly the stand's gate. A third arm on the same twelve fresh layouts:
+
+| 3v3, seeds 200–211 | falls | kicks | goals | possession | advance |
+|---|---|---|---|---|---|
+| no rule | 4.08 | 6.50 | 2.17 | 11.83 | 0.40 |
+| stand | 4.33 | 7.33 | 1.58 | 13.00 | 0.42 |
+| back out | 4.33 | 6.67 | 2.00 | 11.97 | 0.44 |
+
+`stand → back` on falls is **exactly 0.00 ± 1.13, p = 1.000** (52 events
+against 52), and nothing else resolves. The knob is not inert: over one
+instrumented 3v3 run it issues 690 reverse commands (13.8 s a run) and
+drops the ticks spent touching another body from 4473 to 2529 of 90 000 —
+**a 43% cut**, which is precisely the self-feeding the 838-bump trace
+found ("standing on a body keeps touching it"). The mechanism is real, it
+operates, and it does not matter. **Time in contact is not what makes a
+3v3 duck fall** — which agrees with the probe the idea came from: a turn
+beside a *static* body fell 0 times in 98 trials down to 8 cm, and every
+fall in those probes needed a duck that was *moving* into you. The
+remaining lever is the closing duck, not the contact.
+
+The stand still ships on for rosters (`team_bump_stand_s`), and that is a
 default nobody has earned in either direction. Over all 24 layouts the
 point estimate still favours it (−0.81, better on 15/24) and nothing it
 was suspected of costing moved — kicks +0.83 (p = 0.51), goals −0.58

@@ -862,9 +862,27 @@ class ChaseParams:
     # rule is kept OUT of are excluded because "the turn IS the escape" -
     # which was true only while a reverse was believed impossible.
     #
-    # Measure it against `bump_stand_s`, not against nothing: the stand is
-    # the arm to beat, and falls need ~376 seeds to resolve a 25% shift, so
-    # this wants a real battery (`--out` / `--tag`) and not eight seeds.
+    # MEASURED, and it is the most closed null in this file. Three arms on
+    # the same twelve fresh layouts (3v3, seeds 200-211, 300 s a seed):
+    #
+    #            falls  kicks  goals   possession  advance
+    #   no rule   4.08   6.50   2.17     11.83      0.40
+    #   stand     4.33   7.33   1.58     13.00      0.42
+    #   back      4.33   6.67   2.00     11.97      0.44
+    #
+    # stand -> back on falls is EXACTLY 0.00 +/- 1.13, p = 1.000 (52 events
+    # against 52); nothing else resolves either. And the knob is NOT inert:
+    # instrumented over one 3v3 run it issues 690 reverse commands (13.8 s
+    # a run) and cuts the ticks spent touching another body from 4473 to
+    # 2529 of 90000 - a 43% drop, exactly the self-feeding the 838-bump
+    # trace found ("standing on a body keeps touching it").
+    #
+    # So: the mechanism is real, it operates, and it does not matter. Time
+    # in contact is not what makes a 3v3 duck fall. That agrees with the
+    # probe it was built on - a turn beside a STATIC body fell 0 times in
+    # 98 trials down to 8 cm; the falls need a duck that is MOVING into
+    # you - and it means the remaining lever is the closing duck, not the
+    # contact. Ships at 0, as a measured null rather than an untried idea.
     bump_back: float = 0.0
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,
