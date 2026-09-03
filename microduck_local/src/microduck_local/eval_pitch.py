@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 import numpy as np
 
@@ -53,7 +54,33 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
     return {"seed": seed, "perSide": per_side, "left": score["left"], "right": score["right"],
             "kickGoals": score["kicked"], "bumpGoals": score["bumped"],   # attributed by the World (KICK_GOAL_S)
             "kicks": {k: b.kicks for k, b in brains.items()}, "pushes": {k: b.pushes for k, b in brains.items()},
-            "falls": {k: d.falls for k, d in w.ducks.items()}, "simSeconds": round(w.t, 1)}
+            "falls": {k: d.falls for k, d in w.ducks.items()}, "simSeconds": round(w.t, 1),
+            "seconds": seconds}
+
+
+def load_done(path: str | None, tag: str, per_side: int, seconds: float) -> dict[int, dict]:
+    """Seeds already measured into `path` (JSON lines, one row a seed), for a
+    resume. A battery is the best part of an hour and this machine reclaims
+    its container mid-run, so a killed run should cost the seed it was on and
+    nothing else. Rows written under different settings are REFUSED rather
+    than silently mixed: the brain's own parameters do not appear in a row,
+    so `--tag` is how a caller says which variant a file belongs to."""
+    if not path or not os.path.exists(path):
+        return {}
+    done: dict[int, dict] = {}
+    with open(path) as fh:
+        for n, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if (r.get("tag", ""), r.get("perSide"), r.get("seconds")) != (tag, per_side, seconds):
+                raise SystemExit(
+                    f"{path}:{n} was measured with tag={r.get('tag', '')!r} perSide={r.get('perSide')} "
+                    f"seconds={r.get('seconds')}, not tag={tag!r} perSide={per_side} seconds={seconds}. "
+                    "Write a different variant to a different file.")
+            done[int(r["seed"])] = r
+    return done
 
 
 def _seed_line(r: dict) -> str:
@@ -75,28 +102,47 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--per-side", type=int, default=1, help="ducks a side: 1 (1v1), 2, 3")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--out", help="append each seed's result here as a JSON line AND resume from it: "
+                                  "seeds already in the file are not re-run")
+    ap.add_argument("--tag", default="", help="recorded in --out rows; a resume refuses to mix tags, so a file "
+                                              "written under different brain settings is never reused by mistake")
     args = ap.parse_args()
     seeds = [args.seed0 + k for k in range(args.seeds)]
     # Each seed PRINTS as it finishes, rather than the battery printing at the
     # end: a 12-seed 3v3 battery is the best part of an hour, and a machine
     # that reclaims its container mid-run should cost one seed, not all of
     # them (it cost all of them, twice). Resume the rest with --seed0.
-    args_list = [(sd, args.seconds, args.per_side) for sd in seeds]
-    rows = []
-    if args.jobs > 1 and len(seeds) > 1:
-        import multiprocessing as mp
-        ctx = mp.get_context("forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
-        with ctx.Pool(min(args.jobs, len(seeds))) as pool:
-            for r in pool.imap(_run_one_args, args_list):
-                rows.append(r)
-                if not args.json:
-                    print(_seed_line(r), flush=True)
-    else:
-        for a in args_list:
-            r = run_one(*a)
-            rows.append(r)
-            if not args.json:
-                print(_seed_line(r), flush=True)
+    done = load_done(args.out, args.tag, args.per_side, args.seconds)
+    rows = [done[sd] for sd in seeds if sd in done]
+    if not args.json:
+        for r in rows:
+            print(_seed_line(r) + "  (already measured)", flush=True)
+    todo = [sd for sd in seeds if sd not in done]
+    out = open(args.out, "a") if args.out else None
+
+    def keep(r: dict) -> None:
+        rows.append(r)
+        if out is not None:
+            out.write(json.dumps({**r, "tag": args.tag}) + "\n")
+            out.flush()
+        if not args.json:
+            print(_seed_line(r), flush=True)
+
+    args_list = [(sd, args.seconds, args.per_side) for sd in todo]
+    try:
+        if args.jobs > 1 and len(todo) > 1:
+            import multiprocessing as mp
+            ctx = mp.get_context("forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
+            with ctx.Pool(min(args.jobs, len(todo))) as pool:
+                for r in pool.imap(_run_one_args, args_list):
+                    keep(r)
+        else:
+            for a in args_list:
+                keep(run_one(*a))
+    finally:
+        if out is not None:
+            out.close()
+    rows.sort(key=lambda r: r["seed"])
     if args.json:
         print(json.dumps(rows))
         return

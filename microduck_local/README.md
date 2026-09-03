@@ -1079,6 +1079,19 @@ uv run duck-lab --world playroom          # watch it on /sim; the tidy score is 
 uv run eval-tidy --seeds 3 --toys 6 --seconds 300   # the benchmark: toys in the basket
 ```
 
+**Long batteries are resumable.** A 16-seed tidy battery or a 12-seed 3v3
+one is well over an hour, so `eval-tidy` and `eval-pitch` print each seed
+the moment it lands and, given `--out FILE`, append it there as a JSON
+line and skip on a later run whatever the file already holds. Re-running
+the *same command* after an interruption continues it; `--seed0` extends a
+finished battery onto fresh seeds instead of redoing the same ones. The
+brain's own parameters never appear in a row, so `--tag` says which
+variant a file belongs to and a resume **refuses** a file written under a
+different tag, roster or run length rather than fabricating a comparison
+out of two halves. This was written after a cloud container was reclaimed
+twice mid-battery and, because the results were buffered to the end, took
+about ninety minutes of measurement with it both times.
+
 What is real and what is a model here, so nobody mistakes one for the other:
 
 - **Grasp is an attachment event**, not contact physics (`World.grasp`): when
