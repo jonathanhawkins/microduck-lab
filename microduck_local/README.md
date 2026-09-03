@@ -67,6 +67,12 @@ cd ../microduck_rl && uv run scripts/infer_policy.py \
 
 # training curves:
 uv run tensorboard --logdir runs/
+
+# hold a training change to the repo's own standard before it ships:
+uv run bench-ab brains/baseline brains/candidate   # matched STEPS, not matched wall clock
+uv run select-brain my-run --seeds 100,200,300 --jobs 8   # brains: ship the best checkpoint, deterministically
+uv run select-run runs/my-run --jobs 8                    # locomotion: same, scored on achieved ground speed
+uv run bench-envs --ipc-floor                             # is a slow vec-step the plumbing or the physics?
 ```
 
 Measured on an M5 Max: ~26k control-steps/s raw env throughput at 12 workers
@@ -182,9 +188,24 @@ uv run bench-envs --compare-vec --compare-threads
 - **Env batching** (`ForkVecEnv(envs_per_worker=k)` /
   `MICRODUCK_ENVS_PER_WORKER`): several envs per worker process, stepped
   serially inside it — semaphore ops and pipes scale with workers, not envs.
-  Default 1 (identical behavior, pinned by a step-for-step parity test);
-  meant for 48+ env counts where 1:1 packing costs 2 sem ops per env per
-  vec-step.
+  Packing also halves the worker processes available to fill the cores the
+  serial update leaves idle, and those two pull opposite ways, so the curve
+  CROSSES (measured 2026-09-03, real PPO, quiet machine):
+
+  | envs | k=1 | k=2 | |
+  |---:|---:|---:|---|
+  | 8 | 11,516 | 10,829 | −6.0% |
+  | 16 | 15,651 | 14,713 | −6.0% |
+  | 32 | 19,456 | **20,536** | **+5.5%** |
+  | 32 | | 17,824 (k=4) | −8.2% |
+
+  So the default is now **k=2 from 32 envs up** (the trainers' own default
+  `--envs`) and 1 below. This is the one throughput default here that needs
+  no learning-quality A/B, and the reason is mechanical rather than
+  statistical: the packed layout produces a step-for-step BIT-IDENTICAL
+  obs/rew/done stream, pinned by
+  `test_envs_per_worker_batching_matches_one_per_worker`. If that test ever
+  goes, the default goes with it.
 - **MPS update** (`SymmetryPPO(update_device="mps")` / `--update-device`,
   default `auto`): the minibatch loop hops policy + Adam state to the GPU;
   rollouts stay on CPU where batch-32 inference beats GPU dispatch latency.
@@ -199,6 +220,65 @@ update, 4 envs/worker), saturating ~27k — the parent's serial per-vec-step
 work is the remaining wall. A single worker's `env.step` is down to 0.135 ms
 idle, so physics itself would allow ~130k; closing the gap means replacing
 the SB3 rollout loop wholesale, not tuning it.
+
+### The 2026-09-03 pass: where the time really goes (and what that ruled out)
+
+The note above says the parent's serial per-vec-step work is the wall, and
+that "closing the gap means replacing the SB3 rollout loop wholesale". That
+turns out to be **wrong**, and the measurement that settles it is
+`uv run bench-envs --ipc-floor`: a vec-step over envs that do NO work, which
+is pure IPC and scheduling. At 32 envs on a quiet machine:
+
+| | us per vec-step | share |
+|---|---:|---:|
+| IPC + scheduling floor (`--ipc-floor`, k=2) | 86 | 10% |
+| the physics itself, plus memory contention | 482 | 55% |
+| policy forward (batch 32) | 174 | 20% |
+| the rest of SB3's rollout loop | 141 | 16% |
+| **one real vec-step** | **883** | |
+
+And `collect_rollouts` is 58% of wall against the update's 42%. So the Python
+plumbing everyone suspects is 10%, and a rollout-loop rewrite could recover
+at best the "rest of SB3" row — about 6% of wall. The 55% is physics: 16
+worker processes stepping 2 envs each is ~162 us of actual work, and it
+measures 482, the difference being the memory contention of 32 concurrent
+~0.9 MB mjData working sets. **Not a Python problem, and not worth a
+rewrite.**
+
+The same numbers close the "make the numpy nogil and revisit the thread
+backend" idea. Threads would delete the 86 us IPC floor — 10% — and pay for
+it in GIL contention on the 36% that is Python. The measured `elu`/`linear`
+split inside the forward is another dead end worth recording: ELU costs 1.7x
+the matmuls at batch 32, but `inplace=True` changes nothing (174.0 vs
+174.1 us) and `torch.jit.trace` buys 2.4%, because it is per-op dispatch
+across ~14 tiny ops, not arithmetic. Thread count does not move it either
+(171-175 us at 1, 2, 4 and 8 intra-op threads).
+
+**Mirror data augmentation** (`train-behavior --symmetry-augment`) is
+rsl_rl's other symmetry mode, and now implemented: every minibatch is doubled
+with its mirror image and the mirrored halves go through the surrogate and
+value losses, rather than only being penalised for asymmetry. It is the one
+lever that buys sample EFFICIENCY rather than more samples, which is the only
+currency a trainer running ~250x fewer samples than the GPU stack has. On
+reward per step it looked like a clear win — +24.7% and +8.0% in the settled
+tail on two seeds, leading over 97% and 86% of the run, at a 16% throughput
+cost. **Then the deterministic export was scored and every policy in both
+arms was standing still at 0.001 m/s.** 1.5M steps from scratch buys "do not
+fall", nothing more, so that reward signal was not measuring the task at all
+— exactly the trap AGENTS.md #1 exists for. It ships OFF, with the honest
+note that its own mirrored samples reuse the original's `old_log_prob`, so
+the importance ratio on the mirrored half is biased.
+
+**The distilled warm start** (`train-behavior --distill`) clones the shipped
+walker into a fresh SB3 policy and starts PPO from there — cached, so the
+clone is paid once. It works as advertised: the clone walks at 0.194-0.206
+m/s against the teacher's 0.196. What it does NOT do is survive fine-tuning
+at this budget: 1M steps of PPO afterwards left every checkpoint of all four
+arms falling in 100% of episodes, several at negative ground speed.
+`distill.py`'s own header predicts the mechanism ("the critic starts
+untrained ... expect a dip before any gain"); the measurement says the dip is
+longer than 1M steps. So it stays opt-in, and the honest summary is that the
+clone is a good warm start and nobody has yet shown what budget exploits it.
 
 **And the number that actually matters** — reward per wall-second on the
 real recipe — does NOT follow raw steps/s. Both throughput-maximizing
@@ -549,6 +629,207 @@ its current intent live.
   hold-and-correct loop does not have. The obs layout is a contract shared
   by training and the in-world `LearnedBrain` (`brain/learned.py`), and
   the exported ONNX bakes the normalizer in, like `export-walk`.
+
+#### The 2026-09-03 brain-training pass (measured, and one honest negative)
+
+  **The 2M-decision recipe is about 8x more budget than the benchmark can
+  see.** `select-brain` scores every checkpoint of a run on the deterministic
+  export — the artifact that actually ships — instead of on the reward curve,
+  which measures the noise-crutched stochastic policy. Run over a fresh 2M
+  training run (12 envs, `--variety`, seed 7, 40 episodes a checkpoint,
+  datasheet preset):
+
+  | checkpoint | 250k | 500k | 750k | 1.0M | 1.25M | 1.5M | 1.75M | 2.0M | final |
+  |---|---|---|---|---|---|---|---|---|---|
+  | in band | 0.938 | 0.895 | 0.918 | **0.940** | 0.935 | 0.937 | 0.938 | 0.934 | 0.939 |
+
+  The curve is flat from the FIRST checkpoint: 0.938 at 250k against 0.939
+  at 2M. `ep_rew` climbed the whole way (159 → 177) and none of that climb
+  reached the benchmark. The reward curve and the thing being bought parted
+  company at 250k, which is why `select-brain` exists and why
+  `--plateau-patience` is worth arming on a long run.
+
+  ```bash
+  uv run select-brain my-run --seeds 100,200,300,400,500 --jobs 16 --dry-run
+  ```
+
+  **So stop on the benchmark, not on the reward.** `train-brain --probe-every`
+  scores the deterministic export mid-run — 40 benchmark episodes in a spawn
+  pool while the forked training workers sit blocked on their semaphores,
+  ~3 s a probe against the ~2 min of training between two — and logs it as
+  `probe`. `--plateau-patience` watches THAT series.
+
+  Run live on the same recipe and seed as the arm above, against the full-
+  length run it is trying to replace:
+
+  | | trained | shipped | in band (240 eps) | bumps/ep |
+  |---|---|---|---|---|
+  | full run + `select-brain` | 2.00M | 1.00M ckpt | 0.947 | 6.8 |
+  | `--probe-every` + patience 3 | **1.75M** | 1.25M ckpt | **0.945** | 3.7 |
+
+  0.002 apart, ahead on 4/10 eval seeds — the same brain, 12% less training.
+  Fed the same run's REWARD series the detector never fires at all, which is
+  the whole argument for paying the probe's 2%.
+
+  **How much it saves is run-dependent, and the probe has to be big enough to
+  see.** Replayed over the first arm's `select-brain` series — which was flat
+  from 250k — patience 3 stops at 1.0M, a 50% saving for the identical
+  checkpoint (pinned in `tests/test_plateau.py`). The live run's benchmark
+  genuinely kept climbing to 1.0M, so it stopped later. That is the detector
+  working, not failing. What DID fail was a first attempt at an 8-episode
+  probe: it read 0.903 where the 40-episode score was 0.938, and +-0.035 of
+  noise walks straight through a 1% bar — it never stopped at all. The probe
+  is 40 episodes by default for that reason.
+
+  ```bash
+  uv run train-brain --run-name my-run --envs 12 --steps 2_000_000 --variety \
+      --probe-every 250_000 --plateau-patience 3
+  uv run select-brain my-run --seeds 100,200,300,400,500 --jobs 16
+  ```
+
+  **`eval-brain --jobs N`** runs the battery in parallel (2.3-3.3x measured).
+  It is NOT the same numbers as `--jobs 1`, and the flag says so: episodes are
+  chained — the ToF and detector generators are seeded once per World and
+  `reset()` never reseeds them, and the duck's commanded twist survives a
+  respawn into the five settle steps of the next episode — so episode k's
+  start only exists after episode k-1 has been simulated. `--jobs N` seeds
+  every episode independently instead (identical for every N >= 2, so a number
+  never depends on the core count); the shift is <= 0.02 in band, which is the
+  size of the gaps the table above uses to rank brains. **The published table
+  stays `--jobs 1`**, which is byte-for-byte the original loop.
+
+  It earns its keep unevenly and that is the point: on this run it moved the
+  shipped brain by +0.001, on a sibling run by +0.030 (the final checkpoint
+  was the third-worst of nine). A run whose last checkpoint happens to be
+  its best loses nothing by being scored.
+
+  **`select-run` is the same idea for anything that travels**, and it exists
+  under the condition `train_behavior.py` set when it reverted its own
+  attempt: score ACHIEVED GROUND SPEED, not a reward term. That attempt used
+  `keep_pace * ep_len`, which is ~90% ep_len, so it collapsed into
+  "longest-surviving" — and the pace term pays 0.29 at zero velocity, so a
+  motionless duck scored well. Here the number is the body-frame forward
+  velocity a deterministic rollout actually reaches, and **falls are a
+  rejection floor, never a term traded against speed**. On a deliberately
+  under-trained 12k-step run every candidate falls, and the tool ships
+  nothing rather than crowning the fastest faller — which is the one diving
+  forward hardest, and which its own table shows: 0.160 m/s over 41 steps
+  against the final policy's 0.106 over 133. `train-behavior
+  --checkpoint-every` keeps the candidates (off by default; `live.onnx` and
+  `model.zip` are still overwritten as before).
+
+  **`train-brain` on the shared-model fork backend.** `ForkVecEnv` sized its
+  shared memory from the WALK contract's 61 observations and 14 actions,
+  which silently made the backend walk-only — the brain trainer was left on
+  `SubprocVecEnv`, paying a private MJCF compile per worker and a pickled
+  pipe round-trip per worker per step. The buffers now come from the env's
+  own spaces. Measured at 8 workers with `--variety`, same machine and load:
+
+  | | setup | throughput |
+  |---|---|---|
+  | `subproc` (before) | 2.77 s | 1,644 decisions/s |
+  | `fork` (now) | 0.37 s | 1,879 decisions/s |
+
+  Rollouts are step-for-step BIT-IDENTICAL between the two backends
+  (`tests/test_brain_vec_env.py`), which is the bar a throughput change has
+  to clear here. `MICRODUCK_VEC_ENV=subproc` restores the old path.
+
+  **Two brain runs at once beat one.** A 12-env brain run has the machine to
+  itself at 3,007 steps/s; two of them side by side hold 2,092 steps/s each,
+  so the pair moves 4,184 steps/s — **1.39x the aggregate** of running them
+  in sequence. A 12-env fleet leaves cores idle whenever the trainer is in
+  its serial update, and a second run fills them. Since the currency here is
+  experiments finished, not steps in one run, an A/B costs about 1.4 runs of
+  wall time rather than 2. (Measured on the four 2M A/B arms below; the pair
+  arms and the solo arm ran the identical recipe.)
+
+  **Eval seeds do not measure a training run. This is the trap.** The
+  trainer had three arguable defects — a batch of 1024 against a 1536-sample
+  buffer, so SB3 truncated every update into a 1024 and a 512 minibatch (it
+  warns); a constant learning rate, which `train_behavior` blames for every
+  trick run peaking and coming apart; and no cap on the action `log_std`
+  across a warm-start chain. Five seed-matched 2M runs, each scored on 240
+  benchmark episodes:
+
+  | arm | recipe | training seed | in band |
+  |---|---|---|---|
+  | `ab-legacy` | pre-fix | 7 | 0.947 |
+  | `ab-batch` | + even minibatches | 7 | 0.932 |
+  | `ab-batch-lr` | + decayed lr | 7 | 0.931 |
+  | `ab-fixed` | + log_std cap | 7 | 0.929 |
+  | `ab-legacy-s8` | **pre-fix, unchanged** | **8** | **0.926** |
+
+  Read against the pre-fix arm alone, every change "lost" 0.015–0.018 and was
+  ahead on only 1–2 of 10 eval seeds — by the same standard the follow table
+  above uses, a verdict. Then the control: the SAME recipe at a different
+  TRAINING seed lands 0.021 away, ahead on 1/10 eval seeds. The whole spread
+  is one run's luck. Nothing here is resolvable at one training run an arm.
+
+  Ten eval seeds control the eval; they say nothing about run-to-run
+  variance, which on this task is **±0.02 in band** — bigger than the eval
+  spread of ±0.013–0.023 and bigger than every effect above. Two brains that
+  differ by less than ~0.02 are not ranked by this method, whatever the
+  seed-win count says. (The follow table's own gaps are 0.05–0.09, comfortably
+  clear of it.) `MICRODUCK_BRAIN_LEGACY=1` reproduces the pre-fix arm exactly,
+  so any of this stays runnable.
+
+  **Pairing the seeds resolves it.** Train both arms on the SAME seed and the
+  run's luck cancels in the per-seed difference. Four paired seeds at 1M
+  decisions, 240 benchmark episodes a cell (`bench_ab.paired_delta`):
+
+  | training seed | 11 | 12 | 13 | 14 | mean | 95% interval |
+  |---|---|---|---|---|---|---|
+  | even minibatches − pre-fix | −0.003 | −0.002 | −0.006 | **+0.011** | **+0.000** | −0.012 … +0.012 |
+
+  Exactly zero, and the interval says an effect above ±0.012 would have been
+  seen. The unpaired reading of "−0.015, ahead on 1/10 eval seeds" was
+  entirely run luck. Note the interval must use Student's t: at n=2 the
+  normal 1.96 understates it 6.5-fold and turned an unresolved pair into
+  "excludes 0".
+
+  What shipped, on that evidence:
+
+  * **Even minibatches: on.** Measured neutral (+0.000 ± 0.012) — which is
+    the bar for a defect fix. It has to show it does no harm, not that it
+    helps.
+  * **Decayed learning rate: off** (`--lr-end` turns it on). A tuning change
+    with no measured benefit does not get to be a default.
+  * **`log_std` cap: kept, raised to 0.0.** At `train_behavior`'s -0.5 it
+    would bind from step 0, because the brain's `log_std_init` IS -0.5. All
+    five runs drove their own log_std down to -0.55…-1.22 unaided, so the cap
+    never binds on a healthy run; it is there for the warm-start ratchet that
+    reached 3.2 on a trick chain.
+
+  **A mixed person un-learns the habit `follow-v5` picked up**
+  (`train-brain --polite-mix 0,0.55`). v5 was v4's recipe against a person
+  who ALWAYS stops, and what it learned was that the person stops: it tripped
+  the bump signal 2.6 times an episode against v4's 0.3. Drawing the person's
+  politeness per episode removes the incentive. Four paired seeds:
+
+  | | in band, polite | bumps/ep, polite | in band, walk-through |
+  |---|---|---|---|
+  | fixed-polite person | 0.930 | 5.4 | 0.760 |
+  | mixed person | 0.920 | **1.3** | 0.794 |
+  | paired difference | **−0.010** | **−4.1 (−76%)** | +0.033 |
+  | 95% interval | −0.016…−0.005 | −6.7…−1.5 | −0.004…+0.071 |
+
+  **A coarser decision period early buys nothing** (`train-brain
+  --decide-every-start 10`). The idea was a shorter credit-assignment horizon
+  — 100 decisions to explain a 20 s episode instead of 200 — with the period
+  dropping to the deployment 5 halfway through, since `brain.json` records
+  one period and `LearnedBrain` runs at whatever it records. It is also NOT a
+  saving, contrary to how it was first framed: at period 10 each PPO sample
+  covers ten control steps, so a fixed decision budget costs twice the
+  physics. Four paired seeds: mean −0.002 in band, 95% interval −0.015 …
+  +0.010, ahead on 1/4 seeds — unresolved, at **47% more wall time**
+  (1108 s against ~750 s for the same decision budget). It ships off.
+
+  A real trade, and the first two are resolved: the mix gives up 0.010 of
+  band in the polite world to bump 76% less. In the walk-through world (the
+  capsule that walks through the duck, where v5 scored worst) it is ahead on
+  4/4 training seeds by 0.033, but the interval just includes zero — so treat
+  that half as suggestive. It stays **off by default**: this is a choice
+  about which world you want a brain for, not a defect fix.
 
 ### Two ducks, one ball (the soccer track's first form)
 

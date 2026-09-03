@@ -88,11 +88,23 @@ does; this file covers how not to fool yourself.
    updates, big-batch) each raised steps/s ~25–40% and *halved*
    reward-per-step. Any change meant to make training faster gets a
    seed-matched A/B at matched *step counts* before it becomes a default.
-5. **A weird optimizer metric is usually a broken reward.** A KL blow-up here
+   `uv run bench-ab <a> <b>` is that comparison.
+5. **One training run per arm resolves nothing — pair the seeds.** Eval
+   seeds control the *eval*, not the run. On the follow benchmark,
+   run-to-run variance is **±0.02 in band**, larger than the ±0.013–0.023
+   eval-seed spread and larger than every hyperparameter effect measured
+   against it. Three changes each "lost" 0.015–0.018 and were "ahead on only
+   1–2 of 10 eval seeds" — then the same recipe at a different *training*
+   seed moved 0.021, and the whole result was one run's luck. Train both
+   arms on the **same** seeds and compare the per-seed DIFFERENCE
+   (`bench_ab.paired_delta`); that turned a spurious −0.015 into a real
+   −0.002. Use Student's t, not 1.96: at n=2 the normal value understates
+   the interval 6.5-fold and manufactures significance out of two runs.
+6. **A weird optimizer metric is usually a broken reward.** A KL blow-up here
    was chased as a PPO tuning problem for a day; the cause was an unlearnable
    reward term. Check what you're asking for before re-tuning how hard to
    ask.
-6. **Warm-start chains silently ratchet the action std into bang-bang.**
+7. **Warm-start chains silently ratchet the action std into bang-bang.**
    Every `--init-from` reloads the previous run's `log_std`, and the entropy
    bonus pushes it up each generation; one long chain reached std 21–26 in a
    ±4 action space. At that point the *clipped noise distribution* carries

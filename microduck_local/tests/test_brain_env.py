@@ -206,3 +206,41 @@ def test_charge_sends_the_person_through_the_duck_and_avoid_is_a_reflex():
     assert n2 > n1 and (dx * wx + dy * wy) / (n1 * n2) > 0.99
     assert env._closing is not None and env.task.avoid
     env.close()
+
+
+def test_polite_mix_draws_the_person_per_episode_and_leaves_fixed_polite_alone():
+    """Trained against ONE kind of person, a brain is paid for exploiting
+    that kind. `follow-v5` was v4's recipe against a person who always
+    stops, and what it learned was that the person stops: 2.6 bump trips an
+    episode against v4's 0.3, and 0.75 in band against v4's 0.81 when scored
+    back in the world v4 trained in. `polite_mix` draws the person's
+    politeness each episode so neither assumption pays."""
+    mixed = BrainEnv(FollowTask(polite_mix=(0.0, 0.55), episode_s=1.0), seed=0,
+                     fixed_preset="datasheet")
+    drawn = []
+    for ep in range(12):
+        mixed.reset(seed=100 + ep)
+        drawn.append(mixed.person.spec.yield_m)
+    assert set(drawn) == {0.0, 0.55}, "both kinds of person must appear"
+
+    # The fixed path is untouched: an empty mix never writes yield_m.
+    fixed = BrainEnv(FollowTask(polite=0.55, episode_s=1.0), seed=0, fixed_preset="datasheet")
+    for ep in range(4):
+        fixed.reset(seed=100 + ep)
+        assert fixed.person.spec.yield_m == 0.55
+    walk_through = BrainEnv(FollowTask(polite=0.0, episode_s=1.0), seed=0, fixed_preset="datasheet")
+    walk_through.reset(seed=100)
+    assert walk_through.person.spec.yield_m == 0.0
+
+
+def test_polite_mix_is_reproducible_from_the_env_seed():
+    """The draw comes off the env's own rng, so a seeded run replays."""
+    def draws(seed):
+        env = BrainEnv(FollowTask(polite_mix=(0.0, 0.55), episode_s=1.0), seed=seed,
+                       fixed_preset="datasheet")
+        out = []
+        for ep in range(8):
+            env.reset(seed=200 + ep)
+            out.append(env.person.spec.yield_m)
+        return out
+    assert draws(3) == draws(3)

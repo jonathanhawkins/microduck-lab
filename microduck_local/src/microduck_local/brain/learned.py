@@ -29,12 +29,17 @@ class LearnedBrain:
     kind = "learned"
 
     def __init__(self, name: str, decide_every: int | None = None):
-        d = brains_dir() / name
+        # A bare name is a shipped brain under `brains/`; anything that looks
+        # like a path is loaded from there instead. That is what lets
+        # `select-brain` score a mid-run CHECKPOINT on the real benchmark
+        # without first shipping it as brain.onnx — the deterministic probe
+        # the reward curve cannot stand in for.
+        d = Path(name) if ("/" in name or "\\" in name) else brains_dir() / name
         onnx = d / "brain.onnx"
         if not onnx.exists():
             raise ValueError(f"no exported brain at {onnx}")
         meta = json.loads((d / "brain.json").read_text()) if (d / "brain.json").exists() else {}
-        self.name = name
+        self.name = d.name
         self.kind = f"learned:{name}"
         self.target_cls = meta.get("target_cls", "person")
         self.decide_every = int(decide_every or meta.get("decide_every", 5))

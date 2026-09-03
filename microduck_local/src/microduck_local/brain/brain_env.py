@@ -34,8 +34,8 @@ from .. import contract as C
 from ..sensors import DetectorNoise, TofNoise
 from ..world import Box, Duck, Person, Scenario, World
 from ..world.scenario import TOF_PRESETS
-from .runtime import Senses
 from .controllers import ClosingWatch
+from .runtime import Senses
 from .tracker import Tracker
 
 POLICIES_DIR = C.MICRODUCK_RL_DIR.parent / "microduck" / "policies"
@@ -191,6 +191,16 @@ class FollowTask:
     # capsule that walks through, measured to cap every brain's band for
     # a reason that has nothing to do with following.
     polite: float = 0.55
+    # Draw `polite` from this list EACH EPISODE instead of holding it fixed
+    # (empty: the fixed `polite` above). The measured reason: `follow-v5` was
+    # v4's recipe trained against a person who always stops, and what it
+    # learned was that the person stops — it trips the bump signal 2.6 times
+    # an episode against v4's 0.3, and scored back in the world v4 trained in
+    # it holds the band 0.75 against v4's 0.81. Trained against ONE kind of
+    # person, a brain is paid for exploiting that kind. A mix removes both
+    # exploits: it cannot assume the person walks through it (v1-v4's world)
+    # or that the person will wait for it (v5's).
+    polite_mix: tuple[float, ...] = ()
 
 
 class BrainEnv(gym.Env):
@@ -273,6 +283,11 @@ class BrainEnv(gym.Env):
                     break
             self._box_pending = getattr(self, "_box_pending", [])
             self._box_pending.append((q, bx, by))
+        # The person's politeness is drawn per episode when a mix is given —
+        # the spec is read live by `Person.step` and by the World's blocker
+        # test, so setting it here takes effect for this episode.
+        if self.task.polite_mix:
+            p.spec.yield_m = float(self.rng.choice(np.asarray(self.task.polite_mix, float)))
         if self.sense_dr and self.fixed_preset is None:
             name = str(self.rng.choice(TOF_PRESETS))
             self.duck.tof.noise = TofNoise.preset(name)
@@ -398,6 +413,21 @@ class BrainEnv(gym.Env):
         info = {"dist": dist, "bearing": bearing, "seen": seen, "bumped": bumped, "contact": contact,
                 "dodges": self._closing.count}
         return self._obs(), float(reward), terminated, truncated, info
+
+    def set_decide_every(self, n: int) -> int:
+        """Change the decision period mid-run, keeping the episode length in
+        SECONDS fixed (so `max_decisions` has to move with it).
+
+        A coarser period is not cheaper — the opposite. At `decide_every=10`
+        one PPO sample covers ten control steps instead of five, so a fixed
+        number of DECISIONS costs twice the physics. What it buys is a shorter
+        credit-assignment horizon in decisions for the same 20 s of world:
+        100 steps to explain an outcome rather than 200. That is the only
+        reason to schedule it, and it is an experiment, not a saving.
+        """
+        self.decide_every = max(1, int(n))
+        self.max_decisions = int(round(self.task.episode_s / C.CTRL_DT / self.decide_every))
+        return self.decide_every
 
     def close(self) -> None:
         pass

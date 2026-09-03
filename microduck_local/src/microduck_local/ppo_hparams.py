@@ -81,3 +81,18 @@ def configure_torch_cpu(torch_mod) -> None:
         pass
     cpus = os.cpu_count() or TORCH_INTRA_THREADS
     torch_mod.set_num_threads(min(TORCH_INTRA_THREADS, cpus))
+
+
+def linear_decay(start: float, end: float):
+    """SB3 learning-rate schedule: called with progress_remaining, 1.0 -> 0.0.
+
+    Lives here (torch-free) rather than in a trainer so every trainer can
+    share one decay. `train_behavior.py` documented why every run needs it:
+    EVERY constant-rate run so far peaked and then came apart (ep_rew
+    354->223, 177->29, 157->77), which is the classic signature of a rate
+    sized for early exploration still being applied once the policy is near
+    a good solution.
+    """
+    def f(progress_remaining: float) -> float:
+        return end + (start - end) * float(progress_remaining)
+    return f

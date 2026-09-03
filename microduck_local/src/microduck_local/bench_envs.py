@@ -36,6 +36,24 @@ What it found here (18-CPU M5 Max, 2026-08-30, behavior=run, fork backend):
   reaches 42% of 'fork' and 'thread' 38%, and even at 4 envs they are 1.75x
   and 1.87x behind. 'fork' and 'subproc' tie on throughput (1.00x) — model
   sharing is a memory and startup win (0.6 s vs 1.3 s), not a speed one.
+
+And what `--task brain` found (same machine, 2026-09-03, fork backend,
+`--variety`, best of two repeats):
+
+| envs | 4 | 8 | 12 | 16 | 20 | 24 | 32 |
+|---|---|---|---|---|---|---|---|
+| steps/s | 2,376 | 3,890 | 4,775 | 4,938 | 4,873 | 4,862 | 5,336 |
+| per env | 594 | 486 | 398 | 309 | 244 | 203 | 167 |
+
+A different shape from the trick task, and the reason to measure rather than
+reuse the answer: a brain decision is five control steps plus a ToF cast, so
+the workers are the bottleneck early and the curve is FLAT from 12 on — 16 is
+the knee and 12 is within 4% of it. `train-brain`'s default of 12 stays: the
+gain to 16 is inside the measurement's own noise, and moving it would change
+the batch size and samples per update, which is a TRAINING change and needs a
+seed-matched A/B, not a throughput reading. See the README on why that
+matters here — run-to-run variance on the follow benchmark is +-0.02 in band,
+larger than every hyperparameter effect measured against it.
 """
 
 from __future__ import annotations
@@ -49,6 +67,11 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
+
+import gymnasium as gym
+import numpy as np
+
+from . import contract as C
 
 # Fine resolution where the curve is still moving, then two coarse points PAST
 # saturation. The tail is not decoration: `recommend` measures every point
@@ -99,6 +122,7 @@ class Point:
     seconds: float      # wall time for those steps
     setup_s: float      # venv spawn + PPO construction + warmup rollout
     overlap: bool = False  # SymmetryPPO overlap_update (update || rollout)
+    task: str = "walk"     # "walk" (BehaviorEnv) | "brain" (BrainEnv)
 
     @property
     def steps_per_s(self) -> float:
@@ -113,6 +137,58 @@ class Point:
 # --------------------------------------------------------------------------
 # Pure logic (unit-tested in tests/test_bench_envs.py — no MuJoCo required)
 # --------------------------------------------------------------------------
+
+
+class _NullEnv(gym.Env):
+    """An env that does nothing, for measuring the IPC + scheduling floor.
+
+    Module level (not a closure) so the fork children can rebuild it.
+    """
+
+    observation_space = gym.spaces.Box(-1, 1, (C.OBS_DIM,), np.float32)
+    action_space = gym.spaces.Box(-1, 1, (C.NUM_JOINTS,), np.float32)
+
+    def reset(self, *, seed=None, options=None):
+        return np.zeros(C.OBS_DIM, np.float32), {}
+
+    def step(self, action):
+        return np.zeros(C.OBS_DIM, np.float32), 0.0, False, False, {}
+
+    def close(self) -> None:
+        pass
+
+
+def ipc_floor(counts=(8, 16, 32, 64), per_worker=(1, 2), steps: int = 2000) -> list[dict]:
+    """Vec-step time with envs that do NO work: pure IPC and scheduling.
+
+    This is the measurement that says whether a slow vec-step is the Python
+    plumbing or the physics, and it is worth having as a command because the
+    answer decides whether a rollout-loop rewrite is worth attempting. On an
+    18-core M5 Max it came out at 86 us per vec-step at 32 envs (k=2) against
+    an 883 us real vec-step — i.e. the plumbing is 10%, and the remaining 90%
+    is physics plus the memory contention of 32 concurrent mjData working
+    sets. See the README for what that ruled out.
+    """
+    from .vec_env import ForkVecEnv
+
+    spaces = (_NullEnv.observation_space, _NullEnv.action_space)
+    out = []
+    for n in counts:
+        for k in per_worker:
+            venv = ForkVecEnv([_NullEnv] * n, envs_per_worker=k, spaces=spaces)
+            try:
+                venv.reset()
+                act = np.zeros((n, C.NUM_JOINTS), np.float32)
+                for _ in range(200):
+                    venv.step(act)
+                t0 = time.perf_counter()
+                for _ in range(steps):
+                    venv.step(act)
+                dt = (time.perf_counter() - t0) / steps
+            finally:
+                venv.close()
+            out.append({"envs": n, "envs_per_worker": k, "us_per_vec_step": dt * 1e6})
+    return out
 
 
 def recommend(points, tolerance: float = KNEE_TOLERANCE) -> int:
@@ -179,14 +255,28 @@ def format_table(points, title: str = "PPO training throughput") -> str:
 
 def _run_point(envs: int, vec: str, pinned: bool, budget: int,
                behavior: str, seed: int, overlap: bool = False,
-               update_device: str | None = None) -> Point:
-    """Measure ONE configuration. Runs inside the point subprocess."""
+               update_device: str | None = None, task: str = "walk") -> Point:
+    """Measure ONE configuration. Runs inside the point subprocess.
+
+    `task` picks which real training path is measured: "walk" is
+    `BehaviorEnv` under train_behavior's PPO (the original question, "how
+    many envs for a trick"), "brain" is `BrainEnv` under train_brain's — a
+    different question with a different answer, because a brain decision is
+    five control steps of physics plus a ToF cast, roughly 20x the per-step
+    cost, so the serial update is a much smaller share of the iteration.
+    """
     from .ppo_hparams import N_STEPS, configure_torch_cpu, ppo_batch_size
-    from .train_behavior import make_env  # the real training env factory
     from .vec_env import as_sb3_vec_env, make_vec_env
 
+    brain = task == "brain"
+    n_steps = 128 if brain else N_STEPS      # train_brain's --n-steps default
     t_setup = time.perf_counter()
-    factories = [make_env(behavior, i, seed) for i in range(envs)]
+    if brain:
+        from .train_brain import make_env_fn
+        factories = [make_env_fn(seed * 1000 + i, None, True) for i in range(envs)]
+    else:
+        from .train_behavior import make_env  # the real training env factory
+        factories = [make_env(behavior, i, seed) for i in range(envs)]
     # Fork BEFORE importing torch, matching the training path.
     venv = make_vec_env(factories, backend=vec)
 
@@ -209,6 +299,28 @@ def _run_point(envs: int, vec: str, pinned: bool, budget: int,
         configure_torch_cpu(torch)
 
     venv = VecMonitor(as_sb3_vec_env(venv))
+    if brain:
+        # train_brain's normalizer: reward normalization on, tighter clip.
+        venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        model = PPO(
+            "MlpPolicy", venv,
+            policy_kwargs=dict(net_arch=dict(pi=[128, 128], vf=[128, 128]),
+                               activation_fn=torch.nn.ELU, log_std_init=-0.5),
+            n_steps=n_steps, batch_size=ppo_batch_size(n_steps, envs), n_epochs=5,
+            learning_rate=3e-4, gamma=0.98, gae_lambda=0.95, clip_range=0.2,
+            ent_coef=0.003, vf_coef=0.5, max_grad_norm=1.0,
+            device="cpu", seed=seed, verbose=0)
+        warmup = WARMUP_ROLLOUTS * model.n_steps * envs
+        model.learn(total_timesteps=warmup, progress_bar=False)
+        setup_s = time.perf_counter() - t_setup
+        before = model.num_timesteps
+        t0 = time.perf_counter()
+        model.learn(total_timesteps=budget, progress_bar=False, reset_num_timesteps=False)
+        seconds = time.perf_counter() - t0
+        steps = int(model.num_timesteps) - int(before)
+        venv.close()
+        return Point(envs=envs, vec=vec, pinned=pinned, steps=steps,
+                     seconds=seconds, setup_s=setup_s, task="brain")
     venv = VecNormalize(venv, norm_obs=True, norm_reward=False, clip_obs=100.0)
     # Mirrors train_behavior.py's PPO construction. Duplicated rather than
     # imported because that block is a plain call inside main(); if it changes,
@@ -246,7 +358,8 @@ def _run_point(envs: int, vec: str, pinned: bool, budget: int,
 def _spawn_point(envs: int, vec: str, pinned: bool, budget: int,
                  behavior: str, seed: int, timeout: float,
                  overlap: bool = False,
-                 update_device: str | None = None) -> Point | None:
+                 update_device: str | None = None,
+                 task: str = "walk") -> Point | None:
     """Run one point in a fresh interpreter; parse its JSON result line."""
     env = dict(os.environ)
     for var in THREAD_ENV_VARS:
@@ -257,7 +370,7 @@ def _spawn_point(envs: int, vec: str, pinned: bool, budget: int,
     spec = json.dumps({"envs": envs, "vec": vec, "pinned": pinned,
                        "budget": budget, "behavior": behavior, "seed": seed,
                        "overlap": overlap,
-                       "update_device": update_device})
+                       "update_device": update_device, "task": task})
     proc = subprocess.run(
         [sys.executable, "-m", "microduck_local.bench_envs", "--point", spec],
         capture_output=True, text=True, env=env, timeout=timeout,
@@ -274,12 +387,12 @@ def _spawn_point(envs: int, vec: str, pinned: bool, budget: int,
 def _sweep(counts, vec: str, pinned: bool, budget: int, behavior: str,
            seed: int, timeout: float, label: str,
            order: list[int] | None = None, overlap: bool = False,
-           update_device: str | None = None) -> list[Point]:
+           update_device: str | None = None, task: str = "walk") -> list[Point]:
     points: list[Point] = []
     for n in (order if order is not None else list(counts)):
         print(f"  {label}: {n:>2} envs ...", end="", flush=True)
         p = _spawn_point(n, vec, pinned, budget, behavior, seed, timeout,
-                         overlap=overlap, update_device=update_device)
+                         overlap=overlap, update_device=update_device, task=task)
         if p:
             points.append(p)
             print(f" {p.steps_per_s:,.0f} steps/s  ({p.seconds:.1f} s run, "
@@ -290,7 +403,7 @@ def _sweep(counts, vec: str, pinned: bool, budget: int, behavior: str,
 def _best_of(counts, vec: str, pinned: bool, budget: int, behavior: str,
              seed: int, timeout: float, label: str, repeats: int,
              rng: random.Random, overlap: bool = False,
-             update_device: str | None = None) -> list[Point]:
+             update_device: str | None = None, task: str = "walk") -> list[Point]:
     """Repeat a comparison arm the same way the main sweep is repeated.
 
     An arm measured ONCE against a main sweep that kept its best of five is not
@@ -304,7 +417,7 @@ def _best_of(counts, vec: str, pinned: bool, budget: int, behavior: str,
         tag = label if repeats == 1 else f"{label} {r + 1}/{repeats}"
         for p in _sweep(counts, vec, pinned, budget, behavior, seed, timeout,
                         tag, order=order, overlap=overlap,
-                        update_device=update_device):
+                        update_device=update_device, task=task):
             if p.envs not in best or p.steps_per_s > best[p.envs].steps_per_s:
                 best[p.envs] = p
     return sorted(best.values(), key=lambda p: p.envs)
@@ -316,6 +429,13 @@ def main() -> None:
                     help="comma-separated env counts to sweep")
     ap.add_argument("--budget", type=int, default=DEFAULT_BUDGET,
                     help="env-steps timed per data point (warmup excluded)")
+    ap.add_argument("--task", default="walk", choices=("walk", "brain"),
+                    help="which trainer to measure: 'walk' is train_behavior's "
+                         "BehaviorEnv (the original question), 'brain' is "
+                         "train_brain's BrainEnv. They have different answers — "
+                         "a brain decision is 5 control steps plus a ToF cast, "
+                         "so the serial PPO update is a far smaller share of "
+                         "each iteration and the curve saturates elsewhere")
     ap.add_argument("--behavior", default="run",
                     help="behavior recipe to train (physics cost dominates, so "
                          "this mostly picks the episode length)")
@@ -345,15 +465,29 @@ def main() -> None:
                          "(e.g. mps); rollouts stay on cpu")
     ap.add_argument("--timeout", type=float, default=900.0)
     ap.add_argument("--json", default=None, help="also write raw points here")
+    ap.add_argument("--ipc-floor", action="store_true",
+                    help="measure the vec-step floor with envs that do NO work (pure IPC "
+                         "and scheduling) and exit. The number that says whether a slow "
+                         "vec-step is the plumbing or the physics")
     ap.add_argument("--point", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    if args.ipc_floor:
+        counts = [int(x) for x in args.envs.split(",") if x.strip()]
+        print("vec-step floor with envs that do NO work (IPC + scheduling only)\n")
+        print(f"  {'envs':>5} {'envs/worker':>12} {'us/vec-step':>12}")
+        for row in ipc_floor(counts):
+            print(f"  {row['envs']:>5} {row['envs_per_worker']:>12} "
+                  f"{row['us_per_vec_step']:12.1f}")
+        return
 
     if args.point:  # child mode: one data point, one JSON line on stdout
         spec = json.loads(args.point)
         p = _run_point(spec["envs"], spec["vec"], spec["pinned"],
                        spec["budget"], spec["behavior"], spec["seed"],
                        overlap=spec.get("overlap", False),
-                       update_device=spec.get("update_device"))
+                       update_device=spec.get("update_device"),
+                       task=spec.get("task", "walk"))
         print("POINT " + json.dumps(asdict(p)))
         return
 
@@ -363,7 +497,8 @@ def main() -> None:
     pinned = args.pin_threads
     backend = resolve_backend(args.backend)  # what training would pick
     cpus = os.cpu_count() or 0
-    print(f"bench-envs: behavior={args.behavior} backend={backend} "
+    what = "brain (BrainEnv)" if args.task == "brain" else f"behavior={args.behavior}"
+    print(f"bench-envs: {what} backend={backend} "
           f"budget={args.budget:,} steps/point cpus={cpus} "
           f"threads={'pinned to 1' if pinned else 'default'}")
     print("(close other heavy apps — this measures the machine, not the code)\n")
@@ -379,7 +514,8 @@ def main() -> None:
     rng = random.Random(args.seed)
     points = _best_of(counts, backend, pinned, args.budget, args.behavior,
                       args.seed, args.timeout, "sweep", args.repeats, rng,
-                      overlap=args.overlap, update_device=args.update_device)
+                      overlap=args.overlap, update_device=args.update_device,
+                      task=args.task)
     if not points:
         raise SystemExit("every data point failed — see the errors above")
 
@@ -409,7 +545,8 @@ def main() -> None:
         for other in [b for b in BACKENDS if b != backend]:
             print(f"\nbackend {other!r} vs the training default {backend!r}:")
             got = _best_of(low, other, pinned, args.budget, args.behavior,
-                           args.seed, args.timeout, other, arm_repeats, rng)
+                           args.seed, args.timeout, other, arm_repeats, rng,
+                           task=args.task)
             extra += got
             for g in got:
                 ref = next((p for p in points if p.envs == g.envs), None)
@@ -425,7 +562,7 @@ def main() -> None:
         other = _best_of(probe, backend, not pinned, args.budget, args.behavior,
                          args.seed, args.timeout,
                          "unpinned" if pinned else "pinned",
-                         max(1, min(args.repeats, 3)), rng)
+                         max(1, min(args.repeats, 3)), rng, task=args.task)
         extra += other
         for o in other:
             ref = next((p for p in points if p.envs == o.envs), None)

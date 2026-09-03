@@ -419,3 +419,47 @@ def test_envs_per_worker_batching_matches_one_per_worker():
     assert after[:2] == before[:2] and after[3:] == before[3:]
     a.close()
     b.close()
+
+
+def test_default_envs_per_worker_crosses_over_at_the_measured_knee():
+    """Packing two envs into one worker halves the per-vec-step semaphore
+    traffic but halves the worker processes available to fill the cores the
+    serial PPO update leaves idle. Those pull opposite ways and the curve
+    crosses — measured on an 18-core machine (bench-envs, real PPO):
+
+        envs |  k=1   |  k=2   |
+           8 | 11,516 | 10,829 |  -6.0%
+          16 | 15,651 | 14,713 |  -6.0%
+          32 | 19,456 | 20,536 |  +5.5%
+
+    So the default may only switch at the top, and a change to that threshold
+    has to come with new numbers."""
+    from microduck_local.vec_env import ENVS_PER_WORKER_KNEE, default_envs_per_worker
+
+    assert ENVS_PER_WORKER_KNEE == 32, "the trainers' own default --envs"
+    for n in (1, 2, 4, 8, 12, 16, 24, 31):
+        assert default_envs_per_worker(n) == 1, f"{n} envs measured SLOWER packed"
+    for n in (32, 48, 64, 128):
+        assert default_envs_per_worker(n) == 2
+    # Never k=4: measured -8.2% against k=1 at 32 envs.
+    assert max(default_envs_per_worker(n) for n in range(1, 257)) == 2
+
+
+def test_the_packed_default_is_only_safe_because_the_stream_is_identical():
+    """This is the one throughput default in the repo that needs no
+    learning-quality A/B, and the reason is mechanical: the packed layout is
+    step-for-step identical, which the parity test above pins. If that test
+    ever goes, this default has to go with it."""
+    import pathlib
+
+    import microduck_local.vec_env as V
+
+    assert hasattr(V, "default_envs_per_worker")
+    src = pathlib.Path(V.__file__).read_text()
+    assert "BIT-IDENTICAL" in src, (
+        "the default's justification must stay written next to it")
+    # And an explicit env var still wins in both directions.
+    import os
+    from unittest import mock
+    with mock.patch.dict(os.environ, {"MICRODUCK_ENVS_PER_WORKER": "1"}):
+        assert os.environ["MICRODUCK_ENVS_PER_WORKER"] == "1"

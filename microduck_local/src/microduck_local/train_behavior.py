@@ -29,6 +29,13 @@ phase the mirror map scrambles). Passing the flag overrides that either way.
 This matters because viz_server's teach endpoint launches this module WITHOUT
 the flag, so the default is what every taught trick trains under.
 
+Early stopping is available but OFF: `--plateau-patience N` (or
+$MICRODUCK_PLATEAU_PATIENCE, for lab-launched runs that pass no flags) ends a
+run whose smoothed ep_rew has stopped improving — see plateau.py for why it
+is opt-in. It stops the run CLEANLY: the final snapshot, the ONNX export and
+the terminating "done" line all happen, with `"stopped": "plateau"` on that
+line so a short curve is never mistaken for a crash.
+
 Designed to be launched as a subprocess by viz_server's teach endpoint, but
 works standalone too.
 """
@@ -44,6 +51,8 @@ from pathlib import Path
 import numpy as np
 
 from .behaviors import BEHAVIORS, Behavior, BehaviorEnv, is_symmetric
+from .plateau import PlateauDetector
+from .plateau import env_defaults as plateau_env_defaults
 from .ppo_hparams import (
     DEFAULT_DESIRED_KL,
     DEFAULT_SYMMETRY_COEF,
@@ -131,12 +140,27 @@ def _progress_callback_cls(BaseCallback):
         """
 
         def __init__(self, out: Path, venv, total_steps: int,
-                     snap_steps: int = SNAP_STEPS, start_steps: int = 0):
+                     snap_steps: int = SNAP_STEPS, start_steps: int = 0,
+                     plateau: PlateauDetector | None = None,
+                     checkpoint_every: int = 0):
             super().__init__()
             self.out = out
             self.venv = venv
             self.total_steps = total_steps
             self.snap_steps = snap_steps
+            # Off unless a detector with patience > 0 was passed: a disabled
+            # one is a no-op, so the default path keeps returning True from
+            # every _on_step exactly as before.
+            self.plateau = plateau if plateau is not None else PlateauDetector()
+            self._stop = False
+            # Numbered checkpoints (0 = off, the default). `live.onnx` and
+            # `model.zip` are OVERWRITTEN every snapshot, so a finished run
+            # keeps only its last policy — and this trainer's own comment
+            # below says the last one is not reliably the best. `select-run`
+            # scores these on ACHIEVED GROUND SPEED, which is the criterion
+            # that comment asks a future selector to use.
+            self.checkpoint_every = int(checkpoint_every)
+            self.next_ckpt = start_steps + self.checkpoint_every
             self.term_sums: dict[str, float] = {}
             self.term_steps = 0
             self.ep_lens: list[int] = []
@@ -158,7 +182,14 @@ def _progress_callback_cls(BaseCallback):
                     if ep:
                         self.ep_lens.append(int(ep["l"]))
                         self.term_steps += int(ep["l"])
-            return True
+            # False ends collection and breaks out of learn() — the ONLY
+            # clean SB3 stop, and the reason the plateau verdict (taken in
+            # _on_rollout_end, where the ep_rew series lives) is parked on a
+            # flag instead of raising. main() then runs its normal final
+            # path: _snapshot, the ONNX export, the "done" line. Costs one
+            # extra step of collection, which is why the flag is read here
+            # rather than mid-rollout.
+            return not self._stop
 
         def _snapshot(self) -> None:
             import torch
@@ -237,6 +268,24 @@ def _progress_callback_cls(BaseCallback):
             if self.num_timesteps >= self.next_snap:
                 self._snapshot()
                 self.next_snap += self.snap_steps
+            if self.checkpoint_every > 0 and self.num_timesteps >= self.next_ckpt:
+                d = self.out / "checkpoints"
+                d.mkdir(exist_ok=True)
+                tag = f"{int(self.num_timesteps):09d}"
+                self.model.save(str(d / f"model_{tag}"))
+                self.venv.save(str(d / f"vecnormalize_{tag}.pkl"))
+                self.next_ckpt += self.checkpoint_every
+            # Same ep_rew series that just went into progress.jsonl. Disabled
+            # unless --plateau-patience (or $MICRODUCK_PLATEAU_PATIENCE) is
+            # positive; `steps` is the ABSOLUTE counter, so a warm restart's
+            # warmup is measured from the run's own start, not this process's.
+            # `ep_rew` gates it because an empty buffer reports 0.0, which is
+            # not a measurement: on a recipe whose early episodes score
+            # negative, those leading zeros would become an unbeatable `best`
+            # and stop a run that was climbing from -50 toward -10.
+            if ep_rew and self.plateau.update(int(self.num_timesteps), rew):
+                self._stop = True
+                print(f"plateau: {self.plateau.summary()}", flush=True)
 
     return ProgressCallback
 
@@ -324,6 +373,79 @@ def build_parser() -> argparse.ArgumentParser:
                          "behavior and 0 for an asymmetric one (Behavior."
                          "symmetric, or any run carrying a motion clip). "
                          "Passing this overrides that, in either direction")
+    # Early stopping (plateau.py). OFF by default (patience 0) and staying
+    # that way until a seed-matched A/B at matched step counts says otherwise
+    # — a flat curve is not proof that nothing is being consolidated, and
+    # AGENTS.md #4 is explicit that budget/throughput changes earn their
+    # default. Env vars are how the lab's /teach opts in: it launches this
+    # module with no flags (same escape hatch as MICRODUCK_LR_START).
+    pd = plateau_env_defaults()
+    ap.add_argument("--plateau-patience", type=int, default=pd["patience"],
+                    help="stop once the smoothed ep_rew has not improved for "
+                         "this many consecutive rollouts. 0 (default) = never "
+                         "stop early; run the full --steps. Also settable as "
+                         "$MICRODUCK_PLATEAU_PATIENCE")
+    ap.add_argument("--plateau-min-steps", type=int, default=pd["min_steps"],
+                    help="warmup: no plateau may fire before this many steps "
+                         "(absolute, so a warm restart counts its whole run). "
+                         "Early training legitimately looks flat. "
+                         "$MICRODUCK_PLATEAU_MIN_STEPS")
+    ap.add_argument("--plateau-rel", type=float, default=pd["rel"],
+                    help="relative improvement over the best smoothed ep_rew "
+                         "that counts as still learning. "
+                         "$MICRODUCK_PLATEAU_REL")
+    ap.add_argument("--plateau-window", type=int, default=pd["window"],
+                    help="rollouts in the smoothing window — one rollout's "
+                         "ep_rew is far too noisy to judge alone. "
+                         "$MICRODUCK_PLATEAU_WINDOW")
+    ap.add_argument("--net-arch", default="512,256,128", metavar="H,H,...",
+                    help="hidden sizes for the policy and value MLPs. The default came "
+                         "from the GPU stack, where a big net is free because it runs "
+                         "~250x more samples; here the network is 54%% of wall time "
+                         "(12%% rollout forward + 42%% update) and 256-128 measured 2.29x "
+                         "cheaper on that block, 128-128 3.42x. Never swept for QUALITY, "
+                         "so it is still the default")
+    ap.add_argument("--shared-trunk", action="store_true",
+                    help="share all but the last hidden layer between the actor and the "
+                         "critic (symmetry.SharedTrunk), computing the expensive early "
+                         "layers once instead of twice. ~40%% off the network. The value "
+                         "loss then backpropagates into the actor's features, which "
+                         "rsl_rl deliberately avoids — hence off by default")
+    ap.add_argument("--n-epochs", type=int, default=5,
+                    help="PPO epochs per rollout. A near-linear scale on the update, "
+                         "which is 42%% of wall time")
+    ap.add_argument("--distill", action="store_true",
+                    default=os.environ.get("MICRODUCK_DISTILL", "") not in ("", "0"),
+                    help="warm-start a LOCOMOTION recipe by cloning the shipped walker "
+                         "(distill.py) instead of starting from scratch. Measured reason: "
+                         "under BAM every policy trained here from scratch either falls "
+                         "(18/20) or is stable and slow (0.13 m/s), while alpha_walking is "
+                         "stable AND 0.21 m/s — this turns 'discover a gait' into 'make an "
+                         "existing gait faster'. Ignored when --init-from is given, and for "
+                         "non-locomotion tricks (a clone of a walker is a wrong prior for "
+                         "a headstand). The clone is CACHED, so it is paid once")
+    ap.add_argument("--distill-teacher", default=None,
+                    help="ONNX to clone (default: the shipped alpha_walking)")
+    ap.add_argument("--distill-no-critic", action="store_true",
+                    help="clone only the ACTOR, as the first version did. Its own header "
+                         "predicted the consequence — 'the critic starts untrained ... "
+                         "expect a dip' — and the measurement was that the dip destroys "
+                         "the gait: every checkpoint of four 1M-step arms fell in 100%% "
+                         "of episodes. Kept as the A/B baseline")
+    ap.add_argument("--symmetry-augment", action="store_true",
+                    default=os.environ.get("MICRODUCK_SYMMETRY_AUGMENT", "") not in ("", "0"),
+                    help="rsl_rl's OTHER symmetry mode: double every minibatch with its "
+                         "mirror image and put the mirrored halves through the surrogate "
+                         "and value losses, instead of only penalising asymmetry. The one "
+                         "lever that buys sample EFFICIENCY rather than more samples, which "
+                         "is the only currency a CPU trainer has — but the mirrored sample "
+                         "reuses the original's old_log_prob, so its importance ratio is "
+                         "biased. OFF until an A/B says otherwise")
+    ap.add_argument("--checkpoint-every", type=int, default=0, metavar="STEPS",
+                    help="keep a numbered checkpoint this often so `select-run` can "
+                         "score the whole run on ACHIEVED GROUND SPEED afterwards. "
+                         "0 (default) = off, and live.onnx/model.zip keep being "
+                         "overwritten as before")
     return ap
 
 
@@ -346,7 +468,9 @@ def main() -> None:
     # train under a different scorecard than the one on record.
     (out / "behavior.json").write_text(json.dumps(
         {"behavior": b.id, "steps": steps, "weights": weights,
-         "symmetry_coef": symmetry_coef, "desired_kl": args.desired_kl}))
+         "symmetry_coef": symmetry_coef, "desired_kl": args.desired_kl,
+         "net_arch": args.net_arch, "shared_trunk": args.shared_trunk,
+         "n_epochs": args.n_epochs}))
 
     # Fork workers BEFORE importing torch. A torch-initialized parent has
     # OpenMP/Accelerate thread pools; forking them deadlocks on macOS.
@@ -378,6 +502,23 @@ def main() -> None:
 
     from .symmetry import FastActorCriticPolicy, SymmetryPPO
 
+    # Distillation runs AFTER the fork, not before. It imports torch and
+    # builds its own env, and a torch-initialized parent deadlocks the
+    # macOS fork — the exact trap this file's own comment above warns about,
+    # walked into once (four runs hung at 0% CPU with only behavior.json
+    # written). The workers are already alive and blocked on their
+    # semaphores while this runs, so it costs wall time, not correctness.
+    if args.distill and not args.init_from:
+        if not b.forward_cmd:
+            print(f"{b.id}: not a locomotion recipe — --distill ignored "
+                  "(a cloned walker is the wrong prior for a trick)")
+        else:
+            from .distill import ensure_distilled
+            args.init_from = str(ensure_distilled(
+                args.distill_teacher, seed=args.seed,
+                critic=not args.distill_no_critic))
+            print(f"{b.id}: warm-starting from the distilled walker at {args.init_from}")
+
     configure_torch_cpu(torch)
 
     # Resolved here, after torch import. "auto" = mps only when the minibatch
@@ -396,6 +537,26 @@ def main() -> None:
 
     venv = VecMonitor(as_sb3_vec_env(venv))
     batch = ppo_batch_size(N_STEPS, args.envs)
+
+    arch = [int(x) for x in args.net_arch.split(",") if x.strip()]
+    if not arch:
+        raise SystemExit("--net-arch needs at least one hidden size")
+    if args.shared_trunk:
+        if len(arch) < 2:
+            raise SystemExit("--shared-trunk needs at least two hidden sizes: all but "
+                             "the last are shared, the last is the per-head layer")
+        from .symmetry import SharedTrunk
+        net_kwargs = dict(
+            features_extractor_class=SharedTrunk,
+            features_extractor_kwargs=dict(arch=tuple(arch[:-1]),
+                                           activation_fn=torch.nn.ELU),
+            net_arch=dict(pi=[arch[-1]], vf=[arch[-1]]),
+        )
+    else:
+        net_kwargs = dict(net_arch=dict(pi=list(arch), vf=list(arch)))
+    if arch != [512, 256, 128] or args.shared_trunk or args.n_epochs != 5:
+        print(f"net: {'shared ' if args.shared_trunk else ''}{arch}, "
+              f"n_epochs {args.n_epochs}")
     ProgressCallback = _progress_callback_cls(BaseCallback)
     resume = False
     if args.init_from:
@@ -417,12 +578,15 @@ def main() -> None:
         # checkpoint from before the attribute existed carries nothing.
         model.overlap_update = args.overlap
         model.update_device = update_device
+        # This launch is the authority, same rule as symmetry_coef below.
+        model.symmetry_augment = args.symmetry_augment
         # SB3's load() replays the checkpoint's __dict__, including the
         # previous run's batch_size. Helpers change --envs at runtime, and
         # the new buffer (n_steps * n_envs) may not divide that old size
         # (SB3 then truncates the last minibatch). Recompute from THIS
         # launch's env count.
         model.batch_size = batch
+        model.n_epochs = args.n_epochs
         # Same for the symmetry coefficient: a run saved under a different
         # value would silently reinstate its own. This launch is the authority.
         model.symmetry_coef = symmetry_coef
@@ -469,7 +633,7 @@ def main() -> None:
         venv = VecNormalize(venv, norm_obs=True, norm_reward=False, clip_obs=100.0)
         model = SymmetryPPO(
             FastActorCriticPolicy, venv,
-            policy_kwargs=dict(net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),
+            policy_kwargs=dict(**net_kwargs,
                                activation_fn=torch.nn.ELU, log_std_init=0.0,
                                # Profiled on MPS: torch falls back to
                                # _single_tensor_adam (3.8 ms/step of tiny
@@ -484,7 +648,7 @@ def main() -> None:
             # entropy and a third the learning rate, which — with far fewer
             # samples — collapses to the safest policy available, i.e.
             # standing still. Locomotion has to survive early exploration.
-            n_steps=N_STEPS, batch_size=batch, n_epochs=5,
+            n_steps=N_STEPS, batch_size=batch, n_epochs=args.n_epochs,
             learning_rate=linear_decay(
                 args.lr_start if args.lr_start is not None else LR_START,
                 args.lr_end if args.lr_end is not None else LR_END),
@@ -501,10 +665,19 @@ def main() -> None:
             ent_anneal=True,
             overlap_update=args.overlap,
             update_device=update_device,
+            symmetry_augment=args.symmetry_augment,
         )
     start = int(model.num_timesteps) if resume else 0
+    plateau = PlateauDetector(patience=args.plateau_patience,
+                              min_steps=args.plateau_min_steps,
+                              rel=args.plateau_rel, window=args.plateau_window)
+    if plateau.enabled:
+        print(f"plateau stop armed: patience {plateau.patience} rollouts, "
+              f"window {plateau.window}, rel {plateau.rel}, "
+              f"warmup {plateau.min_steps} steps")
     cb = ProgressCallback(out, venv, steps, snap_steps=args.snap_steps,
-                          start_steps=start)
+                          start_steps=start, plateau=plateau,
+                          checkpoint_every=args.checkpoint_every)
     # SB3 treats total_timesteps as ADDITIONAL steps when reset_num_timesteps
     # is False (_setup_learn adds num_timesteps back in), so subtract to keep
     # --steps an absolute target across warm restarts. Pinned by
@@ -523,8 +696,15 @@ def main() -> None:
         cb._snapshot()  # final live.onnx + model.zip + vecnormalize.pkl
     from .export_onnx import export
     export(out, out / "policy.onnx")
+    # A plateau stop is a COMPLETED run, so `steps`/`total`/`done` stay as
+    # they are (the lab reads them as 100%, and the per-rollout lines already
+    # carry the real counter). What gets added is why the curve is short —
+    # without it a later reader cannot tell an early stop from a crash.
+    final = {"steps": steps, "total": steps, "done": True}
+    if plateau.fired:
+        final.update(plateau.record(int(model.num_timesteps)))
     with open(out / "progress.jsonl", "a") as f:
-        f.write(json.dumps({"steps": steps, "total": steps, "done": True}) + "\n")
+        f.write(json.dumps(final) + "\n")
     print(f"done: {out}")
 
 
