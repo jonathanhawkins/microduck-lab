@@ -1313,7 +1313,8 @@ def test_find_ball_spawn_window_knob_and_reports(monkeypatch):
     from microduck_local.behaviors import ball_marker_payload
     payload = ball_marker_payload(env)
     assert len(payload) == 4 and payload[2] == pytest.approx(0.035, abs=1e-3)
-    assert env.behavior.caption_fn(env).startswith("ball ")
+    cap = env.behavior.caption_fn(env)
+    assert cap.startswith(("SEEN ", "LOST ")) and len(cap) <= 31
     assert env.behavior.report_fn(env)[0].startswith("ball:")
     markers = env.behavior.markers_fn(env)
     assert len(markers) == 2 and markers[0][1] == pytest.approx(0.035)

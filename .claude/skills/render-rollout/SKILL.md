@@ -134,9 +134,10 @@ trunk_z=0.103 (stand 0.120)        <- height vs the STAND-keyframe reference
 head_z =0.044 (stand 0.233)        <- head (jaw_soft) height vs its reference
 deg: pitch=-49 tilt=49 rot=+308    <- pitch wraps +/-180; rot accumulates
 feet L=1 R=1  floor:jaw_soft       <- foot contacts; non-foot bodies on the ground
-ball SEEN x+0.12 y-0.30 d1.4 p+12   <- find_ball only: detector bearing across/up the
+SEEN x+0.12 y-0.30 d1.4 p+12       <- find_ball only: detector bearing across/up the
                                       frame (-1..1), range, TRUE body bearing (deg, + left)
-ball LOST 1.2s m+0.55 d1.4 p-150    <- ... or seconds lost and the memory slot (obs[54])
+LOST 1.2s m+0.55 d1.4 p-150        <- ... or seconds lost (= the scan clock) and the
+                                      belief slot (obs[54])
 ```
 
 For `find_ball` the render also draws the ball (orange) and a gaze dot 30 cm

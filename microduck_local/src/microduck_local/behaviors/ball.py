@@ -418,11 +418,13 @@ def _ball_caption(env) -> str:
     x/y = detector bearing across/up the frame (-1..1), m = the memory slot,
     d = range in m, p = the ball's true bearing in the body frame (deg,
     + left) — what the body still has to turn through."""
+    # At most 29 columns: a 320 px tile holds ~31, and a clipped "p+143"
+    # read as "p+14" once (the misread the render skill exists to prevent).
     p = _math.degrees(env._ball_psi)
     if env._ball_seen:
-        return (f"ball SEEN x{env._ball_bx:+.2f} y{env._ball_by:+.2f} "
+        return (f"SEEN x{env._ball_bx:+.2f} y{env._ball_by:+.2f} "
                 f"d{env._ball_dist:.1f} p{p:+.0f}")
-    return (f"ball LOST {env._ball_lost_s:.1f}s m{env.head_cmd[3]:+.2f} "
+    return (f"LOST {env._ball_lost_s:.1f}s m{env.head_cmd[3]:+.2f} "
             f"d{env._ball_dist:.1f} p{p:+.0f}")   # lost time = the scan clock
 
 
