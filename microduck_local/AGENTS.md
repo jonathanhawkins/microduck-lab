@@ -44,6 +44,21 @@ does; this file covers how not to fool yourself.
   memory slot exists because the policy is memoryless: without it the
   ball rolling out of frame leaves nothing observable to say which way to
   look, and the daemon can produce it with one gyro integral.
+- **A symmetric observation leaves the mean nothing to learn.** With the
+  ball equally likely on either side and no cue in the obs, "turn left"
+  and "turn right" carry the same advantage, the mean head-yaw action sits
+  at zero, and the exploration noise does the finding: the first find_ball
+  export stood and stared at a ball 42° off while the stochastic trainer
+  saw it half the time. Diagnose it by probing the exported ONNX directly
+  (feed one obs, vary one slot, read the action) — the network had learned
+  every slot's sign correctly; the failure was in what the obs could not
+  say. Break the tie in the obs (a belief slot with a fixed convention
+  when nothing is known), never by hoping PPO finds a side.
+- **A memoryless policy cannot sweep.** A search is a limit cycle in head
+  yaw and 2M PPO steps produced a static gaze-vs-belief instead. Give it a
+  clock (sin/cos of a phase in two command slots, the imitation recipe's
+  trick) and the sweep becomes a static mapping. Same rule as the phase
+  signal: anything the policy must do *over time* needs time in the obs.
 - **Mind MuJoCo's velocity frames.** `mj_objectVelocity(..., flg_local=0)`
   is the world frame; naive indexing once rewarded a sideways shuffle as
   "forward". When you write a term that reads a velocity, print it in a pose

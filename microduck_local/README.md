@@ -351,7 +351,36 @@ MICRODUCK_BALL_BEARING_MAX=1.2 MICRODUCK_BALL_EVENT_RATE=0.15 \
     uv run train-behavior find_ball --steps 1_000_000 --run-name fb-s1
 uv run train-behavior find_ball --steps 2_000_000 --run-name fb-s2 --init-from runs/fb-s1
 uv run render-rollout --policy runs/fb-s2/policy.onnx --out /tmp/rr-fb   # ball + gaze dot drawn in
+uv run eval-find-ball runs/fb-s2/policy.onnx        # time-to-first-sight by bearing bucket
 ```
+
+**Measured (2026-09-03, `uv run eval-find-ball`, 40 static-ball episodes ×
+8 s per export, deterministic ONNX, randomizers off — the battery sweeps
+bearings round the circle; "found" = ball entered the frame within 8 s):**
+
+| export | front found / median | side found / median | back found / median | falls /40 |
+|---|---|---|---|---|
+| s1c (front window + belief + clock) | 100% / 0.03 s | 20% / 0.29 s | 0% | 0 |
+| s2 (anywhere, moving) | 100% / 0.03 s | 55% / 1.22 s | 0% | 0 |
+| s3 (rolling) | 100% / 0.03 s | 80% / 0.84 s | 40% / 2.64 s | 1 |
+| s4 (+ raised-cosine facing) | 100% / 0.03 s | 85% / 0.62 s | 30% / 3.16 s | 0 |
+| **s5** (+ turn_to_belief, no up-band) | 100% / 0.03 s | 85% / 0.60 s | 60% / 0.94 s | 2 |
+
+The s5 export ships in `policies/find_ball/` (see its README). Balls that
+start directly behind are the open problem: the head's ±170° reaches them
+but the body has to commit to a turn, and the falls are that turn — in a
+4-episode render of s5 on full-circle spawns it fell on two of the back
+starts (0.98 s and 2.48 s in), while s4 (no `turn_to_belief`) never fell
+and found 30% of back balls. `turn_to_belief` has had 1M steps; the turn
+it prices is the skill still missing, so a longer full-circle stage on a
+fast machine is the next experiment, not a new term.
+The three things that made the sweep learnable at all are worth knowing
+before touching the recipe (the module header tells the whole story): the
+belief slot (a symmetric obs leaves the mean action with nothing to learn
+while the noise finds the ball), the scan clock (a memoryless policy cannot
+sweep without a phase), and a facing term that slopes all the way round.
+This whole chain took ~2.5 h on a 4-core cloud CPU at ~1.2k steps/s; an
+M5 Max runs the same at ~12× that.
 
 `render-rollout` draws the ball (orange) and a gaze dot 30 cm down the
 optical axis (cyan while the ball is in frame, red while lost), adds a
