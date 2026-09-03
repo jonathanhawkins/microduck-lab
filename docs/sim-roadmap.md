@@ -46,7 +46,15 @@ the tree, and Track 12 has its first working loop:
   frustum 1% of the time, 90–120° off the nose, a standing turn barely
   turns): 2.25 goals, 9.4 kicks, 0.38 falls a run over 8 seeds against
   2.00 / 8.4 / 0.50; deliberate bumping and a ball memory were measured
-  after it and ship off — the same goals, twice the falls) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
+  after it and ship off — the same goals, twice the falls; so does a
+  ball-trajectory prediction (the tracker carries positions and
+  velocities now; a kicked ball leaves at 1.4 m/s, slows at 0.04 m/s²
+  and leaves the level camera at once): yawing the head toward where the
+  ball is going, opening the search that way and walking the hunt to the
+  predicted stop measured 1.12–2.12 goals with 0.75–1.62 falls a run
+  against 2.25 / 0.38 with it off — the head yaws 34° at most and the
+  searching duck's ball sits 90–120° off its nose, so the gaze cannot
+  reach it; the page draws the prediction anyway) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
   2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
   after the traced fix (supporters turning in place against a teammate
   or the boards: the support spot stays inside the pitch and a supporter
