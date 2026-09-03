@@ -226,6 +226,14 @@ behavior works here, port the env design to an mjlab cfg in `microduck_rl` and
 retrain on GPU (that repo's `AGENTS.md` is the sim2real recipe). Everything
 here keeps the deployment contract so that port is mechanical.
 
+## What's being worked on
+
+`docs/roadmap.md` is the working list: what to run next, the command for each,
+and the number that would settle it. Right now it is mostly the 🔎 `find_ball`
+brain — a scan-and-track behavior that aims the duck at a ball, so the
+ball-blind kick and ground-pick policies have eyes. It was prototyped on a
+cloud CPU and every open question on it wants a real machine.
+
 ## License
 
 Apache-2.0 (same as the upstream Microduck repos). Not affiliated with or

@@ -41,6 +41,11 @@ cd ../duck-viewer && npm install
   harness mirrors.
 - `.claude/skills/render-rollout/SKILL.md` — how to *look* at what a policy
   actually does (works as plain documentation for any agent, not just Claude).
+- `docs/roadmap.md` — the working list of experiments: what to run next, the
+  command for each, and the number that would settle it. Read it before
+  starting anything open-ended, and **write the answer back into the item**
+  when you finish one — a negative result is worth as much as a positive one,
+  and this is where the next person finds out it was already tried.
 
 ## What runs where
 
