@@ -54,7 +54,19 @@ the tree, and Track 12 has its first working loop:
   predicted stop measured 1.12–2.12 goals with 0.75–1.62 falls a run
   against 2.25 / 0.38 with it off — the head yaws 34° at most and the
   searching duck's ball sits 90–120° off its nose, so the gaze cannot
-  reach it; the page draws the prediction anyway) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
+  reach it; the page draws the prediction anyway). Then a bug: the ToF
+  clearance placed hits without the head's rotation, so a dipped head
+  read the floor as a wall 0.35 m ahead — fixed, the 1v1 baseline reads
+  2.38 / 7.4 / 0.38. On that geometry a 120° lens measured 2.75 goals,
+  17.1 kicks, 0.62 falls (a wide camera is worth the money); the head
+  unlocked to its trained ±1.4 rad with an aimed look after the kick, a
+  gaze on the track and a sweeping search all measured off (2.25 / 1.88
+  / 1.88 goals), as did the ToF seeing the ball at the feet (1.62 / 8.1
+  / 0.75 — a blob at the feet is as often the other duck's foot); and a
+  bump sense (feet touching feet) that stands the duck instead of
+  turning halved the crowd's falls — 3v3 5.00 → 1.75 a run, 2v2 4.00 →
+  2.25 — at a cost in goals, so rosters with teammates get it and a lone
+  attacker does not) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
   2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
   after the traced fix (supporters turning in place against a teammate
   or the boards: the support spot stays inside the pitch and a supporter
@@ -133,10 +145,10 @@ the tree, and Track 12 has its first working loop:
   minutes on the pinned 2026-09 model (16 seeds, 0.31 falls a run; 0.84 /
   0.56 under datasheet odometry drift, 0.79 / 0.75 under hostile drift —
   the same with the brain's loop-closed pose on or off, so the map is not
-  what tidying needs — 0.71 / 0.25 with a 250 ms brain tether, the link
+  what tidying needs — 0.81 / 0.19 with a 250 ms brain tether, the link
   modelled both ways (senses late, intents late) and the brain reading
   its latency off its own sensor ages to stop that much earlier at the
-  rim; 0.76 / 2.19 before that, every traced tethered fall the stopping
+  rim and at the toy; 0.76 / 2.19 before that, every traced tethered fall the stopping
   stride at the rim on a stop decided 250 ms late) — up from
   0.88 / 0.38 before rim toys were approached from the outside, 0.67 /
   1.7 falls at the first close of the loop and 0.11 before that. What it took, each a measurement on

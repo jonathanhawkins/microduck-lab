@@ -684,7 +684,11 @@ class ChaseParams:
     # the sim, the IMU / servo loads on the robot): no turn in place for
     # `bump_stand_s` after the last one; a stand is the one thing the walker
     # does safely against a body, and 12 of 13 traced 3v3 falls were
-    # standing turns beside an unseen opponent. 0 = off.
+    # standing turns beside an unseen opponent. Measured (4 seeds x 300 s):
+    # 3v3 falls 5.00 -> 2.75 a run at 1.0 s and 1.75 at 0.5 s (goals 1.50
+    # -> 0.75), 2v2 4.00 -> 2.00 / 2.25 (1.50 -> 1.25); 1v1 (8 seeds) 1.50
+    # goals and 1.00 falls against 2.38 / 0.38 at 1.0 s. 0 here; team
+    # rosters get 0.5 from brain/team.py brain_kwargs.
     bump_stand_s: float = 0.0
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,

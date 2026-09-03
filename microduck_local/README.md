@@ -845,6 +845,20 @@ walking turn bumps what it cannot see. What a crowded pitch needs is a
 sense of the bodies beside the duck — a wider ToF field, or the bump the
 IMU could read — before any rule can act on them.
 
+**A bump sense** (`Senses.bumped`) is what finally moved the crowd's
+falls. The World reads its contact list — in the walk scene only the feet
+carry collision geometry, so a bump is feet touching feet, which is what
+a duck-duck fall is; on the robot it is the IMU and the servo loads — and
+a chase brain that has been bumped stands instead of turning in place for
+`bump_stand_s`. Measured over 4 seeds × 300 s on the fixed ToF geometry:
+**3v3 falls 5.00 → 2.75 a run at 1.0 s and 1.75 at 0.5 s** (goals 1.50 →
+0.75, kicks 6.2 → 4.5 / 6.5), **2v2 4.00 → 2.00 / 2.25** (goals 1.50 →
+1.25). In 1v1 the same rule measured 1.50 goals and 1.00 falls against
+2.38 / 0.38 over 8 seeds — two attackers' feet meet at the ball, and the
+one that stands loses it and gets walked over — so `brain_kwargs` gives
+the half-second stand to rosters with teammates and leaves a lone
+attacker on the default. Per duck, 3v3 falls went 0.83 → 0.29 a run.
+
 ### Tidy the playroom (roadmap Track 12)
 
 `playroom` is the built-in that scatters toys on the floor of a walled room

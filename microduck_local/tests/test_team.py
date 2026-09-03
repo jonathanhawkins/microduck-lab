@@ -125,6 +125,9 @@ def test_pitch_with_teams_and_brain_kwargs():
     assert kw["d0"]["goal"][0] > 0 and kw["d2"]["goal"][0] < 0 and kw["d0"]["goal"] == kw["d1"]["goal"]
     assert kw["d0"]["team"] is kw["d1"]["team"] and kw["d0"]["team"] is not kw["d2"]["team"]
     assert set(teams) == {"left", "right"}
+    assert kw["d0"]["p"].bump_stand_s == 0.5                     # a roster with teammates: the bump sense on
+    solo = make_pitch(per_side=1)
+    assert "p" not in brain_kwargs(solo.ducks[0], World(solo), {})   # a lone attacker keeps the default
     from microduck_local.world import Duck, Scenario
     plain = Scenario(name="x", floor=(4, 4), ducks=[Duck("d0", (0, 0, 0), None, None, None, "chase")])
     assert brain_kwargs(plain.ducks[0], World(plain), {}) == {}
