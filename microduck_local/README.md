@@ -328,8 +328,8 @@ optional dropout knob. FOV defaults to the IMX219 as the daemon sees it
 
 The recipe pays for the ball being in frame, centred (two-layer Gaussian),
 and for the body facing it; while the ball is lost the only income is a
-bounded **coverage** pay for pointing the camera at a (10° yaw × pitch-band)
-cell it has not looked at this sweep — a wiggle re-covers the same cells
+bounded **coverage** pay for pointing the camera at a (10° yaw × near-floor /
+level pitch band) cell it has not looked at this sweep — a wiggle re-covers the same cells
 and earns nothing, a steady sweep pays every step. There is deliberately
 **no per-step search penalty**: falling over would then be the cheapest
 way out of a hard search. Balls spawn anywhere around the duck (0.3–1.5 m)

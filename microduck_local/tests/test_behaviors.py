@@ -1272,6 +1272,7 @@ def test_find_ball_pays_nothing_while_lost_except_new_ground():
     assert terms["new_ground"].fn(env) == 0.0
     env._ball_new_bins = 1
     assert terms["new_ground"].fn(env) == 1.0
+    assert terms["turn_to_belief"].fn(env) == 0.0      # no belief, no pay
     assert not any(t.is_penalty and "search" in t.key for t in terms.values())
 
 
@@ -1404,3 +1405,20 @@ def test_find_ball_facing_slopes_all_the_way_round():
     assert all(a > b for a, b in zip(vals, vals[1:]))   # strictly decreasing
     assert vals[-2] - vals[-1] > 0.001                   # still sloping at 170 deg
     assert vals[-1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_find_ball_turn_pay_is_signed_by_the_belief_and_off_while_seen():
+    env = _ball_env()
+    turn = {t.key: t for t in BEHAVIORS["find_ball"].terms}["turn_to_belief"].fn
+    env._ball_det[2] = 0.0
+    env._ball_mem, env._ball_mem_conf = 1.0, 1.0        # believed to the LEFT
+    env._gyro[2] = 1.0                                   # turning left
+    assert turn(env) == pytest.approx(0.5)
+    env._gyro[2] = -1.0                                  # turning right: charged
+    assert turn(env) == pytest.approx(-0.5)
+    env._gyro[2] = 10.0                                  # capped, no pay for violence
+    assert turn(env) == pytest.approx(1.0)
+    env._ball_mem_conf = 0.5
+    assert turn(env) == pytest.approx(0.5)
+    env._ball_det[2] = 1.0                               # seen: the facing term owns it
+    assert turn(env) == 0.0

@@ -108,10 +108,13 @@ _BALL_NO_PRIOR_MEM = _math.pi / 2
 _BALL_NO_PRIOR_CONF = 0.3
 _BALL_KEEPOUT = 0.12          # m — a rolling ball stops at the duck's feet
 _BALL_ARENA = 2.0             # m — a rolling ball stops at the arena edge
-# Gaze coverage bins for the sweep pay: 10 deg of camera yaw x three pitch
-# bands (nose down past -25 deg: the near floor; level; up).
+# Gaze coverage bins for the sweep pay: 10 deg of camera yaw x two pitch
+# bands (nose down past -25 deg: the near floor; everything else). No "up"
+# band: a floor ball is never above the horizon, and with one the stage-4
+# export spent sweep time looking at the ceiling for the coverage pay.
 _BALL_YAW_BINS = 36
-_BALL_PITCH_EDGES = (-0.436, 0.0)   # rad, band boundaries
+_BALL_PITCH_DOWN = -0.436           # rad: below this is the near-floor band
+_BALL_PITCH_BANDS = 2
 
 
 def _ball_knob(env, key: str) -> float:
@@ -284,7 +287,7 @@ def _ball_sense(env, force: bool = False) -> None:
     # Sweep coverage: which (yaw, pitch band) cells the gaze has visited.
     yaw = _math.atan2(fwd[1], fwd[0])
     pitch = _math.asin(max(-1.0, min(1.0, fwd[2])))
-    band = 0 if pitch < _BALL_PITCH_EDGES[0] else 1 if pitch < _BALL_PITCH_EDGES[1] else 2
+    band = 0 if pitch < _BALL_PITCH_DOWN else 1
     cell = (int((yaw + _math.pi) / (2 * _math.pi) * _BALL_YAW_BINS) % _BALL_YAW_BINS, band)
     cover = env._ball_cover
     if force:
@@ -295,7 +298,7 @@ def _ball_sense(env, force: bool = False) -> None:
     else:
         cover.add(cell)
         env._ball_new_bins = 1
-        if len(cover) >= _BALL_YAW_BINS * 3:
+        if len(cover) >= _BALL_YAW_BINS * _BALL_PITCH_BANDS:
             cover.clear()       # a complete sweep: start counting afresh
 
     # Detector cadence + noise + dropout, held between updates.
@@ -415,6 +418,24 @@ def _ball_new_ground(env) -> float:
     return float(min(env._ball_new_bins, 1))
 
 
+def _ball_turn_to_belief(env) -> float:
+    """SIGNED body-yaw-rate pay toward the belief while the ball is out of
+    frame (the spin recipe's signed pay, aimed by slot 54): turning the way
+    the belief points earns up to +1 at 2 rad/s, turning away charges the
+    same, scaled by the belief's confidence. The stage-4 export glimpsed
+    balls behind it with the head at its limit but never committed the body
+    to the turn — the facing term's slope there is shallow, and this is the
+    direct price on the missing motion. Zero while seen: the facing and
+    centring terms own that regime."""
+    if env._ball_det[2] > 0.5:
+        return 0.0
+    conf = env._ball_mem_conf
+    if conf < 0.1:
+        return 0.0
+    d = 1.0 if env._ball_mem > 0.0 else -1.0
+    return conf * max(-1.0, min(1.0, d * float(env._gyro[2]) / 2.0))
+
+
 # ------------------------------------------------------------- read-side
 
 def _ball_caption(env) -> str:
@@ -492,6 +513,8 @@ _register(Behavior(
                    1.5, _ball_face),
         RewardTerm("new_ground", "While the ball is lost: points for looking somewhere new",
                    1.0, _ball_new_ground),
+        RewardTerm("turn_to_belief", "While the ball is lost: points for turning the body the way it went",
+                   1.0, _ball_turn_to_belief),
         _upright_term(1.5),
         RewardTerm("step_dont_skid", "Points for lifting the feet to turn (no skid-steering)",
                    1.0, _step_dont_skid),
