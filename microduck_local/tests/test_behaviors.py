@@ -1174,3 +1174,61 @@ def test_spin_pays_the_commanded_direction_not_a_wiggle():
     # the direction command is in the OBSERVABLE wz slot every observation
     obs = env._get_obs()
     assert abs(float(obs[50])) == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# deep_squat behavior tests (first_squat.py)
+# ---------------------------------------------------------------------------
+
+class TestDeepSquat:
+    """Regression + contract tests for the custom deep_squat behavior."""
+
+    def test_deep_squat_registers_and_is_reachable(self):
+        b = match_behavior("deep squat")
+        assert b.id == "deep_squat"
+        assert b.emoji == "\U0001F986"
+        b2 = match_behavior("深蹲")
+        assert b2.id == "deep_squat"
+
+    def test_deep_squat_does_not_steal_crouchs_words(self):
+        assert match_behavior("crouch down").id == "crouch"
+        assert match_behavior("deep squat").id == "deep_squat"
+
+    def test_deep_squat_penalties_are_negative_or_zero(self):
+        b = match_behavior("deep squat")
+        for t in b.terms:
+            if t.is_penalty:
+                env = BehaviorEnv(b.id, obs_noise=False, domain_rand=False,
+                                  action_delay=False, random_yaw=False, seed=42)
+                env.reset()
+                val = t.fn(env)
+                assert val <= 0.0, f"Penalty {t.name} returned {val} > 0"
+                env.close()
+
+    def test_squat_z_pays_the_descent_not_only_the_end_state(self):
+        from microduck_local.behaviors.first_squat import _squat_target_z, _squat_z
+        env = BehaviorEnv("deep_squat", obs_noise=False, domain_rand=False,
+                          action_delay=False, random_yaw=False, seed=7)
+        env.reset()
+        target = _squat_target_z(env)
+        assert target > float(env.FALL_HEIGHT), (
+            f"Squat target {target:.4f} <= FALL_HEIGHT {env.FALL_HEIGHT}"
+        )
+        stand_val = _squat_z(env)
+        env._trunk_xpos[2] = target
+        target_val = _squat_z(env)
+        assert target_val > stand_val
+        env.close()
+
+    def test_deep_squat_env_steps_with_finite_rewards(self):
+        import numpy as np
+        env = BehaviorEnv("deep_squat", obs_noise=False, domain_rand=False,
+                          action_delay=False, random_yaw=False, seed=3)
+        obs = env.reset()
+        for _ in range(10):
+            action = np.zeros(env.action_space.shape, dtype=np.float32)
+            obs, reward, terminated, truncated, info = env.step(action)
+            assert np.isfinite(reward), f"Non-finite reward: {reward}"
+            if terminated or truncated:
+                break
+        env.close()
