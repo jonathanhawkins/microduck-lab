@@ -102,6 +102,19 @@ does; this file covers how not to fool yourself.
    on load and every rollout; a mean-poisoned lineage cannot be consolidated
    and must be restarted from scratch. Probe `live.onnx` deterministically
    at every checkpoint — that is the policy that ships.
+7. **An eval env that carries state between episodes hides the tail.**
+   `BrainEnv` used to reseed nothing on reset: the ToF's, the detector's and
+   the world's generators were seeded once at construction, and `_respawn`
+   left the commanded twist standing, so episode 0 reproduced and every
+   episode after it continued the one before. The cell MEANS barely noticed
+   (re-measuring both follow tables independently moved no cell by as much
+   as one seed-level sigma) — what it cost was resolution: v4's lead over
+   v5 clears the seed noise in three cells of four on independent episodes
+   and in NONE of them chained, because the comparison turns on v5's bad
+   episodes and carried noise smears exactly those. If a battery is the
+   evidence, make an episode a pure function of `(seed, ep)` and pin it
+   with an exactness test (`tests/test_eval_brain_jobs.py`); a battery you
+   can shard is also a battery you can trust.
 
 ## Adding a behavior (the main community extension point)
 

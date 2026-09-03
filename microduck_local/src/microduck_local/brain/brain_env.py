@@ -285,6 +285,24 @@ class BrainEnv(gym.Env):
         self._box_pending = []
         self._randomize_episode()
         self.world.reset()
+        # An episode is a pure function of (seed, ep): nothing rides in from
+        # the episode before it. Three generators outlive world.reset(), so
+        # the episode's own rng re-seeds all three here.
+        #   - the sensors': seeded once in World.__init__, and their reset()
+        #     clears the frames but not the stream, so episode k used to
+        #     continue episode k-1's noise;
+        #   - the world's: dormant on this task (the follow duck's odom
+        #     preset is "ideal", and there is nothing to grasp or kick off),
+        #     but re-seeded so that stays true if the task ever turns those
+        #     on rather than silently losing the guarantee.
+        # _respawn clears last_action, the skill and the gains but not the
+        # commanded twist, so the warm-up steps below used to be driven by
+        # whatever the last episode ended up asking for - zero it too.
+        for _gen in (self.duck.tof, self.duck.detector, self.world):
+            if _gen is not None:
+                _gen.rng = np.random.default_rng(int(self.rng.integers(0, 2**31 - 1)))
+        self.duck.twist_cmd[:] = 0.0
+        self.duck.head_cmd[:] = 0.0
         for q, bx, by in self._box_pending:              # after the reset, which re-poses every free body
             self.world.data.qpos[q:q + 3] = [bx, by, 0.15]
             self.world.data.qpos[q + 3:q + 7] = [1.0, 0.0, 0.0, 0.0]

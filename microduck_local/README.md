@@ -362,9 +362,28 @@ its current intent live.
   ```bash
   uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety   # ~15 min
   uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24   # vs `--brain follow`
+  uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24 --jobs 0   # …on every core
   uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v4"
   # …and watch the run live at http://localhost:63317/train (duck-viewer)
   ```
+
+  **An episode is a pure function of `(seed, ep)`.** `BrainEnv.reset()`
+  re-seeds every generator that outlives `world.reset()` — the ToF's, the
+  detector's and the world's own, all three seeded once at construction
+  and untouched by their `reset()` — and zeroes the commanded twist that
+  `_respawn` leaves standing, so the warm-up steps that let the first
+  sensor frames land are not driven by whatever the last episode was
+  asking for. Nothing carries from episode k-1 into episode k. That is
+  what `--jobs N` rests on: it splits a battery over N processes, one env
+  each, and returns exactly the rows `--jobs 1` returns (2.6x on 4 cores
+  for a 24-episode battery; `tests/test_eval_brain_jobs.py` pins the
+  exactness, and 7 of its 8 cases fail if a carrier ever comes back).
+  Episodes used to be chained — episode 0 reproduced, everything after it
+  continued the previous episode's noise stream. Re-measuring both follow
+  tables independently moved no cell by as much as one seed-level sigma
+  (largest in band: 0.019), so no published ranking changed; what it did
+  change is that v4's lead over v5 now clears the noise in three cells of
+  four, where under chained sampling it cleared in none.
 
   `brains/follow-v1` … `follow-v5` (112 kB each, `brain.onnx` + the
   contract in `brain.json`) ship in the repo, so `learned:follow-v1` /
@@ -395,19 +414,22 @@ its current intent live.
   0.55 m centre to centre short of a duck in its way and steps around
   after 2.5 s — **240 episodes a cell** (24 episodes x 10 eval seeds;
   every row has zero contact, falls at most 0.06), in band / in sight
-  under the datasheet and hostile presets:
+  under the datasheet and hostile presets. Re-measured on **independent
+  episodes** (below) on a 4-core Linux container; the same pass taken the
+  old chained way agreed with the M-series figures it replaces to within
+  0.02 a cell, and no cell moved by as much as one seed-level sigma:
 
   | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
   |---|---|---|---|---|
-  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.94** / 0.99 | **0.89** / 0.91 | **0.93** / 0.99 | **0.89** / 0.90 |
-  | `follow-v5` (v4's recipe against the polite person) + reflex tier | 0.93 / 0.98 | 0.88 / 0.89 | 0.93 / 0.98 | 0.87 / 0.87 |
-  | `follow-v2` + reflex tier | 0.91 / 0.98 | 0.83 / 0.92 | 0.90 / 0.98 | 0.84 / 0.93 |
-  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.91 / 0.99 | 0.83 / 0.92 | 0.90 / 0.99 | 0.82 / 0.91 |
-  | `follow-v1` (version-1 observation, no reflex tier) | 0.86 / 0.98 | 0.74 / 0.94 | 0.86 / 0.97 | 0.74 / 0.94 |
-  | scripted `follow` + reflex tier | 0.77 / 0.97 | 0.66 / 0.93 | 0.76 / 0.96 | 0.66 / 0.91 |
+  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.94** / 0.99 | **0.88** / 0.90 | **0.93** / 0.98 | **0.89** / 0.92 |
+  | `follow-v5` (v4's recipe against the polite person) + reflex tier | 0.92 / 0.97 | 0.86 / 0.86 | 0.92 / 0.97 | 0.89 / 0.89 |
+  | `follow-v2` + reflex tier | 0.91 / 0.97 | 0.83 / 0.90 | 0.90 / 0.96 | 0.84 / 0.91 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.90 / 0.98 | 0.82 / 0.92 | 0.90 / 0.97 | 0.81 / 0.90 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.86 / 0.97 | 0.74 / 0.94 | 0.86 / 0.97 | 0.75 / 0.94 |
+  | scripted `follow` + reflex tier | 0.76 / 0.96 | 0.66 / 0.91 | 0.76 / 0.95 | 0.67 / 0.90 |
 
-  v4 leads under hostile noise by 0.05 (10/10 eval seeds over v2, 9/10
-  on the variety cell) and by 0.03 on the clean preset (10/10); the
+  v4 leads under hostile noise by 0.05 (10/10 eval seeds over v2, 10/10
+  on the variety cell) and by 0.04 on the clean preset (9/10); the
   polite person lifted every band by 0.1–0.3 and took the bump counts
   from 15–27 an episode to 0.3–4.6. The capsule that walks
   through the duck (`--polite 0`) had capped every band for a reason
@@ -418,11 +440,12 @@ its current intent live.
 
   | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
   |---|---|---|---|---|
-  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.81 / 0.95** | **0.76** / 0.87 | **0.82 / 0.96** | **0.74** / 0.87 |
-  | `follow-v2` + reflex tier | 0.77 / 0.96 | 0.67 / 0.87 | 0.76 / 0.94 | 0.65 / 0.85 |
-  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.74 / 0.95 | 0.63 / 0.88 | 0.75 / 0.94 | 0.62 / 0.86 |
-  | `follow-v1` (version-1 observation, no reflex tier) | 0.72 / 0.94 | 0.57 / 0.88 | 0.69 / 0.94 | 0.58 / 0.88 |
-  | scripted `follow` + reflex tier | 0.48 / 0.83 | 0.41 / 0.74 | 0.48 / 0.82 | 0.41 / 0.74 |
+  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.84 / 0.97** | **0.73** / 0.85 | **0.83 / 0.96** | **0.74** / 0.87 |
+  | `follow-v5` (v4's recipe against the polite person) + reflex tier | 0.74 / 0.94 | 0.65 / 0.79 | 0.74 / 0.94 | 0.66 / 0.80 |
+  | `follow-v2` + reflex tier | 0.76 / 0.94 | 0.67 / 0.85 | 0.76 / 0.95 | 0.66 / 0.86 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.74 / 0.94 | 0.64 / 0.86 | 0.75 / 0.95 | 0.63 / 0.85 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.70 / 0.95 | 0.57 / 0.89 | 0.70 / 0.93 | 0.57 / 0.87 |
+  | scripted `follow` + reflex tier | 0.48 / 0.82 | 0.41 / 0.75 | 0.47 / 0.81 | 0.41 / 0.73 |
 
   (Before the legs, at 12 episodes: 0.80 / 0.75, 0.63 / 0.61; 0.71 / 0.68,
   0.63 / 0.57; 0.73 / 0.85, 0.60 / 0.75; 0.46 / 0.53, 0.42 / 0.40.)
@@ -430,7 +453,7 @@ its current intent live.
   **`follow-v4` is the follower to pick.** Every shipped brain before it was
   trained while a person vanished inside 1.2 m; v4 is the first trained in
   the world the legs detector made, and it is ahead in all four cells — by
-  0.05 on the datasheet preset and 0.09 under hostile noise, on 9/10 and
+  0.07 on the datasheet preset and 0.07 under hostile noise, on 9/10 and
   10/10 eval seeds respectively. The gap is widest exactly where the old
   brains were worst, which is the shape you would expect if the thing they
   were missing was the close-in half of the band. It also *bumps less*:
@@ -455,22 +478,33 @@ its current intent live.
   records it; v1–v4 were trained against the capsule that walks through
   the duck). It trains faster and settles higher (reward 171 from ~410k
   decisions against v4's 161 from ~610k — the polite world is the easier
-  one; 9 min at 3.7k steps/s) and comes out level with v4 on the clean
-  preset (−0.00 in band, ahead on 4/10 and 5/10 eval seeds) and a shade
-  behind under hostile noise (−0.01 and −0.02, ahead on 2/10 and 3/10 —
-  inside the ±0.03 seed spread). What it learned instead is that the
-  person stops for it: it trips the bump signal 2.6 times an episode
-  against v4's 0.3 on the datasheet preset and 11.5 against 4.2 under
-  hostile noise, is in sight less (0.89 vs 0.91) and falls more with
-  furniture about (0.06 vs 0.02). Scored back in the world v4 was
-  trained in (`--polite 0`, 240 episodes a cell) the habit shows
-  plainly: 0.75 / 0.69 in band against v4's 0.81 / 0.76 (ahead on at most
-  1/10 seeds in any cell), 30 bumps an episode against 15–21, 0.7–0.8 s of
-  contact against 0.4–0.6. A brain trained against a person who walks
-  through the duck had to keep out of the way; one trained against a
-  person who yields is paid for standing in it. **`follow-v4` stays the
-  follower to pick** — trained in the harder world, scored in the polite
-  one — and v5 ships as the measurement.
+  one; 9 min at 3.7k steps/s), and **the interesting part is where it
+  loses.** v5's TYPICAL episode is the better one: its median band is
+  level or ahead in all four cells (0.962 against v4's 0.955 on the clean
+  preset, 0.940 against 0.927 hostile) and per episode it is ahead more
+  often than not (104 of the 159 non-tied episodes on the clean preset).
+  Its BAD episodes are much worse, and that is what the means show: 15
+  episodes under 0.7 band against v4's 2 on the clean preset, 39 against
+  23 hostile, and a 10th percentile of 0.775 against 0.865 (0.579 against
+  0.705 hostile). Paired over the same 240 episodes a cell, v4's lead is
+  +0.018 / +0.020 / +0.014 / +0.007 in band and clears the seed noise in
+  three cells of four (t = 2.9 / 2.0 / 2.1, and 0.8 on +variety hostile,
+  which does not). Under the old chained sampling it cleared in NONE of
+  them (t <= 1.6) — the carried noise was hiding the tail this comparison
+  turns on.
+
+  What v5 learned instead is that the person stops for it: it trips the
+  bump signal 3.4 times an episode against v4's 0.4 on the datasheet
+  preset and 12.5 against 4.1 under hostile noise, is in sight less
+  (0.86 vs 0.90 hostile) and falls more with furniture about (0.05 vs
+  0.02). Scored back in the world v4 was trained in (`--polite 0`, 240
+  episodes a cell) the habit shows plainly: 0.74 / 0.65 in band against
+  v4's 0.84 / 0.73, ahead on at most 1/10 seeds in any cell. A brain
+  trained against a person who walks through the duck had to keep out of
+  the way; one trained against a person who yields is paid for standing
+  in it. **`follow-v4` stays the follower to pick** — trained in the
+  harder world, scored in the polite one — and v5 ships as the
+  measurement.
 
   The **reflex tier** is the thing that moved: under a version-2 brain
   the env yaws the head toward the tracked target (0.8 × the body
