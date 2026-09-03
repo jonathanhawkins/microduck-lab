@@ -509,6 +509,17 @@ class World:
         hx = self.scenario.floor[0] / 2 - 0.25
         return (hx if math.cos(d.spawn[2]) >= 0 else -hx), 0.0
 
+    def ball_xy(self) -> tuple[float, float] | None:
+        """The ball's planar position, unrounded. `soccer_score` rounds to the
+        millimetre for the stream, which is right for a payload and wrong for
+        an accumulator: eval-pitch sums per-step displacements over 15 000
+        control ticks, and mm-quantised differences random-walk into the
+        answer. None off a pitch (no ball / no goals)."""
+        if self._ball_joint is None:
+            return None
+        q = int(self.model.jnt_qposadr[self._ball_joint])
+        return float(self.data.qpos[q]), float(self.data.qpos[q + 1])
+
     def soccer_score(self) -> dict | None:
         if self._ball_joint is None:
             return None
