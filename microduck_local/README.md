@@ -746,6 +746,40 @@ lines into things. The prediction stays tracked and drawn on the /sim
 page (an orange line from the ball to where it will stop); `predict_s`
 turns it back on with the best-measured settings.
 
+**The ToF placed by the head pose — a bug, fixed.** The body-height
+clearance (`tof_clearance_3d`, what every stop, hunt and wall rule reads)
+placed each zone's hit without the head's rotation: with the head dipped
+0.6 rad it reported a wall 0.33–0.37 m ahead in every column — the floor.
+Hits go through the mount rotation now, trunk-relative, and body height
+starts 8.7 cm above the floor (a ball is 7 cm tall). The 1v1 baseline on
+the fixed geometry, same 8 seeds × 300 s: **2.38 goals (0.25 kicked),
+7.4 kicks, 0.38 falls a run** (2.25 / 9.4 / 0.38 before — two fewer
+kicks a run, the ones the false wall had been interrupting one way or
+another). Every soccer number below this line is on the fixed geometry;
+the tidy brain never read that helper, so its rows stand.
+
+**A wider lens, as a hardware question.** The detector's field of view is
+one constant (`DetectorSpec.fov_h_deg`, 62° × 48° as shipped — an
+assumption about a Pi-camera-class module), so the sim can price a
+wide-angle camera: at **120° × 93°**, the same 8 seeds give **2.75 goals
+(0.38 kicked), 17.1 kicks, 0.62 falls a run** against 2.38 / 7.4 / 0.38
+— the duck finds and lines up on the ball more than twice as often, the
+goals follow, and the extra kicks bring a few extra falls (90° × 70°
+measured 1.62 / 12.0 / 0.88 on the old geometry, noise-dominated). A
+wide lens is worth the money; nothing below on the head is.
+
+**The head, unlocked, still cannot help.** The chase brain had capped
+head yaw at 0.6 rad; the walker is trained to ±1.40 (upstream's head-pose
+curriculum). With the cap at 1.4: the look after a kick yawed to the
+foot's kick-map exit angle near the horizon (`look_aim`) 2.25 goals,
+6.4 kicks, 0.50 falls; that plus a gaze on the ball track while
+searching (`predict_s`, `head_yaw_when="search"`) 1.88 / 4.6 / 0.25;
+the aimed look plus a searching head that sweeps ±1.4 rad
+(`search_sweep`; old geometry) 1.88 / 6.8 / 0.38 — all against 2.38 /
+7.4 / 0.38. Fewer kicks every time: a head turned away from the walking
+line leaves the ToF bumper looking sideways, and the brain stops for
+what it then sees. All three ship off behind their flags.
+
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where
 I put it. The nearest attacks, the others support (0.7 m behind the
@@ -837,7 +871,7 @@ datasheet sensor noise, upstream models at the pinned shas):
 | ideal | onboard | **0.89** | 0.31 |
 | datasheet drift | onboard | 0.84 | 0.56 |
 | hostile drift | onboard | 0.79 | 0.75 |
-| ideal | 250 ms round trip | 0.71 | 0.25 |
+| ideal | 250 ms round trip | 0.81 | 0.19 |
 
 All four rows are on the 2026-09 CAD re-export (microduck_rl badc4e7),
 with the staged approach for rim toys, the sidestep-then-turn back-off,
@@ -861,25 +895,28 @@ for the drift and tether rows. A model bump is a re-measure, not a
 merge.
 
 The tether row is roadmap 12.10's answer in one line: a laptop brain over
-Wi-Fi keeps most of the tidying (0.71 against 0.89: every trip is slower
-by the link, and eight of sixteen seeds run out of the five minutes with
-a toy or two left) and now falls **no more than the onboard brain**
-(0.25 against 0.31). It read 0.76 / 2.19 before: every traced tethered
-fall was the stopping stride at the rim, because the stop was decided on
-senses a quarter of a second old (4.7 cm of overshoot at a 0.3 command,
-3.0 at 0.25, which is why the last leg is walked at 0.25), and the fix is
-the one thing a tethered brain *can* do about its link — know it. The
-tether is modelled honestly now (`brain/tether.py`: senses reach the
-brain half a round trip late, re-aged; its intent lands half a round
-trip later — the sim used to delay only the intent, which let the brain
-see senses it would never get), so the brain reads the link off its own
-sensor ages: the floor of the ToF age over the last second is the
-one-way lag (near zero onboard, the sensor runs at 15 Hz), twice it is
-the round trip, and the rim stop moves out by its speed times that
-(`latency_gain`; ~4 cm at 0.16 m/s and 250 ms — the margin every traced
-fall had spent). Nine of the ten falls in four traced runs were within
-0.6 s of a release with the trunk 0.22–0.24 m from the basket. The 50 Hz
-reflex stays onboard either way.
+Wi-Fi keeps most of the tidying (0.81 against 0.89) and falls **no more
+than the onboard brain** (0.19 against 0.31). It read 0.76 / 2.19 before:
+every traced tethered fall was the stopping stride at the rim, because
+the stop was decided on senses a quarter of a second old (4.7 cm of
+overshoot at a 0.3 command, 3.0 at 0.25, which is why the last leg is
+walked at 0.25), and the fix is the one thing a tethered brain *can* do
+about its link — know it. The tether is modelled honestly now
+(`brain/tether.py`: senses reach the brain half a round trip late,
+re-aged; its intent lands half a round trip later — the sim used to
+delay only the intent, which let the brain see senses it would never
+get), so the brain reads the link off its own sensor ages: the floor of
+the ToF age over the last second is the one-way lag (near zero onboard,
+the sensor runs at 15 Hz), twice it is the round trip, and every stop
+moves out by its speed times that (`latency_gain`; ~4 cm at 0.16 m/s and
+250 ms). At the rim that was the margin every traced fall had spent
+(nine of ten falls in four traced runs were within 0.6 s of a release
+with the trunk 0.22–0.24 m from the basket): 0.71 / 0.25. At the toy it
+was the time: traced, the tethered seed 0 picked 3 toys in 8 attempts
+after its first three (onboard 5 in 5) and spent 80 s scanning, because
+the pick's stop landed late too and the beak came down past the toy —
+with the margin on the pick as well, 0.81 / 0.19. The 50 Hz reflex stays
+onboard either way.
 
 Up from 0.67 and 1.7 falls a run at the first close of the loop, and 0.11
 before that. What moved it: the basket is re-measured standing still and
