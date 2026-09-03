@@ -941,9 +941,39 @@ Kicks scale with the lens and the effect is overwhelming (105 against
 51, p < 0.001) — a duck with a wide camera loses the ball far less often
 and spends its run playing instead of searching. Goals do not follow
 (22 against 19 is noise), and kicked goals only hint at it (6 against 1,
-p = 0.13). So the honest recommendation is: **a wider lens buys much
-more contact with the ball, and whether that becomes goals is not yet
-measured.** It is the only hardware change here that clears the noise.
+p = 0.13).
+
+**Then the same lens was pointed at the tidy task, and it lost.** Soccer
+wants a wide view of a big orange ball; tidying wants to resolve a 3 cm
+brick across a room, and the honest size gate takes that away. 24 seeds a
+lens, paired on the same layouts, `--toys 6`:
+
+| lens, same 320 px | tidied | vs shipped, per seed |
+|---|---|---|
+| 62° × 48° (shipped) | **0.889** (128/144) | — |
+| 90° × 70° | 0.743 (107/144) | −0.88, worse on 14 of 24 |
+| 120° × 93° | 0.632 (91/144) | **−1.54, worse on 24 of 24** (sign p = 1e-7) |
+| 120° × 93° on **640 px** | 0.819 (59/72) | −0.33, inside the noise (p ≈ 0.13) |
+
+It replicated across both halves of the battery, and it breaks in exactly
+one place: **the scan**, not the deliver leg and not the grasp. Traced,
+a toy at 1–1.5 m is found in 36% of the frames it appears in at 62° and
+**2%** at 120°; one seed had a toy in frustum for 1182 frames at 1.5–2 m
+and found it three times. The geometric floor for a 3.2 cm brick falls
+from 1.83 m to 0.95 m, which in a 3 × 2.5 m room turns "scan the room"
+into "bump into things": scanning goes from 8% of the run to 40%, and at
+120° no seed ever reached 6/6. The basket is unaffected (hit rate
+0.95–0.98 to 2 m at both lenses — it is 12 cm across and re-measured at
+0.42 m before any release), grasp success is unchanged (0.87 vs 0.85),
+falls are identical (8 vs 8), and release accuracy is if anything better.
+
+So the recommendation is **not** "buy a wide lens", it is **buy
+resolution**: at 640 px the 120° lens tidies within the noise of the
+shipped one, because 305 px/rad is what the shipped 62°/320 px frame
+already had. Field of view is what soccer wanted; pixels per radian is
+what the robot actually needs, and `DetectorSpec.px_h` is the knob that
+says so. A 320 px sensor spread over 120° is a downgrade wearing a
+wide-angle badge.
 
 **Shooting only from inside the goal's cone — no effect measured.** One
 shot in four scores, and a lone shot's direction error is 28–35°, so the
