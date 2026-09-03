@@ -3,8 +3,12 @@ and where the ball was last seen, for ducks that cannot tell a teammate
 from an opponent by sight.
 
 On the robot this is one small message a second over Wi-Fi between
-teammates — id, distance to the ball, the ball's position in my odometry
-frame — which is exactly what `claim` carries. Nothing here reads the sim.
+teammates — id, distance to the ball, the ball's position and my own pose
+in my odometry frame — which is exactly what `claim` carries. Nothing
+here reads the sim. The poses are what a duck cannot get any other way:
+a teammate beside or behind it is invisible to its camera and its ToF,
+and most 3v3 falls were a supporter walking or turning into one
+(`mates`, and the chase brain's `mate_keepout`).
 
 Roles: the teammate nearest the ball attacks (chase, line up, kick or
 push); the others support, standing back toward their own goal, spread
@@ -24,6 +28,7 @@ class Claim:
     t: float
     dist: float                              # my distance to the ball (inf: not seen lately)
     ball: tuple[float, float] | None         # where I put the ball (odom frame; the pitch's frame at spawn)
+    pos: tuple[float, float, float] | None = None   # where I am (x, y, yaw; the same frame)
 
 
 @dataclass
@@ -39,8 +44,14 @@ class Team:
         self.claims.clear()
         self._attacker = None
 
-    def claim(self, duck_id: str, t: float, dist: float, ball: tuple[float, float] | None) -> None:
-        self.claims[duck_id] = Claim(t, dist, ball)
+    def claim(self, duck_id: str, t: float, dist: float, ball: tuple[float, float] | None,
+              pos: tuple[float, float, float] | None = None) -> None:
+        self.claims[duck_id] = Claim(t, dist, ball, pos)
+
+    def mates(self, duck_id: str, t: float) -> list[tuple[str, tuple[float, float, float]]]:
+        """Where my live teammates say they are (the ones that said)."""
+        return [(k, c.pos) for k, c in sorted(self.claims.items())
+                if k != duck_id and c.pos is not None and t - c.t <= self.stale_s]
 
     def members(self, t: float) -> list[str]:
         return sorted(k for k, c in self.claims.items() if t - c.t <= self.stale_s)
@@ -76,7 +87,8 @@ class Team:
 
     def payload(self, t: float) -> dict:
         return {"name": self.name, "attacker": self.attacker(t),
-                "claims": {k: {"dist": None if math.isinf(c.dist) else round(c.dist, 2), "age": round(t - c.t, 2)}
+                "claims": {k: {"dist": None if math.isinf(c.dist) else round(c.dist, 2), "age": round(t - c.t, 2),
+                               **({"pos": [round(v, 2) for v in c.pos]} if c.pos is not None else {})}
                            for k, c in self.claims.items()}}
 
 

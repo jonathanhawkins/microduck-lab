@@ -529,6 +529,8 @@ class ChaseParams:
     predict_s: float = 3.0         # how long a prediction is worth acting on after the last hit
     head_yaw_gain: float = 0.9
     head_yaw_max: float = 0.6
+    head_yaw_when: str = "always"   # or "search": yaw the head only while searching / looking, not on the ball
+    predict_steer: bool = True     # the hunt bends and the search opens toward the prediction
     search_dip_every: float = 1.5
     search_dip_s: float = 0.6
     dip_range: float = 0.22
@@ -590,6 +592,11 @@ class ChaseParams:
     support_margin: float = 0.35
     beside_m: float = 0.3
     beside_s: float = 1.5
+    # Teammates' poses off the team board (brain/team.py): a teammate
+    # inside `mate_keepout` counts as a duck beside me (no turn in place,
+    # no hunt) and, ahead, as a duck to avoid - the camera and the ToF
+    # cannot see one beside or behind me, and most 3v3 falls were that.
+    mate_keepout: float = 0.4
     # Yielding to a duck that clearly has the ball: OFF by default. Measured
     # over 8 seeds × 300 s: off 1.50 goals / 8.5 kicks / 2.12 falls a run,
     # on (0.5 m) 1.12 / 7.0 / 2.12 — it costs play and saves nothing.
@@ -646,6 +653,7 @@ class Chase:
         self.last_bearing = 0.0
         self.last_seen_t: float | None = None
         self._senses: Senses | None = None
+        self._mates: list[tuple[float, float]] = []          # (range, bearing) of live teammates, off the team board
         self.last = (0.0, 0.0, 0.0)
         self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"
         self.lined = False                      # stage two of the line-up: on the line, walking straight in
@@ -773,13 +781,21 @@ class Chase:
                 py = float(np.clip(py, -self.bounds[1] + 0.1, self.bounds[1] - 0.1))
             self.predicted = (px, py)
             pred_bearing = _wrap(math.atan2(py - odom[1], px - odom[0]) - odom[2])
+        self._mates = []
         if self.team is not None:
             self.team.claim(self.duck_id, t, ball.range if seen else math.inf,
-                            self._ball_xy(odom, ball) if seen else None)
+                            self._ball_xy(odom, ball) if seen else None, (odom[0], odom[1], odom[2]))
             self.role = self.team.role(self.duck_id, t)
+            for _, (mx, my, _) in self.team.mates(self.duck_id, t):
+                self._mates.append((math.hypot(mx - odom[0], my - odom[1]),
+                                    _wrap(math.atan2(my - odom[1], mx - odom[0]) - odom[2])))
         other = self.tracker.best("duck", t, min_hits=1)
-        near_duck = (other is not None and other.age(t) <= 0.6 and other.range < p.duck_keepout
-                     and abs(other.bearing) < p.duck_bearing)
+        # The nearest duck ahead to avoid: a seen one, or a teammate by the board.
+        threats = [(r, b) for r, b in self._mates if r < p.mate_keepout and abs(b) < p.duck_bearing]
+        if other is not None and other.age(t) <= 0.6 and other.range < p.duck_keepout and abs(other.bearing) < p.duck_bearing:
+            threats.append((other.range, other.bearing))
+        duck_rb = min(threats) if threats else None
+        near_duck = duck_rb is not None
         clearly_nearer = (other is not None and other.age(t) <= p.lost_s and other.range < p.yield_range
                           and ball is not None and other.range < p.yield_ratio * ball.range
                           and abs(_wrap(other.bearing - ball.bearing)) < 0.8)
@@ -851,11 +867,11 @@ class Chase:
             # one thing the walker does safely against another body. The
             # cold-gait kick creeps forward, so no kick with it near the nose.
             self.spot = None
-            if other.range < p.duck_touch:
+            if duck_rb[0] < p.duck_touch:
                 vx, wz = 0.0, 0.0
             else:
-                vx, _, wz = turn(-1.0 if other.bearing >= 0.0 else 1.0, cold)
-                if abs(other.bearing) < 0.5:
+                vx, _, wz = turn(-1.0 if duck_rb[1] >= 0.0 else 1.0, cold)
+                if abs(duck_rb[1]) < 0.5:
                     vx = 0.0
             self.state = "avoid"
         elif self.role == "support":
@@ -989,7 +1005,7 @@ class Chase:
                 if fresh and ball.range < p.head_range:
                     gaze_at = ball.range
         elif hunting:
-            if self.predicted is not None:                      # the line bends to where the ball is going
+            if self.predicted is not None and p.predict_steer:  # the line bends to where the ball is going
                 self._hunt_u = math.atan2(self.predicted[1] - odom[1], self.predicted[0] - odom[0])
             vx, wz = p.hunt_speed, float(np.clip(p.k_turn * _wrap(self._hunt_u - odom[2]), -p.hunt_wz, p.hunt_wz))
             self.state = "hunt"
@@ -1014,7 +1030,7 @@ class Chase:
                 # at ~24 deg/s, so a ball to the right found by a left turn
                 # takes 10 s, by a right turn 4); the cold-turn kick starts
                 # the right turn the standing walker cannot.
-                side = pred_bearing if pred_bearing is not None else (self.last_bearing if p.search_sided else 1.0)
+                side = pred_bearing if pred_bearing is not None and p.predict_steer else (self.last_bearing if p.search_sided else 1.0)
                 vx, _, wz = turn(1.0 if side >= 0.0 else -1.0, cold)
                 vx = max(vx, p.search_vx)                       # a walking circle: the body actually turns
                 self.state = "search"
@@ -1059,7 +1075,7 @@ class Chase:
         if gaze_at is not None and (vx > 0 or self.state in ("look", "search")):
             head = (0.0, self._gaze(gaze_at), 0.0, 0.0)
         look_at = pred_bearing if pred_bearing is not None else (ball.bearing if ball is not None and ball.age(t) <= p.predict_s else None)
-        if look_at is not None and senses.skill is None:
+        if look_at is not None and senses.skill is None and (p.head_yaw_when == "always" or self.state in ("search", "look")):
             head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
         self.last = (vx, 0.0, wz)
         return Intent(twist=self.last, head=head, note=self.role if self.role != "attack" else self.state, skill=skill)
@@ -1106,10 +1122,11 @@ class Chase:
         return abs(x) > self.bounds[0] or abs(y) > self.bounds[1]
 
     def _beside(self, t: float) -> bool:
-        """Any duck track inside `beside_m`, at any bearing, within `beside_s`."""
+        """Any duck track inside `beside_m`, at any bearing, within `beside_s`;
+        or a teammate inside `mate_keepout` by the team board."""
         p = self.p
         return any(tr.cls == "duck" and tr.range < p.beside_m and tr.age(t) <= p.beside_s
-                   for tr in self.tracker.tracks)
+                   for tr in self.tracker.tracks) or any(r < p.mate_keepout for r, _ in self._mates)
 
 
 def _r(v) -> float | None:

@@ -295,3 +295,24 @@ def test_the_search_walks_to_where_the_ball_was_before_circling():
     # Off by default (measured): a pitch brain with seek_s 0 keeps the memory but never seeks.
     b0 = Chase(ChaseParams(), goal=(1.5, 0.0), bounds=(1.5, 1.25))
     assert b0.step(Senses(t=0.5, odom=(-1.0, 0.0, 0.0))).note == "search"
+
+
+def test_a_teammate_on_the_board_counts_as_a_duck_beside_or_ahead():
+    """Teammates share their poses on the board (brain/team.py `mates`): a
+    teammate inside `mate_keepout` that no sensor can see - beside me - means
+    no turn in place, and one ahead is avoided like a seen duck."""
+    p = ChaseParams()
+    tm = Team("left")
+    b = Chase(p, goal=(1.5, 0.0), team=tm, duck_id="d1", bounds=(1.5, 1.25))
+    tm.claim("d0", 10.0, 0.2, (1.3, 1.1), pos=(0.0, 0.25, 0.0))   # d0 attacks; it is 25 cm to my left
+    assert tm.mates("d1", 10.0) == [("d0", (0.0, 0.25, 0.0))] and tm.mates("d0", 10.0) == []
+    b.step(_senses(10.0, None, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert b._beside(10.0)
+    vx, wz = b._support((0.0, 0.0, 0.0), None, False, True)          # nobody has the ball: it would turn to look
+    assert vx == 0.0 and wz == 0.0
+    tm.claim("d0", 10.5, 0.2, (1.3, 1.1), pos=(0.3, 0.0, 0.0))     # now 30 cm straight ahead, unseen
+    out = b.step(_senses(10.5, None, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert b.state == "avoid" and out.twist[0] == 0.0             # (the note is a supporter's role)
+    tm.claim("d0", 12.5, 0.2, (1.3, 1.1), pos=(1.0, 1.0, 0.0))     # far away: nothing to avoid
+    out = b.step(_senses(12.6, None, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert b.state != "avoid" and not b._beside(12.6)
