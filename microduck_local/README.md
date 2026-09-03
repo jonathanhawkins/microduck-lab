@@ -1333,37 +1333,38 @@ chase brain that has been bumped stands instead of turning in place for
 `bump_stand_s`. Over 4 seeds × 300 s it looked decisive — 3v3 falls 5.00 →
 1.75 a run — and **that number did not replicate**: the same rule over
 twelve seeds gives 3.17 and over twelve others 4.17. So it was measured
-properly, the rebuilt rule against no rule at all, on **twelve fresh
-layouts, 219 fall events** — and then measured *again* on the same twelve,
-which is where the honest number comes from. **Two batteries over the same
-twelve seeds are twelve layouts measured twice, not 24 seeds**, so they
-average per layout rather than pool:
+properly, the rebuilt rule against no rule at all — **and it did not
+survive the confirmation either.** Three batteries, 3v3, 300 s a seed:
 
-| 3v3, 12 layouts (2 batteries each) | no rule | rule at 0.5 s | |
-|---|---|---|---|
-| **falls a run** | 5.50 | **3.62** | −1.88 ± 0.84, p = 0.055, better on 10/12 |
-| kicks a run | 7.00 | 6.88 | −0.12 ± 1.04, p = 0.94 |
-| goals a run | 1.54 | 1.08 | −0.46 ± 0.27, p = 0.14 |
+| block | no rule | rule at 0.5 s | falls a run | |
+|---|---|---|---|---|
+| seeds 24–35 | 4.83 | 3.25 | −1.58 ± 0.92 | p = 0.14, better on 8/12 |
+| seeds 24–35, again | 6.17 | 4.00 | −2.17 ± 1.01 | p = 0.060, better on 8/12 |
+| **seeds 200–211, fresh** | **4.08** | **4.33** | **+0.25 ± 1.04** | **p = 0.88, better on 5/12** |
+| **all 24 distinct layouts** | | | **−0.81 ± 0.69** | **p = 0.264, better on 15/24** |
 
-The batteries alone give −1.58 ± 0.92 (p = 0.14) and −2.17 ± 1.01
-(p = 0.060): the rule is ahead in both, by about the same amount, and
-neither clears 0.05 on its own. Pooling the two as 24 independent seeds
-would say −1.88 ± 0.67, p = 0.012 — **that is repeated measures, not
-replication**, and it is the error this README warns about elsewhere. A
-third fewer falls, consistent across two independent measurements of the
-same twelve layouts and costing no kicks, is the claim the data supports;
-"p < 0.05" is not, until it is confirmed on layouts nobody has run
-(a battery on seeds 200–211 is what settles it). The goals dip is
-unresolved either way: goals need ~146 seeds to call a shift this size, so
-it is neither a real cost nor a refuted one. The rule ships on for rosters
-(`team_bump_stand_s`, applied by `brain_kwargs`) and off for a lone
-attacker, where it measured worse on both counts. (The second battery
-carries `ballAdvance` / `possession` and they say the falls are not bought
-with the ball: possession 27.91 → 26.96 s/min (−0.95 ± 1.32, p = 0.47),
-`ballAdvance` +0.74 → +0.68 m/min (−0.07 ± 0.12, p = 0.58), signed
-progress −0.57 → −0.41 (+0.16 ± 0.19, p = 0.42) — every one of them flat
-over its twelve seeds. Falls is a direct high-count measure and does not
-need the ball metrics anyway.)
+The first two batteries are the same twelve layouts measured twice, not
+24 seeds — averaged per layout they give −1.88 ± 0.84, p = 0.055 (pooling
+them as 24 says p = 0.012, which is repeated measures, not replication,
+and was written here first). On twelve layouts nobody had run, the effect
+is **absent and slightly reversed**. Pooled over all 24 distinct layouts
+it is −0.81 ± 0.69, p = 0.264. **The claim "a third fewer falls" is
+withdrawn.** This is the poacher's shape exactly — found, reproduced on
+its own seeds, gone on fresh ones — and the rule that catches it is this
+repo's own third: confirm on seeds the effect was NOT found on.
+
+The rule still ships on for rosters (`team_bump_stand_s`), and that is a
+default nobody has earned in either direction. Over all 24 layouts the
+point estimate still favours it (−0.81, better on 15/24) and nothing it
+was suspected of costing moved — kicks +0.83 (p = 0.51), goals −0.58
+(p = 0.50), advance and signed progress flat, on the confirmation block —
+so flipping it off now would be reading noise in the other direction.
+Falls need ~376 seeds to resolve a shift this size and this is 24: the
+question is open, not settled, and the honest label is "not shown to
+help", the same as every other knob on the shelf. Possession did move on
+the fresh block (11.83 → 13.00, +1.17 ± 0.48, p = 0.034) — one arm in six
+at p < 0.05 is what chance produces about a quarter of the time, and
+possession is the screen, never the verdict.
 
 Its first form did have a real defect, found by tracing 838 bumps, and
 the trace is worth more than the numbers above. The obvious premise — two

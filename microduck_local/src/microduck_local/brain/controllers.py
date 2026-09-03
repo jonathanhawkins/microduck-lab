@@ -796,16 +796,26 @@ class ChaseParams:
     # A bump (Senses.bumped: the body is touching another body - contacts in
     # the sim, the IMU / servo loads on the robot): no turn in place for
     # `bump_stand_s` after the contact STARTED. 12 of 13 traced 3v3 falls
-    # were standing turns beside an unseen opponent. MEASURED, the rebuilt
-    # rule against no rule at all: 3v3 falls 5.50 -> 3.62 a run over
-    # TWELVE fresh layouts run twice and 219 fall events, -1.88 +/- 0.84
-    # per layout, p = 0.055, better on 10 of 12, kicks unchanged
-    # (7.00 -> 6.88). Two batteries over the same twelve seeds are twelve
-    # layouts measured TWICE: pooling them as 24 gives p = 0.012, which is
-    # repeated measures, not replication, and is what this comment said
-    # first. A third fewer falls reproduced twice is the claim; p < 0.05
-    # waits on layouts nobody has run. Goals 1.54 -> 1.08 is the one
-    # caveat and is unresolved (goals need ~146 seeds). Its first form
+    # were standing turns beside an unseen opponent. MEASURED against no
+    # rule at all, and THE FALL REDUCTION DID NOT REPLICATE:
+    #   seeds 24-35        falls 4.83 -> 3.25   -1.58 +/- 0.92  p = 0.14
+    #   seeds 24-35 again  falls 6.17 -> 4.00   -2.17 +/- 1.01  p = 0.060
+    #   seeds 200-211      falls 4.08 -> 4.33   +0.25 +/- 1.04  p = 0.88
+    #   all 24 DISTINCT layouts             -0.81 +/- 0.69  p = 0.264
+    # The first two are the same twelve layouts measured twice (per layout
+    # -1.88 +/- 0.84, p = 0.055; pooling them as 24 says p = 0.012, which
+    # is repeated measures, not replication, and is what this comment said
+    # first). On twelve layouts nobody had run the effect is absent and
+    # slightly reversed. "A third fewer falls" is WITHDRAWN - the
+    # poacher's shape exactly, caught by AGENTS.md's third rule.
+    #
+    # It stays on for rosters anyway, as a default nobody has earned in
+    # either direction: the pooled point estimate still favours it
+    # (better on 15/24) and nothing it was suspected of costing moved
+    # (kicks +0.83 p = 0.51, goals -0.58 p = 0.50, advance and progress
+    # flat on the fresh block), so flipping it off would be reading noise
+    # the other way. Falls want ~376 seeds for a 25% shift; this is 24.
+    # `bump_back` below is the arm worth measuring against it next. Its first form
     # cost 1v1 1.50 goals and 1.00 falls against 2.38 / 0.38, and a trace
     # of 838 bumps said why, refuting the obvious guess on the way:
     #   * NOT possession. The feet meet a median 0.66 m from the ball; both

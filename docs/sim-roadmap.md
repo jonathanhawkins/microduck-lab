@@ -165,21 +165,22 @@ the tree, and Track 12 has its first working loop:
     shipped on — "halves the crowd's falls", 3v3 5.00 → 1.75 a run over
     4 seeds — did
     not replicate: the same rule gives 3.17 a run over twelve seeds and
-    4.17 over twelve others. Against NO rule, on seeds nobody had looked
-    at, twelve layouts measured twice (two batteries over the same twelve
-    fresh seeds, the rule ahead in both) and 219 fall events: falls 5.50
-    → 3.62 a run (−1.88 ± 0.84, p = 0.055, better on 10 of 12) with
-    kicks unchanged (7.00 → 6.88, −0.12 ± 1.04, p = 0.94) and goals
-    unresolved either way (1.54 → 1.08, −0.46 ± 0.27, p = 0.14, a shift
-    that size needing ~146 seeds). The two batteries alone give
-    −1.58 ± 0.92 (p = 0.14) and −2.17 ± 1.01 (p = 0.060). Pooling them as
-    24 independent seeds gives p = 0.012 — **that is repeated measures,
-    not replication**, and the first version of this row made exactly that
-    error. A third fewer falls at no cost in kicks, reproduced twice on
-    the same layouts, is what the data says; a p under 0.05 waits on the
-    battery running now on twelve layouts nobody has touched. It is a
-    third rather than the half the four-seed battery
-    promised. What the bump work also left is a trace of 838 bumps refuting
+    4.17 over twelve others. Against NO rule it looked real on twelve fresh
+    layouts measured twice (falls 5.50 → 3.62 a run, −1.88 ± 0.84 per
+    layout, p = 0.055, better on 10 of 12; the two batteries alone give
+    −1.58 ± 0.92 and −2.17 ± 1.01, and pooling them as 24 independent
+    seeds gives p = 0.012, which is repeated measures, not replication).
+    **Then it failed its confirmation.** On twelve layouts nobody had run
+    (200–211) the effect is absent and slightly reversed: falls 4.08 →
+    4.33, +0.25 ± 1.04, p = 0.88, better on 5 of 12. Over all 24 DISTINCT
+    layouts: −0.81 ± 0.69, p = 0.264. **"A third fewer falls" is
+    withdrawn** — the same shape as the poacher, and caught by the same
+    rule (confirm on seeds the effect was not found on). Nothing it was
+    suspected of costing moved either (kicks +0.83 p = 0.51, goals −0.58
+    p = 0.50, advance and progress flat), so `team_bump_stand_s` stays on
+    as a default nobody has earned in either direction: falls want ~376
+    seeds and this is 24.
+    What the bump work also left is a trace of 838 bumps refuting
     its own premise (the feet meet a median 0.66 m from the ball, and
     afterwards it is further from BOTH ducks by the same 7.4 cm) and
     finding the real defect: it cancelled the ESCAPE turn (70% of its
@@ -560,7 +561,7 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 4.3 | **Ball perception** | Detector class `ball` (bearing, size ⇒ distance) plus ToF blob; honest label in the UI that the real robot cannot see a ball until someone trains that detector class. | S | ★★★★ |
 | 4.4 | **Striker brain (RL)** | 1v0: dribble toward the goal; reward = ball progress toward goal, being behind the ball, no collisions; discrete kick selection via 3.5. | M | ★★★★★ |
 | 4.5 | **Self-play ladder** | 1v1, then 2v2 with parameter sharing; league of past checkpoints as opponents; ELO in the scoreboard; the lesson is non-stationarity. | L | ★★★★★ |
-| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". **Done (first form):** `Duck.team`, `make_pitch(per_side)`, a team blackboard with attacker/support roles (`brain/team.py`), `pitch-2v2` / `pitch-3v3` built-ins, `eval-pitch --per-side`, a kickoff after every goal; measured 2v2 2.00 goals, 7.8 kicks, 2.75 falls a run, 3v3 1.00 / 7.8 / 3.50 with supporters that stay off the boards and stand beside a teammate (falls per duck climb with the roster: 0.25 → 0.69 → 0.58). The possession stats are done too (`world/metrics.py`): per-team `possession`, `ballAdvance` and signed `ballProgress` at the control tick, reported by `eval-pitch` and drawn live on the /sim pitch panel from the same class. The attacker role is a predicted TIME to the ball (handovers 14.0 → 9.8 a duck a run, median tenure 4.30 → 6.96 s), and the bump-stand rule is now measured on twelve fresh layouts run twice (3v3 falls 5.50 → 3.62 a run, −1.88 ± 0.84 per layout, p = 0.055, 219 fall events; the two batteries agree but neither clears 0.05 alone, and a confirmation on untouched layouts is running). Heatmaps, goal replay and the "possess a duck" mode are still plans. | M | ★★★★ |
+| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". **Done (first form):** `Duck.team`, `make_pitch(per_side)`, a team blackboard with attacker/support roles (`brain/team.py`), `pitch-2v2` / `pitch-3v3` built-ins, `eval-pitch --per-side`, a kickoff after every goal; measured 2v2 2.00 goals, 7.8 kicks, 2.75 falls a run, 3v3 1.00 / 7.8 / 3.50 with supporters that stay off the boards and stand beside a teammate (falls per duck climb with the roster: 0.25 → 0.69 → 0.58). The possession stats are done too (`world/metrics.py`): per-team `possession`, `ballAdvance` and signed `ballProgress` at the control tick, reported by `eval-pitch` and drawn live on the /sim pitch panel from the same class. The attacker role is a predicted TIME to the ball (handovers 14.0 → 9.8 a duck a run, median tenure 4.30 → 6.96 s), and the bump-stand rule's fall reduction FAILED its confirmation — real-looking on twelve layouts measured twice (5.50 → 3.62 a run, −1.88 ± 0.84, p = 0.055) and absent on twelve fresh ones (4.08 → 4.33, p = 0.88), for −0.81 ± 0.69, p = 0.264 over all 24 distinct layouts; it stays on as an unearned default, costing nothing measurable. Heatmaps, goal replay and the "possess a duck" mode are still plans. | M | ★★★★ |
 | 4.7 | **Goal / pitch sensing honesty** | Options: known pitch + drifting odometry (real-ish), or detector classes for goal markers. Expose the choice in the scenario; teach why it matters. | S | ★★★ |
 | 4.8 | **Flocking / follow-the-leader** | Upstream's sketch verbatim: RSSI holds spacing, ToF handles the duck ahead; then a learned version. Cheap once 1.2 + 1.6 exist. | S | ★★★ |
 | 4.9 | **Synchronized dance** | Shared BLE beat drives head-bobs across ducks; the speaker plays each duck's voice on the beat. Pure delight, ten lines once 1.6 and 6.x exist. | S | ★★ |
