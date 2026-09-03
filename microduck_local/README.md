@@ -863,6 +863,37 @@ every kick at the goal cut kicks to 0.6 a run. The two-stage line-up and
 the search walk ship off behind their parameters with the numbers next
 to them; the hunt ships on, below.
 
+**The two-stage line-up, made fast, and still not worth it — and the
+premise it took down with it.** The state histogram said where its time
+goes: over 12 duck-runs it spends 68.9 s a run lining up, of which 48.4 s
+is stage one and 27.1 s of *that* is walking to the pre-spot, with 55
+attempts a run dying in the back-off whose cause is "the pre-spot is
+behind me". `lineup_lat` cuts that — a duck already on the kick line,
+squared up and short of the spot, starts stage two where it stands — and
+it works as designed: a kicking attempt 5.63 → 4.43 s (−21%), the
+back-offs 55 → 35, the ball moving 28.0 → 19.5 cm during an attempt. On
+**24 paired seeds over two independent blocks** (100–111, then 200–211)
+it buys nothing the benchmark can see: against `two_stage` alone, kicks
+72 → 83 (p = 0.44), goals 45 → 34 (p = 0.10), falls 16 → 11 (p = 0.54),
+advance and progress flat. The first block promised +26% kicks and falls
+12 → 4; the fresh block gave 37 → 39 kicks and falls 4 → 7. Neither
+replicated. It ships at 0.
+
+The premise is what actually died. Both careful arms lose to the shipped
+brain on goals — **71 against 45 and 34** over the same 24 seeds
+(p = 0.038 and p = 0.0003) — and the placed kick is not worth more when
+measured directly: the ball's travel in the two seconds after a swing is
+17.7 ± 3.9 cm for the shipped brain against 14.4 ± 3.4 and 13.6 ± 3.0,
+and toward the goal +0.8 cm against −5.1 and −4.9. Nor is the kick
+actually placed — it fires with the ball a median 21–25 cm ahead of the
+trunk where the sweet spot is 6–10 cm, because the plan is laid at
+`refresh_min` and goes stale while the ball moves 20–28 cm. **The
+accuracy limit is the stale plan, not the approach geometry**, which is
+why a faster approach barely moved it (25.5 → 22.6 cm). With this walker
+the kick that happens still beats the kick that is placed, and that now
+rests on 24 seeds and a direct measurement rather than on 8 seeds and a
+ratio.
+
 **The hunt, with its stops** (`hunt_s`). Traced with the hunt on, it
 alternated with "blocked" against the boards at 3 cm, where the ToF
 returns nothing, and walked turning at full rate into the other duck
@@ -1382,12 +1413,26 @@ advance per kick):
 | `two_stage` (the two-stage line-up) | −3.47 ± 1.98 (p = 0.11) | +0.04 | −0.24 ± 0.10 (p = 0.034) | → 0.163 | **−5.00 (p < 0.001)** |
 | `push_beyond` 1.4 (deliberate dribbling) | +2.30 ± 1.86 (p = 0.24) | +0.12 | −0.04 | → 0.136 | −2.92 (p = 0.047) |
 
+**Read the `advance / kick` column as 1/kicks, not as kick quality.** It
+is arithmetically advance ÷ kicks, and `ballAdvance` is flat in every row
+here, so the column only ever reports its denominator: an arm that kicks
+less "improves" it. Measured on three line-up arms whose kick counts
+differ 2.6× over the same 24 seeds (185, 72, 83), total advance is
+statistically identical (0.400, 0.360, 0.342 m/min, every pairwise
+p > 0.17), while the ball's *actual* travel in the two seconds after each
+swing goes the other way — 17.7 ± 3.9 cm for the arm with the worst
+ratio, against 14.4 ± 3.4 and 13.6 ± 3.0 for the two with the best. The
+column stays in the table because it was quoted in the decisions below
+and deleting it would hide that; it is evidence of nothing. The rule it
+cost is in `AGENTS.md`: a ratio whose numerator is flat is its
+denominator, upside down.
+
 **The one arm that cleared p < 0.05 is the instructive row, and it is a
 false positive.** The head sweep took possession from 17.50 to 21.25
 s/min — +3.75 ± 1.21, p = 0.010, up on 10 of 12 seeds — and every reading
-churn cannot inflate says *worse*: `ballAdvance` −0.01 (flat), advance per
-kick 0.091 → 0.073, goals 2.17 → 1.17 a run (−1.00 ± 0.52) and falls 0.67
-→ 1.67 (+1.00 ± 0.49, 8 events against 20). A duck whose head sweeps
+churn cannot inflate says *worse*: `ballAdvance` −0.01 (flat), goals
+2.17 → 1.17 a run (−1.00 ± 0.52) and falls 0.67 → 1.67 (+1.00 ± 0.49, 8
+events against 20). A duck whose head sweeps
 stays near the ball and does less with it, which is precisely what
 possession pays for. That is the metric working as designed — it detected
 a real behavioural difference — and it is why possession is the screen and

@@ -99,15 +99,25 @@ and later reversed; several "measured off" verdicts turned out to be noise.
 5. **Ask what would inflate your metric.** `ballAdvance` keeps only the
    forward part of the ball's motion, so anything that makes the ball move
    MORE scores higher without moving it anywhere: the handover fix raised
-   it 2.9 sigma while signed `ballProgress` stayed flat (0.0 sigma) and the
-   advance per kick halved. Read advance, signed progress and per-kick
-   together, and for any metric ask first which cheap behaviour maximises
-   it.
-6. **"Measured off" usually means "not shown to help".** Say which one you
+   it 2.9 sigma while signed `ballProgress` stayed flat (0.0 sigma). Read
+   advance and signed progress together, and for any metric ask first which
+   cheap behaviour maximises it.
+6. **A ratio whose numerator is flat is its denominator, upside down.**
+   "Advance per kick" was read here as kick QUALITY and it is not one.
+   Three line-up arms whose kick counts differ 2.6x (185, 72, 83 over the
+   same 24 seeds) have statistically identical total advance (0.400, 0.360,
+   0.342 m/min, every pairwise p > 0.17) — so the ratio moved 0.052 ->
+   0.120 -> 0.099 purely because the denominator fell. Measured DIRECTLY
+   (ball travel in the 2 s after each swing) the arms with the flattering
+   ratio kicked the ball LESS far: 17.7 +/- 3.9 cm against 14.4 +/- 3.4 and
+   13.6 +/- 3.0. Before quoting a per-X figure, test the numerator on its
+   own; if it does not move, you are reporting 1/X with extra steps, and it
+   will point whichever way costs you the most to believe.
+7. **"Measured off" usually means "not shown to help".** Say which one you
    mean. Several knobs in `ChaseParams` ship off on differences that never
    cleared the noise; re-screening them with `possession` is cheap and at
    least one of those verdicts is probably wrong.
-7. **A battery must survive the machine.** Use `--out FILE --tag TAG`:
+8. **A battery must survive the machine.** Use `--out FILE --tag TAG`:
    every seed is appended as it lands and a re-run of the same command
    skips what is already there. A cloud container reclaimed mid-run cost
    about ninety minutes of 3v3 twice before the benchmarks streamed. The
