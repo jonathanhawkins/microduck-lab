@@ -1,6 +1,6 @@
-from .locomotion import *  # noqa: F401,F403 — cascades the full upstream namespace,
-
 import math as _math
+
+from .locomotion import *  # noqa: F401,F403 — cascades the full upstream namespace,
 
 # mirroring the flat file's definition order exactly (each module sees
 # everything defined before it, helpers included).
