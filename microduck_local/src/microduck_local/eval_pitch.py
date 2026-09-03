@@ -59,12 +59,15 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seeds", type=int, default=4)
+    ap.add_argument("--seed0", type=int, default=0,
+                    help="first seed: --seeds 12 --seed0 12 EXTENDS a 12-seed battery instead of redoing it "
+                         "(a promising result found on one set of seeds has to be confirmed on fresh ones)")
     ap.add_argument("--seconds", type=float, default=300.0)
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--per-side", type=int, default=1, help="ducks a side: 1 (1v1), 2, 3")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
-    seeds = list(range(args.seeds))
+    seeds = [args.seed0 + k for k in range(args.seeds)]
     if args.jobs > 1 and len(seeds) > 1:
         import multiprocessing as mp
         ctx = mp.get_context("forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
