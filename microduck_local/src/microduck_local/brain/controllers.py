@@ -515,6 +515,12 @@ class ChaseParams:
     # turns the walker (the cold-turn kick fires once, the next dip stands
     # it still again). Walking, the body rotates and the camera sweeps.
     search_vx: float = TURN_KICK
+    # Turning toward the side the ball was last on (a right turn when it
+    # went right) probed 4 s against 10 s for a ball to the right, and
+    # measured OFF over 8 seeds: 1.62 goals, 8.9 kicks, 0.62 falls a run
+    # against 2.25 / 9.4 / 0.38 always turning left - within the noise of
+    # eight seeds, with the falls on the walker's weak right turn.
+    search_sided: bool = False
     # Dribbling: OFF (inf). Measured — a ball pushed at 0.3 m/s for half a
     # second rolls on at about the walking speed on this floor and the duck
     # walks behind it without ever lining up; the kick wins. ~1.4 to try.
@@ -937,7 +943,7 @@ class Chase:
                 # at ~24 deg/s, so a ball to the right found by a left turn
                 # takes 10 s, by a right turn 4); the cold-turn kick starts
                 # the right turn the standing walker cannot.
-                vx, _, wz = turn(1.0 if self.last_bearing >= 0.0 else -1.0, cold)
+                vx, _, wz = turn(1.0 if (self.last_bearing >= 0.0 or not p.search_sided) else -1.0, cold)
                 vx = max(vx, p.search_vx)                       # a walking circle: the body actually turns
                 self.state = "search"
                 since = t - self._search_t0

@@ -634,8 +634,34 @@ lost ball rolled off along — the kick's, or the duck's own heading —
 before the standing search; state histograms said half of every run is
 search) were measured with it: the hunt found the ball (2.00 bumped
 goals a run) and walked into the other duck (1.50 falls a run); aiming
-every kick at the goal cut kicks to 0.6 a run. All three ship off
-behind their parameters with the numbers next to them.
+every kick at the goal cut kicks to 0.6 a run. The two-stage line-up and
+the search walk ship off behind their parameters with the numbers next
+to them; the hunt ships on, below.
+
+**The hunt, with its stops** (`hunt_s`). Traced with the hunt on, it
+alternated with "blocked" against the boards at 3 cm, where the ToF
+returns nothing, and walked turning at full rate into the other duck
+beside it at 90–110° — outside the camera's avoid cone and the ToF's
+middle columns. It is now slower (0.3 m/s), turns at most 0.5 rad/s,
+and ends — does not alternate — the moment the ToF has something inside
+0.45 m, any duck track is beside, or the boards are 0.35 m ahead in
+odometry. Over 8 seeds × 300 s: **8.6 kicks a run against 8.4, 0.12
+falls against 0.50**, goals within the noise of eight seeds (1.50
+against 2.00).
+
+**The search is a walking circle.** Instrumented over 300 s, during
+search the ball was inside the camera's frustum 1% of the time and
+detected 0%: it sat 90–120° off the nose, and a standing turn barely
+turns the walker (the cold-turn kick fires once, the next dip stands it
+still again). Probed with a lone duck, the search now sweeps at ~24°/s
+walking a slow circle (0.2 m/s with the turn): a ball straight behind is
+found in 7 s, one to the right — by the always-left turn — in 10 s.
+With the hunt and the circle, over 8 seeds × 300 s of 1v1: **2.25 goals
+(0.25 kicked, 2.00 bumped), 9.4 kicks, 0.38 falls a run** against 2.00
+(0.75 / 1.25), 8.4 and 0.50 before. Turning the search toward the side
+the ball was last on probed 4 s instead of 10 for a ball to the right
+and measured off (1.62 goals, 8.9 kicks, 0.62 falls a run: within the
+noise, the falls on the walker's weak right turn).
 
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where
