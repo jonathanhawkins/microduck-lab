@@ -152,6 +152,14 @@ page's picker). One room, many ducks, and what each duck senses:
   at the depth the sensor *reports*, colored near→far amber→teal, plus the
   four corner rays from the aperture. Select a duck (click, or `1`–`9`) to
   see only its fan.
+- **Chase overlay** (under `T` too, on a pitch): what each chase brain
+  thinks about the ball, drawn on the floor in its own odometry frame like
+  the map — an orange line from the ball track to where the brain predicts
+  it will stop (its head yaws that way and its hunt aims there), a grey
+  ring on the ball memory its search would walk to, a teal ring on its
+  line-up / push spot. Every chase duck, the selected one bright. The pitch
+  panel splits the goals into kicked (within 4 s of a kick) and walked in,
+  the same attribution `eval-pitch` prints.
 - **Inspector** (right): the selected duck's heatmap painted straight off the
   stream, frame age (amber when stale), a noise preset select (`ideal` /
   `datasheet` / `hostile`, applied live), and which brain is steering it.

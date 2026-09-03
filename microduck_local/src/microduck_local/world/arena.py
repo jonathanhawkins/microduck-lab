@@ -47,6 +47,10 @@ GROUND_PICK_END_PHI = 0.7
 # `kick_duration` (0.5 s in robotd's control.rs) with an all-zero command,
 # then back to the walker. Same protocol here.
 KICK_S = 0.5
+# A goal this soon after a kick is the kick's; the rest were walked into (a
+# chase at 0.45 m/s sends a bumped ball rolling about as far as a kick does
+# on this floor). `soccer_score` reports both counts; eval-pitch prints them.
+KICK_GOAL_S = 4.0
 # …and at the STANDING tuning: robotd's standing transition fires on that
 # all-zero command, so the window runs at `standing_action_scale` (1.0 —
 # the same whole action this world always applies) and the softened
@@ -332,6 +336,9 @@ class World:
         self.last_goal: str | None = None
         self.kickoff_hold_s = 1.0
         self.kickoff_until = -1.0
+        self.last_kick_t = -1e9            # when a kick skill last started (attribution, KICK_GOAL_S)
+        self.goals_kicked = 0
+        self.goals_bumped = 0
         self._ball_joint: int | None = None
         if self.goal_width > 0 and scenario.balls:
             bb = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ball0")
@@ -394,6 +401,8 @@ class World:
         self.goals = {"left": 0, "right": 0}
         self.last_goal = None
         self.kickoff_until = -1.0
+        self.last_kick_t = -1e9
+        self.goals_kicked = self.goals_bumped = 0
         for p in self.persons.values():
             p.reset(self.data)
         for d in self.ducks.values():
@@ -450,6 +459,10 @@ class World:
             self.goals[side] += 1
             self.last_goal = side
             self.goal_seq += 1
+            if self.t - self.last_kick_t <= KICK_GOAL_S:
+                self.goals_kicked += 1
+            else:
+                self.goals_bumped += 1
             self.kickoff()
 
     def kickoff(self) -> None:
@@ -493,7 +506,8 @@ class World:
         q = int(self.model.jnt_qposadr[self._ball_joint])
         return {"left": self.goals["left"], "right": self.goals["right"],
                 "ball": [round(float(self.data.qpos[q]), 3), round(float(self.data.qpos[q + 1]), 3)],
-                "lastGoal": self.last_goal, "kickoff": round(max(0.0, self.kickoff_until - self.t), 2)}
+                "lastGoal": self.last_goal, "kickoff": round(max(0.0, self.kickoff_until - self.t), 2),
+                "kicked": self.goals_kicked, "bumped": self.goals_bumped}
 
     # -- odometry (roadmap 1.7) ---------------------------------------------
     def _odom_reset(self, d: WorldDuck, x: float, y: float, yaw: float) -> None:
@@ -628,6 +642,7 @@ class World:
         d._hold_yaw = None
         if name.startswith("kick"):
             self._set_gain_ratio(d, STANDING_GAIN_RATIO)
+            self.last_kick_t = self.t
         if d.holding is None:
             d.beak_closed = False          # a cycle starts with an open, empty beak
         return True

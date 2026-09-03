@@ -113,6 +113,12 @@ export interface BrainInputs {
   tof?: { age: number | null; stale: boolean; max: number };
   det?: { age: number | null; stale: boolean; max: number; n: number };
   target?: { bearing: number; range: number | null; since: number } | null;
+  /** The brain's tracker, with each track's odometry-frame position and velocity once it has both. */
+  tracks?: { id: number; cls: string; name: string; bearing: number; range: number; hits: number; age: number; xy?: [number, number]; vel?: [number, number] }[];
+  /** A chase brain's plan, in its odometry frame: where it predicts the
+   *  ball will stop (it looks and hunts that way), the ball memory its
+   *  search walks to, and its line-up / push spot. */
+  chase?: { kicks: number; pushes: number; role: string; memory: [number, number] | null; predicted: [number, number] | null; spot: [number, number, string] | null };
 }
 export interface SimDuck {
   id: string;
@@ -157,7 +163,7 @@ export interface SimFrame {
   possessed: string | null;
   tidy: TidyScore | null;
   /** Soccer score on a pitch scenario (goals per short wall, ball position), else null. */
-  soccer: { left: number; right: number; ball: [number, number]; lastGoal: "left" | "right" | null; kickoff: number } | null;
+  soccer: { left: number; right: number; ball: [number, number]; lastGoal: "left" | "right" | null; kickoff: number; kicked?: number; bumped?: number } | null;
   /** Brain round-trip latency applied to every intent (roadmap 12.10), ms; 0 = onboard. */
   tetherMs?: number;
   /** Occupancy maps per duck, in each duck's ODOMETRY frame (brain-layer output, ~2 Hz; null on the other frames). */

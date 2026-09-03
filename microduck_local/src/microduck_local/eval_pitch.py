@@ -19,9 +19,7 @@ import numpy as np
 from .brain import REGISTRY, Senses
 from .brain.brain_env import POLICIES_DIR, onnx_infer
 from .world import World, make_pitch
-
-
-KICK_GOAL_S = 4.0      # a goal this soon after a kick is the kick's
+from .world.arena import KICK_GOAL_S  # noqa: F401  (the attribution window; the World keeps the counts)
 
 
 def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
@@ -37,9 +35,6 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
     q = int(w.model.jnt_qposadr[j])
     w.data.qpos[q:q + 2] = rng.uniform(-0.2, 0.2, 2)
     goal_seq = 0
-    kicks_seen = {k: 0 for k in brains}
-    last_kick = -99.0
-    kick_goals = bump_goals = 0
     while w.t < seconds:
         for d in w.ducks.values():
             tof, det = d.tof.last, d.detector.last
@@ -50,23 +45,13 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
             w.apply_intent(d, intent)
             if d.skill is None:
                 d.set_cmd(w.data, intent.twist, intent.head)
-            if brains[d.id].kicks > kicks_seen[d.id]:
-                kicks_seen[d.id] = brains[d.id].kicks
-                last_kick = w.t
         w.step()
         if w.goal_seq != goal_seq:              # a goal: play restarts from the spawns
             goal_seq = w.goal_seq
             kickoff_brains(brains, teams)
-            # Attribution: a goal within `KICK_GOAL_S` of a kick is the kick's;
-            # the rest are balls walked into (a chase at 0.45 m/s sends a
-            # bumped ball rolling about as far as a kick does on this floor).
-            if w.t - last_kick <= KICK_GOAL_S:
-                kick_goals += 1
-            else:
-                bump_goals += 1
     score = w.soccer_score()
     return {"seed": seed, "perSide": per_side, "left": score["left"], "right": score["right"],
-            "kickGoals": kick_goals, "bumpGoals": bump_goals,
+            "kickGoals": score["kicked"], "bumpGoals": score["bumped"],   # attributed by the World (KICK_GOAL_S)
             "kicks": {k: b.kicks for k, b in brains.items()}, "pushes": {k: b.pushes for k, b in brains.items()},
             "falls": {k: d.falls for k, d in w.ducks.items()}, "simSeconds": round(w.t, 1)}
 

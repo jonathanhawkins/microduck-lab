@@ -441,6 +441,74 @@ function DetOverlay({ scene, client, enabled }: { scene: Scene; client: SimClien
   );
 }
 
+/** What a chase brain thinks about the ball, drawn on the pitch in its own
+ *  odometry frame (the world frame under ideal odometry, like the map):
+ *  the ball track's motion as a line from where the ball is to where the
+ *  brain predicts it will stop (orange — the head yaws that way and the
+ *  hunt aims there), the ball memory its search would walk to (grey ring),
+ *  and its line-up / push spot (teal). Every chase duck, the selected one
+ *  bright; under the sensors toggle (T). */
+const MAX_CHASE = 16 * 32;
+function ChaseOverlay({ client, enabled }: { client: SimClient; enabled: boolean }) {
+  const lines = useRef<THREE.LineSegments>(null);
+  useEffect(() => {
+    lines.current?.layers.set(OVERLAY_LAYER);
+  }, []);
+  const pos = useMemo(() => new Float32Array(MAX_CHASE * 2 * 3), []);
+  const colors = useMemo(() => new Float32Array(MAX_CHASE * 2 * 3), []);
+  const col = useMemo(() => new THREE.Color(), []);
+  useFrame(() => {
+    const ls = lines.current;
+    if (!ls) return;
+    const f = client.frame;
+    let n = 0;
+    const seg = (a: [number, number], b: [number, number], c: string) => {
+      if (n >= MAX_CHASE) return;
+      const o = n * 6;
+      pos[o] = a[0]; pos[o + 1] = a[1]; pos[o + 2] = 0.012;
+      pos[o + 3] = b[0]; pos[o + 4] = b[1]; pos[o + 5] = 0.012;
+      col.set(c);
+      col.toArray(colors, o);
+      col.toArray(colors, o + 3);
+      n++;
+    };
+    const ring = (c: [number, number], r: number, color: string, k = 10) => {
+      for (let i = 0; i < k; i++) {
+        const a0 = (i / k) * Math.PI * 2, a1 = ((i + 1) / k) * Math.PI * 2;
+        seg([c[0] + r * Math.cos(a0), c[1] + r * Math.sin(a0)], [c[0] + r * Math.cos(a1), c[1] + r * Math.sin(a1)], color);
+      }
+    };
+    if (f && enabled) {
+      const sel = getSelectedDuck();
+      for (const d of f.ducks) {
+        const ch = d.brain?.inputs?.chase;
+        if (!ch) continue;
+        const dim = sel !== null && sel !== d.id;
+        const ball = d.brain.inputs.tracks?.find((t) => t.cls === "ball" && t.xy);
+        if (ch.predicted) {
+          const orange = dim ? "#7a4a1a" : "#ff8c00";
+          if (ball?.xy) seg(ball.xy, ch.predicted, orange);
+          ring(ch.predicted, 0.05, orange, 8);
+        }
+        if (ch.memory) ring(ch.memory, 0.06, dim ? "#3d4450" : "#9aa5b1", 8);
+        if (ch.spot) ring([ch.spot[0], ch.spot[1]], 0.04, dim ? "#1f5a55" : "#43c2b8", 8);
+      }
+    }
+    (ls.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (ls.geometry.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+    ls.geometry.setDrawRange(0, n * 2);
+  });
+  return (
+    <lineSegments ref={lines} frustumCulled={false}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[pos, 3]} />
+        <bufferAttribute attach="attributes-color" args={[colors, 3]} />
+      </bufferGeometry>
+      <lineBasicMaterial vertexColors transparent opacity={0.9} />
+    </lineSegments>
+  );
+}
+
 /** Publishes projected duck trunks so clicks can select the nearest duck. */
 function SimTargets({ client }: { client: SimClient }) {
   const { camera, gl } = useThree();
@@ -746,7 +814,7 @@ export default function SimViewer() {
   const [lessonOpen, setLessonOpen] = useState(() => loadJSON("simLessonOpen", true));
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
-  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: { left: number; right: number; lastGoal: "left" | "right" | null; kickoff: number } | null }>({
+  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: { left: number; right: number; lastGoal: "left" | "right" | null; kickoff: number; kicked?: number; bumped?: number } | null }>({
     rtf: 0,
     perf: "",
     soccer: null,
@@ -968,6 +1036,7 @@ export default function SimViewer() {
           {scene && client && <SimDucks scene={scene} client={client} />}
           {scene && client && <TofOverlay scene={scene} client={client} enabled={showTof} />}
           {scene && client && <DetOverlay scene={scene} client={client} enabled={showTof} />}
+          {client && <ChaseOverlay client={client} enabled={showTof} />}
           {client && <MapOverlay client={client} duckId={selected} enabled={showMap} />}
           {scene && client && <InsetRender scene={scene} client={client} enabled={showCam} />}
         </group>
@@ -1131,6 +1200,16 @@ export default function SimViewer() {
                     </span>
                   </>
                 )}
+                {selDuck.brain.inputs.chase && (
+                  <>
+                    <span>chase</span>
+                    <span title="where the brain predicts the ball will stop (it looks and hunts there) · the ball memory its search walks to">
+                      {selDuck.brain.inputs.chase.role} · {selDuck.brain.inputs.chase.kicks} kicks
+                      {selDuck.brain.inputs.chase.predicted ? ` · ball → ${selDuck.brain.inputs.chase.predicted[0].toFixed(2)}, ${selDuck.brain.inputs.chase.predicted[1].toFixed(2)}` : ""}
+                      {selDuck.brain.inputs.chase.memory ? ` · memory ${selDuck.brain.inputs.chase.memory[0].toFixed(2)}, ${selDuck.brain.inputs.chase.memory[1].toFixed(2)}` : ""}
+                    </span>
+                  </>
+                )}
               </div>
             )}
             {selDuck.sensors?.det && (
@@ -1246,6 +1325,9 @@ export default function SimViewer() {
           <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>Pitch</div>
           <div style={{ fontSize: 22, fontWeight: 600 }}>
             {status.soccer.left} <span style={{ fontSize: 12, color: "#9aa5b1" }}>left</span> · {status.soccer.right} <span style={{ fontSize: 12, color: "#9aa5b1" }}>right</span>
+          </div>
+          <div style={{ color: "#9aa5b1", fontSize: 11 }} title="a goal within 4 s of a kick is the kick's; the rest were walked into">
+            {status.soccer.kicked ?? 0} kicked · {status.soccer.bumped ?? 0} walked in
           </div>
           {status.soccer.kickoff > 0 ? (
             <div style={{ color: "#ffd166" }}>GOAL {status.soccer.lastGoal} · kickoff in {status.soccer.kickoff.toFixed(1)} s</div>
