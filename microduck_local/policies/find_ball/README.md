@@ -20,7 +20,11 @@ episodes × 8 s, deterministic, randomizers off), measured 2026-09-03:
 | back (> 135°) | 60% | 0.94 s / 6.98 s | 34% | 2 |
 | blind (no prior), all | 88% | 0.64 s / 7.06 s | 74% | 1 |
 
-Known gap: it falls on some back starts while turning (2/40 in the battery,
+Known gap: **it aims with its head, not its body** — it will hold the ball
+dead centre in frame with ~21° of head yaw and never square up, so the kick
+handoff (which requires the head straight ahead, i.e. the body pointing at the
+ball) does not fire on a side start. It also falls on some back starts while
+turning (2/40 in the battery,
 2/4 in a full-circle render) — `turn_to_belief` has had only 1M steps. The
 fall-free choice is the s4 recipe (no turn term), which found 30% of back
 balls; retrain longer before putting either near a real duck.

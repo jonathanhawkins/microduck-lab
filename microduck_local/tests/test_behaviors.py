@@ -1422,3 +1422,88 @@ def test_find_ball_turn_pay_is_signed_by_the_belief_and_off_while_seen():
     assert turn(env) == pytest.approx(0.5)
     env._ball_det[2] = 1.0                               # seen: the facing term owns it
     assert turn(env) == 0.0
+
+
+def _aim_head(env, nod: float) -> None:
+    """Pitch the head DOWN by `nod` rad and refresh the kinematics, so the
+    camera frame the ball is projected through is the posed one. Negative
+    neck_pitch looks down (the camera element's +z is the optical axis)."""
+    import mujoco
+
+    from microduck_local import contract as C
+
+    env.data.qpos[env.joint_qpos_adr[5]] = C.DEFAULT_POSE[5] - nod
+    mujoco.mj_forward(env.model, env.data)
+
+
+def test_find_ball_handoff_needs_half_a_second_squared_up_on_the_ball():
+    """The gate a kick policy is handed: ball centred in the DETECTOR's frame
+    and the head straight ahead (so the body is what's pointing at it), held
+    0.5 s. Both halves are detector + joint encoders — the daemon has to be
+    able to run this same test, so no privileged state may leak into it."""
+    from microduck_local.behaviors import (
+        _BALL_AIM_STEPS,
+        _BALL_HEAD_YAW_ID,
+        _ball_place,
+        _ball_sense,
+    )
+    b = BEHAVIORS["find_ball"]
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    # Straight ahead at 1.2 m, head nodded down 0.18 rad. The nod is not
+    # decoration: the camera is 25 cm up, so a floor ball at 1.2 m sits 12 deg
+    # BELOW a level gaze (by = -0.34) and does not count as centred until the
+    # duck looks down at it. Handing a kick a ball the duck is only looking
+    # over the top of is exactly the failure this gate exists to prevent.
+    _aim_head(env, nod=0.18)
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and abs(env._ball_by) < 0.25
+    assert not b.handoff_fn(env)          # one aimed instant is not a handoff
+    # Fires exactly at the threshold, not before. Driven off the streak rather
+    # than a step count because the reset's own sample counts when the episode
+    # happens to spawn already aimed.
+    while env._ball_aim_steps < _BALL_AIM_STEPS - 1:
+        env.step_count += 1
+        _ball_sense(env)
+    assert not b.handoff_fn(env), "handed off before the half second"
+    env.step_count += 1
+    _ball_sense(env)
+    assert env._ball_aim_steps == _BALL_AIM_STEPS and b.handoff_fn(env)
+    # Turning the head to hold the ball means the BODY is not square: the
+    # streak breaks even though the ball is still dead centre in frame.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.8
+    env.step_count += 1
+    _ball_sense(env)
+    assert env._ball_aim_steps == 0 and not b.handoff_fn(env)
+
+
+def test_find_ball_handoff_breaks_when_the_ball_leaves_the_frame():
+    from microduck_local.behaviors import _BALL_AIM_STEPS, _ball_place, _ball_sense
+    b = BEHAVIORS["find_ball"]
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    _aim_head(env, nod=0.18)
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    for _ in range(_BALL_AIM_STEPS + 5):
+        env.step_count += 1
+        _ball_sense(env)
+    assert b.handoff_fn(env)
+    _ball_place(env, 1.2, np.pi)          # gone: the streak resets, not decays
+    for _ in range(4):                     # past the held detector report
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_aim_steps == 0 and not b.handoff_fn(env)
+
+
+def test_find_ball_hands_off_to_a_kick_and_keeps_its_heading():
+    """It aims a ball-BLIND kick, so the handoff target is the kick — and the
+    turn it just made toward the ball is the deliverable, which is why the
+    lab's post-handoff yaw recentring is off for this recipe."""
+    b = BEHAVIORS["find_ball"]
+    assert b.handoff_policy == "pollen:ball_kick_right"
+    assert b.handoff_recenter is False
+    # The flip family keeps the default: its handoff IS a landing, and the
+    # heading a landing imparts is drift, not a choice.
+    for bid in ("backflip", "airflip"):
+        assert BEHAVIORS[bid].handoff_fn is None
+        assert BEHAVIORS[bid].handoff_recenter is True

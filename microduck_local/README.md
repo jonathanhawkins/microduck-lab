@@ -366,8 +366,19 @@ bearings round the circle; "found" = ball entered the frame within 8 s):**
 | s4 (+ raised-cosine facing) | 100% / 0.03 s | 85% / 0.62 s | 30% / 3.16 s | 0 |
 | **s5** (+ turn_to_belief, no up-band) | 100% / 0.03 s | 85% / 0.60 s | 60% / 0.94 s | 2 |
 
+**It aims its head, not its body — the open problem.** Handing off to a kick
+exposed it: over a full 8 s episode with the ball 15° off, the duck holds the
+camera perfectly centred (bearing +0.11, elevation 0.00, in frame 100% of
+steps) using **21° of head yaw**, while the body bearing to the ball stays at
+18–20° and drifts slightly further away. The head does the eyes-on job alone
+and for free; turning the body costs steps, smoothness penalties and fall
+risk. `face_the_ball`'s tight layer (std 0.4 rad) still pays ~2/3 at 19° off
+so the last 20° has little gradient behind it, and `turn_to_belief` only fires
+while the ball is *out* of frame. Candidate fixes and how to A/B them are in
+`docs/roadmap.md`.
+
 The s5 export ships in `policies/find_ball/` (see its README). Balls that
-start directly behind are the open problem: the head's ±170° reaches them
+start directly behind are the same problem seen from further away: the head's ±170° reaches them
 but the body has to commit to a turn, and the falls are that turn — in a
 4-episode render of s5 on full-circle spawns it fell on two of the back
 starts (0.98 s and 2.48 s in), while s4 (no `turn_to_belief`) never fell
@@ -381,6 +392,28 @@ while the noise finds the ball), the scan clock (a memoryless policy cannot
 sweep without a phase), and a facing term that slopes all the way round.
 This whole chain took ~2.5 h on a 4-core cloud CPU at ~1.2k steps/s; an
 M5 Max runs the same at ~12× that.
+
+**Handing off to the kick.** The behavior declares its own handoff condition
+(`Behavior.handoff_fn`), so `render-rollout --handoff` and the lab's showcase
+duck ask the identical question rather than keeping two copies of a rule in
+step: the detector reports the ball centred (|bx|, |by| < 0.25) **and** the
+head is straight ahead (|head_yaw| < 0.25 rad), held 0.5 s. Head centred on
+the ball plus head aligned with the body means the *body* is pointing at it,
+which is the precondition the ball-blind `ball_kick_*` policies were trained
+under — and both halves are detector output plus joint encoders, so the daemon
+can run the same test. `handoff_policy` names the kick; `handoff_recenter` is
+off, because the lab's post-handoff yaw correction exists to undo the drift a
+*landing* imparts and would spin away a turn that was the whole point.
+
+What the gate cannot assert is **range**: the detector here reports a bearing,
+not a box size, so "aimed" is all it honestly knows. `ball_kick_*` wants the
+ball ~9 cm in front of the kicking foot, so a clean handoff that then whiffs is
+the expected first result and the argument for an approach behavior.
+
+```bash
+uv run render-rollout --policy policies/find_ball/policy.onnx \
+    --handoff ../microduck/policies/ball_kick_right.onnx --out /tmp/rr-soccer
+```
 
 `render-rollout` draws the ball (orange) and a gaze dot 30 cm down the
 optical axis (cyan while the ball is in frame, red while lost), adds a

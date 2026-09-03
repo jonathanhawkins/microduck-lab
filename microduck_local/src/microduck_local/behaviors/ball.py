@@ -106,6 +106,22 @@ _BALL_KNOBS = {
 # no idea always starts its sweep the same way instead of not at all.
 _BALL_NO_PRIOR_MEM = _math.pi / 2
 _BALL_NO_PRIOR_CONF = 0.3
+# Handoff gate — "squared up on the ball", the state a kick policy wants
+# handed to it. Both halves are things the ROBOT can evaluate (detector
+# report + joint encoders), never the privileged truth: the daemon has to be
+# able to run this same test. Ball centred in the frame AND the head pointing
+# straight ahead means the BODY is pointing at the ball, which is the
+# precondition ball_kick_* was trained under (it is ball-blind and expects to
+# be aimed). Held for half a second so a sweep passing across the ball does
+# not trip it.
+_BALL_AIM_BEARING = 0.25      # |bx|, |by| — centred in the detector's frame
+_BALL_AIM_HEAD_YAW = 0.25     # rad (~14 deg) — head aligned with the body
+_BALL_AIM_STEPS = 25          # control steps (0.5 s at 50 Hz)
+# Resolved from the contract so a joint reordering cannot silently point this
+# at the wrong servo (the reward stack looks joints up by name for the same
+# reason). head_yaw's DEFAULT_POSE entry is 0, so raw angle == relative here.
+_BALL_HEAD_YAW_ID = C.JOINT_NAMES.index("head_yaw")
+
 _BALL_KEEPOUT = 0.12          # m — a rolling ball stops at the duck's feet
 _BALL_ARENA = 2.0             # m — a rolling ball stops at the arena edge
 # Gaze coverage bins for the sweep pay: 10 deg of camera yaw x two pitch
@@ -205,6 +221,7 @@ def _ball_reset(env) -> None:
     env._ball_dist = dist
     env._ball_psi = bearing
     env._ball_lost_s = 0.0
+    env._ball_aim_steps = 0
     env._ball_scan_phase = 0.0
     env._ball_first_seen_t = None
     env._ball_seen_steps = 0
@@ -333,6 +350,16 @@ def _ball_sense(env, force: bool = False) -> None:
         if was_seen:
             env._ball_losses += 1
         env._ball_lost_s += dt
+    # Aim streak for the handoff gate — consecutive steps the DAEMON could
+    # call this squared up (see _BALL_AIM_*). Counted here, not in the
+    # predicate, so it stays right whether or not anyone is asking: the lab
+    # only calls the predicate while a handoff is armed.
+    if (det[2] > 0.5 and -_BALL_AIM_BEARING < det[0] < _BALL_AIM_BEARING
+            and -_BALL_AIM_BEARING < det[1] < _BALL_AIM_BEARING
+            and abs(float(env._joint_qpos()[_BALL_HEAD_YAW_ID])) < _BALL_AIM_HEAD_YAW):
+        env._ball_aim_steps += 1
+    else:
+        env._ball_aim_steps = 0
     # The scan clock runs on the DETECTOR's view (what the daemon has), from
     # zero at every loss; it parks at phase 0 while the report says seen.
     if det[2] > 0.5:
@@ -436,6 +463,20 @@ def _ball_turn_to_belief(env) -> float:
     return conf * max(-1.0, min(1.0, d * float(env._gyro[2]) / 2.0))
 
 
+def _ball_handoff_due(env) -> bool:
+    """Squared up on the ball for half a second — hand over to the kick.
+
+    Behavior.handoff_fn, so render-rollout's `--handoff` and the lab's
+    showcase duck ask the identical question. What it does NOT test is
+    RANGE: the fake detector reports a bearing, not a box size, so "aimed"
+    is all this can honestly assert. ball_kick_* wants the ball ~9 cm in
+    front of the kicking foot, so a render that hands off cleanly and then
+    whiffs is the expected first result and the argument for an approach
+    behavior — see docs/roadmap.md.
+    """
+    return getattr(env, "_ball_aim_steps", 0) >= _BALL_AIM_STEPS
+
+
 # ------------------------------------------------------------- read-side
 
 def _ball_caption(env) -> str:
@@ -471,6 +512,9 @@ def _ball_report(env) -> list[str]:
         f"ball: first seen {first}; in frame {env._ball_seen_steps / n:.0%} of steps, "
         f"centred (|b|<0.25) {env._ball_centred_steps / n:.0%}; "
         f"lost {env._ball_losses}x; {env._ball_events} ball events",
+        f"aim streak at the end: {env._ball_aim_steps} steps "
+        f"({env._ball_aim_steps * C.CTRL_DT:.2f} s of "
+        f"{_BALL_AIM_STEPS * C.CTRL_DT:.2f} s needed to hand off to a kick)",
     ]
 
 
@@ -536,6 +580,14 @@ _register(Behavior(
     symmetric=False,
     reset_fn=_ball_reset,
     obs_fn=_ball_obs,
+    handoff_fn=_ball_handoff_due,
+    # The kick this brain exists to aim. Right-footed by convention (the
+    # shipped pair is ball_kick_left/right and upstream's own cfg trains one
+    # foot per policy); it is ball-blind, which is the whole point.
+    handoff_policy="pollen:ball_kick_right",
+    # The turn toward the ball is the DELIVERABLE, not landing drift: the
+    # lab's post-handoff yaw correction would spin it straight back.
+    handoff_recenter=False,
     caption_fn=_ball_caption,
     markers_fn=_ball_markers,
     report_fn=_ball_report,

@@ -261,7 +261,17 @@ def load_driver(spec: str) -> Driver:
 
 
 def handoff_due(env) -> bool:
-    """Mirrors viz_server.Duck._handoff_due."""
+    """Mirrors viz_server.Duck._handoff_due.
+
+    A behavior may bring its own condition (Behavior.handoff_fn) — then
+    there is one implementation and this "mirrors" note is a fact rather
+    than a promise. The flip family's rule below is the original, kept
+    inline because it predates the field and is what every existing
+    showcase chain hands off on.
+    """
+    fn = getattr(getattr(env, "behavior", None), "handoff_fn", None)
+    if fn is not None:
+        return bool(fn(env))
     rot = getattr(env, "_bf_rot", None)
     if rot is None or rot < HANDOFF_ROT_RAD:
         return False
@@ -689,8 +699,10 @@ def main() -> None:
           f"(stride {stride} of the 50 Hz control loop), backend "
           f"{mujoco.GLContext.__module__}")
     if handoff:
-        print(f"handoff: {args.handoff} (label {handoff.label}) at rot>="
-              f"{HANDOFF_ROT_RAD} rad with both feet down")
+        own = getattr(getattr(env, "behavior", None), "handoff_fn", None)
+        when = (f"{env.behavior.id}'s own condition ({own.__name__})" if own
+                else f"rot>={HANDOFF_ROT_RAD} rad with both feet down")
+        print(f"handoff: {args.handoff} (label {handoff.label}) at {when}")
 
     for ep in range(args.episodes):
         frames, diags, meta = run_episode(

@@ -1193,6 +1193,40 @@ def test_showcase_duck_hands_off_to_a_standing_brain(fake_popen):
     assert duck.handed is False   # every episode starts on the trick again
 
 
+def test_find_ball_hands_off_to_the_kick_it_aims(fake_popen):
+    """find_ball exists to aim the ball-BLIND kick policies, so its showcase
+    handoff target is the kick, not the stand every trick lands into — and
+    the condition comes from the behavior, so this duck and render-rollout
+    ask the identical question instead of two copies of a rule."""
+    run = _mk_teach_run("teach-find_ball-abc123-s3", behavior="find_ball")
+    ho = V.handoff_for(str(run / "policy.onnx"))
+    assert ho is not None and ho[1] == "ball_kick_right"
+    duck = V.Duck("d7", "fb", V._zero_infer, seed=1,
+                  env_kwargs={"behavior_id": "find_ball"})
+    duck.handoff_infer, duck.handoff_label = ho
+    duck.env._ball_aim_steps = 0
+    assert duck._handoff_due() is False
+    duck.env._ball_aim_steps = B._BALL_AIM_STEPS
+    assert duck._handoff_due() is True
+
+
+def test_find_ball_keeps_the_heading_it_turned_to(fake_popen):
+    """The lab's post-handoff yaw correction undoes the drift a LANDING
+    imparts. find_ball's turn is the deliverable, so the correction is off
+    for it — otherwise the commander spins the duck off the ball it just
+    squared up on, and hands the kick nothing."""
+    flip = V.Duck("d5", "bf", V._zero_infer, seed=1,
+                  env_kwargs={"behavior_id": "backflip"})
+    ball = V.Duck("d6", "fb", V._zero_infer, seed=1,
+                  env_kwargs={"behavior_id": "find_ball"})
+    for duck in (flip, ball):
+        duck.handed = True
+        duck._settle = 100          # past the ~1 s landing settle
+        duck.env.home_yaw = 1.2     # a heading 69 deg off where it is now
+    assert flip._recenter_wz() is not None, "the flip still recentres"
+    assert ball._recenter_wz() is None
+
+
 def test_plain_assign_has_no_handoff(fake_popen):
     """Only showcase ducks hand off — a single-stage assign is being watched
     for what THAT policy does, unaided."""

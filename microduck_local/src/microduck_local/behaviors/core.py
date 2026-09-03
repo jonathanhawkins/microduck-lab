@@ -144,6 +144,22 @@ class Behavior:
     caption_fn: Callable | None = None
     markers_fn: Callable | None = None
     report_fn: Callable | None = None
+    # HANDOFF: the brain a finished behavior gives control to, and when.
+    # `handoff_fn(env) -> bool` is the condition, asked once per control step
+    # while a handoff is armed. It lives HERE, on the behavior, because the
+    # two callers — render_rollout's `--handoff` and the lab's showcase duck —
+    # have to agree exactly, and the flip's version is two copies of the same
+    # rule kept in step by a comment. A behavior that brings its own predicate
+    # gets one implementation and both callers by construction.
+    # `handoff_policy` names the shipped brain to hand to (default: the lab's
+    # alpha_stand, which rises from the crouch a trick lands in).
+    # `handoff_recenter` is the lab's post-handoff yaw correction, which
+    # exists to undo the heading a LANDING imparts — a behavior that chose
+    # its heading on purpose (find_ball turned to face the ball) must set it
+    # False or the commander spins that choice away.
+    handoff_fn: Callable | None = None
+    handoff_policy: str | None = None
+    handoff_recenter: bool = True
 
 
 def resolve_clip_name(behavior: Behavior, clip_name: str | None = None) -> str | None:

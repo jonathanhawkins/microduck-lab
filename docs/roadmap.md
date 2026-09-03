@@ -47,24 +47,53 @@ lineage are in `microduck_local/policies/find_ball/`.
       the spawn note (`↻ ball +143° 1.3m prior`). This is the first time the
       viewer's ball-drawing path runs against a browser.
 
-### 1. The open problem: balls that start directly behind
+### 1. The open problem: the body never turns — `find_ball` is a gaze policy
 
-The head reaches ±170°, so the *camera* can see behind; what is missing is the
-body committing to the turn. Stage 5 added `turn_to_belief` (signed yaw-rate
-pay aimed by the belief slot) and back-bucket found rate went 30% → 60% — but
-it also introduced the only falls in the chain (2/40 in the battery, 2 of 4
-back starts in a render, at 0.98 s and 2.48 s). That term has had exactly 1M
-steps. **This is the highest-value item on the list.**
+**Sharpened by the handoff work (see item 4, which is done): the duck aims its
+HEAD at the ball and leaves its body where it was.** Traced over a full
+8 s episode with the ball 15° off at 1.2 m: it centres the camera perfectly
+(bearing +0.11, elevation 0.00, in frame 100% of steps) using **21° of head
+yaw**, while the body bearing to the ball stays at 18–20° and drifts slightly
+*further* away. It never squares up, so it never satisfies the kick handoff.
 
-- [ ] **Just train it longer.** `uv run train-behavior find_ball --init-from runs/find_ball --steps 3_000_000 --run-name fb-long`
+This is one problem with the back-bucket weakness, not two. The head does the
+eyes-on job alone and for free, while turning the body costs steps, smoothness
+penalties, and fall risk — so the policy takes the cheap option. `face_the_ball`
+is paid while the ball is seen, but its tight layer (std 0.4 rad) still pays
+~2/3 at 19° off, so the last 20° has almost no gradient behind it; and
+`turn_to_belief` is gated to fire only while the ball is *out* of frame, so
+once the head finds the ball nothing pays for the body to catch up.
+
+Three candidate fixes, cheapest first — **A/B them, do not stack them**:
+
+- [ ] **Price the state you actually want.** The handoff gate (ball centred
+      **and** head straight, i.e. the body is what's pointing at it) is a
+      clean, fully observable target. Pay for it directly instead of hoping
+      body-facing falls out of a bearing Gaussian. Roughly: pay
+      `head-centred × exp(-head_yaw² / 0.3²)` while seen.
+      → **decide on:** head yaw settles under 0.25 rad with the ball centred,
+      i.e. the handoff actually fires on a side start.
+- [ ] **Tighten `face_the_ball`'s tight layer** (std 0.4 → ~0.2 rad) and/or
+      raise its weight. The blunt version of the same idea; try it second
+      because a steeper Gaussian is also how you get a policy that fights to
+      hold an exact pose.
+- [ ] **Ungate `turn_to_belief`** so it also pays while the ball is seen (with
+      the belief pointing at it, the sign is the same). Try third: a
+      yaw-rate pay that never switches off is the shape that produces the
+      spin recipe's wiggle.
+
+Also still open, and probably the same root cause:
+
+- [ ] **Train the full circle longer.** `uv run train-behavior find_ball --init-from runs/find_ball --steps 3_000_000 --run-name fb-long`
       (full-circle knobs: `MICRODUCK_BALL_BEARING_MAX=3.1416 MICRODUCK_BALL_EVENT_RATE=0.33`)
       → **decide on:** back-bucket found ≥ 80% **and** 0 falls / 40. Falls are
       the veto: a duck that finds the ball by falling over has not found it.
 - [ ] **A/B the turn term** at weight 0 vs 1.0, same warm start, same seed, 2M
       steps each (`--weights-json` or the viewer's sliders).
-      → **decide on:** does the term buy the turn, or only the falls? If back
-      found rate is the same at weight 0, the term is not what fixed it and the
-      credit belongs to the coverage-band change that shipped alongside it.
+      → **decide on:** does the term buy the turn, or only the falls? Stage 5
+      added it and back-bucket found rate went 30% → 60%, but it also brought
+      the chain's only falls (2/40 in the battery, 2 of 4 back starts in a
+      render, at 0.98 s and 2.48 s). It has had exactly 1M steps.
 - [ ] **If falls persist:** drop the weight to 0.5 before adding anything new.
       A recipe that needs a fourth term to survive its third is usually
       mispriced, not underspecified.
@@ -107,18 +136,32 @@ behavior survives contact with reality.
 `find_ball` aims; `ball_kick_right.onnx` kicks but is blind. One clip of find →
 square up → kick is the whole argument for this behavior.
 
-- [ ] **Add a handoff condition** to `render_rollout.handoff_due` and
-      `viz_server.Duck._handoff_due`: ball centred (|bx|, |by| < 0.25) and body
-      squared (|psi| < ~0.2 rad) held for ~0.5 s. Mirror the two
-      implementations, as the backflip's rotation handoff already does.
-- [ ] **Render it.** `uv run render-rollout --policy policies/find_ball/policy.onnx --handoff ../microduck/policies/ball_kick_right.onnx --out /tmp/rr-soccer`
-      → **decide on:** does the handoff fire from a side or back start, and
-      does the kick connect? The kick policy expects the ball ~9 cm in front
-      of the kicking foot, so "squared up" may need to become "squared up and
-      the ball is close", which is an approach behavior we do not have yet.
+- [x] **Handoff condition — done.** It lives on the behavior
+      (`Behavior.handoff_fn`), so `render-rollout --handoff` and the lab's
+      showcase duck ask one implementation instead of two copies kept in step
+      by a comment. Fires on: detector reports the ball centred (|bx|, |by| <
+      0.25) **and** the head straight ahead (|head_yaw| < 0.25 rad), held
+      0.5 s. Head centred plus head aligned means the *body* is pointing at
+      the ball, and both halves are detector output plus joint encoders — the
+      daemon can run the same test, no privileged state. `handoff_policy`
+      names the kick; `handoff_recenter=False` keeps the lab from spinning
+      away the turn the duck just made.
+- [x] **Rendered it, and it found the real problem.** The gate is correct and
+      the policy does not meet it: an episode with the ball centred 98% of the
+      time never handed off, because the duck aims with 21° of head yaw and
+      leaves its body put (item 1). The two episodes that *did* fire were
+      near-frontal starts, and the kick toppled the duck within 0.4 s in
+      both — expected, since it was handed a ball 0.9–1.3 m away.
+- [ ] **Re-render after item 1 lands.** `uv run render-rollout --policy <new> --handoff ../microduck/policies/ball_kick_right.onnx --out /tmp/rr-soccer`
+      → **decide on:** does the handoff fire from a side start, and does the
+      kick connect? It almost certainly will not: the gate asserts *aimed*,
+      never *in range*, because the fake detector reports a bearing and not a
+      box size. That gap is the approach behavior below.
 - [ ] **(Stretch) Approach.** Walking to the ball is a `forward_cmd` locomotion
       task steered by the bearing slot — a different recipe, not a stage of
-      this one. Scope it only after the handoff render says what is missing.
+      this one. Range needs the detector to report box size (distance ≈
+      focal × real diameter / box height), which the sim's fake detector does
+      not yet produce; adding it is a prerequisite, not an afterthought.
 
 ### 5. Lab ergonomics, while the above trains
 
