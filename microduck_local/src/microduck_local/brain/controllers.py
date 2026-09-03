@@ -728,16 +728,35 @@ class ChaseParams:
     tof_ball_m: float = 0.0
     # A bump (Senses.bumped: the body is touching another body - contacts in
     # the sim, the IMU / servo loads on the robot): no turn in place for
-    # `bump_stand_s` after the last one; a stand is the one thing the walker
-    # does safely against a body, and 12 of 13 traced 3v3 falls were
-    # standing turns beside an unseen opponent. Measured (4 seeds x 300 s):
-    # 3v3 falls 5.00 -> 2.75 a run at 1.0 s and 1.75 at 0.5 s (goals 1.50
-    # -> 0.75), 2v2 4.00 -> 2.00 / 2.25 (1.50 -> 1.25); 1v1 (8 seeds) 1.50
-    # goals and 1.00 falls against 2.38 / 0.38 at 1.0 s. 0 here; team
-    # rosters get 0.5 from brain/team.py brain_kwargs.
+    # `bump_stand_s` after the contact STARTED. 12 of 13 traced 3v3 falls
+    # were standing turns beside an unseen opponent, and the rule halves the
+    # crowd's falls (4 seeds x 300 s: 3v3 5.00 -> 1.75 a run at 0.5 s, 2v2
+    # 4.00 -> 2.25) - but the first version of it also cost 1v1 1.50 goals
+    # and 1.00 falls against 2.38 / 0.38, and a trace of 838 bumps said
+    # exactly why, refuting the obvious guess on the way:
+    #   * NOT possession. The feet meet a median 0.66 m from the ball; both
+    #     ducks are inside 0.35 m of it in 18% of bumps; and two seconds
+    #     later the ball is further from BOTH ducks by the same +0.074 m.
+    #     Nobody is walked over. (`bump_exempt_m` was built on that guess.)
+    #   * It cancelled the ESCAPE. 70% of its firing was in `blocked`, a
+    #     state that is 12.6% of the run, where the walk is already zeroed
+    #     and the turn is the only command left. 6 of 8 falls were a stand
+    #     pressed against the other duck: the walker leans on it.
+    #   * It fed itself. Standing on a body keeps touching it, which
+    #     refreshed the timer: bumps went 44 -> 105 a run and one freeze
+    #     ran 74 s. So the window is edge-triggered now (`bump_gap_s`).
+    # 0 here; team rosters get 0.5 from brain/team.py brain_kwargs.
     bump_stand_s: float = 0.0
-    # ...except with the ball this close: two attackers' feet meet AT the
-    # ball, and the one that stands there loses it. 0 = no exemption.
+    # Only where a standing turn beside a body is the danger. Never in
+    # `blocked` / `avoid` / `retreat` (the turn IS the escape) and never in
+    # `search` (its circle WALKS at `search_vx`, and freezing that stops the
+    # one behaviour that finds the ball - 5 of 8 traced falls were there).
+    bump_stand_states: tuple[str, ...] = ("support", "lineup", "settle", "turn")
+    # A contact episode ends after this long without one; the freeze runs
+    # from its onset and is never extended by staying in contact.
+    bump_gap_s: float = 1.0
+    # Measured on the refuted premise above and kept only as its record: the
+    # stand does not apply with the ball inside this. 0 = no exemption.
     bump_exempt_m: float = 0.0
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,
@@ -814,7 +833,8 @@ class Chase:
         self._senses: Senses | None = None
         self._mates: list[tuple[float, float]] = []          # (range, bearing) of live teammates, off the team board
         self._last_foot: str | None = None                   # the foot of the last kick (the look aims by it)
-        self._bump_t = -1e9
+        self._bump_t = -1e9                                  # last contact
+        self._bump_t0 = -1e9                                 # onset of the current contact episode
         self.last = (0.0, 0.0, 0.0)
         self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"
         self.lined = False                      # stage two of the line-up: on the line, walking straight in
@@ -958,6 +978,8 @@ class Chase:
             pred_bearing = _wrap(math.atan2(py - odom[1], px - odom[0]) - odom[2])
         self._mates = []
         if senses.bumped:
+            if t - self._bump_t > p.bump_gap_s:
+                self._bump_t0 = t                            # a NEW contact, not the same one continuing
             self._bump_t = t
         if self.team is not None:
             self.team.claim(self.duck_id, t, ball.range if seen else math.inf,
@@ -1262,8 +1284,8 @@ class Chase:
             look_at = p.search_sweep * math.sin(2.0 * math.pi * (t - self._search_t0) / p.search_sweep_s) / p.head_yaw_gain
         if look_at is not None and senses.skill is None and (p.head_yaw_when == "always" or self.state in ("search", "look")):
             head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
-        if p.bump_stand_s > 0 and t - self._bump_t < p.bump_stand_s and vx <= TURN_KICK and wz != 0.0 \
-                and self.state != "retreat" \
+        if p.bump_stand_s > 0 and t - self._bump_t0 < p.bump_stand_s and vx <= TURN_KICK and wz != 0.0 \
+                and self.state in p.bump_stand_states \
                 and not (p.bump_exempt_m > 0 and ball is not None and ball.age(t) <= p.lost_s
                          and ball.range < p.bump_exempt_m):
             vx, wz = 0.0, 0.0                                   # touching a body: stand, do not turn in place

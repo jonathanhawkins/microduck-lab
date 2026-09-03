@@ -348,32 +348,47 @@ def test_the_look_after_a_kick_aims_by_the_kick_map_and_the_search_can_sweep_the
 def test_a_bumped_duck_stands_instead_of_turning_in_place():
     """Senses.bumped (the body touching another body): for `bump_stand_s`
     after it, a standing turn becomes a stand. Off at 0."""
-    b = Chase(ChaseParams(bump_stand_s=1.0, search_dip_s=0.0, search_vx=0.0), goal=(1.5, 0.0))   # no dips: a plain standing turn
-    b.step(_senses(0.0, None, speed=0.0))
-    out = b.step(_senses(0.5, None, speed=0.0))
+    # `search` is deliberately NOT a bump-stand state (its circle walks, and
+    # freezing it stops the one behaviour that finds the ball), so drive the
+    # rule through `support`, which is.
+    p = ChaseParams(bump_stand_s=1.0, search_dip_s=0.0, search_vx=0.0)
+    lone = Chase(p, goal=(1.5, 0.0))
+    lone.step(_senses(0.0, None, speed=0.0))
+    out = lone.step(_senses(0.5, None, speed=0.0))
     assert out.note == "search" and out.twist[2] != 0.0                # a standing search turn
-    s = _senses(0.6, None, speed=0.0)
-    out = b.step(Senses(t=s.t, speed=0.0, odom=s.odom, bumped=True))
-    assert out.twist == (0.0, 0.0, 0.0)
-    out = b.step(_senses(1.2, None, speed=0.0))                        # still inside the hold
-    assert out.twist == (0.0, 0.0, 0.0)
-    out = b.step(_senses(1.8, None, speed=0.0))                        # the hold is over
-    assert out.twist[2] != 0.0
+    out = lone.step(Senses(t=0.6, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
+    assert out.twist[2] != 0.0                                         # searching: the rule leaves it alone
+    # A real supporter: a teammate claims the ball from closer, so this duck's role is support.
+    tm = Team("left")
+    b = Chase(p, goal=(1.5, 0.0), team=tm, duck_id="d1", bounds=(1.5, 1.25))
+
+    def tick(t, bumped):
+        tm.claim("d0", t, 0.2, None)                                   # d0 is nearer: it attacks
+        return b.step(Senses(t=t, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=bumped))
+
+    out = tick(0.5, False)
+    assert b.state == "support" and out.twist[2] != 0.0                # turning to look for the ball
+    assert tick(0.7, True).twist == (0.0, 0.0, 0.0)                    # supporting and touching: stand
+    assert tick(1.4, True).twist == (0.0, 0.0, 0.0)                    # still inside the window
+    # Contact that never let up must NOT extend the window: it is timed from the onset.
+    assert tick(1.75, True).twist[2] != 0.0
+    # A fresh episode (a gap longer than bump_gap_s) starts a new window.
+    assert tick(3.5, True).twist == (0.0, 0.0, 0.0)
     off = Chase(ChaseParams(search_dip_s=0.0, search_vx=0.0), goal=(1.5, 0.0))
     off.step(_senses(0.0, None, speed=0.0))
     out = off.step(Senses(t=0.5, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
     assert out.twist[2] != 0.0
-    # `bump_exempt_m`: with the ball right there the duck is fighting for it and does not stand.
-    ex = Chase(ChaseParams(bump_stand_s=1.0, bump_exempt_m=0.4), goal=(1.5, 0.0))
-    ex.step(_senses(0.0, (0.9, 0.25)))
-    s2 = _senses(0.4, (0.9, 0.25))
-    out = ex.step(Senses(t=s2.t, det=s2.det, det_age=0.0, speed=0.0, odom=s2.odom, bumped=True))
-    assert out.twist != (0.0, 0.0, 0.0)                                # a ball 0.25 m off: keep working
-    far = Chase(ChaseParams(bump_stand_s=1.0, bump_exempt_m=0.4), goal=(1.5, 0.0))
-    far.step(_senses(0.0, (0.9, 1.5)))
-    s3 = _senses(0.4, (0.9, 1.5))
-    out = far.step(Senses(t=s3.t, det=s3.det, det_age=0.0, speed=0.0, odom=s3.odom, bumped=True))
-    assert out.twist == (0.0, 0.0, 0.0)                                # the ball is 1.5 m away: stand
+    # `blocked` is an escape, never a stand: 70% of the first version's firing
+    # was there, and 6 of 8 traced falls were a stand leaning on the other
+    # duck. A wall right ahead blocks the walking search; bumped or not, the
+    # turn out of it survives.
+    depth = np.full((8, 8), 2000, np.uint16)
+    depth[2:5, 3:5] = 150                                              # something 15 cm dead ahead
+    bl = Chase(ChaseParams(bump_stand_s=1.0, search_dip_s=0.0), goal=(1.5, 0.0))
+    bl.step(_senses(0.0, None, speed=0.0))
+    wall = TofFrame(t=0.5, depth_mm=depth, valid=np.ones((8, 8), bool))
+    out = bl.step(Senses(t=0.5, tof=wall, tof_age=0.0, speed=0.0, odom=(0.0, 0.0, 0.0), bumped=True))
+    assert bl.state == "blocked" and out.twist[2] != 0.0
 
 
 def test_the_kick_cone_dribbles_a_ball_that_is_too_far_out_and_shoots_from_close():
