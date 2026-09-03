@@ -688,7 +688,13 @@ bounds from `make_pitch`), and a supporter with any duck track inside
 0.3 m within the last 1.5 s (a track's bearing turns with the body, so
 a duck seen a second ago still says where it is) stands instead of
 turning in place. 3v3 over 4 seeds: **1.00 goals, 7.8 kicks, 3.50 falls
-a run (0.58 per duck)**, from 0.75 / 5.2 / 4.75 (0.79).
+a run (0.58 per duck)**, from 0.75 / 5.2 / 4.75 (0.79). With the hunt
+and the walking search (below, measured on 1v1) the same 4 seeds give
+2v2 1.50 goals, 9.8 kicks, 3.50 falls a run (0.88 per duck; 2.00 / 7.8
+/ 2.75 without) and 3v3 1.50 / 5.0 / 4.50 (0.75; 1.00 / 7.8 / 3.50
+without): more goals in 3v3, more falls in both — four seeds of six
+ducks walking blind lines through a crowd. `hunt_s` and `search_vx`
+switch them off per brain if a roster prefers it.
 
 ### Tidy the playroom (roadmap Track 12)
 

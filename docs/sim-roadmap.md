@@ -39,12 +39,19 @@ the tree, and Track 12 has its first working loop:
   spot — 4 lone shots in 11 against 1 in 12 — and ships off too, kicking
   3.5 times a run against 8.4 with 0.00 kicked goals against 0.75; goals
   are now attributed, and most are bumps: 0.75 kicked, 1.25 bumped a run
-  for the shipped brain) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
+  for the shipped brain; what did help is a hunt with its stops — walk the
+  line a lost ball rolled off along, slowly, ending for the ToF, a duck
+  beside or the boards — and a search that walks a slow circle instead of
+  standing (instrumented: during search the ball was in the camera's
+  frustum 1% of the time, 90–120° off the nose, a standing turn barely
+  turns): 2.25 goals, 9.4 kicks, 0.38 falls a run over 8 seeds against
+  2.00 / 8.4 / 0.50) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
   2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
   after the traced fix (supporters turning in place against a teammate
   or the boards: the support spot stays inside the pitch and a supporter
-  with a duck track beside it stands; 0.75 / 5.2 / 4.75 before) — falls
-  per duck still climb with the roster. Dribbling, a walk-round and
+  with a duck track beside it stands; 0.75 / 5.2 / 4.75 before), and
+  with the hunt and the walking search 2v2 1.50 / 9.8 / 3.50, 3v3 1.50
+  / 5.0 / 4.50 — falls per duck still climb with the roster. Dribbling, a walk-round and
   close-range re-planning were built, measured worse, and ship off with
   the numbers.
   `brains/follow-v1` ships in the repo. Upstream is pinned (microduck_rl
