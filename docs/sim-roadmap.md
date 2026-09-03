@@ -45,7 +45,8 @@ the tree, and Track 12 has its first working loop:
   standing (instrumented: during search the ball was in the camera's
   frustum 1% of the time, 90–120° off the nose, a standing turn barely
   turns): 2.25 goals, 9.4 kicks, 0.38 falls a run over 8 seeds against
-  2.00 / 8.4 / 0.50) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
+  2.00 / 8.4 / 0.50; deliberate bumping and a ball memory were measured
+  after it and ship off — the same goals, twice the falls) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
   2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
   after the traced fix (supporters turning in place against a teammate
   or the boards: the support spot stays inside the pitch and a supporter

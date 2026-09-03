@@ -663,6 +663,22 @@ the ball was last on probed 4 s instead of 10 for a ball to the right
 and measured off (1.62 goals, 8.9 kicks, 0.62 falls a run: within the
 noise, the falls on the walker's weak right turn).
 
+Measured after it, on the same 8 seeds, and shipped off with the
+numbers: **deliberate bumping** (`push_beyond` 1.4, a push spot behind
+the ball and a walk through it toward the goal) scored the same 2.25
+goals a run (0.25 kicked, 2.00 bumped) from 6.4 kicks and 1.8 pushes
+with **0.75 falls against 0.38** — the deliberate bump scores no more
+than the accidental one and falls twice as often; and a **ball memory**
+(`seek_s`: the centre spot at a kickoff, every fresh sighting, the end
+of a hunted line, walked to before the circle) at 2.38 goals, 7.8 kicks
+and 0.75 falls — the goals did not move and the blind walks fell. For
+the rosters (4 seeds): with the hunt and the circle off, 2v2 1.00 goals,
+8.8 kicks, 3.50 falls and 3v3 0.75 / 7.0 / 3.75 against 1.50 / 9.8 /
+3.50 and 1.50 / 5.0 / 4.50 with them on — more goals with them in both,
+the same falls in 2v2, 0.75 more in 3v3 — and a wider support standoff
+(1.0 m back, 0.6 m to the side) 3v3 1.75 / 5.2 / 4.50: the team
+defaults stay.
+
 **Teams** (`brain/team.py`): teammates share a blackboard — one message
 a second over Wi-Fi on the robot: my id, my distance to the ball, where
 I put it. The nearest attacks, the others support (0.7 m behind the

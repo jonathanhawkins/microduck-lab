@@ -274,7 +274,7 @@ def test_the_search_walks_to_where_the_ball_was_before_circling():
     sighting, the end of a hunted line. A search with a memory further
     than seek_min away walks there first ("seek"); arriving with nothing
     seen forgets it, and the circle begins."""
-    p = ChaseParams()
+    p = ChaseParams(seek_s=20.0)
     b = Chase(p, goal=(1.5, 0.0), bounds=(1.5, 1.25))
     assert b.memory is not None and b.memory[:2] == (0.0, 0.0)        # a pitch: the centre spot
     # Nothing seen, standing 1 m from the centre spot facing it: seek, walking.
@@ -291,3 +291,6 @@ def test_the_search_walks_to_where_the_ball_was_before_circling():
     assert b.memory is not None and abs(b.memory[0] - 0.5 * math.cos(0.3)) < 1e-6 and abs(b.memory[1] - 0.5 * math.sin(0.3)) < 1e-6
     # Off a pitch there is no centre spot to remember.
     assert Chase(p).memory is None
+    # Off by default (measured): a pitch brain with seek_s 0 keeps the memory but never seeks.
+    b0 = Chase(ChaseParams(), goal=(1.5, 0.0), bounds=(1.5, 1.25))
+    assert b0.step(Senses(t=0.5, odom=(-1.0, 0.0, 0.0))).note == "search"

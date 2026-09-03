@@ -510,8 +510,10 @@ class ChaseParams:
     # than `seek_min` away WALKS there first (the hunt's speed and stops)
     # instead of circling on the spot - with the hunt and the circle,
     # 107 s of a 300 s run were still search. Forgotten after `seek_s` or
-    # once there with nothing seen. 0: off.
-    seek_s: float = 20.0
+    # once there with nothing seen. OFF (0): measured over 8 seeds x 300 s
+    # of 1v1 at 2.38 goals, 7.8 kicks, 0.75 falls a run against 2.25 / 9.4
+    # / 0.38 without - the goals did not move and the blind walks fell.
+    seek_s: float = 0.0
     seek_min: float = 0.4
     seek_tol: float = 0.25
     search_dip_every: float = 1.5
@@ -532,7 +534,11 @@ class ChaseParams:
     search_sided: bool = False
     # Dribbling: OFF (inf). Measured — a ball pushed at 0.3 m/s for half a
     # second rolls on at about the walking speed on this floor and the duck
-    # walks behind it without ever lining up; the kick wins. ~1.4 to try.
+    # walks behind it without ever lining up; the kick wins. Re-measured
+    # at 1.4 with goals attributed (8 seeds x 300 s): 2.25 goals a run
+    # either way (0.25 kicked, 2.00 bumped), 6.4 kicks and 1.8 pushes
+    # against 9.4 kicks, and 0.75 falls against 0.38 - the deliberate
+    # bump scores no more than the accidental one and falls twice as often.
     push_beyond: float = math.inf
     push_behind: float = 0.16
     push_speed: float = 0.3
