@@ -60,7 +60,14 @@ the tree, and Track 12 has its first working loop:
   or the boards: the support spot stays inside the pitch and a supporter
   with a duck track beside it stands; 0.75 / 5.2 / 4.75 before), and
   with the hunt and the walking search 2v2 1.50 / 9.8 / 3.50, 3v3 1.50
-  / 5.0 / 4.50 — falls per duck still climb with the roster. Dribbling, a walk-round and
+  / 5.0 / 4.50 — falls per duck still climb with the roster. Teammates
+  now share their poses on the board; a keep-out around them (a
+  teammate beside is invisible to the camera and the ToF) measured off,
+  3v3 5.25 falls against 4.50, because a fresh trace put 12 of 13 falls
+  beside an *opponent* in a standing turn, and a walking turn for
+  supporters measured off too (2v2 4.00 falls against 3.50, 3v3 5.25
+  against 4.50): a crowded pitch needs a sense of the bodies beside the
+  duck before any rule can act on them. Dribbling, a walk-round and
   close-range re-planning were built, measured worse, and ship off with
   the numbers.
   `brains/follow-v1` ships in the repo. Upstream is pinned (microduck_rl

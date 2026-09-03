@@ -762,7 +762,13 @@ falls a run with it at 0.4 m against 1.50 / 5.0 / 4.50 without. A fresh
 trace of two seeds (13 falls) said why: 12 were beside an *opponent* —
 which no board carries — and all but one were standing turns, most of
 them a supporter at its spot turning to face the ball. The poses stay on
-the board (the inspector shows them); the keep-out ships at 0.
+the board (the inspector shows them); the keep-out ships at 0. Making
+that turn a walking one (`support_turn_vx` 0.2, like the search circle)
+measured off too: 2v2 1.50 goals, 8.8 kicks, 4.00 falls a run against
+1.50 / 9.8 / 3.50, 3v3 1.00 / 4.2 / 5.25 against 1.50 / 5.0 / 4.50 — a
+walking turn bumps what it cannot see. What a crowded pitch needs is a
+sense of the bodies beside the duck — a wider ToF field, or the bump the
+IMU could read — before any rule can act on them.
 
 ### Tidy the playroom (roadmap Track 12)
 

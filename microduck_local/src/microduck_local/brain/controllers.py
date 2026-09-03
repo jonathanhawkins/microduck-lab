@@ -610,9 +610,12 @@ class ChaseParams:
     # falls beside an OPPONENT, which no board carries, turning in place.
     mate_keepout: float = 0.0
     # A supporter at its spot turns to face the ball WALKING (`support_turn_vx`
-    # > 0, like the search circle) instead of standing: the traced 3v3
-    # falls were standing turns beside a body nothing had seen.
-    support_turn_vx: float = 0.2
+    # > 0, like the search circle) instead of standing - the traced 3v3
+    # falls were standing turns beside a body nothing had seen. Measured
+    # OFF at 0.2 (4 seeds x 300 s): 2v2 1.50 goals / 8.8 kicks / 4.00
+    # falls a run against 1.50 / 9.8 / 3.50; 3v3 1.00 / 4.2 / 5.25
+    # against 1.50 / 5.0 / 4.50 - the walking turn bumps what it cannot see.
+    support_turn_vx: float = 0.0
     # Yielding to a duck that clearly has the ball: OFF by default. Measured
     # over 8 seeds × 300 s: off 1.50 goals / 8.5 kicks / 2.12 falls a run,
     # on (0.5 m) 1.12 / 7.0 / 2.12 — it costs play and saves nothing.
