@@ -1008,7 +1008,10 @@ def test_only_the_one_sided_recipes_opt_out_of_the_mirror_prior():
     imitates a clip) has to be listed here — the default is True and silence
     would train it under a wrong prior."""
     asymmetric = {b.id for b in BEHAVIORS.values() if not b.symmetric}
-    assert asymmetric == {"one_leg", "imitate"}
+    # find_ball: from a symmetric start (ball unseen, memory empty) a
+    # mirror-consistent policy must output a zero yaw sweep — it cannot pick
+    # a side to look first, so the exported mean would sit and stare.
+    assert asymmetric == {"one_leg", "imitate", "find_ball"}
     # spin stays mirror-safe: the direction COMMAND rides the wz slot, and
     # the mirror map negates that slot and the gyro together, so a mirrored
     # episode is just the opposite commanded direction. The rest are sagittal
@@ -1174,3 +1177,151 @@ def test_spin_pays_the_commanded_direction_not_a_wiggle():
     # the direction command is in the OBSERVABLE wz slot every observation
     obs = env._get_obs()
     assert abs(float(obs[50])) == pytest.approx(1.0)
+
+
+# ------------------------------------------------------------- find_ball
+
+def _ball_env(seed=0, **kw):
+    env = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=seed, **kw)
+    env.reset(seed=seed)
+    return env
+
+
+def test_find_ball_rides_the_head_slots_and_nothing_else():
+    """The ball's detector output lives in obs[51:55] (bx, by, seen, memory)
+    and the twist stays a trick's pinned zero. Placing the ball straight
+    ahead at 1 m must read as seen, centred horizontally and BELOW centre
+    (the camera is 25 cm up and level at STAND); at 0.3 m it is under the
+    field of view — finding a near ball means nodding down."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    np.testing.assert_allclose(obs[48:51], 0.0, atol=1e-6)
+    assert obs[53] == 1.0
+    assert abs(obs[51]) < 0.05 and -1.0 < obs[52] < -0.2
+    assert abs(obs[54]) < 0.02          # memory = body bearing / pi = 0
+    _ball_place(env, 0.3, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    assert obs[53] == 0.0 and obs[51] == 0.0 and obs[52] == 0.0
+
+
+def test_find_ball_bearing_signs_match_the_detector():
+    """duck_detect::Detection::bearing is -1 hard LEFT .. +1 hard RIGHT. A
+    ball 17 deg to the duck's left (+y in its yaw frame) must read negative
+    across the frame and positive in the body-bearing memory slot."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, 0.3)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and env._ball_bx < -0.3
+    assert env.head_cmd[3] == pytest.approx(0.3 / np.pi, abs=1e-3)
+    _ball_place(env, 1.0, -0.3)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and env._ball_bx > 0.3
+    assert env.head_cmd[3] == pytest.approx(-0.3 / np.pi, abs=1e-3)
+
+
+def test_find_ball_memory_fades_while_lost_and_snaps_back_when_seen():
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    # No ball events: a teleport or roll mid-test would put it back in frame.
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    _ball_place(env, 1.0, 0.3)
+    _ball_sense(env, force=True)
+    m0 = float(env.head_cmd[3])
+    assert m0 > 0.05
+    _ball_place(env, 1.0, np.pi)           # gone behind: lost
+    # Drive the sensing loop directly (the physics is frozen at the spawn
+    # pose, so this is the memory logic alone, not a toppling duck).
+    for _ in range(100):                   # 2 s of the 4 s fade
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_seen is False
+    assert env.head_cmd[2] == 0.0
+    # (the detector holds its last report for DETECT_EVERY steps, so the
+    # fade starts a step late — 1% slack covers it)
+    assert env._ball_mem_conf == pytest.approx(np.exp(-2.0 / 4.0), rel=0.01)
+    # The memory slot still points where the ball WAS (the old bearing,
+    # decayed), never the new true bearing the policy could not have seen.
+    assert float(env.head_cmd[3]) == pytest.approx(m0 * np.exp(-0.5), rel=0.01)
+    _ball_place(env, 1.0, 0.0)
+    for _ in range(3):
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_seen and env.head_cmd[2] == 1.0 and env._ball_mem_conf == 1.0
+
+
+def test_find_ball_pays_nothing_while_lost_except_new_ground():
+    """A per-step SEARCH penalty would make falling over the cheapest way
+    out of a hard search (the episode ends, the charge stops). While the
+    ball is out of frame the only income is bounded coverage pay, and a
+    gaze parked on the same cell earns none of it."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, np.pi)
+    _ball_sense(env, force=True)
+    env._ball_mem_conf = 0.0
+    terms = {t.key: t for t in BEHAVIORS["find_ball"].terms}
+    assert terms["eyes_on_ball"].fn(env) == 0.0
+    assert terms["ball_in_view"].fn(env) == 0.0
+    assert terms["face_the_ball"].fn(env) == 0.0
+    env._ball_new_bins = 0
+    assert terms["new_ground"].fn(env) == 0.0
+    env._ball_new_bins = 1
+    assert terms["new_ground"].fn(env) == 1.0
+    assert not any(t.is_penalty and "search" in t.key for t in terms.values())
+
+
+def test_find_ball_centred_beats_edge_of_frame():
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    eyes = {t.key: t for t in BEHAVIORS["find_ball"].terms}["eyes_on_ball"].fn
+    _ball_place(env, 1.5, 0.0)
+    _ball_sense(env, force=True)
+    centre = eyes(env)
+    _ball_place(env, 1.5, 0.35)
+    _ball_sense(env, force=True)
+    assert env._ball_seen
+    assert eyes(env) < centre
+
+
+def test_find_ball_ladder_carries_no_reward_edits():
+    """Stages ladder only the WORLD (spawn window, ball events) — the sealed
+    term set is identical in every stage (AGENTS.md)."""
+    b = BEHAVIORS["find_ball"]
+    assert len(b.curriculum) == 3
+    allowed = {"MICRODUCK_BALL_BEARING_MAX", "MICRODUCK_BALL_EVENT_RATE",
+               "MICRODUCK_BALL_ROLL_PROB"}
+    for st in b.curriculum:
+        assert set(st.env) <= allowed, st.env
+    # The first rung keeps the ball in front; the last opens the whole circle.
+    assert float(b.curriculum[0].env["MICRODUCK_BALL_BEARING_MAX"]) < 1.6
+    assert float(b.curriculum[-1].env["MICRODUCK_BALL_BEARING_MAX"]) > 3.0
+
+
+def test_find_ball_spawn_window_knob_and_reports(monkeypatch):
+    monkeypatch.setenv("MICRODUCK_BALL_BEARING_MAX", "0.3")
+    monkeypatch.setenv("MICRODUCK_BALL_EVENT_RATE", "0")
+    env = _ball_env(seed=4)
+    for _ in range(20):
+        env.reset()
+        assert abs(env._ball_psi) <= 0.3 + 1e-6
+        assert env.last_spawn.startswith("ball ")
+    from microduck_local.behaviors import ball_marker_payload
+    payload = ball_marker_payload(env)
+    assert len(payload) == 4 and payload[2] == pytest.approx(0.035, abs=1e-3)
+    assert env.behavior.caption_fn(env).startswith("ball ")
+    assert env.behavior.report_fn(env)[0].startswith("ball:")
+    markers = env.behavior.markers_fn(env)
+    assert len(markers) == 2 and markers[0][1] == pytest.approx(0.035)
+
+
+def test_find_ball_teach_card_and_matcher():
+    card = behavior_card(BEHAVIORS["find_ball"])
+    assert card["curriculum"] and card["terms"]
+    assert match_behavior("find the ball").id == "find_ball"
+    assert match_behavior("look around for the ball").id == "find_ball"
+    assert match_behavior("stand on one leg").id == "one_leg"

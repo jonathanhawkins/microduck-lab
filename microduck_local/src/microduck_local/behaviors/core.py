@@ -126,6 +126,24 @@ class Behavior:
     # generic — behaviors own their knobs, the server just exports them into
     # each stage's subprocess environment.
     curriculum: tuple = ()
+    # TASK-STATE hooks, for behaviors whose world holds something the robot
+    # is not (a ball to find). `reset_fn(env)` runs at the end of every
+    # reset, after the spawn families have posed the duck, and the obs is
+    # rebuilt after it; `obs_fn(env)` runs before every observation is
+    # assembled and may write the command slots (the imitation clip's phase
+    # rides the body slots the same way — the 61-dim contract is untouched,
+    # only what the daemon must put in those slots changes per task).
+    reset_fn: Callable | None = None
+    obs_fn: Callable | None = None
+    # Read-side hooks, so the tools that LOOK at a policy can see the task
+    # state too: `caption_fn(env) -> str` is one extra contact-sheet caption
+    # line, `markers_fn(env) -> [(xyz, radius, rgba), ...]` draws the task's
+    # objects into the render, `report_fn(env) -> [str, ...]` adds lines to
+    # the episode summary, and `marker_payload(env)` is what the lab streams
+    # to the viewer (the ball's position, or None).
+    caption_fn: Callable | None = None
+    markers_fn: Callable | None = None
+    report_fn: Callable | None = None
 
 
 def resolve_clip_name(behavior: Behavior, clip_name: str | None = None) -> str | None:

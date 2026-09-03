@@ -3525,6 +3525,10 @@ def make_app(ducks: list[Duck]):
                         "assist": bool(getattr(d.env, "spotter_active", False)),
                         "handed": bool(getattr(d, "handed", False)),
                         "handoff": getattr(d, "handoff_label", None),
+                        # Task objects that live in the env, not the
+                        # physics: the find_ball ball as [x, y, z, r] so
+                        # the viewer can draw what the duck is looking for.
+                        "ball": behaviors_mod.ball_marker_payload(d.env),
                         "bodies": d.pose_payload(),
                     } for d in st.ducks],
                 })

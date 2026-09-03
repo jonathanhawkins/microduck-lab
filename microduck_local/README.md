@@ -294,6 +294,65 @@ carry `training.stage {idx, count, label}` plus cumulative
 whole chain, and an explicit `initFrom` skips it (single run, final stage's
 env).
 
+### 🔎 `find_ball` — the eyes for soccer and fetch
+
+The shipped kick policies are ball-blind (upstream's `ball_kick` cfg: "the
+operator aims the robot at the ball"); `find_ball` is the aiming. It is a
+whole-body policy that sweeps for a ball it cannot see, nods down for the
+near ones (the camera is 25 cm up and level, so anything inside ~0.5 m is
+below a level gaze), steps the body round to face it, and keeps it centred
+while it rolls or jumps elsewhere. The intended handoff is the robot's own
+pattern: `find_ball` until the ball is centred and the body square, then
+`ball_kick_*` / `alpha_ground_pick`.
+
+There is no ball in the physics. The env tracks a point on the floor and
+projects it through the robot's own `head_camera` MJCF element, so what the
+policy sees is what a detector on the robot hands it — and it rides the
+four **head command slots** (`obs[51:55]`), the same way the imitation
+clip's phase rides two body slots. The 61-dim contract is untouched; the
+daemon fills the slots for this brain:
+
+| slot | meaning |
+|---|---|
+| 51 | horizontal bearing across the frame, −1 hard left … +1 hard right (`duck_detect::Detection::bearing`); 0 when not seen |
+| 52 | vertical bearing, −1 bottom … +1 top; 0 when not seen |
+| 53 | 1.0 while the detector reports the ball, else 0 |
+| 54 | the ball's bearing in the duck's yaw frame ÷ π (+ = left) while seen; while lost, the last one dead-reckoned by the gyro yaw rate and faded by exp(−t/4 s) — a memoryless policy needs someone to remember which side the ball went |
+
+Detector realism: reports every 2 control steps (a 15–30 Hz NPU detector
+against the 50 Hz loop), ±0.02 bearing jitter under `obs_noise`, and an
+optional dropout knob. FOV defaults to the IMX219 as the daemon sees it
+(portrait after its 90° rotation: ~48° across, ~62° tall) —
+`MICRODUCK_BALL_HFOV_DEG` / `_VFOV_DEG` if the real intrinsics differ.
+
+The recipe pays for the ball being in frame, centred (two-layer Gaussian),
+and for the body facing it; while the ball is lost the only income is a
+bounded **coverage** pay for pointing the camera at a (10° yaw × pitch-band)
+cell it has not looked at this sweep — a wiggle re-covers the same cells
+and earns nothing, a steady sweep pays every step. There is deliberately
+**no per-step search penalty**: falling over would then be the cheapest
+way out of a hard search. Balls spawn anywhere around the duck (0.3–1.5 m)
+and every ~3 s either teleport (a new search) or roll off at 0.3–0.9 m/s
+(a track, then a re-acquisition from the memory slot). The three-stage
+curriculum ladders only the world: ball in the front 140° → anywhere,
+moving → mostly rolling. `symmetric=False` on purpose: from a symmetric
+start a mirror-consistent policy cannot choose which way to look first.
+
+```bash
+uv run train-behavior find_ball                     # single run, final-stage knobs
+# or stage by hand (the lab's 🎓 panel runs the chain for you):
+MICRODUCK_BALL_BEARING_MAX=1.2 MICRODUCK_BALL_EVENT_RATE=0.15 \
+    uv run train-behavior find_ball --steps 1_000_000 --run-name fb-s1
+uv run train-behavior find_ball --steps 2_000_000 --run-name fb-s2 --init-from runs/fb-s1
+uv run render-rollout --policy runs/fb-s2/policy.onnx --out /tmp/rr-fb   # ball + gaze dot drawn in
+```
+
+`render-rollout` draws the ball (orange) and a gaze dot 30 cm down the
+optical axis (cyan while the ball is in frame, red while lost), adds a
+`ball …` caption line per frame and a `ball:` summary line (time to first
+sight, share of steps in frame / centred, losses); the lab streams the ball
+to the viewer, which draws it next to the duck.
+
 `behaviors/core.py` also has a **term CATALOG** — composable optional terms
 mirroring the official stack's reward vocabulary (`head_up`, `flat_feet`,
 `calm_body`, `no_limit_parking`, `smooth_torque`, `soft_landings`). A /teach
