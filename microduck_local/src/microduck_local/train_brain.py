@@ -1,8 +1,17 @@
-"""Train a brain (roadmap 3.1/3.2): PPO over BrainEnv, then export it.
+"""Train a brain (roadmap 3.1/3.2/4.4): PPO over BrainEnv, then export it.
 
     uv run train-brain --run-name follow-v2 --envs 12 --steps 400000
     uv run eval-brain --brain learned:follow-v2 --preset hostile
     uv run eval-brain --brain follow --preset hostile          # the scripted baseline
+
+    uv run train-brain --task striker --run-name striker-v1 --envs 8 --steps 400000
+    uv run python -m microduck_local.eval_striker --brain striker-v1 --seeds 8
+
+`--task striker` (roadmap 4.4) trains the soccer brain in `brain/striker.py`
+instead: 88 features (the 80-float brain contract plus the goal geometry),
+five actions (the twist plus a kick logit per foot — roadmap 3.5's
+hierarchical head), reward = the ball's SIGNED progress toward the goal.
+Its baseline is the scripted `Chase`, on the pitch, not the scripted follow.
 
 Each PPO step here is one DECISION (five control steps of the frozen
 walker), so 400k steps is 2M control steps of physics. Workers use
@@ -32,6 +41,14 @@ from .brain.brain_env import (
     BrainEnv,
     FollowTask,
 )
+from .brain.striker import (
+    S_ACT_HIGH,
+    S_ACT_LOW,
+    STRIKER_OBS_DIM,
+    STRIKER_OBS_VERSION,
+    StrikerEnv,
+    StrikerTask,
+)
 from .brain.learned import brains_dir
 from .machine import profile, with_phase_callbacks
 from .ppo_hparams import configure_torch_cpu
@@ -44,7 +61,14 @@ def make_env_fn(seed: int, fixed_preset: str | None, variety: bool = False, poli
     return fn
 
 
-def export_brain(run_dir: Path) -> Path:
+def make_striker_env_fn(seed: int, task: StrikerTask, fixed_preset: str | None):
+    def fn():
+        return StrikerEnv(task, seed=seed, fixed_preset=fixed_preset)
+    return fn
+
+
+def export_brain(run_dir: Path, obs_dim: int = BRAIN_OBS_DIM,
+                 act_low: np.ndarray = ACT_LOW, act_high: np.ndarray = ACT_HIGH) -> Path:
     import pickle
 
     import torch
@@ -60,8 +84,8 @@ def export_brain(run_dir: Path) -> Path:
             self.policy = policy
             self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32))
             self.register_buffer("std", torch.tensor(np.sqrt(var + 1e-8), dtype=torch.float32))
-            self.register_buffer("lo", torch.tensor(ACT_LOW))
-            self.register_buffer("hi", torch.tensor(ACT_HIGH))
+            self.register_buffer("lo", torch.tensor(act_low))
+            self.register_buffer("hi", torch.tensor(act_high))
             self.clip = clip
 
         def forward(self, obs):
@@ -72,13 +96,13 @@ def export_brain(run_dir: Path) -> Path:
 
     wrapper = OnnxBrain(model.policy, vn.obs_rms.mean, vn.obs_rms.var, vn.clip_obs).eval()
     out = run_dir / "brain.onnx"
-    torch.onnx.export(wrapper, (torch.zeros(1, BRAIN_OBS_DIM),), str(out),
+    torch.onnx.export(wrapper, (torch.zeros(1, obs_dim),), str(out),
                       input_names=["obs"], output_names=["intent"], opset_version=17, dynamo=False)
     import onnxruntime as ort
     sess = ort.InferenceSession(str(out))
     rng = np.random.default_rng(0)
     for _ in range(3):
-        obs = rng.normal(0, 1, (1, BRAIN_OBS_DIM)).astype(np.float32)
+        obs = rng.normal(0, 1, (1, obs_dim)).astype(np.float32)
         with torch.no_grad():
             want = wrapper(torch.tensor(obs)).numpy()
         got = sess.run(["intent"], {"obs": obs})[0]
@@ -99,7 +123,28 @@ def main() -> None:
     ap.add_argument("--variety", action="store_true", help="train with furniture and a wandering duck (eval-brain --variety)")
     ap.add_argument("--polite", type=float, default=FollowTask.polite, metavar="M",
                     help="the person stops M m short of the duck in its way (eval-brain --polite); 0: walks through it, as follow-v1..v4 were trained")
+    ap.add_argument("--task", default="follow", choices=("follow", "striker"),
+                    help="follow (roadmap 3.2, BrainEnv) or striker (roadmap 4.4, StrikerEnv on a pitch)")
+    # --- striker only. The reward weights are here so a run RECORDS what it
+    # was paid; the spawn probabilities are the ladder (physics and spawns,
+    # never the pay — AGENTS.md), and are the knob to reach for when the kick
+    # does not appear in rollouts.
+    ap.add_argument("--episode-s", type=float, default=StrikerTask.episode_s)
+    ap.add_argument("--spot-prob", type=float, default=StrikerTask.spot_prob,
+                    help="fraction of episodes that start with the ball on a kicking foot's sweet spot")
+    ap.add_argument("--near-prob", type=float, default=StrikerTask.near_prob,
+                    help="fraction that start with the ball a step or two ahead")
+    ap.add_argument("--w-progress", type=float, default=StrikerTask.w_progress)
+    ap.add_argument("--w-approach", type=float, default=StrikerTask.w_approach)
+    ap.add_argument("--no-gaze", action="store_true", help="no reflex head pitch onto the tracked ball")
+    ap.add_argument("--snap-steps", type=int, default=100_000, metavar="N",
+                    help="atomically refresh model.zip / vecnormalize.pkl / brain.onnx every N steps "
+                         "(0: only at the end). The exported brain is the one that ships, so a long run "
+                         "has to be probeable while it runs — AGENTS.md verification discipline #6.")
     args = ap.parse_args()
+    striker = args.task == "striker"
+    task = StrikerTask(episode_s=args.episode_s, spot_prob=args.spot_prob, near_prob=args.near_prob,
+                       w_progress=args.w_progress, w_approach=args.w_approach, gaze=not args.no_gaze)
 
     import torch
     from stable_baselines3 import PPO
@@ -115,7 +160,10 @@ def main() -> None:
 
     out = brains_dir() / args.run_name
     out.mkdir(parents=True, exist_ok=True)
-    fns = [make_env_fn(args.seed * 1000 + i, args.fixed_preset, args.variety, args.polite) for i in range(args.envs)]
+    if striker:
+        fns = [make_striker_env_fn(args.seed * 1000 + i, task, args.fixed_preset) for i in range(args.envs)]
+    else:
+        fns = [make_env_fn(args.seed * 1000 + i, args.fixed_preset, args.variety, args.polite) for i in range(args.envs)]
     venv = VecMonitor(SubprocVecEnv(fns, start_method="forkserver"))
     if args.init_from:
         prev = brains_dir() / args.init_from
@@ -135,7 +183,24 @@ def main() -> None:
     t0 = time.time()
 
     class Progress(BaseCallback):
+        next_snap = args.snap_steps or 1 << 62
+
+        def _snapshot(self) -> None:
+            """model.zip + vecnormalize.pkl + brain.onnx, via temp names, so a
+            reader never sees a half-written file."""
+            import os
+            # SB3 appends ".zip" only to a suffix-less path, so "model.tmp"
+            # lands literally and the replace stays atomic.
+            self.model.save(str(out / "model.tmp"))
+            os.replace(out / "model.tmp", out / "model.zip")
+            venv.save(str(out / "vecnormalize.pkl.tmp"))
+            os.replace(out / "vecnormalize.pkl.tmp", out / "vecnormalize.pkl")
+            export_brain(out, STRIKER_OBS_DIM, S_ACT_LOW, S_ACT_HIGH) if striker else export_brain(out)
+
         def _on_rollout_end(self) -> None:
+            if self.num_timesteps >= self.next_snap:
+                self.next_snap = self.num_timesteps + args.snap_steps
+                self._snapshot()
             ep = self.model.ep_info_buffer
             rew = float(np.mean([e["r"] for e in ep])) if ep else float("nan")
             ln = float(np.mean([e["l"] for e in ep])) if ep else float("nan")
@@ -148,12 +213,21 @@ def main() -> None:
         def _on_step(self) -> bool:
             return True
 
-    (out / "brain.json").write_text(json.dumps({
-        "name": args.run_name, "task": "follow", "target_cls": "person", "decide_every": 5,
-        "obs_dim": BRAIN_OBS_DIM, "obs_version": BRAIN_OBS_VERSION,
-        "act_low": ACT_LOW.tolist(), "act_high": ACT_HIGH.tolist(),
-        "envs": args.envs, "steps": args.steps, "seed": args.seed,
-        "fixed_preset": args.fixed_preset, "variety": args.variety, "polite": args.polite}, indent=2))
+    meta = {"name": args.run_name, "task": args.task, "decide_every": 5,
+            "envs": args.envs, "steps": args.steps, "seed": args.seed,
+            "fixed_preset": args.fixed_preset}
+    if striker:
+        meta |= {"target_cls": "ball", "obs_dim": STRIKER_OBS_DIM, "obs_version": STRIKER_OBS_VERSION,
+                 "act_low": S_ACT_LOW.tolist(), "act_high": S_ACT_HIGH.tolist(),
+                 "episode_s": task.episode_s, "spot_prob": task.spot_prob, "near_prob": task.near_prob,
+                 "w_progress": task.w_progress, "w_approach": task.w_approach,
+                 "gaze": task.gaze, "head_range": task.head_range, "bump_stop": task.bump_stop,
+                 "init_from": args.init_from}
+    else:
+        meta |= {"target_cls": "person", "obs_dim": BRAIN_OBS_DIM, "obs_version": BRAIN_OBS_VERSION,
+                 "act_low": ACT_LOW.tolist(), "act_high": ACT_HIGH.tolist(),
+                 "variety": args.variety, "polite": args.polite}
+    (out / "brain.json").write_text(json.dumps(meta, indent=2))
     try:
         model.learn(total_timesteps=args.steps,
                     callback=with_phase_callbacks(Progress(), BaseCallback))
@@ -162,7 +236,8 @@ def main() -> None:
         venv.save(str(out / "vecnormalize.pkl"))
         venv.close()
         log.close()
-    print(f"[train-brain] exported {export_brain(out)}", flush=True)
+    path = (export_brain(out, STRIKER_OBS_DIM, S_ACT_LOW, S_ACT_HIGH) if striker else export_brain(out))
+    print(f"[train-brain] exported {path}", flush=True)
 
 
 if __name__ == "__main__":
