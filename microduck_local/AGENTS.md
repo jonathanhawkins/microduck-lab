@@ -156,19 +156,25 @@ with `bench-envs` (real PPO, not raw stepping), and A/B learning quality
 before shipping any throughput win as a default.
 
 **Mac is the default; other machines get a profile, not a rewrite.**
-`machine.py` picks a per-machine thread and worker-packing policy, and the
-`mac` profile reproduces the historical settings term for term —
+`machine.py` picks a per-machine thread policy, and the `mac` profile
+reproduces the historical settings term for term —
 `tests/test_machine.py` pins that, including that a Mac run gets *no* extra
 callback in its training loop. When you find that a tuning constant here was
 measured on an M5 Max and is wrong elsewhere (they mostly were), add it to a
-profile rather than changing the shared default. Two rules bound what a
+profile rather than changing the shared default. Three rules bound what a
 profile may contain:
 
-- **Only quality-neutral knobs.** Thread counts do not enter the PPO math,
-  and worker packing is pinned step-for-step by `test_vec_env.py`. The env
-  count is the line: it sets the PPO batch size and therefore the learning
-  dynamics, so `--envs` stays 32 on every machine and is never profiled.
-  Verification discipline #4 applies to a profile like anything else.
+- **Only quality-neutral knobs.** Thread counts do not enter the PPO math.
+  The env count is the line: it sets the PPO batch size and therefore the
+  learning dynamics, so `--envs` stays 32 on every machine and is never
+  profiled. Verification discipline #4 applies to a profile like anything
+  else.
+- **A profile earns each knob separately, against the same window.** Worker
+  packing shipped in the first draft of the linux profile on one point that
+  showed +7%; four interleaved reps then put it behind 1:1 at every env
+  count and it was removed. Measure each knob with the others held fixed
+  (`MICRODUCK_ENVS_PER_WORKER=1` isolates packing from the thread split),
+  and never let a bundle of changes ride on one arm's total.
 - **Measure the profile you ship, on the machine you ship it for.**
   `uv run bench-envs --compare-profiles` runs both arms interleaved with the
   same repeats, which is the only form of that comparison worth reading

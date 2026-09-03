@@ -421,49 +421,55 @@ def test_envs_per_worker_batching_matches_one_per_worker():
     b.close()
 
 
-def test_the_packing_default_crosses_over_at_the_measured_knee():
-    """Packing two envs into one worker halves the per-vec-step semaphore
-    traffic but halves the worker processes available to fill the cores the
-    serial PPO update leaves idle. Those pull opposite ways and the curve
-    crosses — measured on an 18-core machine (bench-envs, real PPO):
+def test_packing_is_off_by_default_on_every_machine():
+    """Packing several envs into one worker halves the per-vec-step semaphore
+    traffic but also halves the worker processes available to fill the cores
+    the serial PPO update leaves idle. It shipped briefly as a profile
+    default on a single +7% point; re-measured with four interleaved reps,
+    order rotated each rep, it was BEHIND one process per env at every count
+    (-1.7% at 8, -3.9% at 16, -2.6% at 32). Its other claimed win, startup,
+    was the per-worker numba JIT that `_warm_jit` now pays once in the parent
+    for every layout.
 
-        envs |  k=1   |  k=2   |
-           8 | 11,516 | 10,829 |  -6.0%
-          16 | 15,651 | 14,713 |  -6.0%
-          32 | 19,456 | 20,536 |  +5.5%
+    So no profile packs and the default is 1 everywhere. It stays a manual
+    knob because it is still parity-tested and still worth re-measuring at
+    env counts far above these — but it has to be asked for."""
+    import microduck_local.machine as M
 
-    `Profile.envs_per_worker` is now the one place that decides this, and its
-    `n_envs > cores` rule has to keep reproducing those numbers on the mac
-    profile. A change to the threshold has to come with new numbers."""
-    from microduck_local.machine import Profile
-
-    mac18 = Profile(name="mac", cores=18, update_threads=8, rollout_threads=None,
-                    interop_threads=1, pack_workers=True)
-    for n in (1, 2, 4, 8, 12, 16, 18):
-        assert mac18.envs_per_worker(n) == 1, f"{n} envs measured SLOWER packed"
-    assert mac18.envs_per_worker(32) == 2, "32 envs measured +5.5% at k=2"
-    # Never k=4: measured -8.2% against k=1 at 32 envs.
-    assert mac18.envs_per_worker(32) != 4
-    # A profile that does not pack never does, whatever the fleet.
-    nopack = Profile(name="mac", cores=18, update_threads=8, rollout_threads=None,
-                     interop_threads=1, pack_workers=False)
-    assert max(nopack.envs_per_worker(n) for n in range(1, 257)) == 1
+    # The knob is not a profile concern any more, on any machine.
+    for name in M.PROFILES:
+        prof = M.build_profile(name, cores=4)
+        assert not hasattr(prof, "pack_workers")
+        assert not hasattr(prof, "envs_per_worker")
 
 
-def test_the_packed_default_is_only_safe_because_the_stream_is_identical():
-    """This is the one throughput default in the repo that needs no
-    learning-quality A/B, and the reason is mechanical: the packed layout is
-    step-for-step identical, which the parity test above pins. If that test
-    ever goes, this default has to go with it."""
+def test_the_manual_packing_knob_is_the_only_way_in(monkeypatch):
+    """`MICRODUCK_ENVS_PER_WORKER` is the escape hatch, and it defaults to 1."""
+    import os
+    import pathlib
+
+    import microduck_local.vec_env as V
+
+    monkeypatch.delenv("MICRODUCK_ENVS_PER_WORKER", raising=False)
+    assert int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "1") or 1) == 1
+    monkeypatch.setenv("MICRODUCK_ENVS_PER_WORKER", "2")
+    assert int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "1") or 1) == 2
+
+    src = pathlib.Path(V.__file__).read_text()
+    assert "MICRODUCK_ENVS_PER_WORKER" in src
+
+
+def test_packing_when_asked_for_is_only_safe_because_the_stream_is_identical():
+    """Whenever the knob IS used, the reason it is safe is mechanical rather
+    than statistical: the packed layout is step-for-step identical, which the
+    parity test above pins. If that test ever goes, the knob goes with it."""
     import pathlib
 
     import microduck_local.vec_env as V
 
     src = pathlib.Path(V.__file__).read_text()
-    assert "profile().envs_per_worker" in src, (
-        "the packing decision must come from the machine profile")
     assert "BIT-IDENTICAL" in src, (
-        "the default's justification must stay written next to it")
+        "the knob's justification must stay written next to it")
     # And an explicit env var still wins in both directions.
     import os
     from unittest import mock

@@ -1,5 +1,5 @@
-"""What THIS machine can do — usable cores, and the thread/packing policy that
-suits them.
+"""What THIS machine can do — usable cores, and the thread policy that suits
+them.
 
 **Mac is the default this repo is tuned for and advertised on**, and the
 `mac` profile below reproduces the historical numbers exactly: intra-op 8,
@@ -7,15 +7,17 @@ inter-op 1, one env per worker process, no thread switching between PPO
 phases. Nothing about a Mac run changes because this module exists — that is
 what `tests/test_machine.py` locks.
 
-Linux and cloud boxes are a different machine and were measured as one.
-`train-behavior`'s recipe on a 4-vCPU Xeon (this session's container), 40k
-timed steps per point, `behavior=run`, fork backend:
+Linux and cloud boxes are a different machine and were measured as one, on a
+4-vCPU Xeon (this session's container). Medians of four INTERLEAVED
+repetitions — the arms measured back to back with their order rotated per
+rep, because this box drifts far too much to compare across windows —
+`behavior=run`, fork backend, 40k timed steps per point:
 
-| 32 envs                          | steps/s | CPU busy |
-|----------------------------------|--------:|---------:|
-| the mac profile's settings       |  2,231  |     90%  |
-| + phase-aware threads (1/4)      |  2,915  |     77%  |
-| + 4 workers x 8 envs             |  3,129  |     74%  |
+| envs | mac profile | + phase-aware threads |
+|-----:|------------:|----------------------:|
+|    8 |         892 |     1,420  (+59%)     |
+|   16 |       1,228 |     1,727  (+41%)     |
+|   32 |       1,764 |     2,155  (+22%)     |
 
 The cause of the gap is the TRAINER, not the physics workers. torch's
 OpenMP pool spin-waits between the tiny batch-N policy forwards of a
@@ -32,13 +34,21 @@ wants — 1 during rollout collection, all of them during the update, where a
 rollout 22.8 s vs update 2.9 s, so the rollout is ~89% of wall time on this
 box and is what the threads must not disturb.
 
-Both knobs are QUALITY-NEUTRAL by construction, which is what lets them be
-defaults at all under AGENTS.md's "throughput is not learning speed" rule:
-thread counts do not enter the math, and worker packing is pinned
-step-for-step by `test_envs_per_worker_batching_matches_one_per_worker`.
-The env count — which DOES set the PPO batch size and therefore the
-learning dynamics — is deliberately NOT part of any profile; it stays 32
-everywhere.
+The thread split is QUALITY-NEUTRAL by construction, which is what lets it
+be a default at all under AGENTS.md's "throughput is not learning speed"
+rule: thread counts do not enter the PPO math. The env count — which DOES
+set the batch size and therefore the learning dynamics — is deliberately
+NOT part of any profile; it stays 32 everywhere.
+
+**Worker packing was measured and REJECTED.** Packing the fleet into one
+process per core (32 envs as 4 x 8) looked like a +7% win in a single
+unreplicated point, but four interleaved repetitions put it slightly BEHIND
+one process per env at every count: -1.7% at 8 envs, -3.9% at 16, -2.6% at
+32, never once ahead. Its other claimed advantage, faster startup, was
+really the per-worker numba JIT, and `vec_env._warm_jit` now removes that
+for every layout (32-env setup 7.5 s unpacked vs 7.2 s packed — a wash).
+So no profile packs, and `MICRODUCK_ENVS_PER_WORKER` stays what it was: a
+manual escape hatch, worth re-measuring only at env counts far above these.
 
 Overrides, for benchmarking and for a machine that disagrees:
 
@@ -146,7 +156,7 @@ def usable_cores() -> int:
 
 @dataclass(frozen=True)
 class Profile:
-    """The thread and packing policy for one kind of machine.
+    """The thread policy for one kind of machine.
 
     ``rollout_threads is None`` means "do not touch torch's thread count
     between PPO phases" — the mac behavior, and the reason a Mac run is
@@ -158,7 +168,6 @@ class Profile:
     update_threads: int
     rollout_threads: int | None
     interop_threads: int = 1
-    pack_workers: bool = False
 
     @property
     def phase_threads(self) -> bool:
@@ -166,47 +175,13 @@ class Profile:
         return (self.rollout_threads is not None
                 and self.rollout_threads != self.update_threads)
 
-    def envs_per_worker(self, n_envs: int) -> int:
-        """How many envs to pack into each worker PROCESS.
-
-        1 (one process per env) until the fleet outnumbers the cores. Beyond
-        that point the extra processes cannot run in parallel anyway, and each
-        one costs the parent two semaphore operations per vec-step.
-
-        Measured on both profiles, and the `n_envs > cores` threshold is what
-        both sets of numbers say — packing helps only past it:
-
-        * linux, 32 envs on 4 cores: packing to 4 workers is +7% throughput
-          and halves vec-env startup (8.2 s -> 4.3 s).
-        * mac, 18 cores (bench-envs, real PPO, best of 3-4 repeats, quiet
-          machine, 2026-09-03):
-
-              envs |  k=1    |  k=2    |
-                 8 | 11,516  | 10,829  |  -6.0%   too few workers, cores idle
-                16 | 15,651  | 14,713  |  -6.0%
-                32 | 19,456  | 20,536  |  +5.5%   semaphore traffic dominates
-                32 |         | 17,824  |  -8.2% at k=4 — past the knee again
-
-          which this rule reproduces exactly: 8 and 16 are under 18 cores so
-          they get k=1, and 32 gets ceil(32/18) = 2, never the 4 that lost.
-
-        Packing is invisible to the caller — same obs/rew/done stream, pinned
-        by tests/test_vec_env.py's
-        test_envs_per_worker_batching_matches_one_per_worker, so unlike most
-        throughput changes here there is no learning-quality question to A/B.
-        """
-        if not self.pack_workers or n_envs <= self.cores:
-            return 1
-        return -(-int(n_envs) // max(1, self.cores))  # ceil
-
     def describe(self) -> str:
         rollout = ("unchanged" if self.rollout_threads is None
                    else str(self.rollout_threads))
         return (f"{self.name} profile: {self.cores} usable cores, "
                 f"torch intra-op {rollout} during rollouts / "
                 f"{self.update_threads} during the update, "
-                f"inter-op {self.interop_threads}, "
-                f"worker packing {'on' if self.pack_workers else 'off'}")
+                f"inter-op {self.interop_threads}")
 
 
 def _int_env(name: str) -> int | None:
@@ -240,11 +215,11 @@ def build_profile(name: str | None = None, cores: int | None = None) -> Profile:
     name = name or detect_platform()
     cores = cores or usable_cores()
     if name == "mac":
-        # EXACTLY the historical settings. No phase switching, no packing.
+        # EXACTLY the historical settings. No phase switching.
         profile = Profile(
             name="mac", cores=cores,
             update_threads=min(MAC_INTRA_THREADS, cores),
-            rollout_threads=None, interop_threads=1, pack_workers=True,
+            rollout_threads=None, interop_threads=1,
         )
     elif name == "linux":
         profile = Profile(
@@ -256,7 +231,6 @@ def build_profile(name: str | None = None, cores: int | None = None) -> Profile:
             # and the spinning is what starves the physics workers.
             rollout_threads=1,
             interop_threads=1,
-            pack_workers=True,
         )
     else:  # pragma: no cover - guarded by detect_platform
         raise ValueError(f"unknown profile {name!r}")
@@ -269,7 +243,6 @@ def build_profile(name: str | None = None, cores: int | None = None) -> Profile:
             update_threads=update if update is not None else profile.update_threads,
             rollout_threads=rollout if rollout is not None else profile.rollout_threads,
             interop_threads=profile.interop_threads,
-            pack_workers=profile.pack_workers,
         )
     return profile
 
@@ -363,9 +336,8 @@ def main() -> None:  # `python -m microduck_local.machine`
     print(prof.describe())
     print(f"  platform={sys.platform} machine={platform.machine()} "
           f"os.cpu_count()={os.cpu_count()} cgroup_quota={_cgroup_quota()}")
-    for n in (16, 32, 64):
-        print(f"  {n} envs -> {n // prof.envs_per_worker(n)} worker processes "
-              f"x {prof.envs_per_worker(n)} envs")
+    packed = os.environ.get("MICRODUCK_ENVS_PER_WORKER")
+    print(f"  worker layout: {packed + ' envs per process (MICRODUCK_ENVS_PER_WORKER)' if packed else 'one process per env'}")
 
 
 if __name__ == "__main__":

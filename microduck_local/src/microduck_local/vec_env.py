@@ -63,7 +63,6 @@ import cloudpickle
 import gymnasium as gym
 import numpy as np
 
-from .machine import profile
 from .walk_env import shared_model_scope
 
 # Which backend `make_vec_env` picks when nobody says. "fork" shares the model
@@ -628,21 +627,19 @@ def make_vec_env(env_fns: list[Callable[[], gym.Env]],
         wrapped = [_SharedModelEnvFn(fn, exclusive=True) for fn in env_fns]
         # >1 packs several envs per worker process (stepped serially there):
         # fewer semaphore ops and pipes per vec-step, at the cost of longer
-        # per-worker latency and fewer worker processes to fill the cores the
-        # serial PPO update leaves idle. Those two pull opposite ways and the
-        # curve CROSSES at the point where the fleet outnumbers the cores,
-        # which is where `Profile.envs_per_worker` switches packing on — see
-        # the measured tables for both profiles in machine.py. On this
-        # 18-core mac that puts 8 and 16 envs at k=1 and 32 at k=2 (+5.5%).
-        # Safe to make a default in a way most throughput changes here are
-        # NOT: the packed layout produces a BIT-IDENTICAL obs/rew/done
-        # stream, pinned by
-        # test_envs_per_worker_batching_matches_one_per_worker, so there is
-        # no learning-quality question to A/B. $MICRODUCK_ENVS_PER_WORKER
-        # overrides in either direction; measure with `bench-envs` first.
-        per_worker = int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "0") or 0)
-        if per_worker <= 0:
-            per_worker = profile().envs_per_worker(len(env_fns))
+        # per-worker latency. Default 1 on EVERY machine. Packing to one
+        # worker per core was tried as a Linux-profile default and measured
+        # off again: four interleaved reps put it behind 1:1 at every env
+        # count (-1.7% at 8, -3.9% at 16, -2.6% at 32), and its startup
+        # advantage turned out to be the per-worker numba JIT that
+        # `_warm_jit` now removes for every layout. Still here as a manual
+        # knob for env counts far above these — measure with `bench-envs`.
+        # Whenever it IS used it needs no learning-quality A/B, for a
+        # mechanical rather than a statistical reason: the packed layout is a
+        # step-for-step BIT-IDENTICAL obs/rew/done stream, pinned by
+        # test_envs_per_worker_batching_matches_one_per_worker. If that test
+        # ever goes, the knob goes with it.
+        per_worker = int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "1") or 1)
         return ForkVecEnv(wrapped, envs_per_worker=per_worker, spaces=spaces)
 
     if name == "subproc":            # forkserver: children re-import, torch-safe

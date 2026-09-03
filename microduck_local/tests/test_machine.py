@@ -1,11 +1,12 @@
 """The per-machine profile — and above all, that a Mac still gets exactly
 what it got before `machine.py` existed.
 
-This repo is tuned, measured and advertised on Apple Silicon. Everything the
-Linux/cloud profile does (phase-aware torch threads, worker packing) is a
-change to a machine whose numbers were measured somewhere else, so the mac
-profile is pinned here term by term: same intra-op ceiling, same inter-op,
-one worker process per env, and NO callback in the training loop at all.
+This repo is tuned, measured and advertised on Apple Silicon. What the
+Linux/cloud profile does (phase-aware torch threads) is a change to a
+machine whose numbers were measured somewhere else, so the mac profile is
+pinned here term by term: same intra-op ceiling, same inter-op, and NO
+callback in the training loop at all. Neither profile touches the worker
+layout — packing was measured and rejected, and a test below keeps it out.
 """
 
 import os
@@ -91,26 +92,6 @@ def test_with_phase_callbacks_hands_a_mac_run_the_very_same_object():
     assert got[0] is cb and len(got) == 2
 
 
-def test_mac_profile_packs_workers_only_once_envs_outnumber_cores():
-    """Both profiles pack by the same `n_envs > cores` rule, because that is
-    where both machines' numbers say it starts paying. On the 18-core Mac
-    (bench-envs, real PPO, best of 3-4 repeats): 8 envs -6.0% and 16 envs
-    -6.0% packed, but 32 envs +5.5% (19,456 -> 20,536 steps/s) — and k=4 at
-    32 was -8.2%, which ceil(32/18) = 2 never reaches. See the table in
-    `Profile.envs_per_worker`.
-
-    The packed layout is a BIT-IDENTICAL obs/rew/done stream (pinned by
-    tests/test_vec_env.py), so this changes throughput only — no learning
-    number moves with it."""
-    prof = build_profile("mac", cores=18)
-    for n_envs in (4, 16, 18):
-        assert prof.envs_per_worker(n_envs) == 1, "measured SLOWER packed"
-    assert prof.envs_per_worker(32) == 2      # -> 16 workers, +5.5%
-    assert prof.envs_per_worker(36) == 2
-    # A machine with a core per env packs nothing.
-    assert build_profile("mac", cores=64).envs_per_worker(32) == 1
-
-
 # ---------------------------------------------------------- the linux profile
 
 
@@ -121,27 +102,15 @@ def test_linux_profile_gives_the_rollout_one_thread_and_the_update_all_of_them()
     assert prof.phase_threads is True
 
 
-def test_linux_profile_packs_workers_only_once_envs_outnumber_cores():
-    """Packing exists to stop the parent paying two semaphore ops per env
-    per vec-step for processes that cannot run in parallel anyway. Below
-    that point there is nothing to save."""
-    prof = build_profile("linux", cores=4)
-    assert prof.envs_per_worker(4) == 1       # one env per core already
-    assert prof.envs_per_worker(2) == 1
-    assert prof.envs_per_worker(16) == 4      # -> 4 workers
-    assert prof.envs_per_worker(32) == 8      # -> 4 workers
-    # A big cloud box has a core per env, so it packs nothing.
-    assert build_profile("linux", cores=64).envs_per_worker(32) == 1
-
-
-def test_packing_always_divides_the_fleet_into_at_most_core_count_workers():
-    for cores in (1, 2, 3, 4, 8, 12, 16):
-        prof = build_profile("linux", cores=cores)
-        for n_envs in (1, 4, 7, 16, 32, 48, 64):
-            k = prof.envs_per_worker(n_envs)
-            workers = -(-n_envs // k)
-            assert k >= 1
-            assert workers <= max(cores, 1) or n_envs <= cores
+def test_no_profile_packs_workers():
+    """Packing was measured and rejected: four interleaved reps put one
+    process per CORE behind one process per ENV at every count (-1.7% at 8
+    envs, -3.9% at 16, -2.6% at 32). No profile may quietly reintroduce it —
+    MICRODUCK_ENVS_PER_WORKER is the only way to pack now."""
+    for name in ("mac", "linux"):
+        for cores in (2, 4, 18):
+            assert not hasattr(build_profile(name, cores=cores), "envs_per_worker")
+            assert not hasattr(build_profile(name, cores=cores), "pack_workers")
 
 
 def test_linux_callback_rethreads_torch_between_phases():
@@ -247,7 +216,7 @@ def test_profile_is_detected_once_per_process(monkeypatch):
 def test_describe_names_the_numbers_a_run_is_about_to_use():
     text = build_profile("linux", cores=4).describe()
     assert "linux" in text and "4 usable cores" in text
-    assert "packing on" in text
+    assert "1 during rollouts" in text
     assert "unchanged" in build_profile("mac", cores=8).describe()
 
 
@@ -272,29 +241,29 @@ def test_configure_torch_cpu_applies_the_profile(monkeypatch):
         torch.set_num_threads(before)
 
 
-def test_vec_env_packs_workers_per_the_profile(monkeypatch):
-    """The integration point: `make_vec_env` must ask the profile, and an
-    explicit MICRODUCK_ENVS_PER_WORKER must still win over it."""
+def test_vec_env_gives_one_process_per_env_on_every_profile(monkeypatch):
+    """The integration point: no profile changes the worker layout, and
+    MICRODUCK_ENVS_PER_WORKER is still honoured when set by hand."""
     from microduck_local.train_behavior import make_env
     from microduck_local.vec_env import make_vec_env
 
     monkeypatch.delenv("MICRODUCK_ENVS_PER_WORKER", raising=False)
     fns = [make_env("one_leg", i, 3) for i in range(4)]
 
-    monkeypatch.setenv("MICRODUCK_PROFILE", "mac")
-    machine.reset_cache()
-    venv = make_vec_env(fns, backend="fork")
-    try:
-        assert venv.num_workers == 4      # one process per env, as on a Mac
-    finally:
-        venv.close()
+    for name in ("mac", "linux"):
+        monkeypatch.setenv("MICRODUCK_PROFILE", name)
+        machine.reset_cache()
+        venv = make_vec_env(fns, backend="fork")
+        try:
+            assert venv.num_workers == 4, f"{name} profile packed workers"
+        finally:
+            venv.close()
 
-    monkeypatch.setenv("MICRODUCK_PROFILE", "linux")
-    monkeypatch.setenv("MICRODUCK_ENVS_PER_WORKER", "2")
+    monkeypatch.setenv("MICRODUCK_ENVS_PER_WORKER", "2")   # the manual knob
     machine.reset_cache()
     venv = make_vec_env(fns, backend="fork")
     try:
-        assert venv.num_workers == 2      # the explicit override
+        assert venv.num_workers == 2
     finally:
         venv.close()
 
