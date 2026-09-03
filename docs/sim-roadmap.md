@@ -56,17 +56,30 @@ the tree, and Track 12 has its first working loop:
   searching duck's ball sits 90–120° off its nose, so the gaze cannot
   reach it; the page draws the prediction anyway). Then a bug: the ToF
   clearance placed hits without the head's rotation, so a dipped head
-  read the floor as a wall 0.35 m ahead — fixed, the 1v1 baseline reads
-  2.38 / 7.4 / 0.38. On that geometry a 120° lens measured 2.75 goals,
-  17.1 kicks, 0.62 falls (a wide camera is worth the money); the head
-  unlocked to its trained ±1.4 rad with an aimed look after the kick, a
-  gaze on the track and a sweeping search all measured off (2.25 / 1.88
-  / 1.88 goals), as did the ToF seeing the ball at the feet (1.62 / 8.1
-  / 0.75 — a blob at the feet is as often the other duck's foot); and a
-  bump sense (feet touching feet) that stands the duck instead of
-  turning halved the crowd's falls — 3v3 5.00 → 1.75 a run, 2v2 4.00 →
-  2.25 — at a cost in goals, so rosters with teammates get it and a lone
-  attacker does not) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
+  read the floor as a wall 0.35 m ahead — fixed; a second one followed,
+  because the ToF is IN THE HEAD and calling the middle sensor columns
+  "ahead" only holds while the head looks along the walking line (yawed
+  1.2 rad, they reported a wall 0.52 m ahead that was 69° off the nose
+  and the brain stopped for it), so clearance is selected by bearing in
+  the body frame now and a turned head reads honestly blind. **The
+  round's real lesson is about the benchmark itself:** 8 seeds × 300 s
+  of 1v1 holds ~50–130 kicks but only 3–8 FALLS and ~20 goals, so falls
+  barely separate — the same baseline measured twice gave 3 and 6, a
+  chance split (p ≈ 0.5). Claims carry event counts now, and several
+  earlier rows that did not clear them were demoted, the head variants
+  among them. What survives: a wider lens buys far more contact with the
+  ball (kicks 51 → 94 → 105 → 130 at 62/90/120/150°, p < 0.001, paying
+  an honest pixel-limited size gate that costs 120° a duck at 3.9 m —
+  found 73 times in 400 against 260), though the goals do not yet
+  follow; a goal-cone kick gate turns kicks into pushes and gains
+  nothing; the ToF seeing the ball at the feet ships off (a blob at the
+  feet is as often the other duck's foot); and a bump sense (feet
+  touching feet) halves the crowd's falls — 3v3 5.00 → 1.75 a run, 2v2
+  4.00 → 2.25 — but its first form cost 1v1 both goals and falls, and a
+  trace of 838 bumps said why: it cancelled the ESCAPE turn (70% of its
+  firing in `blocked`, 6 of 8 falls a stand leaning on the other duck)
+  and fed itself (standing on a body keeps touching it: 44 → 105 bumps a
+  run, one freeze of 74 s). It is edge-triggered and state-scoped now) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
   2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
   after the traced fix (supporters turning in place against a teammate
   or the boards: the support spot stays inside the pitch and a supporter
