@@ -829,7 +829,7 @@ export default function SimViewer() {
   const [lessonOpen, setLessonOpen] = useState(() => loadJSON("simLessonOpen", true));
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
-  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: { left: number; right: number; lastGoal: "left" | "right" | null; kickoff: number; kicked?: number; bumped?: number } | null }>({
+  const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: SimFrame["soccer"] }>({
     rtf: 0,
     perf: "",
     soccer: null,
@@ -1370,6 +1370,30 @@ export default function SimViewer() {
           <div style={{ color: "#9aa5b1", fontSize: 11 }} title="a goal within 4 s of a kick is the kick's; the rest were walked into">
             {status.soccer.kicked ?? 0} kicked · {status.soccer.bumped ?? 0} walked in
           </div>
+          {status.soccer.possession && (
+            <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #2b313b", display: "grid", gridTemplateColumns: "auto 1fr 1fr", gap: "2px 8px", fontSize: 11 }}>
+              <span style={{ color: "#5f6b78" }} title="goals are ~2.5 a run and resolve almost nothing; these are what the benchmark judges by">
+                per min
+              </span>
+              <span style={{ color: "#9aa5b1" }}>left</span>
+              <span style={{ color: "#9aa5b1" }}>right</span>
+              <span style={{ color: "#5f6b78" }} title="seconds a minute one of ours is nearest the ball inside 0.25 m — the cheap screen (9 seeds to see a 25% change)">
+                possession
+              </span>
+              <span style={{ color: "#43c2b8" }}>{(status.soccer.possession.left ?? 0).toFixed(1)}s</span>
+              <span style={{ color: "#43c2b8" }}>{(status.soccer.possession.right ?? 0).toFixed(1)}s</span>
+              <span style={{ color: "#5f6b78" }} title="metres a minute the ball is carried toward the goal this team attacks — the discriminator (43 seeds), but inflated by churn: read it with signed progress">
+                advance
+              </span>
+              <span style={{ color: "#ff8c00" }}>{(status.soccer.ballAdvance?.left ?? 0).toFixed(2)}</span>
+              <span style={{ color: "#ff8c00" }}>{(status.soccer.ballAdvance?.right ?? 0).toFixed(2)}</span>
+              <span style={{ color: "#5f6b78" }} title="the same, signed — pushing the ball back toward your own goal is charged for. Churn cannot inflate this one.">
+                signed
+              </span>
+              <span style={{ color: (status.soccer.ballProgress?.left ?? 0) < 0 ? "#d9534f" : "#e9edf1" }}>{(status.soccer.ballProgress?.left ?? 0).toFixed(2)}</span>
+              <span style={{ color: (status.soccer.ballProgress?.right ?? 0) < 0 ? "#d9534f" : "#e9edf1" }}>{(status.soccer.ballProgress?.right ?? 0).toFixed(2)}</span>
+            </div>
+          )}
           {status.soccer.kickoff > 0 ? (
             <div style={{ color: "#ffd166" }}>GOAL {status.soccer.lastGoal} · kickoff in {status.soccer.kickoff.toFixed(1)} s</div>
           ) : (

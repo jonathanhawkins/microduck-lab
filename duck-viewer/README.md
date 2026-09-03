@@ -152,6 +152,17 @@ page's picker). One room, many ducks, and what each duck senses:
   at the depth the sensor *reports*, colored near→far amber→teal, plus the
   four corner rays from the aperture. Select a duck (click, or `1`–`9`) to
   see only its fan.
+- **Pitch panel** (on a soccer scenario): the score, the kickoff countdown,
+  goals split into kicked and walked in, and — under a rule — the three
+  per-team rates the benchmark actually judges by. Goals are about 2.5 a
+  run and cannot resolve a change (146 seeds for a 25% shift), so watching
+  them tells you almost nothing: `possession` (seconds a minute one of ours
+  is nearest the ball inside 0.25 m) is the cheap screen at 9 seeds,
+  `advance` (metres a minute the ball is carried toward the goal that team
+  attacks) is the discriminator at 43, and `signed` is the same thing with
+  backward motion charged for — the one churn cannot inflate, shown in red
+  when a team is losing ground. They come off the same `PitchMetrics` the
+  battery uses, so a number on screen is the battery's number.
 - **Chase overlay** (under `T` too, on a pitch): what each chase brain
   thinks about the ball, drawn on the floor in its own odometry frame like
   the map — an orange line from the ball track to where the brain predicts

@@ -220,3 +220,26 @@ def test_tether_latency_delays_intents_and_maps_stream(app):
             for _ in range(4):
                 frame = ws.receive_json()
             assert frame["tetherMs"] == 0.0
+
+
+def test_a_pitch_streams_the_metrics_the_benchmark_judges_by():
+    """Goals are ~2.5 a run and resolve nothing, so the page shows what
+    eval-pitch actually judges by — the same PitchMetrics class, ticked on
+    the server's own step, per team and per minute. A world with no goals
+    (the playroom) carries none of it."""
+    from microduck_local.world_server import WorldState
+    st = WorldState(None)
+    st.preload("pitch")
+    assert st.metrics is not None
+    for _ in range(20):
+        st.world.step()
+        st.metrics.tick()
+    import numpy as np
+    soc = st.frame(np.zeros(3), "auto")["soccer"]
+    assert soc is not None and set(soc) >= {"left", "right", "kicked", "bumped",
+                                            "ballAdvance", "ballProgress", "possession"}
+    assert set(soc["possession"]) == {"left", "right"}          # per team, as the battery reports it
+    assert all(isinstance(v, (int, float)) for v in soc["ballAdvance"].values())
+    tidy = WorldState(None)
+    tidy.preload("playroom")
+    assert tidy.metrics is None and tidy.frame(np.zeros(3), "auto")["soccer"] is None

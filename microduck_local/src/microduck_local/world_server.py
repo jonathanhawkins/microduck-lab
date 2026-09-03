@@ -185,6 +185,7 @@ class WorldState:
         self.load_infer = load_infer
         self.world: World | None = None
         self.scenario: Scenario | None = None
+        self.metrics = None                  # PitchMetrics on a pitch, else None
         self.clients: set[WebSocket] = set()
         self.override: np.ndarray | None = None
         self.override_until = 0.0
@@ -266,10 +267,23 @@ class WorldState:
         spec = replace(sd, brain=kind)
         return REGISTRY.make(kind, **brain_kwargs(spec, world, self.teams))
 
+    def new_metrics(self):
+        """The pitch's continuous metrics for the world just built, or None.
+        The page shows what the benchmark judges by (world/metrics.py):
+        goals are ~2.5 a run and cannot resolve anything, so a viewer
+        watching for a difference needs the same instruments eval-pitch
+        uses. Same class, so a number on screen IS the battery's number."""
+        w, sc = self.world, self.scenario
+        if w is None or sc is None or w.goal_width <= 0 or not sc.balls:
+            return None
+        from .world.metrics import PitchMetrics
+        return PitchMetrics(w, {d.id: (d.team or d.id) for d in sc.ducks})
+
     def preload(self, name: str) -> None:
         """Build a world before serving (the CLI's --world). Blocking."""
         sc = resolve_scenario(name)
         self.world, self.scenario = self.build(sc), sc
+        self.metrics = self.new_metrics()
         print(f"[sim] world {sc.name}: {len(sc.ducks)} ducks", flush=True)
 
     def payload(self) -> dict:
@@ -381,7 +395,8 @@ class WorldState:
             "ducks": ducks,
             "objects": (w.objects_payload() + w.persons_payload()) if w else [],
             "tidy": w.tidy_score() if (w and w.pickables) else None,
-            "soccer": w.soccer_score() if w else None,
+            "soccer": ({**w.soccer_score(), **(self.metrics.row() if self.metrics else {})}
+                       if (w and w.soccer_score()) else None),
             "maps": ({k: g.payload() for k, g in self.maps.items()} if (w and self.send_maps) else None),
             "tetherMs": self.tether_ms,
             "possessed": next((p.id for p in w.persons.values() if p.possessed), None) if w else None,
@@ -536,6 +551,7 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
         finally:
             st.loading = False
         st.world, st.scenario = world, sc
+        st.metrics = st.new_metrics()
         st.script_t = 0.0
         st.events.append(f"loaded {sc.name}: {len(sc.ducks)} ducks")
         return st.payload()
@@ -731,6 +747,8 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
             if w is not None:
                 st.drive(cmd, mode)
                 w.step()
+                if st.metrics is not None:
+                    st.metrics.tick()
                 st.after_step()
                 window_sim += 1.0 / TICK_HZ
                 for did, grid in st.maps.items():

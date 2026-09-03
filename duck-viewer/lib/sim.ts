@@ -174,7 +174,13 @@ export interface SimFrame {
   possessed: string | null;
   tidy: TidyScore | null;
   /** Soccer score on a pitch scenario (goals per short wall, ball position), else null. */
-  soccer: { left: number; right: number; ball: [number, number]; lastGoal: "left" | "right" | null; kickoff: number; kicked?: number; bumped?: number } | null;
+  /** Soccer on a pitch scenario. `left`/`right` are goal MOUTHS, not team
+   *  scores — the left team attacks +x and its goals land in `right`. The
+   *  per-team rates are what the benchmark actually judges by: goals are
+   *  ~2.5 a run and cannot resolve a change (146 seeds for a 25% shift),
+   *  while possession takes 9 and ballAdvance 43. */
+  soccer: ({ left: number; right: number; ball: [number, number]; lastGoal: "left" | "right" | null; kickoff: number; kicked?: number; bumped?: number }
+    & Partial<Record<"ballAdvance" | "ballProgress" | "possession" | "possessionWide", Record<string, number>>>) | null;
   /** Brain round-trip latency applied to every intent (roadmap 12.10), ms; 0 = onboard. */
   tetherMs?: number;
   /** Occupancy maps per duck, in each duck's ODOMETRY frame (brain-layer output, ~2 Hz; null on the other frames). */
