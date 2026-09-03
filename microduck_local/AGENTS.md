@@ -143,6 +143,45 @@ that were **rejected for hurting learning**. Follow that precedent: measure
 with `bench-envs` (real PPO, not raw stepping), and A/B learning quality
 before shipping any throughput win as a default.
 
+**Mac is the default; other machines get a profile, not a rewrite.**
+`machine.py` picks a per-machine thread and worker-packing policy, and the
+`mac` profile reproduces the historical settings term for term —
+`tests/test_machine.py` pins that, including that a Mac run gets *no* extra
+callback in its training loop. When you find that a tuning constant here was
+measured on an M5 Max and is wrong elsewhere (they mostly were), add it to a
+profile rather than changing the shared default. Two rules bound what a
+profile may contain:
+
+- **Only quality-neutral knobs.** Thread counts do not enter the PPO math,
+  and worker packing is pinned step-for-step by `test_vec_env.py`. The env
+  count is the line: it sets the PPO batch size and therefore the learning
+  dynamics, so `--envs` stays 32 on every machine and is never profiled.
+  Verification discipline #4 applies to a profile like anything else.
+- **Measure the profile you ship, on the machine you ship it for.**
+  `uv run bench-envs --compare-profiles` runs both arms interleaved with the
+  same repeats, which is the only form of that comparison worth reading
+  (`--profile mac` on a Linux box reproduces the old behavior exactly).
+
+**A cloud VM is not a stable ruler.** On the box these profiles were measured,
+the *identical* script and configuration ran 13.1 s in one window and 19.5 s
+an hour later — a 49% drift with nothing changed, from noisy neighbours and
+CPU-credit throttling. That is larger than every optimization in this file, so
+a number compared against one taken earlier is worthless, and this bit almost
+shipped a false result here: a configuration re-measured in a later window
+looked like a regression in code that was provably not running (the callback
+was verified firing, and disabling the change reproduced the same "slow"
+number). Rules that follow, on any shared or virtualized machine:
+
+- **Interleave the arms.** Every comparison runs its arms back to back inside
+  one window and repeats the whole cycle, which is what `bench-envs
+  --repeats N` and `--compare-profiles` already do. Never quote arm A from
+  this hour against arm B from the last one.
+- **Re-measure the baseline whenever you re-measure anything.** A surprising
+  result is a drifted machine until the baseline says otherwise.
+- **Prefer ratios within a window to absolute steps/s across windows.** The
+  absolute numbers in `README.md` date a specific machine on a specific day;
+  the ORDERING of the arms is the transferable part.
+
 ## Sim2real honesty
 
 This harness is for prototyping with minutes-long feedback loops. Even under

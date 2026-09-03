@@ -150,6 +150,104 @@ uv run bench-envs --envs 8,16,24 --repeats 3   # narrower, more repeats
 uv run bench-envs --compare-vec --compare-threads
 ```
 
+## Cloud and Linux training (`machine.py`)
+
+Every number above was measured on an 18-core M5 Max, and **that stays the
+default** — this harness is written for a Mac and advertised as one. But two
+of those tunings are wrong on a small Linux or cloud box, badly enough to
+lose a third of the machine, so `machine.py` detects which machine it is on
+and picks a profile. `uv run machine-facts` prints what yours resolved to.
+
+**What goes wrong on a 4-core cloud box.** The trainer, not the physics
+workers, eats the machine. torch's OpenMP pool spin-waits between the tiny
+batch-N policy forwards that make up a rollout, and those spinning threads
+take the cores the workers need: measured at 4 envs, the trainer process sat
+at **311% CPU while each worker got 18%**. The cores looked 90% busy and were
+mostly spinning. An M5 Max has enough cores to absorb that, which is exactly
+why `--pin-threads` measured a 21-24% *regression* there.
+
+The fix is not to pin threads — that gives the update one core, which is what
+cost 21% on the Mac. It is to give each PPO phase the threads it actually
+wants. Measured per phase at 32 envs on this box: **rollout 22.8 s, update
+2.9 s**, so the rollout is ~89% of wall time and is the phase the threads
+must not disturb.
+
+All four rows below were measured **back to back in one window** on a 4-vCPU
+Xeon container, 40k timed steps each, because this box's speed drifts far too
+much to compare across windows (see the warning after the table):
+
+| 32 envs, `behavior=run` | steps/s | CPU busy |
+|---|---:|---:|
+| mac profile (the historical settings) | 2,231 | 90% |
+| `OMP_WAIT_POLICY=PASSIVE` (no code change) | 2,678 | 71% |
+| **+ phase-aware threads: 1 rollout / N update** | **2,915** | 77% |
+| **+ worker packing (4 processes × 8 envs)** | **3,129** | 74% |
+
+> **Do not compare these to a number you measure later.** The same script and
+> configuration on this same container ran 13.1 s in one window and 19.5 s a
+> few hours later — a 49% drift from noisy neighbours and CPU-credit
+> throttling, larger than every optimization in this file. Only the ordering
+> within a window transfers; re-measure both arms together
+> (`--compare-profiles`) rather than trusting any absolute figure here.
+
+The `linux` profile is those last two, and it is the default off Darwin:
+
+- **Phase-aware torch threads.** One intra-op thread while collecting
+  rollouts, every usable core for the update. Implemented as an SB3
+  *callback* on `on_rollout_start` / `on_rollout_end` — the two hooks that
+  bracket the phase — so `train-walk`, `train-behavior` and `train-brain` all
+  get it without a vendored train loop. On the mac profile the callback list
+  is **empty**, not a no-op.
+- **Worker packing.** Once the fleet outnumbers the cores, extra processes
+  cannot run in parallel but still cost the parent two semaphore ops each per
+  vec-step, so the profile packs to one worker per core (32 envs → 4 × 8).
+  Invisible to the caller, pinned step-for-step by `test_vec_env.py`.
+- **Cores from the container, not the host.** `os.cpu_count()` reports the
+  *host's* cores inside Docker or Kubernetes, so a 4-CPU pod on a 64-core node
+  would start 64 spinning threads. `usable_cores()` takes the smallest of
+  `cpu_count`, CPU affinity and the cgroup quota.
+- **numba warmed once, in the parent.** The BAM kernels JIT on first call:
+  **528 ms** against a 0.95 ms steady step, and `cache=True` does not avoid it
+  across processes. `vec_env._warm_jit` pays it once before forking so the
+  workers inherit compiled code — the same trade as the shared `mjModel`,
+  for code. It restores every model array a warm-up step touches, so children
+  still inherit exactly the model the probe's construction left.
+
+`train-brain` also never called `configure_torch_cpu` at all, so it ran with
+torch's defaults (intra-op *and* inter-op at the core count). It does now.
+
+**What is deliberately NOT in a profile: the env count.** `--envs` sets the
+PPO batch size and therefore the learning dynamics, and this repo's rule is
+that throughput is not learning speed. It stays 32 everywhere. Both profile
+knobs are quality-neutral by construction — thread counts do not enter the
+math, and packing is a step-for-step parity test.
+
+```bash
+uv run machine-facts                           # cores + the profile they imply
+uv run bench-envs --compare-profiles           # both arms, interleaved repeats
+MICRODUCK_PROFILE=mac uv run train-behavior run   # force the historical settings
+MICRODUCK_ROLLOUT_THREADS=2 MICRODUCK_UPDATE_THREADS=6 uv run bench-envs  # try your own
+```
+
+**Sizing a cloud box.** A single trainer's ceiling is the serial parent loop,
+not the cores — the Mac numbers saturate near 27k steps/s. Past ~16 cores the
+way to use the machine is *several independent trainers* (`taskset` each to
+its own core group, each with its own `MICRODUCK_RUNS_DIR`), which is also
+what the seed-matched A/Bs this playbook demands need anyway. Per-core clock
+matters more than core count: one env steps in 0.34 ms here against 0.135 ms
+on the M5 Max, so a 4-vCPU box will not match the laptop whatever the
+threading does.
+
+Two things measured and **not** adopted: `OMP_WAIT_POLICY=PASSIVE` on top of
+phase-aware threads is a small loss (the update's threads then sleep between
+minibatches — update 3.3 s → 5.1 s at 16 envs), and pinning OpenBLAS to one
+thread is neutral, because the workers never spawn BLAS pools on 61-dim ops.
+Two known gaps: the lock file resolves CUDA torch wheels on Linux (a 7.2 GB
+venv for a CPU trainer — CI installs from the CPU index first, and a
+`[tool.uv.sources]` entry would fix `uv sync` too), and `--update-device`'s
+`auto` only knows about MPS, so a CUDA cloud box needs an explicit
+`--update-device cuda` (the code path is device-generic but unmeasured).
+
 ### The 2026-08-31 speed pass (measured, in order applied)
 
 - **Semaphore IPC in `ForkVecEnv`** (`vec_env.py`): step traffic had cost two

@@ -638,7 +638,15 @@ class Duck:
 
 def _onnx_infer(path: Path):
     import onnxruntime as ort
-    sess = ort.InferenceSession(str(path))
+    # One thread per session, like brain_env's walker. The lab steps its whole
+    # roster serially in one frame loop, so a session's own thread pool can
+    # never overlap with anything — but ORT's DEFAULT is a thread per core, so
+    # an 8-duck roster meant 8 pools of N spinning threads in this one process,
+    # competing with the trainer subprocess a teach run just launched.
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    sess = ort.InferenceSession(str(path), sess_options=opts)
     in_name = sess.get_inputs()[0].name
 
     def infer(obs: np.ndarray) -> np.ndarray:

@@ -33,6 +33,8 @@ from .brain.brain_env import (
     FollowTask,
 )
 from .brain.learned import brains_dir
+from .machine import profile, with_phase_callbacks
+from .ppo_hparams import configure_torch_cpu
 
 
 def make_env_fn(seed: int, fixed_preset: str | None, variety: bool = False, polite: float = FollowTask.polite):
@@ -104,6 +106,13 @@ def main() -> None:
     from stable_baselines3.common.callbacks import BaseCallback
     from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
 
+    # This trainer never called it, so it ran on torch's defaults: intra-op AND
+    # inter-op both at the machine's core count, every one of those threads
+    # spinning through rollouts made of 128-step brain decisions. Same policy
+    # as the other two trainers now (machine.py).
+    configure_torch_cpu(torch)
+    print(profile().describe())
+
     out = brains_dir() / args.run_name
     out.mkdir(parents=True, exist_ok=True)
     fns = [make_env_fn(args.seed * 1000 + i, args.fixed_preset, args.variety, args.polite) for i in range(args.envs)]
@@ -146,7 +155,8 @@ def main() -> None:
         "envs": args.envs, "steps": args.steps, "seed": args.seed,
         "fixed_preset": args.fixed_preset, "variety": args.variety, "polite": args.polite}, indent=2))
     try:
-        model.learn(total_timesteps=args.steps, callback=Progress())
+        model.learn(total_timesteps=args.steps,
+                    callback=with_phase_callbacks(Progress(), BaseCallback))
     finally:
         model.save(str(out / "model"))
         venv.save(str(out / "vecnormalize.pkl"))
