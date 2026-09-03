@@ -549,7 +549,7 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 3.4 | **Go-to under odometry drift** | Reach a target given only drifting odometry; lesson on why closed-loop sensing beats dead reckoning. | S | ★★★ |
 | 3.5 | **Hierarchical brain** | Add a discrete head to the brain action: which reflex policy to run (walk / stand / kick / ground-pick). Needed for soccer kicking and for "sit when petted". | M | ★★★★ |
 | 3.6 | **Brain teach panel** | Same UX as tricks: plain-English recipe cards, sliders, live snapshots hot-loaded on the trainee duck in `/sim`. Reuse `TeachPanel` with a brain behavior family. | M | ★★★★ |
-| 3.7 | **Head-aware locomotion (reflex side)** | A walk policy fine-tuned so head-pose commands are honoured while walking (the shipped walker only sees keep-alive ranges). Trained on the existing `train-walk` path with wider `HEAD_CMD_RANGES`, still inside the contract. Ports to `microduck_rl` as an mjlab cfg change. | M | ★★★★ |
+| 3.7 | **A faster body yaw (reflex side)** | Was "head-aware locomotion": a walk policy fine-tuned so head-pose commands are honoured while walking, on the premise that the shipped walker only sees keep-alive ranges. **Half of it is already done and the other half was aimed at the wrong joint.** Measured (`walker-facts`): the shipped walker tracks a head-yaw command to 1.42 rad WHILE WALKING at 7.5 rad/s, for a 12% forward-speed cost and no falls — `HEAD_CMD_RANGES`' ±0.07 is the curriculum's first stage, not the policy's range, and upstream runs `head_pose_range` out to ±1.40 with head-pose tracking as a primary reward. There is nothing to train there. What IS a wall is the BODY yaw: ~0.65 rad/s in a real run, ~0.6–0.8 at the ceiling, with `ANG_VEL_Z_RANGE`'s ±1.0 already delivering it — at full command there is nothing left to ask for. A 1v1 run spends **47% of itself rotating on the spot** (measured over 1200 duck-seconds, sweeping 371 rad at 0.655 rad/s; a 3v3 run is worse). Holding the yaw demand fixed, a walker that turned at 1.5 rad/s would free **~27% of every run** — larger than any brain-level change measured in this repo. So: retrain for TURN RATE, and widen the twist command range with it. | M | ★★★★★ |
 
 ### Track 4: Multi-duck and soccer
 
@@ -917,9 +917,15 @@ intents:
   detections (a `media.frame` call vs publishing from `mediad`). The bridge
   mirrors the sim's `{class, bearing, elevation, bbox_w, conf}` and adapts
   when upstream lands one.
-- **Head-pose commands while walking.** The shipped walker was trained with
-  keep-alive head ranges only; a brain that steers the gaze while walking
-  will need 3.7 (or the upstream head-pose curricula) to be honoured.
+- ~~**Head-pose commands while walking.**~~ **This was wrong and is struck
+  out.** The shipped walker was NOT trained with keep-alive head ranges only
+  — `HEAD_CMD_RANGES`' ±0.07 is the curriculum's first stage, and upstream
+  runs `head_pose_range` out to ±1.40 with head-pose tracking as a primary
+  reward. Measured on the shipped policy: it holds a commanded head yaw at
+  1.42 rad *while walking at 0.3*, slewing at 7.5 rad/s, for a 12%
+  forward-speed cost and no falls. A brain that steers the gaze while
+  walking needs nothing trained; what it needs is a reason, and the one
+  tried so far (a searching sweep) made the body turn MORE on 5 of 5 seeds.
 - **Multi-duck on hardware** is BLE + ToF only; soccer on real ducks is a
   long way off and the page should say so.
 - **`MjSpec` composition of the upstream MJCF.** Attaching several copies of

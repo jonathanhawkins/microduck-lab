@@ -1131,6 +1131,40 @@ helping, not on evidence that they hurt. All three were re-screened on
 re-screened", below); the sweeping head is the false positive in that
 table.
 
+Worth saying plainly, because the cap being raised to 1.4 reads like a
+capability that shipped: **with all three off, the shipped brain never
+yaws its head at all.** Every path that sets `look_at` is behind one of
+them, so `head_yaw_max` is inert, and an instrumented 1v1 run confirms
+it — `max |head yaw| commanded 0.000` over 1200 duck-seconds. The only
+head motion shipping is the pitch that looks down at the ball.
+
+And the reason none of them helped is now measured rather than guessed.
+The walker's head is not the bottleneck: it tracks a yaw command to
+1.42 rad *while walking*, at 7.5 rad/s — 11× the body's yaw rate — for a
+12% forward-speed cost and no falls, which turns a 62° camera into a
+210° gaze cone for free. Handing the brain that cone does not buy back
+one second of body rotation: with `search_sweep` on, the body turned
+**more**, on 5 of 5 paired seeds (+8.6% of the in-place yaw, +9.2% of
+the total, n ≈ 150,000 ticks an arm). It finds the ball sooner and then
+still has to turn the body to it. **Finding the ball was never the
+bottleneck; pointing the body at it is** — see the next paragraph.
+
+**Where the run actually goes: 47% of it is the robot spinning on the
+spot.** Instrumenting a 1v1 run (1200 duck-seconds, commanded twist and
+achieved body yaw every tick) says the chase brain spends 47.1% of it
+turning in place and another 26.6% steering while walking — sweeping
+371 rad, twenty-odd full revolutions a duck a run, at 0.655 rad/s. That
+0.655 is the walker's ceiling and `ANG_VEL_Z_RANGE`'s ±1.0 is already
+asking for all of it. Holding the yaw demand fixed, a walker that turned
+at 1.0 rad/s would free 16% of every run, and one at 1.5 rad/s would free
+**27%** — bigger than any brain-level change measured in this repo, and
+the reason roadmap 3.7 was rewritten from "head-aware locomotion" (done,
+by upstream, already) to "a faster body yaw" (not done, and the ceiling).
+
+This is a claim about time, not about falls. Turning beside a *static*
+body fell 0 times in 98 trials down to 8 cm of separation; the falls need
+a duck that is *moving* into you. Do not sell a faster turn on falls.
+
 **Clearance by bearing, not by sensor column.** The ToF is *in the
 head*, so calling the middle columns "ahead" only holds while the head
 looks along the walking line. Yawed 1.2 rad at boards 0.40 m away, those
