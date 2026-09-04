@@ -469,11 +469,52 @@ behavior survives contact with reality.
       hold 7.24 s aim streaks at 98-99% in frame, one falls at 1.26 s, one
       holds the ball 24% of the time. So the skill is there and something is
       destabilising it.
-      → **decide on:** re-express the centring stds and the handoff gate in
-      ANGLE (degrees) rather than normalized bearing, so the camera cannot
-      silently rescale the reward, then retrain and compare. If that recovers
-      it, the tolerance rescale was the cause and the fix belongs in the
-      recipe permanently.
+      → **done, and the diagnosis was right about the AIM and incomplete about
+      the FALLS.** The tolerances are now in degrees (`_BALL_AIM_DEG` 7,
+      `_BALL_EYES_TIGHT_DEG` 7, `_BALL_EYES_WIDE_DEG` 16, chosen to reproduce
+      what the 48x62 placeholder happened to mean), the battery's `centred`
+      column is measured the same way, and the recipe retrained as
+      `teach-find_ball-72af49`. Three eval seeds, real-FOV env,
+      `--events 0.33`, all three brains scored with the new angular metric:
+
+      | | old brain (48x62) | FOV retrain (normalized) | **angular tolerances** |
+      |---|---|---|---|
+      | in frame | 75 / 66 / 64% | 58 / 63 / 58% | **86 / 79 / 79%** |
+      | centred | 56 / 54 / 54% | 45 / 49 / 45% | **74 / 69 / 70%** |
+      | worst t_first | 6.9 / 7.6 / 7.9 s | 7.1 / 5.7 / 4.7 s | **1.1 / 4.6 / 1.7 s** |
+      | found | 98 / 100 / 97% | 88 / 93 / 85% | 98 / 92 / 92% |
+      | **falls** | **5 / 1 / 2** | 12 / 9 / 14 | 5 / 8 / 11 |
+
+      The aim recovered and then some — best of all three on in-frame, centred
+      and worst-case first sight, by a wide margin. **The falls did not.** They
+      improved on the FOV retrain (12/9/14 -> 5/8/11) but remain well above
+      the old brain's 5/1/2, so the tolerance rescale was *a* cause of the
+      regression and not the only one.
+
+      **Keep the angular tolerances regardless of the falls.** They fix a real
+      defect that has nothing to do with any policy: with tolerances in
+      normalized bearing, changing the camera silently changes what "centred"
+      means, what the reward pays, and what the kick handoff accepts — on
+      hardware as well as in sim. A recipe whose meaning moves when a lens
+      changes is wrong even when it happens to score well.
+
+- [ ] **The remaining falls are an over-aggressive belief-driven turn, and
+      that is a stability problem, not an aiming one.** Rendered
+      (`/tmp/rr-ang`), 5 of 6 episodes are excellent — in frame 88-99%,
+      centred 74-98%, aim streaks to 7.26 s. The one fall is legible and is
+      the same shape as the other arms' back-start falls: from a ball at
+      p+173° the duck turns ~57° in 0.7 s while `trunk_z` sinks 0.127 ->
+      0.066, tilt climbs 0° -> 41°, and it goes single-footed at 0.76 s. It
+      never sees the ball at all, so this is purely the belief-driven turn,
+      executed as **a one-footed leaning pivot instead of steps**.
+      → **decide on:** back-bucket falls at or below the old brain's ~2/60 at
+      `--events 0.33`, without losing the in-frame/centred gain above.
+      Candidates, cheapest first, and **not by adding a fourth term** (this
+      file's own rule — a recipe that needs a new term to survive its last one
+      is mispriced): raise `step_dont_skid`, which already exists to price
+      stepping over skidding and is exactly the behaviour being violated;
+      then `stay_upright`; only then consider capping the turn rate in the
+      world rather than the pay.
 
       **Left in the tree, deliberately inconsistent:** the knobs are the real
       camera's, and `policies/find_ball/policy.onnx` is still the brain

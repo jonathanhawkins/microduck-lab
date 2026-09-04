@@ -13,6 +13,10 @@ Two tables come out, because the first one cannot see the failure this
 behavior actually has:
 
 FINDING — time to first sight, share of steps in frame and centred, falls.
+`centred` is measured in DEGREES off the optical axis (the behavior's own
+`_BALL_AIM_DEG`), not in normalized bearing — a normalized tolerance means
+different angles on different cameras, and this battery is the thing that
+compares them.
 
 AIMING — the numbers that separate a policy that aims its BODY from one that
 just cranks its neck. `find_ball` exists to hand a ball-blind kick a
@@ -90,7 +94,7 @@ def run_battery(onnx_path: str, episodes: int, seconds: float, seed: int,
                 seen_steps += 1
                 if first is None:
                     first = steps * C.CTRL_DT
-                if abs(env._ball_bx) < 0.25 and abs(env._ball_by) < 0.25:
+                if _ball_centred(env):
                     centred += 1
                     # Head yaw is only meaningful as an AIM measure while the
                     # ball is centred: mid-sweep the head is supposed to be
@@ -113,6 +117,16 @@ def run_battery(onnx_path: str, episodes: int, seconds: float, seed: int,
                                     if hy_centred else None),
                      "handoff_t": handoff_t})
     return {"rows": rows, "seconds": seconds, "events": events}
+
+
+def _ball_centred(env) -> bool:
+    """Centred, in DEGREES off the optical axis, the same tolerance the
+    behavior's reward and handoff gate use. Measured in normalized bearing it
+    would mean different things on different cameras, and this battery is the
+    thing that compares them."""
+    from .behaviors import _BALL_AIM_DEG, _ball_off_axis_deg2
+
+    return _ball_off_axis_deg2(env) < _BALL_AIM_DEG ** 2
 
 
 def _buckets(rows: list[dict]):

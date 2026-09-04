@@ -1566,8 +1566,11 @@ def test_find_ball_body_aimed_pays_the_body_not_the_neck():
     _ball_sense(env, force=True)
     assert env._ball_seen and abs(env._ball_bx) < 0.25
 
+    # ~0.70: a floor ball at 1.2 m sits ~4 deg BELOW a level gaze (the camera
+    # is above it), which is geometry, not bad aiming — the tight layer is
+    # 7 deg, so a perfectly squared-up duck still scores a little under 1.
     straight = _ball_body_aimed(env)
-    assert straight > 0.7, straight
+    assert straight > 0.65, straight
 
     # Same centred detector report, head cranked to where the export sat
     # (21 deg = 0.37 rad): the pay has to collapse, or it is another term

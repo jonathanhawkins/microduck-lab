@@ -150,9 +150,23 @@ _BALL_NO_PRIOR_CONF = 0.3
 # precondition ball_kick_* was trained under (it is ball-blind and expects to
 # be aimed). Held for half a second so a sweep passing across the ball does
 # not trip it.
-_BALL_AIM_BEARING = 0.25      # |bx|, |by| — centred in the detector's frame
+# In DEGREES off the optical axis, not in normalized-bearing units. The
+# detector's bx/by are divided by the half-FOV, so a tolerance expressed in
+# them silently rescales with the camera: swapping the 48x62 placeholder for
+# the real 60x116 lens moved "centred" from +-7.8 deg to +-14.5 deg vertically
+# with no reward edited, and moved this gate with it (docs/roadmap.md section
+# 2). Degrees are the units the kick actually cares about. The daemon can
+# still run this test — it knows its own FOV, which it needs anyway to produce
+# a normalized bearing at all.
+_BALL_AIM_DEG = 7.0           # ball this many degrees off the axis, or closer
 _BALL_AIM_HEAD_YAW = 0.25     # rad (~14 deg) — head aligned with the body
 _BALL_AIM_STEPS = 25          # control steps (0.5 s at 50 Hz)
+# Centring pay, same units: a wide pull and a tight polish (`_ball_eyes_on`).
+# Chosen to reproduce what the 48x62 placeholder happened to mean, which is
+# what the working brains trained under: its 0.25/0.6 normalized stds worked
+# out to 6.0/14.4 deg across the frame and 7.8/18.6 deg up it.
+_BALL_EYES_TIGHT_DEG = 7.0
+_BALL_EYES_WIDE_DEG = 16.0
 # Resolved from the contract so a joint reordering cannot silently point this
 # at the wrong servo (the reward stack looks joints up by name for the same
 # reason). head_yaw's DEFAULT_POSE entry is 0, so raw angle == relative here.
@@ -396,7 +410,11 @@ def _ball_sense(env, force: bool = False) -> None:
     dt = C.CTRL_DT
     if seen:
         env._ball_seen_steps += 1
-        if -0.25 < bx < 0.25 and -0.25 < by < 0.25:
+        # Degrees, like every other aim tolerance here: a "centred" share
+        # measured in normalized bearing is not comparable across cameras,
+        # which is exactly the trap that hid the FOV rescale.
+        if (bx * _math.degrees(k["half_h"])) ** 2 + \
+                (by * _math.degrees(k["half_v"])) ** 2 < _BALL_AIM_DEG ** 2:
             env._ball_centred_steps += 1
         if env._ball_first_seen_t is None:
             env._ball_first_seen_t = env.step_count * dt
@@ -409,8 +427,9 @@ def _ball_sense(env, force: bool = False) -> None:
     # call this squared up (see _BALL_AIM_*). Counted here, not in the
     # predicate, so it stays right whether or not anyone is asking: the lab
     # only calls the predicate while a handoff is armed.
-    if (det[2] > 0.5 and -_BALL_AIM_BEARING < det[0] < _BALL_AIM_BEARING
-            and -_BALL_AIM_BEARING < det[1] < _BALL_AIM_BEARING
+    aim2 = ((det[0] * _math.degrees(k["half_h"])) ** 2
+            + (det[1] * _math.degrees(k["half_v"])) ** 2)
+    if (det[2] > 0.5 and aim2 < _BALL_AIM_DEG ** 2
             and abs(float(env._joint_qpos()[_BALL_HEAD_YAW_ID])) < _BALL_AIM_HEAD_YAW):
         env._ball_aim_steps += 1
     else:
@@ -459,12 +478,27 @@ def _ball_obs(env) -> None:
 
 # ------------------------------------------------------------- reward terms
 
+def _ball_off_axis_deg2(env) -> float:
+    """Squared angular distance of the ball from the optical axis, in deg^2.
+
+    The detector reports bx/by already divided by the half-FOV, so multiplying
+    back by it recovers the angle — the unit every aim tolerance here is
+    written in, so that changing the camera cannot silently change what
+    "centred" means. Exact, not an approximation: `_ball_sense` builds bx/by
+    as atan2(...)/half, an equidistant mapping."""
+    k = env._ball_k
+    ax = env._ball_bx * _math.degrees(k["half_h"])
+    ay = env._ball_by * _math.degrees(k["half_v"])
+    return ax * ax + ay * ay
+
+
 def _ball_eyes_on(env) -> float:
     """Ball centred in the frame — wide pull + tight polish, seen only."""
     if not env._ball_seen:
         return 0.0
-    e2 = env._ball_bx ** 2 + env._ball_by ** 2
-    return 0.5 * _math.exp(-e2 / 0.6 ** 2) + 0.5 * _math.exp(-e2 / 0.25 ** 2)
+    e2 = _ball_off_axis_deg2(env)
+    return (0.5 * _math.exp(-e2 / _BALL_EYES_WIDE_DEG ** 2)
+            + 0.5 * _math.exp(-e2 / _BALL_EYES_TIGHT_DEG ** 2))
 
 
 def _ball_in_view(env) -> float:
@@ -540,9 +574,10 @@ def _ball_body_aimed(env) -> float:
     to still slope where the gate is not yet satisfied."""
     if not env._ball_seen:
         return 0.0
-    e2 = env._ball_bx ** 2 + env._ball_by ** 2
+    e2 = _ball_off_axis_deg2(env)
     hy = float(env._joint_qpos()[_BALL_HEAD_YAW_ID])
-    return _math.exp(-e2 / 0.25 ** 2) * _math.exp(-hy * hy / 0.3 ** 2)
+    return (_math.exp(-e2 / _BALL_EYES_TIGHT_DEG ** 2)
+            * _math.exp(-hy * hy / 0.3 ** 2))
 
 
 def _ball_handoff_due(env) -> bool:
@@ -592,7 +627,7 @@ def _ball_report(env) -> list[str]:
              else f"t={env._ball_first_seen_t:.2f} s")
     return [
         f"ball: first seen {first}; in frame {env._ball_seen_steps / n:.0%} of steps, "
-        f"centred (|b|<0.25) {env._ball_centred_steps / n:.0%}; "
+        f"centred (<{_BALL_AIM_DEG:.0f} deg off axis) {env._ball_centred_steps / n:.0%}; "
         f"lost {env._ball_losses}x; {env._ball_events} ball events",
         f"aim streak at the end: {env._ball_aim_steps} steps "
         f"({env._ball_aim_steps * C.CTRL_DT:.2f} s of "
