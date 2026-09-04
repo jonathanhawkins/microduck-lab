@@ -345,16 +345,37 @@ Two consequences:
 
 Both components are **noise rather than bias** (mean +1.3 cm of range
 against a 2.7 cm median absolute error in the line-up band). That matters
-because it says which lever exists *in this simulation*: not resolution (see
-above), but temporal averaging. The
-tracker currently smooths at α = 0.6 — about 1.7 frames of averaging, which
-is light for a ball that is stationary in half of all sightings. Heavier
-averaging gated on the tracker's own velocity estimate is the obvious
-cheap lever, and it is deliberately **not** taken here: AGENTS.md rule 7
-applies (the line-up's offsets and tolerances were fitted with this noise
-present), the soccer benchmark needs ~200 seeds to resolve a +0.3 goal
-effect, and two previous line-up-precision changes measured *worse*. It is
-written down as a lead with its numbers, not shipped on a hunch.
+because noise is the kind of error averaging removes — so temporal
+averaging looked like the remaining cheap lever, resolution having been
+ruled out above. **It was then measured, and it is not one.** Sweeping the
+tracker's smoothing weight (α = weight on each new measurement; lower is
+heavier averaging) and reading `Track.xy`, which is what the brain steers
+by, against truth:
+
+| tracker `smooth` | still ball < 0.6 m | rolling ball (> 0.3 m/s) |
+|---|---|---|
+| 1.00 — no averaging at all | 3.42 cm | 9.75 cm |
+| **0.60 — what ships** | **2.70 cm** | **8.90 cm** |
+| 0.30 | 4.36 cm | 14.26 cm |
+| 0.15 | 8.89 cm | 14.40 cm |
+
+**The shipped value is already the optimum, and heavier averaging makes
+things worse on a still ball as well as a rolling one.** The mechanism is
+the frame: the tracker smooths *bearing and range*, in the body frame, and
+the body is walking and turning. A ball that is stationary **in the world**
+still sweeps quickly in bearing as the duck moves, so averaging it lags —
+and past α ≈ 0.6 the lag costs more than the noise it removes. "Still ball"
+describes the world, not the measurement.
+
+That does leave one specific, untried design rather than a knob: **smooth
+in the odometry frame, where a stationary ball genuinely is stationary.**
+`Track.xy` is already in odometry, but it is *computed from* the smoothed
+polar values rather than smoothed itself. Averaging `xy` directly, gated on
+the tracker's own velocity estimate, is the version of this idea that the
+frame argument does not kill. It is written down, not built: AGENTS.md
+rule 7 applies (the line-up's offsets were fitted with this noise present),
+the soccer benchmark needs ~200 seeds to resolve a +0.3 goal effect, and
+two previous line-up-precision changes measured *worse*.
 
 **Two traps, both the same mistake**, recorded because the first version of
 this table was wrong in a way that looked like a discovery:

@@ -73,7 +73,24 @@ class Track:
 class TrackerParams:
     gate_rad: float = 0.35         # a detection this close in bearing can update a track
     gate_range_frac: float = 0.6   # …if its range is within this fraction, too
-    smooth: float = 0.6            # weight of the new measurement
+    # Weight of the new measurement. MEASURED as already optimal, and the
+    # sweep is worth keeping because the obvious intuition is wrong: heavier
+    # averaging makes a STILL ball worse, not better. Reading `Track.xy`
+    # against truth over 3 seeds of 1v1 (still ball inside 0.6 m / a ball
+    # rolling above 0.3 m/s): 1.00 -> 3.42 / 9.75 cm, 0.60 -> 2.70 / 8.90,
+    # 0.30 -> 4.36 / 14.26, 0.15 -> 8.89 / 14.40.
+    #
+    # The mechanism is the FRAME. This smooths bearing and range, in the
+    # BODY frame, and the body walks and turns - so a ball stationary in the
+    # WORLD still sweeps quickly in bearing, and averaging it lags. Past
+    # ~0.6 the lag costs more than the noise it removes. "Still ball"
+    # describes the world, not the measurement.
+    #
+    # The untried version that the frame argument does NOT kill: smooth `xy`
+    # itself, in the odometry frame where a stationary ball genuinely is
+    # stationary, gated on `vel`. `xy` is currently COMPUTED FROM these
+    # smoothed polar values rather than smoothed on its own.
+    smooth: float = 0.6
     coast_s: float = 2.5           # a track survives this long without a hit
     confirm_hits: int = 2          # hits before a brain should trust it
     vel_smooth: float = 0.5        # weight of a new velocity sample (hits 0.05-1 s apart)
