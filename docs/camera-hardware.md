@@ -160,10 +160,52 @@ and it is §3: **at a 640 px inference input it is 316 px/rad and lands back
 beside the baseline.** The crop has no such escape — no inference budget
 fixes a 22.5° vertical.
 
-*Caveats.* Seeds 0–31 are a discovery block; a confirmation on 32 fresh
-layouts is running, as is a pinhole rerun of the 116° arm to separate "wide
-and blurry" from "and the bearing is wrong by up to 9.7°". And the crop arm
-still assumes the stock Pi lens (§1).
+### The crop, confirmed
+
+On 32 layouts nobody had run: **−1.44 toys (p < 0.0001, worse on 22 of
+32)**, falls 13 → 66 events. Pooled over all **64 distinct layouts**:
+**−1.53 ± 0.17, p < 0.0001, worse on 48 and better on 3**, with falls
+**25 → 144 events (+1.86 ± 0.19)**. It replicated, and it is about as solid
+as anything measured in this repo.
+
+### The 116° arm, decomposed — and nearly half of it is fixable
+
+Running the same frustum with a **pinhole** reader separates "wide and
+blurry" from "and the bearing is wrong":
+
+| | tidied | falls | grasp |
+|---|---|---|---|
+| 62 × 48 baseline | 0.880 | 0.38 | 88% |
+| 116 × 60, **pinhole** (geometry only) | 0.693 | 0.59 | 86% |
+| 116 × 60, **equidistant** (the real lens) | 0.542 | 0.69 | 80% |
+
+| step | cost |
+|---|---|
+| the wide, low-resolution geometry | **−1.12 toys** (p < 0.0001) |
+| the bearing error *on top of it* | **−0.91 toys** (p = 0.0005) |
+| together | −2.03 toys |
+
+**The distortion is nearly half the total cost of the wide lens** — and it
+is the half that a calibration fixes, which is a checkerboard and an
+afternoon rather than new hardware. Note grasp barely moves between the two
+(86% → 80%) while tidying falls a long way: a bearing error does not make
+the duck fumble, it makes it walk to the wrong place.
+
+So the recommendation for the replacement module is now concrete and has
+two parts, each addressing one half:
+
+1. **Calibrate the lens** and use a proper projection when mapping box →
+   bearing. Recovers ~0.9 of the 2.03 toys.
+2. **Raise the inference input to 640 px** (§3): 316 px/rad puts it back
+   beside the baseline on the resolution half.
+
+Do both and it should land near 62 × 48. Do neither and it is a 40%
+downgrade on the tidy benchmark.
+
+*Caveat that remains.* The crop arm assumes the stock Pi lens (§1). Nothing
+above is affected if that assumption is wrong — the 39 × 22.5 arm would
+simply be describing a camera the robot does not have, and the question of
+what it *does* have would still be open.
 
 ## 4. Frame rate is a non-issue
 
