@@ -43,6 +43,12 @@ from .runtime import REGISTRY, Intent, Senses, age_inputs
 class TidyParams:
     reach_ahead: float = PICK_REACH_AHEAD
     reach_left: float = PICK_REACH_LEFT
+    # Slack added to `reach_ahead` in the stop rule. It was a bare 0.01
+    # literal in four places; it is named because it is NOT geometry
+    # (`reach_ahead` is - it is where the beak tip lands) but a fitted
+    # constant, and `stale_fix` showed it was fitted against a BIASED
+    # toy estimate. See `stale_fix`.
+    reach_pad: float = 0.01
     approach_speed: float = 0.3        # the walker delivers ~half; below ~0.2 it stands still
     k_turn: float = 2.5
     head_down: float = 0.6             # head_pitch intent while walking in: camera ~37° down
@@ -661,9 +667,9 @@ class Tidy:
             # The stop lands late by the link (stop_margin, see latency_gain): a
             # tethered pick overshot the toy and came up empty - traced: 3
             # picks in 6 attempts after the first three toys, 80 s of scans.
-            twist, dist, bearing = self._servo(odom, p.reach_ahead + 0.01 + self.stop_margin, p.reach_left)
+            twist, dist, bearing = self._servo(odom, p.reach_ahead + p.reach_pad + self.stop_margin, p.reach_left)
             head_down = twist[0] > 0 or (dist < 0.5 and abs(bearing) <= 0.35)
-            if dist <= p.reach_ahead + 0.01 + self.stop_margin:
+            if dist <= p.reach_ahead + p.reach_pad + self.stop_margin:
                 self._enter("settle", t)
             elif t - self.t_seen > 1.0 and dist < 0.3 and abs(bearing) <= 0.35:
                 # It left the camera's view: dead-reckon the rest. Not while
@@ -676,11 +682,11 @@ class Tidy:
                 self._enter("scan", t)
 
         elif self.state == "blind":
-            twist, dist, _ = self._servo(odom, p.reach_ahead + 0.01 + self.stop_margin, p.reach_left)
+            twist, dist, _ = self._servo(odom, p.reach_ahead + p.reach_pad + self.stop_margin, p.reach_left)
             if self._point_in_basket_zone(*self.est):
                 self.est = None                          # it is in (or against) the basket after all
                 self._enter("scan", t)
-            elif dist <= p.reach_ahead + 0.01 + self.stop_margin:
+            elif dist <= p.reach_ahead + p.reach_pad + self.stop_margin:
                 self._enter("settle", t)
             elif t - self.t_state > 6.0:
                 self.est = None

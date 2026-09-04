@@ -202,10 +202,101 @@ two parts, each addressing one half:
 Do both and it should land near 62 × 48. Do neither and it is a 40%
 downgrade on the tidy benchmark.
 
+### CONFIRMED: the recommendation, measured as a recommendation
+
+The two parts above were each measured *separately* and the "do both" was
+arithmetic on two numbers — exactly the kind of composition this repo has
+been wrong about before. So both halves were applied together and run as
+one arm, 32 paired seeds, same layouts as everything above:
+
+| arm | px/rad | tidied | falls a run |
+|---|---|---|---|
+| 62 × 48, 320 px, pinhole — the shipped baseline | 296 | 0.880 | 0.38 |
+| 116 × 60, 320 px, equidistant — the module as-is | 158 | 0.542 | 0.69 |
+| 116 × 60, 320 px, **calibrated** | 158 | 0.693 | 0.59 |
+| 116 × 60, **640 px**, equidistant | 316 | 0.724 | 0.38 |
+| 116 × 60, **640 px, calibrated** — the recommendation | 316 | **0.880** | 0.41 |
+
+Paired against the 116 × 60 module as it ships:
+
+| step | gain |
+|---|---|
+| calibrate the lens (still 320 px) | **+0.91 toys** (p = 0.0005, better on 18 of 32) |
+| 640 px input (lens left uncalibrated) | **+1.09 toys** (p = 0.0001, better on 23 of 32) |
+| **both** | **+2.03 toys** (p < 0.0001, better on 28 of 32) |
+
+**The recommendation vs the shipped baseline: +0.00 toys, p = 1.0000**
+(better on 11 seeds, worse on 8, tied on 13), falls 0.41 against 0.38. Not
+"close to" the baseline — indistinguishable from it, on the same 32
+layouts.
+
+Two things worth keeping from this:
+
+1. **The two costs are separable and additive.** 0.91 + 1.09 = 2.00 against
+   the 2.03 measured jointly. Bearing error and angular resolution are
+   independent failures here, so either fix alone buys about half and
+   neither is wasted if the other is skipped. That is *not* something the
+   separate arms could establish — it is why the joint arm was run.
+2. **Either fix alone still leaves a real loss**: 640 px alone is −0.94
+   against the baseline (p < 0.0001) and calibration alone −1.12
+   (p < 0.0001). Both are needed to break even; one is a half-measure with
+   a measured price.
+
+So the hardware answer is: **the 116 × 60 module costs nothing on this
+benchmark provided the lens is calibrated and the NPU runs a 640 px input.**
+Neither is new hardware. §4 covers whether the NPU has the budget for the
+second.
+
 *Caveat that remains.* The crop arm assumes the stock Pi lens (§1). Nothing
 above is affected if that assumption is wrong — the 39 × 22.5 arm would
 simply be describing a camera the robot does not have, and the question of
 what it *does* have would still be open.
+
+## 3d. The VERTICAL field of view: how much floor the camera loses
+
+The horizontal number gets all the attention because it is what the lens
+sweep varied, but the *vertical* one decides something specific and
+physical: **how close a floor object can be before the camera loses it.**
+That is the "blind last 30 cm" that `tof_floor_ball`, `_gaze_pitch` and
+half a dozen docstrings are written around.
+
+Measured from the model rather than from the docstrings — the `head_camera`
+site on a duck **standing on the walker**, driving the head-pitch command
+and reading the site back:
+
+```
+ cmd  tilt deg    z cm  blind@48  blind@60
+0.00     11.01    23.5     28.5cm     23.0cm
+0.20     19.45    22.5     20.0cm     16.2cm
+0.40     28.30    21.3     13.8cm     11.0cm
+0.60     37.53    20.1      9.0cm      6.9cm
+
+measured: tilt = 11.01 deg + 0.772 * cmd (rad/unit)
+assumed : tilt = 11.29 deg + 0.750 * cmd   (striker._gaze_pitch)
+```
+
+Three results:
+
+1. **`_gaze_pitch`'s constants are right.** `cam_level = 0.197` and
+   `gain = 0.75` were fitted by hand; measured they are 0.192 and 0.772.
+   The "~0.3 m level, ~0.2 m looking down" in its docstring is the 28.5 cm
+   and 20.0 cm above — accurate.
+2. **The camera is not level at rest — it sits 11° down when the duck
+   stands.** Reading the site at the model's *default* qpos says 0.0° and
+   24.8 cm, which is wrong by the whole 11°; the walker's standing pose is
+   what tilts it. A first pass at this measurement made exactly that
+   mistake and concluded the docstrings were wrong by 20 cm. **Settle the
+   duck before reading a site.**
+3. **60° vertical buys 5.5 cm of floor, not the 11 cm a level-camera
+   calculation gives.** Level-head blind radius 28.5 → 23.0 cm; head fully
+   down 9.0 → 6.9 cm. The gain shrinks the more the head is already
+   dipped, because the dip and the half-FOV add.
+
+So the replacement module's 60° vertical is a real improvement over 48° and
+a small one. It does not remove the blind zone — nothing does, the camera
+is 23 cm above the floor and pointing forward — it moves its edge in by
+about a fifth. Anything that depends on the last 20 cm still cannot use the
+camera for it.
 
 ## 4. Frame rate is a non-issue
 

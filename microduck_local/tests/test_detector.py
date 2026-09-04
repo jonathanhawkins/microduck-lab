@@ -263,3 +263,62 @@ def test_a_wide_lens_bearing_is_pushed_outward_by_a_pinhole_reader():
                        for t in range(0, 32))
     assert 9.0 < worst_wide < 10.5 and worst_narrow < 1.5          # 8x worse on the wide lens
     assert worst_wide > 6.9                                        # ...and past the aim tolerance
+
+
+def test_the_camera_sits_eleven_degrees_down_on_a_standing_duck():
+    """The head_camera site's tilt and height, MEASURED on a duck standing on
+    the walker — the geometry every "the camera loses a floor ball at X"
+    claim in this repo rests on.
+
+    The trap this pins: at the model's DEFAULT qpos the site reads level and
+    24.8 cm up, and a blind-radius sum built on that is wrong by the whole
+    11° (it says the level camera loses a floor ball at 48 cm; the standing
+    duck loses it at 28.5). The walker's standing pose is what tilts the
+    head, so the duck has to be settled before the site means anything.
+    """
+    import math
+
+    import mujoco
+
+    from microduck_local.brain.brain_env import POLICIES_DIR, onnx_infer
+    from microduck_local.brain.striker import _gaze_pitch
+    from microduck_local.world import World, make_pitch
+
+    sc = make_pitch(per_side=1)
+    w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=0)
+    d = w.ducks["d0"]
+    sid = mujoco.mj_name2id(w.model, mujoco.mjtObj.mjOBJ_SITE, "d0/head_camera")
+
+    def settle(cmd):
+        for _ in range(120):
+            d.set_cmd(w.data, (0.0, 0.0, 0.0), (0.0, cmd, 0.0, 0.0))
+            w.step()
+        ax = w.data.site_xmat[sid].reshape(3, 3)[:, 0]
+        return math.atan2(-ax[2], math.hypot(ax[0], ax[1])), w.data.site_xpos[sid][2]
+
+    level, z = settle(0.0)
+    assert 0.17 < level < 0.21, f"standing camera tilt {math.degrees(level):.1f}deg, expected ~11"
+    assert 0.22 < z < 0.25
+
+    down, z_down = settle(0.6)
+    gain = (down - level) / 0.6
+    assert 0.70 < gain < 0.85, f"head_pitch gain {gain:.3f} rad/unit, expected ~0.77"
+    # `striker._gaze_pitch` inverts exactly this law (cam_level 0.197, gain
+    # 0.75). Its constants must keep matching the model, or every head dip
+    # aims at the wrong range.
+    assert abs(_gaze_pitch(10.0)) < 1e-9                       # far ball: head level
+    for rng in (0.30, 0.50, 0.90):
+        want = math.atan2(z - 0.035, rng)                      # the true down-angle to a floor ball
+        cmd = _gaze_pitch(rng)
+        if 0.0 < cmd < 0.6:                                    # unclipped: the axis should land on it
+            assert abs((level + gain * cmd) - want) < 0.06, f"gaze off at {rng} m"
+
+    # How much floor 60deg vertical buys over 48deg: the blind radius is
+    # where the frame's BOTTOM edge meets the floor.
+    def blind(fov_v_deg, tilt, z_cam):
+        return (z_cam - 0.035) / math.tan(tilt + math.radians(fov_v_deg) / 2)
+
+    b48, b60 = blind(48.0, level, z), blind(60.0, level, z)
+    assert 0.26 < b48 < 0.31 and 0.21 < b60 < 0.25
+    assert 0.04 < b48 - b60 < 0.07, "60deg should buy ~5.5 cm of floor, not the 11 cm a level camera gives"
+    assert blind(48.0, down, z_down) < 0.11                    # head fully down: ~9 cm
