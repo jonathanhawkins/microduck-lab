@@ -371,6 +371,11 @@ per episode, so each episode answers one question), but the recipe *trains* at
 which policy is safest** — one A/B arm measured 0 falls at `--events 0` and 1
 at 0.33, another went 4 → 10. Judge falls at `--events 0.33`.
 
+`--env KEY=VALUE` (repeatable, same spelling as `render-rollout`'s) sets any
+behavior knob for the battery, which is how the sensitivity sweeps in
+`docs/roadmap.md` are run — e.g. `--env MICRODUCK_BALL_HFOV_DEG=40`. It wins
+over `--events` / `--prior` for the same key.
+
 **Measured (2026-09-03, `uv run eval-find-ball`, 40 static-ball episodes ×
 8 s per export, deterministic ONNX, randomizers off — the battery sweeps
 bearings round the circle; "found" = ball entered the frame within 8 s):**

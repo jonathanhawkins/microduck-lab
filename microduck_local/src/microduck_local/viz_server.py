@@ -863,6 +863,20 @@ def load_policy_infer(policy_id: str):
     return infer
 
 
+def _same_run_dir(p: Path) -> bool:
+    """Is `p` the run dir that `run:<p.name>` resolves to?
+
+    is_trick_duck() and the palette both address a run by BARE NAME under
+    RUNS_DIR, so tagging a duck `run:<name>` is only honest when the directory
+    it came from really is that one. A run dir given by some other path
+    (a scratch copy, another checkout, MICRODUCK_RUNS_DIR pointing elsewhere)
+    keeps policy_id=None and the old conservative behavior."""
+    try:
+        return p.resolve() == (RUNS_DIR / p.name).resolve()
+    except OSError:
+        return False
+
+
 def build_ducks(args) -> list[Duck]:
     ducks: list[Duck] = []
 
@@ -896,7 +910,18 @@ def build_ducks(args) -> list[Duck]:
                 export(p, onnx)
                 print(f"[lab] exported {onnx} on the fly")
             if onnx.exists():
-                add(p.name, _onnx_infer(onnx), onnx_path=str(onnx))
+                # policy_id, not just a label: is_trick_duck() classifies on a
+                # "run:" prefix, so without this a run dir passed on the CLI is
+                # not recognised as a trick and the lab drives it with the
+                # WASD velocity command. For a ball/trick brain that command is
+                # pure out-of-distribution noise — `duck-lab runs/find_ball`
+                # measured 1058 falls and r̄ -3.2 in four minutes, while the
+                # identical dir dropped from the 🧠 palette (which does set
+                # policy_id) stood there quite happily.
+                same = _same_run_dir(p)
+                add(p.name, _onnx_infer(onnx),
+                    policy_id=f"run:{p.name}" if same else None,
+                    onnx_path=str(onnx))
             else:
                 print(f"[lab] skipping {p}: no policy.onnx / model.zip")
         else:

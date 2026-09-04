@@ -2358,3 +2358,57 @@ def test_init_from_uses_the_one_run_name_validator(fake_popen):
     (run / "model.zip").touch()
     (run / "vecnormalize.pkl").touch()
     assert V.resolve_init_from("teach-spin-abc123") == run
+
+
+def test_cli_run_dir_is_tagged_so_the_lab_stops_driving_a_trick_brain(
+        fake_popen, tmp_path, monkeypatch):
+    """`duck-lab runs/find_ball` must behave like dropping the SAME dir from
+    the palette. build_ducks used to set only a label, so policy_id stayed
+    None, is_trick_duck() said False on the missing "run:" prefix, and the lab
+    posted its WASD velocity command to a ball brain that trained on zero
+    twist: 1058 falls and mean reward -3.2 in four minutes of
+    `duck-lab runs/find_ball`, against a duck that stood there quite happily
+    when the identical dir was assigned from the palette."""
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path)
+    V._TRICK_DUCK_CACHE.clear()
+    run = tmp_path / "find_ball"
+    run.mkdir()
+    (run / "policy.onnx").touch()
+    (run / "behavior.json").write_text(json.dumps({"behavior": "find_ball"}))
+    monkeypatch.setattr(V, "_onnx_infer", lambda p: V._zero_infer)
+
+    duck, = V.build_ducks(types.SimpleNamespace(policies=[str(run)],
+                                                checkpoints=None))
+    assert duck.policy_id == "run:find_ball"
+    assert V.is_trick_duck(duck) is True
+
+    # A LOCOMOTION run tagged the same way still gets driven — the tag says
+    # "look me up", not "hold still". test_locomotion_teach_runs_are_not_
+    # trick_ducks is the other half of that rule.
+    V._TRICK_DUCK_CACHE.clear()
+    runner = tmp_path / "teach-run-z"
+    runner.mkdir()
+    (runner / "policy.onnx").touch()
+    (runner / "behavior.json").write_text(json.dumps({"behavior": "run"}))
+    duck, = V.build_ducks(types.SimpleNamespace(policies=[str(runner)],
+                                                checkpoints=None))
+    assert duck.policy_id == "run:teach-run-z"
+    assert V.is_trick_duck(duck) is False
+
+
+def test_a_run_dir_from_somewhere_else_is_not_claimed_as_a_named_run(
+        fake_popen, tmp_path, monkeypatch):
+    """`run:<name>` is resolved by BARE NAME under RUNS_DIR, so only a dir that
+    really is RUNS_DIR/<name> may claim it. A scratch copy that happens to
+    share a basename must not inherit an unrelated run's behavior.json."""
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "runs").mkdir()
+    elsewhere = tmp_path / "scratch" / "find_ball"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "policy.onnx").touch()
+    monkeypatch.setattr(V, "_onnx_infer", lambda p: V._zero_infer)
+
+    duck, = V.build_ducks(types.SimpleNamespace(policies=[str(elsewhere)],
+                                               checkpoints=None))
+    assert duck.policy_id is None
+    assert duck.label == "find_ball"

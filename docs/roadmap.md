@@ -339,24 +339,140 @@ behavior survives contact with reality.
       → **decide on:** in-frame share drops by no more than a few points. The
       real NPU detector will miss frames; the brain should not lose the ball
       when it does.
-- [ ] **FOV sensitivity** (no training — run the battery on the existing brain
-      with `--env MICRODUCK_BALL_HFOV_DEG=40` and `=56`).
-      → **decide on:** if found rates swing hard, the daemon's real IMX219
-      intrinsics have to be measured before this goes near hardware. Upstream
-      flags them as placeholders (`microduck/docs/ideas/autonomous_behavior.md`).
+- [x] **FOV sensitivity — NOT a blocker, and the reason is worth knowing.**
+      `eval-find-ball` grew the `--env KEY=VALUE` this item always assumed it
+      had. Swept far wider than the item asked (40 static-ball episodes each,
+      shipped brain):
+
+      | HFOV | 24° | 30° | 40° | **48°** | 56° | 70° | 90° |
+      |---|---|---|---|---|---|---|---|
+      | found | 95% | 95% | 95% | 95% | 95% | 95% | 95% |
+      | in frame | 71% | 77% | 78% | 79% | 79% | 81% | 82% |
+      | handoff | 82% | 80% | 80% | 80% | 80% | 78% | 85% |
+      | head yaw \| centred | 12.7° | 13.9° | 14.0° | 14.4° | 14.6° | 14.1° | 14.0° |
+      | falls | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+      → **decide-on says ship**: found rate does not move AT ALL across a
+      3.75× range, and in-frame share degrades gracefully rather than
+      swinging. The placeholder IMX219 intrinsics do not have to be measured
+      before this goes near hardware.
+
+      The knob was verified to actually reach the detector before believing
+      the flatness (`half_h` moves, and a ball 22° off is LOST at 40° and SEEN
+      at 56°) — a flat sweep is only good news if the thing swept.
+
+      **Why it is flat, because this is a design property worth keeping:** the
+      detector reports `bx = angle / half_h` — a bearing NORMALIZED by the
+      field of view — so the policy's control loop works in frame-relative
+      units and the geometry cancels. FOV only sets how wide the "seen" window
+      is in angle, and a head sweep covers the circle regardless.
+
+      **What this does NOT clear, and it is the sharper version of the same
+      worry:** the sweep moves the camera and the normalizer together. The
+      dangerous case on hardware is a MISMATCH — a real 56° camera whose
+      daemon divides by an assumed 48° — which is a constant gain error on
+      bx/by, not a FOV change, and is untested. The contract to write down is
+      "bearing normalized by the camera's ACTUAL horizontal/vertical FOV";
+      get that right and, per the table, the precise value stops mattering.
 
 ### 3. Search speed itself — the actual ask
+
+**Why this section now has a mechanism, not just a hunch (measured
+2026-09-03).** "Which way should it look first?" has a fixed answer: with
+nothing known the belief slot is seeded `_BALL_NO_PRIOR_MEM = +pi/2`, "sweep
+left first". Splitting the battery by which side the ball was really on shows
+what that convention costs, on the shipped brain, blind episodes, balls
+outside the initial view (n=66):
+
+| ball side | found | t_first mean | t_first median |
+|---|---:|---:|---:|
+| LEFT (with the convention) | 100% | **0.35 s** | 0.18 s |
+| RIGHT (against it) | 97% | **2.48 s** | 2.75 s |
+
+A **7x mean penalty** for being on the wrong side; 17 of 40 right-side balls
+took over 2 s against 2 of 40 on the left. Note what this is NOT: it is not
+fixable by choosing the side better. Spawns are uniform in bearing, so no
+observable information distinguishes left from right, and the convention
+exists precisely because a symmetric obs leaves the mean action with nothing
+to learn (AGENTS.md). The wrong guess is unavoidable half the time; what is
+tunable is what it COSTS, which is ~2/3 of a sweep period. That makes
+SCAN_PERIOD the dominant term in mean time-to-first-sight for half of all
+blind episodes, and it is why the item below is now the most valuable one
+here rather than a nice-to-have.
+
+**Unexplained, and probably the same bug as the prior item below:** force the
+prior ON and the asymmetry REVERSES — left 2.29 s / 91% found, right 1.61 s /
+97%. If the convention were the whole story, a seeded belief should make the
+two sides symmetric, not swap them. Worth understanding before tuning either.
 
 - [ ] **Faster sweep.** `MICRODUCK_BALL_SCAN_PERIOD=2.5` (from 4.0) fine-tune.
       → **decide on:** median time-to-first-sight on side and back, weighed
       against falls and centred share. A faster sweep that loses the ball on
-      the way past is not faster.
-- [ ] **Is the prior worth producing?** `uv run eval-find-ball <policy> --prior 0`
-      vs `--prior 1` on the same brain.
-      → **decide on:** in the cloud runs the prior barely helped (blind was
-      *better* on the side bucket: 100% vs 85%). If that holds on a
-      longer-trained brain, the daemon does not need to synthesize one and the
-      slot can carry the sweep convention alone.
+      the way past is not faster. **Split the result by ball side** (above):
+      the number this is really moving is the 2.48 s wrong-side mean, and a
+      whole-battery median will hide it behind the 0.35 s right-side half.
+- [x] **Is the prior worth producing? NO — and an ORACLE prior is worse than
+      none, which rules out "the prior is just too noisy".** 60 episodes each
+      on the shipped brain:
+
+      | belief seeding | found | t_first med | in frame | centred | falls |
+      |---|---:|---:|---:|---:|---:|
+      | **blind (convention only)** | **98%** | 0.36 s | **85%** | **84%** | **1** |
+      | prior, ORACLE (noise 0) | 93% | 0.36 s | 74% | 71% | 2 |
+      | prior, noise 0.3 rad | 92% | 0.24 s | 73% | 70% | 2 |
+      | prior, noise 0.6 rad (the recipe) | 93% | 0.22 s | 75% | 72% | 2 |
+      | prior, noise 1.2 rad | 97% | 0.34 s | 77% | 74% | 2 |
+
+      → **decide-on met: the daemon does not need to synthesize a prior**, and
+      the slot can carry the sweep convention alone. Note the shape: prior
+      ACCURACY is irrelevant (93 / 92 / 93 / 97% found across a 4x noise
+      range) while prior PRESENCE costs ~11 points of in-frame share. A belief
+      pointing exactly at the ball still loses. So this is not a bad estimate,
+      it is the mechanism: a seeded belief buys a marginally faster first
+      sight (0.22 s vs 0.36 s) and then keeps the ball worse.
+
+      **Why, from probing the exported ONNX directly** (feed one obs, vary one
+      slot, read the action — the method that found the original
+      symmetric-obs bug). The belief slot is NOT ignored and NOT sign-flipped:
+      with the ball lost, head yaw responds monotonically and correctly across
+      the whole range. But the response is badly **asymmetric in magnitude**,
+      and that is what produces every oddity here:
+
+      | belief slot | −1.0 | −0.45 | −0.25 | **0.0** | +0.15 | +0.25 | +0.45 | +1.0 |
+      |---|---:|---:|---:|---:|---:|---:|---:|---:|
+      | head-yaw action | −3.75 | −2.10 | −1.45 | **−0.39** | +0.23 | +0.57 | +1.09 | +2.13 |
+
+      A rightward belief commands a **2.6× stronger** turn than the mirrored
+      leftward one, and a NEUTRAL belief already commands −0.39 (rightward).
+      Two consequences, both of which had been observed and unexplained:
+
+      - The no-prior convention (+0.15) sits in the flattest part of that
+        curve — it produces a limp +0.23 — which is why blind episodes find
+        left-side balls in 0.35 s and right-side ones in 2.48 s (section 3's
+        table above).
+      - Force a prior on and the asymmetry **reverses** (left 2.29 s, right
+        1.61 s), because now the slot carries a real bearing and rightward
+        ones pull much harder. That was the unexplained reversal noted above;
+        this is the explanation.
+
+      Nothing in the reward asks for "turn harder to the right". The recipe is
+      deliberately one-sided (`symmetric=False`, no mirror loss) so that a
+      fixed convention can break the tie — but the tie-break is supposed to be
+      a *direction*, not a 2.6× gain difference. That asymmetry is an
+      artifact of leaving a one-sided policy unconstrained, and it is the
+      single best explanation on the table for the search's remaining cost.
+
+      Caveat on method: sweeping slot 54 while holding bx and head yaw fixed
+      leaves the manifold for the SEEN case (while the ball is visible the
+      slot carries the body-frame bearing, which is tied to bx and head yaw by
+      geometry), so only the ball-LOST rows above are trustworthy. They are
+      the rows that matter — the belief exists for when the ball is lost.
+
+      **Queued from this:** a blind-TRAINED arm (`MICRODUCK_BALL_PRIOR_PROB=0`
+      through the whole curriculum, run `teach-find_ball-31f14b`). Everything
+      above is measured on a brain that saw a prior in 70% of its training
+      episodes; if the prior is dead weight, the recipe should stop generating
+      it, not just stop trusting it.
 
 ### 4. The soccer handoff — the demo that proves the point
 
@@ -414,11 +530,38 @@ square up → kick is the whole argument for this behavior.
   `microduck_rl`. That stack, not this one, is the sim2real recipe. Blocked on
   the items above: there is no point porting a recipe whose back-bucket
   behavior is still moving.
-- **A real detector in the loop.** The env fakes the detector by projecting a
-  point through the MJCF camera. The honest version renders the head camera and
-  runs the actual `duck_detect` ONNX — far slower per step, but it is the only
-  way to find out what the brain does with a *wrong* box rather than a noisy
-  one. Worth it only once the behavior is otherwise settled.
+- **What the fake detector cannot produce.** The env fakes the detector by
+  projecting a point through the MJCF camera: FOV bounds plus a range check,
+  and nothing else. Three things a real one does are therefore untested, and
+  they are worth doing in this order rather than as one "real detector" job:
+
+  1. **Box size, hence RANGE.** Cheapest, and it unblocks queued work rather
+     than opening new questions: the handoff gate asserts *aimed* and never
+     *in range*, which is exactly why the kick whiffs in every soccer render,
+     and the approach behavior (item 4's stretch) cannot start without it.
+     `distance ~= focal x real diameter / box height`.
+  2. **Occlusion — i.e. WALLS.** Today "not seen" ALWAYS means "not inside my
+     camera cone", so the belief's dead-reckoning is never wrong about
+     anything except direction. Put an occluder in the scene and that
+     assumption breaks: not-seen can mean *hidden*, and the right response is
+     to look around the obstacle rather than sweep past it — the memory slot
+     would have to represent "hidden there", not just "it went that way".
+     That is a qualitatively harder search than the one this recipe solves,
+     and it is the one a robot in a real room faces. Needs geometry in the
+     scene AND a ray test in `_ball_sense`; note the lab arena on the
+     `robot-lab-sim-roadmap` branch may bring the geometry along anyway, in
+     which case the deployed duck meets walls its training never had.
+     (Worth being clear about what walls are NOT: they are not a better
+     search-direction cue. Spawns are uniform in bearing, so no wall makes one
+     side likelier — see section 3, where the wrong-side cost is real but the
+     fix is a faster sweep, not a smarter choice.)
+  3. **False positives.** A real detector reports something orange that is not
+     the ball. The policy currently trusts `seen` completely, and nothing in
+     training has ever lied to it.
+
+  The fully honest version — render the head camera and run the actual
+  `duck_detect` ONNX — subsumes all three and is far slower per step. Worth it
+  only once the behavior is otherwise settled.
 - **Other things to find.** The slot layout is not ball-specific: the same
   four head slots and scan clock would serve "find the other duck" (upstream
   wants precise bearing for gaze and following) or "find the charging dock".

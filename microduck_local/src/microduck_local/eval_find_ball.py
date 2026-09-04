@@ -51,7 +51,8 @@ BUCKETS = (("front", 0.0, 45.0), ("side", 45.0, 135.0), ("back", 135.0, 180.001)
 
 
 def run_battery(onnx_path: str, episodes: int, seconds: float, seed: int,
-                prior: float | None = None, events: float = 0.0) -> dict:
+                prior: float | None = None, events: float = 0.0,
+                env_overrides: dict[str, str] | None = None) -> dict:
     import onnxruntime as ort
 
     from .behaviors import _BALL_HEAD_YAW_ID, BEHAVIORS, BehaviorEnv, _ball_place, _ball_sense
@@ -64,6 +65,9 @@ def run_battery(onnx_path: str, episodes: int, seconds: float, seed: int,
     overrides = {"MICRODUCK_BALL_EVENT_RATE": str(events)}
     if prior is not None:
         overrides["MICRODUCK_BALL_PRIOR_PROB"] = str(prior)
+    # --env last: an explicit knob wins over the flags above, so a sweep can
+    # set anything the behavior reads without growing a flag per knob.
+    overrides.update(env_overrides or {})
     env = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
                       action_delay=False, random_yaw=False, seed=seed,
                       spawn_overrides=overrides, max_episode_s=seconds)
@@ -171,14 +175,27 @@ def main() -> None:
                          "one search per episode. 0.33 = what the recipe trains "
                          "and render-rollout runs at — judge FALLS there, the two "
                          "regimes disagree (docs/roadmap.md item 1)")
+    ap.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                    help="repeatable behavior env knob, e.g. "
+                         "--env MICRODUCK_BALL_HFOV_DEG=40 (same spelling as "
+                         "render-rollout's --env). Wins over --events/--prior")
     args = ap.parse_args()
     if not os.path.exists(args.onnx_path):
         sys.exit(f"{args.onnx_path} not found")
+    env_overrides = {}
+    for item in args.env:
+        if "=" not in item:
+            sys.exit(f"--env wants KEY=VALUE, got {item!r}")
+        key, _, value = item.partition("=")
+        env_overrides[key] = value
     res = run_battery(args.onnx_path, args.episodes, args.seconds, args.seed,
-                      args.prior, args.events)
+                      args.prior, args.events, env_overrides)
     ball = "static-ball" if not args.events else f"events={args.events}"
+    knobs = ("" if not env_overrides else
+             "  env: " + " ".join(f"{k}={v}" for k, v in env_overrides.items()))
     print(f"find_ball battery: {args.onnx_path}  ({args.episodes} {ball} episodes x "
-          f"{args.seconds:.0f} s, prior={'recipe default' if args.prior is None else args.prior})")
+          f"{args.seconds:.0f} s, prior={'recipe default' if args.prior is None else args.prior})"
+          f"{knobs}")
     print("\nFINDING — eyes on the ball")
     print("\n".join(summarize(res)))
     print("\nAIMING — is it the body doing it, or the neck?")

@@ -110,3 +110,28 @@ def test_finding_table_is_unchanged_by_the_aim_columns():
                       "in", "frame", "centred", "fell"]
     row = summarize({"rows": [_row(seen=0.5, centred=0.25, fell=True)]})[1]
     assert "50%" in row and "25%" in row and row.rstrip().endswith("1")
+
+
+def test_env_overrides_reach_the_detector_and_beat_the_flags():
+    """`--env KEY=VALUE` exists because docs/roadmap.md's FOV item assumed it
+    did. It has to actually reach the behavior's knobs — a flat sweep is only
+    good news if the thing swept — and an explicit knob has to win over the
+    --events/--prior shorthands, or a sweep silently measures the default."""
+    from microduck_local.behaviors import BehaviorEnv
+
+    def half_h(**overrides):
+        env = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                          action_delay=False, random_yaw=False, seed=0,
+                          spawn_overrides=overrides)
+        env.reset(seed=0)
+        return math.degrees(env._ball_k["half_h"])
+
+    assert round(half_h(), 1) == 24.0                                # default 48 deg
+    assert round(half_h(MICRODUCK_BALL_HFOV_DEG="90"), 1) == 45.0    # the knob moves
+
+    # An explicit --env wins over the --events shorthand for the same key.
+    res = run_battery("policies/find_ball/policy.onnx", episodes=1, seconds=0.2,
+                      seed=1, events=0.33,
+                      env_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    assert res["events"] == 0.33          # what the caller asked for, reported
+    assert len(res["rows"]) == 1          # ...and the run still completed
