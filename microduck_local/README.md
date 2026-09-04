@@ -1606,6 +1606,31 @@ if anything fewer). Tidying, the same 12 layouts as the shipped lens:
 on 5 seeds and worse on 2 — inside the noise on the cheap screen and on
 the discriminator both.
 
+**And then the hardware answered back, which changes what this battery
+means.** The vendor spec for the replacement module is **D 142.2° / H 116° /
+V 60°** on a 1/2.9", 2.75 µm, natively-1080p sensor at up to 90 fps — so
+**116° is essentially the 120° arm above, already measured here.** At the
+NPU's current 320 px YOLO input that is 158 px/rad: the row that tidied
+0.632, worse on 24 of 24 seeds. At 640 px it is 316 px/rad: the row that
+came back to 0.819. **The deciding variable is the inference input, not the
+camera** — and the sensor is not the constraint either, since 1920 px across
+is six times what the detector consumes. The 60° vertical is a clear win
+either way.
+
+Two things also came out of tracing what the robot actually has, and both
+say the baseline below is not the robot's. Upstream identifies an **IMX219**
+(Pi Camera v2, quoted 62.2° × 48.8° — where the 62/48 here came from), but
+`mediad` pins the *sensor* to 1920 × 1080, which on that part is a centred
+**crop** (`(680, 692)/1920x1080`, 59% of the columns and 44% of the rows).
+With the stock lens that is **39.0° × 22.5°** — so this baseline may be ~23°
+too wide and ~25° too tall, and the vertical error is the one that bites.
+And the new lens is **not rectilinear** (a pinhole focal length solved from
+H, V and D disagrees; an equidistant model agrees near the quoted 2.9 mm
+EFL), while `Detector` maps pixels to bearing with a pinhole model and no
+distortion — wrong exactly at the edges, which is where a wide lens keeps
+its extra view. `docs/camera-hardware.md` holds all of it, with the open
+questions.
+
 So the whole recommendation, as one finding: **the shipped camera is
 adequate, and what breaks it is widening the lens without adding pixels.**
 Doubling the resolution at 62° changes neither task; spreading the same

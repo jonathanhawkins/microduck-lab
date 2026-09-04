@@ -38,77 +38,33 @@ SHIPPED_FOV_H_DEG = 62.0
 _SHIPPED_PX_PER_RAD = SHIPPED_PX_H / np.deg2rad(SHIPPED_FOV_H_DEG)
 
 
-# WHAT THE SENSOR ACTUALLY IS (2026-09, from the developer + its datasheet):
-# 1/2.9", 2.75 um BSI pixels, 1920 x 1080 active, up to 90 fps. Derived:
-# 5.28 x 2.97 mm active area, 6.06 mm diagonal, 16:9.
+# THE CAMERA: see docs/camera-hardware.md, which is the single home for this
+# and carries the workings. The three facts that bear on the numbers below:
 #
-# Three things follow, and only the first two are answers.
+# 1. `fov_h_deg` / `fov_v_deg` ARE THE FULL-ARRAY FIGURE FOR A CAMERA THE
+#    ROBOT DOES NOT RUN THAT WAY. Upstream identifies an IMX219 (Pi Camera
+#    v2, quoted 62.2 x 48.8) but `mediad` pins the SENSOR to 1920x1080, which
+#    on that part is a centred CROP - libcamera: "(680, 692)/1920x1080 crop",
+#    59% of the columns and 44% of the rows. With the stock f = 3.04 mm lens
+#    that is 39.0 x 22.5 deg, so this spec may be ~23 deg too wide and ~25
+#    deg TOO TALL. Unconfirmed (the lens is not in the repo, only the driver
+#    overlay), so nothing here is re-baselined on it.
+# 2. `px_h` IS THE NPU'S YOLO11n INPUT, NOT THE SENSOR. The sensor carries
+#    1920 px across it, six times what the detector consumes, so a wider lens
+#    is paid for by the INFERENCE INPUT and not by new hardware.
+# 3. THE REPLACEMENT MODULE IS 116 x 60 deg (vendor: 1/2.9", 2.75 um BSI,
+#    1920x1080 native, 90 fps, D 142.2 / H 116 / V 60, EFL ~2.9 mm). That is
+#    essentially the lens sweep's 120 deg arm, which this repo has already
+#    measured: at 320 px it tidied 0.632 against 0.889, worse on 24 of 24
+#    seeds; at 640 px it recovered to 0.819. So the NPU input size decides
+#    whether it helps or hurts. Its 60 deg VERTICAL is a clear win either way.
 #
-# 1. THE SENSOR IS NOT THE PIXEL BUDGET. `px_h` below is the NPU's YOLO11n
-#    INT8 input, and the sensor carries 1920 px across it - SIX TIMES what
-#    the detector consumes. So "a wide lens is worth buying only with the
-#    sensor to pay for it" (README) is loosely worded: what has to pay is
-#    the INFERENCE INPUT, and this sensor can already feed a bigger one.
-#    The 640 px arm measured in that sweep is an NPU question ("can it run
-#    YOLO11n at 640, and at what rate"), not a new-hardware question.
-# 2. FRAME RATE IS A NON-ISSUE. `rate_hz` is 10 and the brain decides at
-#    10 Hz; the sensor offers 90. Nine times the headroom, so the "not sure
-#    we have the compute for the full potential" caveat does not bite this
-#    workload - frames can be dropped freely.
-# 3. THE FOV IS STILL UNKNOWN for the new part, and it is the assumption
-#    that matters. Sensor size does not give field of view without the
-#    lens's focal length. On this active area: 62 deg needs f = 4.4 mm,
-#    90 deg 2.6 mm, 120 deg 1.5 mm.
-#
-# AND THE CAMERA THE ROBOT HAS TODAY IS A DIFFERENT SENSOR, WITH A FOV
-# THIS SPEC IS PROBABLY WRONG ABOUT. Upstream identifies it on hardware:
-# `imx219 2-0010: Model ID 0x0219` (microduck/docs/project/media-bringup.md),
-# i.e. a Raspberry Pi Camera v2 - 1/4", 1.12 um, 3280 x 2464, whose quoted
-# 62.2 x 48.8 deg is where the 62/48 below came from. But `mediad`'s
-# `pin_sensor_mode` pins the SENSOR to 1920x1080 (pipeline.rs), and on the
-# IMX219 that mode is a CROP - libcamera reports it as
-# "1920x1080 [47.57 fps - (680, 692)/1920x1080 crop]", a centred window of
-# the array, no binning and no scaling. It keeps 59% of the columns and
-# 44% of the rows. With the stock f = 3.04 mm lens (confirmed by geometry:
-# the full array gives 62.3 x 48.8, matching the published spec):
-#
-#     full array 3280x2464   62.3 x 48.8 deg   <- what this spec assumes
-#     PINNED MODE 1920x1080  39.0 x 22.5 deg   <- what the robot may see
-#
-# So the frustum here may be ~23 deg too wide and ~25 deg TOO TALL. The
-# vertical error is the one that bites: 22.5 deg of vertical view is half
-# what the near-field reasoning assumes (a floor ball leaving the camera in
-# the last 0.3 m, a person's middle leaving the frustum at 1.2 m).
-#
-# The same crop cuts the other way on resolution: 320 px over 39 deg is
-# 471 px/rad against the 296 assumed here, because a narrow view
-# concentrates pixels. Both errors push the same conclusion - the lens
-# sweep's "the shipped camera is adequate" was measured on a baseline
-# WIDER and BLURRIER than the robot's, so a wider lens is probably worth
-# more than that battery said, not less.
-#
-# UNCONFIRMED, and it is one question: is the module the stock Pi Camera
-# v2 (f = 3.04 mm), or a third-party IMX219 board? Those ship M12 lenses
-# from 88 to 160 deg and would change every number above. The repo names
-# the driver overlay, not the lens. Do not re-baseline the sim on 39 x
-# 22.5 until someone confirms the lens - the point here is that 62 x 48 is
-# the FULL-ARRAY figure and the robot does not run the full array.
-#
-# The new sensor's headline advantage falls out of this: 1920 x 1080 is
-# its NATIVE array, so there is no crop to lose, and whatever the lens
-# gives is what the robot sees.
-#
-# And it raises one: the frustum below is 62 x 48 deg, whose shape
-# (tan24/tan31 = 0.74) is 4:3. THIS SENSOR IS 16:9 (0.56). At 62 deg
-# horizontal a 16:9 frame gives 37 deg vertical, not 48 - so this spec may
-# be ~11 deg too generous VERTICALLY, which is the axis the near-field
-# blindness lives on (a floor ball leaves the camera in the last 0.3 m; a
-# person's middle leaves the frustum at 1.2 m). If so the sim is optimistic
-# about close-range vision. Unresolved: ask for the lens focal length or
-# quoted FOV, and whether the 16:9 frame is letterboxed into the 320x320
-# YOLO input (keeps the FOV, wastes pixels) or centre-cropped (keeps the
-# pixels, loses horizontal FOV) - the two give different px/rad AND a
-# different effective HFOV.
+# One modelling gap it opens: that lens is NOT rectilinear (a pinhole EFL
+# solved from H, V and D gives 1.65 / 2.57 / 1.04 mm - inconsistent; an
+# equidistant model gives 2.61 / 2.84 / 2.44 mm, near the quoted 2.9). This
+# detector maps pixel offset to bearing with a pinhole model and no
+# distortion term, which is wrong exactly at the frame edges - where a 116
+# deg lens keeps its extra view. Recorded, not built.
 
 
 @dataclass(frozen=True)
