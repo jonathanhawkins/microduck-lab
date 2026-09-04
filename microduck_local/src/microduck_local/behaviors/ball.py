@@ -68,8 +68,28 @@ from .locomotion import *  # noqa: F401,F403 — cascades the full upstream name
 
 BALL_RADIUS = 0.035           # the 70 mm / 15 g kick ball (microduck_rl ball.xml)
 _BALL_KNOBS = {
-    # Camera field of view as the detector sees it (portrait after the
-    # daemon's 90 deg rotation of the 4:3 IMX219: ~48 deg across, ~62 deg tall).
+    # Camera field of view as the detector sees it, portrait (the sensor is
+    # mounted rotated 90 deg, which is also why the daemon rotates its frames).
+    #
+    # These two are PLACEHOLDERS and the pair is internally inconsistent with
+    # the actual sensor: they were written for a 4:3 IMX219, and the camera is
+    # 1920x1080 on 2.75 um pixels (1/2.9 in) — a **16:9** part, 5.28 x 2.97 mm
+    # active, 6.06 mm diagonal. A 16:9 sensor in portrait has a tall/wide
+    # angular ratio of 1.778, so VFOV should be
+    # 2*atan(1.778 * tan(HFOV/2)) — about 77 deg against this 48 deg, not 62.
+    # The absolute values cannot be derived without the LENS FOCAL LENGTH,
+    # which nobody has written down; for reference, portrait f=2.8 mm gives
+    # 56 x 87 deg, f=3.6 mm gives 45 x 73 deg, f=4.0 mm gives 41 x 67 deg.
+    #
+    # Measured tolerance to being wrong (docs/roadmap.md section 2, 60-episode
+    # batteries at --events 0.33): found rate does not move at all across HFOV
+    # 24-90 deg, because the detector reports bearing NORMALIZED by the FOV and
+    # the geometry cancels. VFOV is the sensitive axis — in-frame share runs
+    # 58% at 40 deg to 71% at 90 deg — and the ORIENTATION matters more than
+    # either: portrait 48x77 scores at or above this placeholder pair, while
+    # landscape 77x48 loses 4 points of found rate and 3 of handoff. A
+    # floor-searching duck wants a TALL frame. Confirm the mount before the
+    # focal length.
     "MICRODUCK_BALL_HFOV_DEG": 48.0,
     "MICRODUCK_BALL_VFOV_DEG": 62.0,
     "MICRODUCK_BALL_MAX_RANGE": 3.0,     # m — beyond this the detector has no box
@@ -87,6 +107,17 @@ _BALL_KNOBS = {
     # Detector cadence (control steps), jitter (normalized bearing units),
     # dropout (probability an update reports nothing while the ball is in
     # frame) and the memory's fade time constant (s).
+    #
+    # 2 steps = 25 Hz against the 50 Hz control loop. The bottleneck this
+    # models is the NPU, NOT the camera: the sensor does 1920x1080 at up to
+    # 90 fps, which is ~9x more than this pipeline can consume, so frame rate
+    # is not where compute should go. **The real requirement is >= 10 Hz
+    # detection**, measured (docs/roadmap.md section 2): 50/25/17/10 Hz are
+    # indistinguishable, and between 10 and 6 Hz the behavior falls off a
+    # cliff — centred share 60% -> 23%, kick handoff 75% -> 13%, falls 1 -> 4,
+    # and at 4 Hz the handoff never fires at all. Note the trap: `found` stays
+    # 97% at EVERY rate down to 4 Hz, because "ever saw it" is satisfied
+    # eventually. Only the AIMING columns see the collapse.
     "MICRODUCK_BALL_DETECT_EVERY": 2.0,
     "MICRODUCK_BALL_JITTER": 0.02,
     "MICRODUCK_BALL_DROPOUT": 0.0,

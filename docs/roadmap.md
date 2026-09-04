@@ -375,6 +375,68 @@ behavior survives contact with reality.
       "bearing normalized by the camera's ACTUAL horizontal/vertical FOV";
       get that right and, per the table, the precise value stops mattering.
 
+- [x] **The camera is not an IMX219, and VFOV — not HFOV — is the axis that
+      matters.** The datasheet (2026-09-03) is 1920x1080 on 2.75 µm pixels,
+      1/2.9 in: **16:9**, 5.28 x 2.97 mm active, 6.06 mm diagonal, up to
+      90 fps. `ball.py` derived its `48° x 62°` pair from a 4:3 IMX219, and a
+      4:3 assumption is the one thing a 16:9 sensor definitely breaks — in
+      portrait the tall/wide angular ratio is **1.778**, so VFOV should be
+      ~77° against that 48°, not 62°. The absolute pair still cannot be
+      derived without the **lens focal length**, which is the one number
+      nobody has written down (portrait reference: f=2.8 mm → 56 x 87°,
+      f=3.6 mm → 45 x 73°, f=4.0 mm → 41 x 67°).
+
+      VFOV swept on the shipped brain, 60 episodes at `--events 0.33`:
+
+      | VFOV | 40° | 50° | **62°** | 77° | 90° |
+      |---|---|---|---|---|---|
+      | found | 95% | 97% | 97% | 97% | 97% |
+      | in frame | 58% | 62% | 66% | 69% | 71% |
+      | t_first med | 0.58 s | 0.27 s | 0.24 s | 0.21 s | 0.20 s |
+      | falls | 1 | 1 | 1 | 3 | 3 |
+
+      Unlike HFOV (flat), VFOV has a real gradient — 13 points of in-frame
+      share — which is what you would expect of a behavior built around
+      nodding down for near-floor balls.
+
+      **Orientation matters more than the sensor swap**, and it is the thing
+      to confirm on the hardware:
+
+      | mount | found | in frame | centred | handoff | t_handoff |
+      |---|---|---|---|---|---|
+      | current placeholder 48 x 62 | 97% | 66% | 62% | 68% | 2.08 s |
+      | **16:9 PORTRAIT 48 x 77** | 97% | **69%** | 63% | **72%** | 2.10 s |
+      | 16:9 LANDSCAPE 77 x 48 | 93% | 60% | 56% | 65% | 3.30 s |
+
+      → **no setting has to change today**: the real sensor mounted portrait
+      scores at or above the placeholder, so the trained brains are not
+      invalidated. Landscape costs 4 points of found rate, 6 of in-frame and
+      60% more time to the handoff. A floor-searching duck wants a TALL frame.
+      **Confirm the mount, then get the focal length**, in that order.
+
+- [x] **Detector rate is the real compute requirement: ≥ 10 Hz.** The sensor's
+      90 fps is ~9x more than this pipeline can consume, so frame rate is not
+      where compute should go; the NPU's detection rate is. Swept
+      `MICRODUCK_BALL_DETECT_EVERY` against the 50 Hz control loop, 60
+      episodes at `--events 0.33`:
+
+      | detector | 50 Hz | 25 Hz (modelled) | 17 Hz | **10 Hz** | 6 Hz | 4 Hz |
+      |---|---|---|---|---|---|---|
+      | in frame | 65% | 66% | 66% | 64% | 51% | 19% |
+      | centred | 62% | 62% | 60% | 60% | **23%** | **5%** |
+      | handoff | 80% | 68% | 72% | 75% | **13%** | **0%** |
+      | falls | 1 | 1 | 1 | 1 | 4 | 16 |
+
+      → **50 / 25 / 17 / 10 Hz are indistinguishable, and it falls off a cliff
+      between 10 and 6.** Write ≥ 10 Hz into the daemon's requirements. The
+      recipe's 25 Hz default has 2.5x margin and does not need changing.
+
+      **The trap in this table is worth its own line:** `found` stays 97% at
+      EVERY rate, including the 4 Hz column where the handoff never fires and
+      the duck falls in 16 of 60 episodes. "Ever saw the ball" is satisfied
+      eventually by any detector. Only the AIMING columns see the collapse —
+      one more reason the battery grew them.
+
 ### 3. Search speed itself — the actual ask
 
 ### Time spent LOST — the strongest signal found so far, and it says ship the blind recipe
