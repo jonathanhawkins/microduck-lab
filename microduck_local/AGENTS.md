@@ -150,6 +150,27 @@ redundant — a module that parses can still fail on a bad relative import.
    that does not match the type it stands in for can make a dead path look
    alive. Prefer the real type in a test; if you must stub, assert the shape
    you are relying on.
+
+   The same shape has now bitten three times, and the third has its own
+   mechanism worth knowing. **A default argument object is bound once, at
+   `def` time.** `Detector.__init__(self, ..., spec=DetectorSpec())` holds
+   ONE `DetectorSpec` made at import; `World` constructs detectors without
+   a `spec=`, so patching `DetectorSpec.__init__.__defaults__` — the usual
+   trick for sweeping a frozen dataclass through a battery — changes what
+   `DetectorSpec()` returns from then on and changes NOTHING about the
+   detector that actually runs. A frustum sweep built that way returns
+   identical arms and looks like a null. (`TidyParams` is safe from this
+   only because `eval_tidy` builds a fresh `TidyParams(...)` per run; the
+   difference is invisible from the call site, so do not reason about it —
+   check.)
+
+   **So: assert on the object that is running, not on a fresh one.**
+   `assert DetectorSpec().fov_h_deg == 116` passes while the live detector
+   is at 62. `assert duck.detector.spec.fov_h_deg == 116` is the check that
+   would have caught it. Reach into the constructed world and read the
+   value back off the thing being measured — every sweep harness in
+   `scratchpad/` does this now, and the one that did not produced two
+   bit-identical arms.
 1. **Training charts measure the noise-crutched stochastic policy.** Claims
    about a run are made from the deterministic exported ONNX, never from
    `ep_rew` curves. Export, then eval, then look.
