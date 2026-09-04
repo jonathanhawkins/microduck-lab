@@ -86,6 +86,28 @@ LR_START = 3e-4
 LR_END = LR_START
 
 
+def git_state(repo: Path | None = None) -> dict:
+    """{"git_sha": short sha, "git_dirty": bool} for the workspace this trainer
+    runs from — the one fact brain.json could not answer before: "what CODE
+    was different between these two runs". Best-effort: a checkout without
+    git, or a copy that is not a repo, records nothing rather than failing a
+    training run over provenance."""
+    import subprocess
+    root = repo or Path(__file__).resolve().parents[3]
+    try:
+        sha = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        if sha.returncode != 0:
+            return {}
+        dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain",
+                                "--untracked-files=no"],
+                               capture_output=True, text=True, timeout=5)
+        return {"git_sha": sha.stdout.strip(),
+                "git_dirty": bool(dirty.stdout.strip()) if dirty.returncode == 0 else None}
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+
+
 def make_env_fn(seed: int, fixed_preset: str | None, variety: bool = False,
                 polite: float = FollowTask.polite, polite_mix: tuple[float, ...] = ()):
     def fn():
@@ -501,7 +523,7 @@ def main() -> None:
             "probe_presets": probe_presets if args.probe_every > 0 else None,
             "net_arch": args.net_arch, "n_epochs": args.n_epochs,
         "n_steps": args.n_steps, "batch_size": batch, "lr": args.lr, "lr_end": args.lr_end,
-            "log_std_max": log_std_max, "legacy_hparams": LEGACY}
+            "log_std_max": log_std_max, "legacy_hparams": LEGACY, **git_state()}
     if striker:
         meta |= {"target_cls": "ball", "obs_dim": STRIKER_OBS_DIM, "obs_version": STRIKER_OBS_VERSION,
                  "act_low": S_ACT_LOW.tolist(), "act_high": S_ACT_HIGH.tolist(),
