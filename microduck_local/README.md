@@ -159,10 +159,10 @@ uv run bench-envs --compare-vec --compare-threads
 ## Cloud and Linux training (`machine.py`)
 
 Every number above was measured on an 18-core M5 Max, and **that stays the
-default** — this harness is written for a Mac and advertised as one. But two
-of those tunings are wrong on a small Linux or cloud box, badly enough to
-lose a third of the machine, so `machine.py` detects which machine it is on
-and picks a profile. `uv run machine-facts` prints what yours resolved to.
+default** — this harness is written for a Mac and advertised as one. But one
+of those tunings is wrong on a small Linux or cloud box, badly enough to lose
+a third of the machine, so `machine.py` detects which machine it is on and
+picks a profile. `uv run machine-facts` prints what yours resolved to.
 
 **What goes wrong on a 4-core cloud box.** The trainer, not the physics
 workers, eats the machine. torch's OpenMP pool spin-waits between the tiny
@@ -257,15 +257,52 @@ matters more than core count: one env steps in 0.34 ms here against 0.135 ms
 on the M5 Max, so a 4-vCPU box will not match the laptop whatever the
 threading does.
 
-Two things measured and **not** adopted: `OMP_WAIT_POLICY=PASSIVE` on top of
-phase-aware threads is a small loss (the update's threads then sleep between
-minibatches — update 3.3 s → 5.1 s at 16 envs), and pinning OpenBLAS to one
-thread is neutral, because the workers never spawn BLAS pools on 61-dim ops.
+**Measured and not adopted** (recorded so nobody pays for them twice):
+
+- `OMP_WAIT_POLICY=PASSIVE` on top of phase-aware threads — a small loss; the
+  update's threads then sleep between minibatches (update 3.3 s → 5.1 s at 16
+  envs). It is the best *no-code* fallback on its own, at +20%, but the two
+  do not stack.
+- Pinning OpenBLAS to one thread — neutral. The workers never spawn BLAS
+  pools on 61-dim ops.
+- **Pinning each worker to a core** (`sched_setaffinity`, round robin). 32
+  processes on 4 cores means the scheduler may migrate every worker on every
+  wake, so this looked obvious. Six interleaved runs: median 9.80 ms pinned
+  vs 9.56 ms default — neutral to slightly worse. Linux's scheduler is
+  already doing a better job than the naive pinning.
+- **A double-buffered (split-fleet) rollout.** Step half the fleet while the
+  parent computes actions for the other half, hiding its serial ~1.95 ms of
+  forward + dispatch behind worker compute. Prototyped with two independent
+  16-env vec envs, interleaved arms: **+6.2% at 8 envs, +7.1% at 16, +6.2%
+  at 32** — real, but a third of the ~18% the arithmetic suggested, because
+  splitting pays a second wait's sync cost and two batch-16 forwards cost
+  more than one batch-32. Not adopted, because ~5% end-to-end does not buy
+  what it costs: it *redefines what a step is*. The bitwise-collection test
+  (`test_overlap.py`) pins the vendored collect loop against stock SB3 and a
+  split fleet cannot satisfy it; `VecNormalize`
+  updates `obs_rms` once per step, so halves give two updates of 16 rows and
+  a different running normalizer — which is baked into every exported ONNX;
+  and the rollout buffer's `add()` takes a full row, so half-rows need
+  staging in the most correctness-sensitive code here. The scratch prototype
+  is not in the tree; re-derive it from these numbers before reopening.
+
 Two known gaps: the lock file resolves CUDA torch wheels on Linux (a 7.2 GB
 venv for a CPU trainer — CI installs from the CPU index first, and a
 `[tool.uv.sources]` entry would fix `uv sync` too), and `--update-device`'s
 `auto` only knows about MPS, so a CUDA cloud box needs an explicit
 `--update-device cuda` (the code path is device-generic but unmeasured).
+
+**Where the remaining time goes on this box**, at 32 envs after all of the
+above: the vec-step is ~10.8 ms — policy forward 0.96 ms (8.9%),
+`step_async` 1.00 ms (9.2%), `step_wait` 8.83 ms (81.9%). Uncontended physics
+for 32 envs on 4 cores would be ~4.9 ms, and the gap is the memory contention
+of 32 concurrent mjData working sets that the `--ipc-floor` decomposition
+below already pins down on a quieter machine. Worth noting that the two
+agree from opposite directions: that section predicted a rollout-loop rewrite
+could recover "at best ... about 6% of wall", and the split-fleet prototype
+went and measured 6.2-7.1%. The next real step-change is batched physics (one
+`mujoco.rollout` call for the whole fleet), which needs the BAM actuator in C
+rather than Python — it targets the physics row, not the plumbing.
 
 ### The 2026-08-31 speed pass (measured, in order applied)
 
