@@ -367,15 +367,37 @@ still sweeps quickly in bearing as the duck moves, so averaging it lags —
 and past α ≈ 0.6 the lag costs more than the noise it removes. "Still ball"
 describes the world, not the measurement.
 
-That does leave one specific, untried design rather than a knob: **smooth
-in the odometry frame, where a stationary ball genuinely is stationary.**
+That leaves one specific design rather than a knob: **smooth in the
+odometry frame, where a stationary ball genuinely is stationary.**
 `Track.xy` is already in odometry, but it is *computed from* the smoothed
-polar values rather than smoothed itself. Averaging `xy` directly, gated on
-the tracker's own velocity estimate, is the version of this idea that the
-frame argument does not kill. It is written down, not built: AGENTS.md
-rule 7 applies (the line-up's offsets were fitted with this noise present),
-the soccer benchmark needs ~200 seeds to resolve a +0.3 goal effect, and
-two previous line-up-precision changes measured *worse*.
+polar values rather than smoothed itself. That was the one version of the
+idea the frame argument does not kill — so it was measured too, as an EMA
+of the raw per-frame `xy` against the same truth:
+
+| estimator | still ball < 0.6 m | rolling ball |
+|---|---|---|
+| `Track.xy` — what ships (smoothed polar) | 2.70 cm | **8.90 cm** |
+| xy-EMA in odometry, α = 1.00 (no smoothing) | 3.30 cm | 8.08 cm |
+| xy-EMA in odometry, α = 0.60 | 2.41 cm | 10.37 cm |
+| xy-EMA in odometry, **α = 0.30** | **2.19 cm** | 17.01 cm |
+| xy-EMA in odometry, α = 0.15 | 3.24 cm | 31.39 cm |
+
+**The frame argument is confirmed and the idea is still not worth
+building.** Smoothing in odometry does what smoothing in polar could not —
+it keeps improving a still ball past the point where polar smoothing turns
+over, reaching **2.19 cm against the shipped 2.70, a 19% cut**. But it costs
+heavily on a rolling ball (8.90 → 17.01 cm), because an EMA lags a moving
+target in any frame; it would need gating on the tracker's `vel`, which
+exists. And even in odometry it turns over by α = 0.15 — the ball is not
+perfectly still and the odometry itself drifts.
+
+So the size is now known: **~0.5 cm off a 5.5 cm placement error, about
+9%**, the rest being the stale pose and odometry. Against a benchmark that
+needs ~200 seeds to resolve a +0.3 goal effect, that is below the
+resolution of anything this repo can measure end to end. It is recorded
+here with its numbers so nobody re-derives it, and AGENTS.md rule 7 would
+apply on top (the line-up's offsets were fitted with the present noise, and
+two previous line-up-precision changes measured *worse*).
 
 **Two traps, both the same mistake**, recorded because the first version of
 this table was wrong in a way that looked like a discovery:

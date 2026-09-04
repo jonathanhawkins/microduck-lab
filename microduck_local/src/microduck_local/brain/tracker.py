@@ -86,10 +86,16 @@ class TrackerParams:
     # ~0.6 the lag costs more than the noise it removes. "Still ball"
     # describes the world, not the measurement.
     #
-    # The untried version that the frame argument does NOT kill: smooth `xy`
-    # itself, in the odometry frame where a stationary ball genuinely is
-    # stationary, gated on `vel`. `xy` is currently COMPUTED FROM these
-    # smoothed polar values rather than smoothed on its own.
+    # The version the frame argument does NOT kill - smooth `xy` itself, in
+    # the odometry frame where a stationary ball genuinely is stationary -
+    # was measured too, as an EMA of the raw per-frame xy (still / rolling):
+    # shipped 2.70 / 8.90 cm, xy-EMA a=0.60 2.41 / 10.37, a=0.30 2.19 /
+    # 17.01, a=0.15 3.24 / 31.39. It works as predicted (19% off a still
+    # ball, and unlike polar smoothing it keeps improving past a=0.6) and it
+    # is still not worth building: it costs heavily on a rolling ball so it
+    # needs gating on `vel`, and 0.5 cm off a 5.5 cm placement error is
+    # below what the soccer benchmark can resolve (~200 seeds for +0.3
+    # goals). Recorded so nobody re-derives it. docs/camera-hardware.md 3c.
     smooth: float = 0.6
     coast_s: float = 2.5           # a track survives this long without a hit
     confirm_hits: int = 2          # hits before a brain should trust it
