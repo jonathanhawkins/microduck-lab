@@ -121,6 +121,50 @@ approach, and at 0.654 rad the blind radius is 0.18 m against the sim's
 head-level figure suggests, which is worth knowing before anyone panics
 about the crop. The replacement module improves on the sim on both rows.
 
+## 3c. MEASURED: the sim's baseline is a camera neither candidate is
+
+The audit §3 asked for. `eval-tidy`, 32 paired seeds x 6 toys x 300 s, the
+frustum swept and nothing else changed:
+
+| frustum | px/rad | tidied | falls a run | grasp | att/pick | scans |
+|---|---|---|---|---|---|---|
+| **62 x 48 — what the sim assumes** | 296 | **0.880** | **0.38** | 88% | 1.15 | 80 |
+| 39.0 x 22.5 — the IMX219 1080p crop | 470 | 0.609 | **2.44** | 62% | 1.61 | 102 |
+| 116 x 60 equidistant — the new module | 158 | 0.542 | 0.69 | 80% | 1.24 | 73 |
+
+Against the baseline, paired: the crop is **−1.62 toys (p < 0.0001, worse
+on 26 of 32)** with falls up **6.5x** (12 events against 78, p < 0.0001);
+the new module is **−2.03 toys (p < 0.0001, worse on 29 of 32, better on
+0)** with falls up but unresolved (p = 0.12).
+
+**Every tidy result in this repo was measured on a camera better than
+either real candidate.** That is the headline, and it is a caveat on the
+whole Track 12 benchmark rather than a fact about any one knob.
+
+The two fail in *opposite* ways, which is the useful part:
+
+- **The crop fails on FIELD OF VIEW while having the best angular
+  resolution of the three** (470 px/rad). It sees sharply through a
+  keyhole: scans rise 80 → 102, grasp drops to 62%, and the falls explode —
+  a duck with 22.5° of vertical and 39° of horizontal walks into what it
+  cannot see.
+- **The new module fails on RESOLUTION while having the best field of
+  view.** 158 px/rad is the lens sweep's bad arm exactly. Grasp holds at
+  80% and falls barely move; it is the *finding* that breaks, which is what
+  the sweep predicted.
+
+So the sim's 62 x 48 at 296 px/rad sits near a sweet spot that neither
+option occupies, and the choice between them is not "which is better" but
+"which failure is cheaper". For the new module the answer is already known
+and it is §3: **at a 640 px inference input it is 316 px/rad and lands back
+beside the baseline.** The crop has no such escape — no inference budget
+fixes a 22.5° vertical.
+
+*Caveats.* Seeds 0–31 are a discovery block; a confirmation on 32 fresh
+layouts is running, as is a pinhole rerun of the 116° arm to separate "wide
+and blurry" from "and the bearing is wrong by up to 9.7°". And the crop arm
+still assumes the stock Pi lens (§1).
+
 ## 4. Frame rate is a non-issue
 
 `DetectorSpec.rate_hz` is 10 and the brain decides at 10 Hz, against the
