@@ -147,18 +147,42 @@ def test_ipc_floor_measures_the_plumbing_and_nothing_else():
     """
     from microduck_local.bench_envs import ipc_floor
 
-    rows = ipc_floor(counts=(4, 8), per_worker=(1, 2), steps=200)
-    assert {(r["envs"], r["envs_per_worker"]) for r in rows} == {
-        (4, 1), (4, 2), (8, 1), (8, 2)}
-    by = {(r["envs"], r["envs_per_worker"]): r["us_per_vec_step"] for r in rows}
+    # A FLOOR is a minimum, so estimate it as one: repeat and take the best
+    # sample per configuration. Contention is one-sided — a busy runner only
+    # ever ADDS time — so the minimum is both the right estimator and the
+    # robust one, and it is not a tolerance bolted on to hide noise.
+    #
+    # This matters because the test previously asserted a strict inequality
+    # between two SINGLE wall-clock samples, and CI duly inverted it once on
+    # a loaded macOS runner: 100.8 us against 94.9, a 6% inversion of an
+    # effect that is ~40% (locally k=2 measures 0.57-0.69x of k=1 on six
+    # trials out of six). The mechanism was never in doubt; the estimator
+    # was. AGENTS.md: one sample resolves nothing.
+    #
+    # Best-of-N is also what this repo's own recorded sweep used - see
+    # `test_the_measured_curve_still_picks_the_shipped_default`, whose data
+    # is "best of 3 interleaved repeats on a quiet machine". This is the
+    # only test in the file that takes a LIVE measurement (every other one
+    # asserts on recorded constants or synthetic Points), which is why it
+    # was the only one that could flake, and it now uses the same estimator
+    # the recorded data did.
+    best: dict = {}
+    for _ in range(3):
+        rows = ipc_floor(counts=(4, 8), per_worker=(1, 2), steps=200)
+        assert {(r["envs"], r["envs_per_worker"]) for r in rows} == {
+            (4, 1), (4, 2), (8, 1), (8, 2)}
+        for r in rows:
+            k = (r["envs"], r["envs_per_worker"])
+            best[k] = min(best.get(k, float("inf")), r["us_per_vec_step"])
+    by = best
     for v in by.values():
         assert 0 < v < 5000, f"a null-env vec-step of {v:.0f} us is not a floor"
     # Packing halves the semaphore traffic, so k=2 must be the cheaper floor —
     # this is the mechanism behind the envs-per-worker default.
-    assert by[(8, 2)] < by[(8, 1)]
+    assert by[(8, 2)] < by[(8, 1)], f"k=2 {by[(8, 2)]:.0f} us, k=1 {by[(8, 1)]:.0f} us"
     # And the floor grows with the worker count, which is why it matters more
     # at high env counts than low ones.
-    assert by[(8, 1)] > by[(4, 1)]
+    assert by[(8, 1)] > by[(4, 1)], f"8 workers {by[(8, 1)]:.0f} us, 4 {by[(4, 1)]:.0f} us"
 
 
 def test_null_env_is_module_level_so_fork_children_can_rebuild_it():

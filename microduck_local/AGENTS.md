@@ -232,6 +232,40 @@ redundant — a module that parses can still fail on a bad relative import.
    value back off the thing being measured — every sweep harness in
    `scratchpad/` does this now, and the one that did not produced two
    bit-identical arms.
+
+   **And it is not only a harness problem.** The turn-rate work found the
+   same shape in SHIPPING inference code: `LearnedBrain` clipped its
+   actions with the *module's* `ACT_HIGH`, so a brain trained at
+   wz ±2.0 was silently re-clipped to the current default when it ran —
+   halving its turn rate, and making any A/B across that bound measure
+   nothing at all. A trained policy's action bounds are part of its
+   contract, so they now come from its own `brain.json`. The general form:
+   **a limit applied at BOTH training and inference must come from one
+   place, and that place must travel with the artifact.** When a global
+   default and a per-artifact value can disagree, the global one wins
+   silently and the artifact is quietly worse than it was trained to be.
+8. **To call a sensor wrong, reproduce its exact frame and definition
+   first.** A probe splitting the ball's placement error into bearing and
+   range made the same mistake twice, and both times the artefact looked
+   like a finding:
+   - `range_est` is the 3-D SLANT range from the camera SITE to the target's
+     centre. The camera sits ~21 cm above a ball on the floor, so comparing
+     it against a 2-D ground distance shows a "+5.7 cm systematic range
+     bias" that is entirely the measurer's — at 0.35 m,
+     `hypot(0.35, 0.21) - 0.35 = 5.8 cm`, which is the whole "bias".
+   - `bearing` is in the CAMERA's frame, and brains yaw the head. Compared
+     against a body-frame bearing it charges the detector for the head's
+     rotation: it inflated the measured bearing error from 3.35° to 5.65°
+     and invented a -1.5° bias. `frame.cam_yaw` is what
+     `Tracker._associate` adds for exactly this reason.
+
+   Both errors are the arc lesson wearing a different hat (net displacement
+   in a start frame is not body-axis speed): **a difference between two
+   quantities is only an error when they are the same quantity.** Before
+   attributing a residual to the thing you are measuring, write down the
+   sensor's frame, its origin, and whether its number is 2-D or 3-D — and
+   check a case where you can predict the answer by hand. A bias that
+   happens to equal a geometric term you left out is the tell.
 1. **Training charts measure the noise-crutched stochastic policy.** Claims
    about a run are made from the deterministic exported ONNX, never from
    `ep_rew` curves. Export, then eval, then look.
