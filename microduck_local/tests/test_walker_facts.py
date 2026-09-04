@@ -94,3 +94,35 @@ def test_back_up_clamps_past_the_dead_band_and_into_the_command_range():
     assert back_up(0.5)[2] == 0.5 and back_up(0.5)[0] < 0        # combines with a turn
     assert turn(+1, cold=True) == (TURN_KICK, 0.0, 1.0)
     assert turn(-1, cold=False) == (0.0, 0.0, -1.0)
+
+
+@walker
+def test_the_reverse_composes_with_a_turn_and_the_arc_is_not_a_failure():
+    """Speed along the BODY axis is what says whether a reverse is working.
+    Net displacement in the start frame is not: a duck reversing while it
+    turns drives an arc that curves back toward where it began, and reading
+    that as "the reverse fails under a turn" is a reading of the coordinate
+    frame. It was written into `gait.back_up`'s docstring until the rollout
+    was rendered and looked at."""
+    straight = _body_axis_speed(-0.40, 0.0)
+    assert straight < -0.19
+    for wz in (0.5, 1.0, -1.0):
+        turning = _body_axis_speed(-0.40, wz)
+        assert turning < -0.19, wz                         # the reverse is unimpaired...
+        assert abs(turning - straight) < 0.05, wz          # ...to within 5 cm/s of straight
+
+
+def _body_axis_speed(vx: float, wz: float, secs: float = 6.0) -> float:
+    """Metres a second along the duck's OWN heading, integrated step by step
+    against the live yaw — the frame-independent reading."""
+    w, d = _flat_world()
+    _settle(w, d)
+    prev = d.trunk_pos(w.data).copy()
+    along = 0.0
+    for _ in range(int(secs / 0.02)):
+        d.set_cmd(w.data, (vx, 0, wz), (0, 0, 0, 0))
+        w.step()
+        p, y = d.trunk_pos(w.data), d.yaw(w.data)
+        along += (p[0] - prev[0]) * math.cos(y) + (p[1] - prev[1]) * math.sin(y)
+        prev = p.copy()
+    return along / secs

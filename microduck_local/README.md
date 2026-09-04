@@ -467,6 +467,25 @@ its current intent live.
   forward dead band as well: it starts the gait for a cold turn, but a
   brain that "walks" at 0.2 moves 9 mm in 6 s.
 
+  **And then a second lesson, on top of the first.** Reversing while
+  turning looked at first like the limit the straight reverse was not: net
+  displacement over 6 s is 1.31 m straight but only 0.62 m at `wz` 1.0, and
+  "it cannot reverse and turn at once" was written into `gait.back_up`'s
+  docstring on that reading. Rendering the rollout and *looking* at it
+  killed that in one glance — the duck is reversing the whole time and
+  visibly rotating, so it drives an **arc**, and an arc curves back toward
+  where it started. Measured along the duck's own heading instead of the
+  frame it began in, the reverse is unimpaired: −0.219 m/s straight,
+  −0.208 at `wz` 0.5, −0.209 at 1.0, −0.230 at −1.0, while the body turns
+  at 0.30–0.40 rad/s. The first reading was a fact about the coordinate
+  frame. **A dead band and a rotating frame are the same mistake twice:
+  a number measured correctly and read as more than it says.**
+
+  It is a real gait, too — 3.43 m in 15 s at a steady 0.228 m/s, four start
+  headings agreeing to 6 mm with under 0.1 rad of drift and no falls — and
+  unlike the turn it needs no warm gait: cold reaches 2 cm in 0.48 s
+  against 0.38 s warm, at the same final speed.
+
   Three things came out of this beyond the numbers. `walker-facts` now
   **sweeps the command ranges** instead of sampling one value each
   (`command_deadbands()`), on an empty floor — `make_room`'s 3.0 × 2.5 m
