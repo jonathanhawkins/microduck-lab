@@ -287,6 +287,29 @@ the tree, and Track 12 has its first working loop:
   in the scenario/editor (12.9 in first form); the tether toggle (12.10),
   graspability learning (12.8) and VLM designation (12.12) are still plans.
 
+- **The reflex tier under all of this: local PPO cannot produce a walker, and
+  a clone can.** Everything above rides on the shipped `alpha_walking`, and
+  the question of whether this harness can improve on it is now answered for
+  both routes. From scratch, two 1.5M-step arms reached `ep_rew` 2300-2900 at
+  **0.001 m/s** — standing still is the safest policy at this sample budget,
+  and the reward said nothing about it. Cloning the shipped walker instead
+  works and is close to free (`uv run distill`, ~1 min, cached): 0.203 m/s,
+  1000-step episodes, **0 falls** on held-out seeds, the teacher's own
+  numbers. Fidelity is the whole story there — correlation(action MSE, fall
+  rate) = **+0.93** over five budgets, and below ~0.00011 rad² the falling
+  stops outright; the old default sat at 0.00017 and fell 8% of episodes,
+  and the LOWEST-fidelity clone was the FASTEST (0.238 m/s) while falling
+  three episodes in four. But PPO on top of a good clone is a resolved bad
+  trade over 14 paired seeds — episode length **-414** [-596,-233], fall rate
+  **+0.44** [+0.250,+0.628], ground speed +0.041 [+0.007,+0.075] — with the
+  five fastest fine-tunes being the five that collapsed to ~50-step episodes.
+  Three learning rates, four fall-penalty weights and two training lengths
+  all failed to beat the clone, so for locomotion **the clone is the
+  deliverable** and the GPU stack is where a better walker comes from. Judge
+  candidates with `select-run` (achieved ground speed, falls as a rejection
+  floor), never `ep_rew`: it is an episode SUM and tracks survival, which
+  reversed a verdict on a real pair of runs.
+
 Numbers that shaped the design, all measured in this world: the walker only
 turns in place at a yaw command of 1.0 and stands still below ~0.2 m/s
 asked; it honours a head-pitch intent of +0.6 (camera 37° down, no falls,
@@ -545,12 +568,44 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | # | Task | What | Size | Value |
 |---|---|---|---|---|
 | 3.1 | **`BrainEnv`** | Gymnasium env: obs = sensor features (64 ToF cells, detector tuple, odom delta, last intents, ~80 dims), action = `[vx, vy, vyaw, head_yaw, head_pitch]` at 10 Hz, frozen reflex ONNX underneath, `ForkVecEnv` parallelism as today. Domain randomization on sensor noise/latency, not physics. | M | ★★★★★ |
-| 3.2 | **Follow-me** | Scenario: a person capsule walks a random path; reward = keep 0.5–0.8 m and bearing near zero, penalize losing sight, collisions, jerky intents. Compare RL vs the scripted controller in the same scenario with the same noise preset. | M | ★★★★★ |
+| 3.2 | **Follow-me** | Scenario: a person capsule walks a random path; reward = keep 0.5–0.8 m and bearing near zero, penalize losing sight, collisions, jerky intents. Compare RL vs the scripted controller in the same scenario with the same noise preset. **Shipped (follow-v4); what the training ECONOMY turned out to be is in the sub-bullet below.** | M | ★★★★★ |
 | 3.3 | **Obstacle avoidance from ToF only** | Wander without collisions in procedural rooms; the classic "learn a policy over a depth image" lesson at 64 pixels. | M | ★★★★ |
 | 3.4 | **Go-to under odometry drift** | Reach a target given only drifting odometry; lesson on why closed-loop sensing beats dead reckoning. | S | ★★★ |
 | 3.5 | **Hierarchical brain** | Add a discrete head to the brain action: which reflex policy to run (walk / stand / kick / ground-pick). Needed for soccer kicking and for "sit when petted". **Done in its first form** (`brain/striker.py`): a kick logit per foot on top of the continuous twist, and the option is EXECUTED BY THE REFLEX TIER — it latches, stops the body, fires after 0.3 s of standing — because a kick issued mid-stride is the fall mode (4 falls in 25 episodes, all within 0.6 s of a kick; a speed-only gate made it worse at 11/25, the latch took it to 0–1). A cooldown is needed too: without it PPO found a lock, one kick every 0.93 s, so the duck never walks and never samples anything else. Both are world fixes, not reward terms. | M | ★★★★ |
 | 3.6 | **Brain teach panel** | Same UX as tricks: plain-English recipe cards, sliders, live snapshots hot-loaded on the trainee duck in `/sim`. Reuse `TeachPanel` with a brain behavior family. | M | ★★★★ |
-| 3.7 | **A faster body yaw (reflex side)** | Was "head-aware locomotion": a walk policy fine-tuned so head-pose commands are honoured while walking, on the premise that the shipped walker only sees keep-alive ranges. **Half of it is already done and the other half was aimed at the wrong joint.** Measured (`walker-facts`): the shipped walker tracks a head-yaw command to 1.42 rad WHILE WALKING at 7.5 rad/s, for a 12% forward-speed cost and no falls — `HEAD_CMD_RANGES`' ±0.07 is the curriculum's first stage, not the policy's range, and upstream runs `head_pose_range` out to ±1.40 with head-pose tracking as a primary reward. There is nothing to train there. What IS a wall is the BODY yaw: ~0.65 rad/s in a real run, ~0.6–0.8 at the ceiling, with `ANG_VEL_Z_RANGE`'s ±1.0 already delivering it — at full command there is nothing left to ask for. A 1v1 run spends **47% of itself rotating on the spot** (measured over 1200 duck-seconds, sweeping 371 rad at 0.655 rad/s; a 3v3 run is worse). Holding the yaw demand fixed, a walker that turned at 1.5 rad/s would free **~27% of every run** — larger than any brain-level change measured in this repo. So: retrain for TURN RATE, and widen the twist command range with it. | M | ★★★★★ |
+| 3.7 | **A faster body yaw (reflex side)** | Was "head-aware locomotion": a walk policy fine-tuned so head-pose commands are honoured while walking, on the premise that the shipped walker only sees keep-alive ranges. **Half of it is already done and the other half was aimed at the wrong joint.** Measured (`walker-facts`): the shipped walker tracks a head-yaw command to 1.42 rad WHILE WALKING at 7.5 rad/s, for a 12% forward-speed cost and no falls — `HEAD_CMD_RANGES`' ±0.07 is the curriculum's first stage, not the policy's range, and upstream runs `head_pose_range` out to ±1.40 with head-pose tracking as a primary reward. There is nothing to train there. What IS a wall is the BODY yaw: ~0.65 rad/s in a real run, ~0.6–0.8 at the ceiling, with `ANG_VEL_Z_RANGE`'s ±1.0 already delivering it — at full command there is nothing left to ask for. A 1v1 run spends **47% of itself rotating on the spot** (measured over 1200 duck-seconds, sweeping 371 rad at 0.655 rad/s; a 3v3 run is worse). Holding the yaw demand fixed, a walker that turned at 1.5 rad/s would free **~27% of every run** — larger than any brain-level change measured in this repo. So: retrain for TURN RATE, and widen the twist command range with it. **Before that run is launched, read this: local PPO cannot currently produce a walker, by either route, and both failures are measured.** From scratch, two 1.5M-step arms reached `ep_rew` 2300-2900 at **0.001 m/s** — they learn to stand and not fall, which is the safest policy available at this sample budget, and the reward says nothing about it. Warm-starting instead from a distilled clone of the shipped walker works (`uv run distill`, ~1 min, cached: 0.203 m/s / 1000-step episodes / 0 falls on held-out seeds, the teacher's own numbers) — but PPO ON TOP of that clone is a resolved bad trade over 14 paired seeds: episode length **-414** [-596,-233], fall rate **+0.44** [+0.250,+0.628], ground speed +0.041 [+0.007,+0.075]. The five fastest fine-tunes were the five that collapsed to ~50-step episodes. Three learning rates, four fall-penalty weights and two training lengths all failed to beat the clone. So a turn-rate run has to either (a) find a training recipe that survives fine-tuning, which is an open problem, or (b) go to the GPU stack, which is what `microduck_rl` is for. Judge any candidate with `select-run` (achieved ground speed, falls as a rejection floor), never `ep_rew` — it is an episode SUM and tracks survival, not rate. | M | ★★★★★ |
+
+**What brain training costs, measured (2026-09-03/04).** Four results that
+change how a brain A/B should be run, all on the follow benchmark:
+
+- **The benchmark plateaus long before the reward does.** `select-brain`
+  scores every checkpoint of a run on the DETERMINISTIC export. Over a fresh
+  2M-decision run the in-band score was 0.938 at the first 250k checkpoint
+  and 0.939 at 2M, while `ep_rew` climbed 159 → 177 the whole way. So size a
+  run by the benchmark, not the curve: `train-brain --probe-every` scores the
+  export mid-run (40 episodes, ~3 s, ~2% of the training between probes) and
+  `--plateau-patience` stops on THAT series. Fed the same run's reward
+  instead, the detector never fires. An 8-episode probe is too noisy to drive
+  it (it read 0.903 where the 40-episode score was 0.938).
+- **Run-to-run variance is ±0.02 in band — bigger than most effects.** Two
+  runs of the identical recipe at different training seeds differ by 0.021.
+  Three hyperparameter changes each "lost" 0.015-0.018 and were "ahead on
+  only 1-2 of 10 eval seeds" until the control showed the whole spread was
+  one run's luck. Train both arms on the SAME seeds and compare the per-seed
+  DIFFERENCE (`bench_ab.paired_delta`); use Student's t, not 1.96, which at
+  n=2 understates the interval 6.5-fold.
+- **Shorter runs are a FALSE economy for an A/B.** A 250k comparison recovers
+  the same point estimate as a 1M one (-0.0101 against -0.0102) at 2.4× the
+  paired spread — equal precision needs 5.9× the seeds, so 1.47× the total
+  cost. Run A/Bs at 1M.
+- **Two knobs measured and left off.** `--polite-mix` (draw the person's
+  politeness per episode) is a real trade — it costs 0.010 in band and buys a
+  **76% bump reduction** (5.4 → 1.3 an episode), both resolved over 4 paired
+  seeds — but which world you want a brain for is a choice, not a defect.
+  `--net-arch` on the brain is a CAPACITY knob and not a throughput one: the
+  PPO update is 5.3% of brain wall time (collection is 94.7%), and 256-256
+  against 128-128 was unresolved over six paired seeds (+0.006, interval
+  spanning zero, ~14 seeds needed to settle a third of the noise floor).
 
 ### Track 4: Multi-duck and soccer
 
@@ -609,7 +664,7 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 8.1 | **One world, one step** | N ducks in one `mjData` costs one `mj_step` per substep instead of N; measure against today's per-duck envs. | (0.1) | ★★★★ |
 | 8.2 | **Sensor cost budget** | ToF at 15 Hz × 64 rays via `mj_multiRay`; detector at 10 Hz with one occlusion ray per candidate; target < 5% of a core for 8 ducks. Bench + test. | S | ★★★★ |
 | 8.3 | **Binary framing + delta compression** | Sensor arrays binary; static world geometry sent once; ball/boxes as deltas. | S | ★★★ |
-| 8.4 | **Vectorised brain training** | `BrainEnv` under `ForkVecEnv` with `envs_per_worker` packing (worlds are heavier than single ducks); `bench-envs` support for world envs. | M | ★★★★ |
+| 8.4 | **Vectorised brain training** | `BrainEnv` under `ForkVecEnv` with `envs_per_worker` packing (worlds are heavier than single ducks); `bench-envs` support for world envs. **Done, and the packing half was measured off.** `ForkVecEnv` sized its shared memory from the WALK contract's 61 obs / 14 actions, which silently made the backend walk-only — `BrainEnv` is 80 and 3, so brain training sat on `SubprocVecEnv` paying a private MJCF compile per worker and a pickled pipe round-trip per step. Buffers now come from the env's own spaces: setup 2.77 s → 0.37 s, throughput 1,644 → 1,879 decisions/s at 8 workers, rollouts step-for-step BIT-IDENTICAL (`tests/test_brain_vec_env.py`). `bench-envs --task brain` sweeps the real trainer; the curve is FLAT from 12 envs (4,775 / 4,938 / 4,873 / 4,862 / 5,336 steps/s at 12 / 16 / 20 / 24 / 32), so the default 12 is within 4% of the knee and stays. `envs_per_worker` packing did NOT survive: interleaved reps put it behind 1:1 at every count, and the startup win it appeared to have was per-worker numba JIT, now removed for every layout. `bench-envs --ipc-floor` (a vec-step over envs that do nothing) is the number that settles these — 86 µs at 32 envs against an 883 µs real vec-step, i.e. the plumbing is 10% and the rest is physics plus memory contention. | M | ★★★★ |
 | 8.5 | **Viewer instancing** | Instanced meshes for walls/boxes; keep the no-shadow rule; grid overlay as one textured quad updated from a `Uint8Array`, not per-cell meshes. | S | ★★★★ |
 | 8.6 | **Replay off the main loop** | Recorder writes in a thread; replay serves from disk without a live world. | S | ★★★ |
 

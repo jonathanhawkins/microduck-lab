@@ -110,6 +110,34 @@ the shipped policy, the ceiling is not the training range and this whole
 experiment changes shape — say so and stop. If it saturates at ~0.65–0.78, the
 range is the wall and the training run is justified.
 
+**Step 0b (read before budgeting Step 1).** Local PPO cannot currently
+produce a walker by either route, and both failures are measured. This does
+not sink the experiment, but it decides what A and B can even be.
+
+* **From scratch does not walk.** Two 1.5M-step arms reached `ep_rew`
+  2300-2900 at **0.001 m/s** — they learn to stand and not fall, which is the
+  safest policy available at this budget. `ep_rew` said nothing about it. If A
+  and B are both from-scratch runs, the most likely outcome is two motionless
+  ducks and a turn-rate comparison that measures nothing.
+* **A distilled clone DOES walk**, in about a minute and cached:
+  `uv run distill --teacher ../microduck/policies/alpha_walking.onnx
+  --run-name my-walk` gives 0.203 m/s, 1000-step episodes, 0 falls on
+  held-out seeds — the teacher's own numbers. Fidelity is what buys that:
+  correlation(action MSE, fall rate) = +0.93, and below ~0.00011 rad² the
+  falling stops outright.
+* **But PPO on top of the clone is a resolved bad trade**, over 14 paired
+  seeds: episode length **-414** [-596,-233], fall rate **+0.44**
+  [+0.250,+0.628], ground speed +0.041 [+0.007,+0.075]. The five fastest
+  fine-tunes were the five that collapsed to ~50-step episodes. Three
+  learning rates, four fall-penalty weights and two training lengths all
+  failed to beat the clone.
+
+So budget Step 1 knowing that 3M steps of local PPO is more likely to destroy
+a gait than to add turn rate to one. If the cheap check in Step 0 justifies
+the experiment, the honest options are to find a fine-tune recipe that
+survives — an open problem — or to run it on the GPU stack, which is what
+`microduck_rl` is for.
+
 **Step 1.** Train A and B. Same `--envs`, `--steps`, `--seed`, same machine.
 Use `uv run bench-envs` to pick `--envs` for that box; `uv run machine-facts`
 prints its thread profile. Budget for at least 3M steps each — the README's
@@ -131,6 +159,19 @@ trunk height and forward speed, not just yaw rate.
 at each policy — cold and warm, both directions, the whole sweep. If B's warm
 rate is not meaningfully above A's, stop here and report that: the rest of the
 pipeline is measuring nothing.
+
+Check that each policy still WALKS while you are there, with
+`uv run select-run runs/<name> --behavior run --cmd 0.4 --seeds 1001,1002`:
+it scores achieved ground speed on the deterministic export and treats falls
+as a rejection FLOOR rather than a term to trade against. That distinction is
+load-bearing here — a policy that turns fast by falling over is exactly what
+this experiment is at risk of producing, and on a 12k-step run the tool's own
+table shows the pathology plainly (fastest candidate 0.160 m/s over 41 steps,
+against the final policy's 0.106 over 133). Never rank candidates by
+`ep_rew`: it is an episode SUM, so on a recipe whose episodes end early it
+tracks survival rather than any rate — on one real pair of runs `ep_rew` said
+"B is better (+8.7%)" and `--metric ep_rew_per_step` said "A is better
+(-17.1%)".
 
 **Step 4. Only then, the game.**
 
