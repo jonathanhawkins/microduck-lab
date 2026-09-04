@@ -77,11 +77,22 @@ const TOP_BAR_MIN_BOTTOM = 46;
 // The head-camera inset is as wide as the inspector (border-box), at the
 // camera's aspect; the inspector reserves that much room so the pair fits.
 const CAM_INSET_H = insetHeight(INSPECTOR_W, CAM_FOV_DEG) + GAP;
+// ...and when that inset is minimized, only its bar hangs off the edge.
+const CAM_BAR_H = 26 + GAP;
 
+const BTN_BORDER = "#2b313b";
+// The border is spelled out rather than using the `border` shorthand: half a
+// dozen buttons below override borderColor to show a toggle is on, and React
+// warns (and can mis-render) when a longhand is dropped while the shorthand
+// that also sets it stays put. The pair in the Timeline hit that every time
+// you paused — the two branches are the same <button>, so going live→scrub
+// REMOVED borderColor from an element whose `border` still set one.
 const BTN: React.CSSProperties = {
   background: "#1f242c",
   color: "#e9edf1",
-  border: "1px solid #2b313b",
+  borderWidth: 1,
+  borderStyle: "solid",
+  borderColor: BTN_BORDER,
   borderRadius: 4,
   padding: "3px 8px",
   fontFamily: "inherit",
@@ -210,17 +221,19 @@ const MAX_BOXES = 12;
  *  canvas renders the camera view into (InsetRender), with the detector's
  *  boxes drawn over it from bearing, elevation and apparent width - the
  *  three numbers a brain gets per detection, and nothing more. */
-function CamInset({ client, duckId, panelRef, enabled }: { client: SimClient; duckId: string | null; panelRef: React.RefObject<HTMLDivElement | null>; enabled: boolean }) {
+function CamInset({ client, duckId, panelRef, enabled, open, onToggle }: { client: SimClient; duckId: string | null; panelRef: React.RefObject<HTMLDivElement | null>; enabled: boolean; open: boolean; onToggle: () => void }) {
   const box = useRef<HTMLDivElement>(null);
   const boxes = useRef<(HTMLDivElement | null)[]>([]);
   const meta = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    camInset.el = enabled ? box.current : null;
+    // Minimized: the box is a bar, not a viewport — take it off the render
+    // pass so InsetRender does not scissor a camera view into a 26 px strip.
+    camInset.el = enabled && open ? box.current : null;
     camInset.duckId = duckId;
     return () => {
       camInset.el = null;
     };
-  }, [enabled, duckId]);
+  }, [enabled, open, duckId]);
   useEffect(() => {
     if (!enabled) return;
     let raf = 0;
@@ -235,11 +248,14 @@ function CamInset({ client, duckId, panelRef, enabled }: { client: SimClient; du
       el.style.right = `${Math.round(window.innerWidth - pr.right)}px`;
       const width = Math.round(pr.width);
       el.style.width = `${width}px`;
-      el.style.height = `${Math.round(width / aspect)}px`;
+      el.style.height = open ? `${Math.round(width / aspect)}px` : "";
       const f = client.frame;
       const d = sensedDuck(f, duckId);
       const det = d?.sensors?.det;
-      el.style.display = d ? "block" : "none";
+      // A minimized bar stays put even with nothing selected — it is the only
+      // way back to the view. The full inset still hides when there is no duck.
+      el.style.display = d || !open ? "block" : "none";
+      if (!open) return;
       const fov = det?.fov ?? CAM_FOV_DEG;
       let n = 0;
       if (det) {
@@ -279,14 +295,41 @@ function CamInset({ client, duckId, panelRef, enabled }: { client: SimClient; du
     };
     raf = requestAnimationFrame(paint);
     return () => cancelAnimationFrame(raf);
-  }, [client, duckId, panelRef, enabled]);
+  }, [client, duckId, panelRef, enabled, open]);
   if (!enabled) return null;
+  // Minimized: the same docked box, collapsed to a clickable bar — the head
+  // camera's answer to the inspector's title bar.
+  if (!open)
+    return (
+      <div
+        ref={box}
+        style={{ position: "absolute", top: 0, right: 10, width: 220, border: "1px solid #2b313b", borderRadius: 6, boxSizing: "border-box", zIndex: 20, overflow: "hidden", display: "none", background: "rgba(16,18,22,0.86)" }}
+      >
+        <button
+          onClick={onToggle}
+          title="expand the head camera"
+          aria-label="expand the head camera"
+          style={{ display: "flex", alignItems: "center", width: "100%", background: "none", border: "none", color: "#9aa5b1", cursor: "pointer", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 10, padding: "4px 6px", pointerEvents: "auto" }}
+        >
+          <span style={{ flex: 1, textAlign: "left" }}>head camera</span>
+          <span style={{ fontSize: 12, lineHeight: 1 }}>+</span>
+        </button>
+      </div>
+    );
   return (
     <div
       ref={box}
       title="what the head camera sees, at the detector's field of view; boxes are the detections (bearing, elevation, apparent width) - all a brain gets"
       style={{ position: "absolute", top: 0, right: 10, width: 220, height: 170, border: "1px solid #2b313b", borderRadius: 6, boxSizing: "border-box", zIndex: 20, overflow: "hidden", pointerEvents: "none", display: "none" }}
     >
+      <button
+        onClick={onToggle}
+        title="minimize the head camera"
+        aria-label="minimize the head camera"
+        style={{ position: "absolute", top: 2, right: 2, zIndex: 1, background: "rgba(16,18,22,0.7)", border: "none", borderRadius: 3, color: "#9aa5b1", cursor: "pointer", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, lineHeight: 1, padding: "2px 5px", pointerEvents: "auto" }}
+      >
+        —
+      </button>
       <div style={{ position: "absolute", left: "50%", top: "50%", width: 10, height: 10, marginLeft: -5, marginTop: -5, border: "1px solid rgba(233,237,241,0.5)", borderRadius: "50%" }} />
       {Array.from({ length: MAX_BOXES }, (_, i) => (
         <div key={i} ref={(el) => { boxes.current[i] = el; }} style={{ position: "absolute", display: "none", border: "1.5px solid #fff", borderRadius: 2, boxSizing: "border-box" }}>
@@ -782,7 +825,7 @@ function Timeline({ client }: { client: SimClient }) {
           ▶ live
         </button>
       ) : (
-        <button style={BTN} onClick={pause} disabled={busy} title="space">
+        <button style={{ ...BTN, borderColor: BTN_BORDER }} onClick={pause} disabled={busy} title="space">
           {busy ? "…" : "⏸ scrub"}
         </button>
       )}
@@ -987,9 +1030,13 @@ export default function SimViewer() {
   const [selected, setSelected] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [possessed, setPossessed] = useState<string | null>(null);
-  // The bottom-left lesson panel folds into a pill, like the lab HUD's
-  // 🎥 controls bar — it is reference text, and it sits over the room.
-  const [lessonOpen, setLessonOpen] = useState(() => loadJSON("simLessonOpen", true));
+  // The bottom-left controls panel folds into a pill, like the lab HUD's
+  // 🎥 controls bar — it is reference text, and it sits over the room, so it
+  // starts folded. Fresh storage key: the old one persisted the previous
+  // default on first render, which is not a choice anyone made.
+  const [lessonOpen, setLessonOpen] = useState(() => loadJSON("simControlsOpen", false));
+  const [inspectorOpen, setInspectorOpen] = useState(() => loadJSON("simInspectorOpen", true));
+  const [camOpen, setCamOpen] = useState(() => loadJSON("simCamOpen", true));
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
   const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: SimFrame["soccer"] }>({
@@ -1017,7 +1064,9 @@ export default function SimViewer() {
     if (!driving) clientRef.current?.sendCmd([0, 0, 0]);
   }, [driving]);
 
-  useEffect(() => saveJSON("simLessonOpen", lessonOpen), [lessonOpen]);
+  useEffect(() => saveJSON("simControlsOpen", lessonOpen), [lessonOpen]);
+  useEffect(() => saveJSON("simInspectorOpen", inspectorOpen), [inspectorOpen]);
+  useEffect(() => saveJSON("simCamOpen", camOpen), [camOpen]);
 
   // Measure the top bar (it grows a row at a time as the window narrows) and
   // the stage, so the inspector can be placed below the header and capped to
@@ -1114,6 +1163,10 @@ export default function SimViewer() {
       }
       if (k === "v") {
         if (!e.repeat) setShowCam((v) => !v);
+        return;
+      }
+      if (k === "i") {
+        if (!e.repeat) setInspectorOpen((v) => !v);
         return;
       }
       // Shift+E, not E: plain E is the camera's vertical truck (lib/camera).
@@ -1226,7 +1279,7 @@ export default function SimViewer() {
   const shown = editor ? editor.draft : scenario;
   const inspectorTop = frameBox.barBottom + GAP;
   const inspectorMax = frameBox.height
-    ? Math.max(120, frameBox.height - inspectorTop - PAD - (showCam ? CAM_INSET_H : 0))
+    ? Math.max(120, frameBox.height - inspectorTop - PAD - (showCam ? (camOpen ? CAM_INSET_H : CAM_BAR_H) : 0))
     : undefined;
 
   return (
@@ -1305,7 +1358,7 @@ export default function SimViewer() {
           ↺ restart
         </button>
         <button
-          style={{ ...BTN, background: driving ? "#3a2f10" : BTN.background, borderColor: driving ? "#f2b632" : "#2b313b" }}
+          style={{ ...BTN, background: driving ? "#3a2f10" : BTN.background, borderColor: driving ? "#f2b632" : BTN_BORDER }}
           onClick={() => setDriving((v) => !v)}
           title="P"
         >
@@ -1329,17 +1382,17 @@ export default function SimViewer() {
             ))}
           </select>
         )}
-        <button style={{ ...BTN, borderColor: showMap ? "#43c2b8" : "#2b313b" }} onClick={() => setShowMap((v) => !v)} title="M: the selected duck's occupancy map, in its own odometry frame">
+        <button style={{ ...BTN, borderColor: showMap ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowMap((v) => !v)} title="M: the selected duck's occupancy map, in its own odometry frame">
           map
         </button>
-        <button style={{ ...BTN, borderColor: showTof ? "#43c2b8" : "#2b313b" }} onClick={() => setShowTof((v) => !v)} title="T">
+        <button style={{ ...BTN, borderColor: showTof ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowTof((v) => !v)} title="T">
           ToF overlay
         </button>
-        <button style={{ ...BTN, borderColor: showCam ? "#43c2b8" : "#2b313b" }} onClick={() => setShowCam((v) => !v)} title="V: the selected duck's head camera, with the detector's boxes">
+        <button style={{ ...BTN, borderColor: showCam ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowCam((v) => !v)} title="V: the selected duck's head camera, with the detector's boxes">
           cam
         </button>
         <button
-          style={{ ...BTN, borderColor: editor ? "#f2b632" : "#2b313b" }}
+          style={{ ...BTN, borderColor: editor ? "#f2b632" : BTN_BORDER }}
           onClick={() => setEditor((st) => (st ? null : { draft: emptyDraft(scenario), tool: null, wallStart: null }))}
           title="Shift+E (plain E flies the camera down)"
         >
@@ -1372,167 +1425,183 @@ export default function SimViewer() {
           overscrollBehavior: "contain",
         }}
       >
-        <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10, marginBottom: 6 }}>
-          Inspector · sensors
-        </div>
-        {selDuck ? (
-          <div style={{ marginBottom: 8 }}>
-            <div>
-              <b>{selDuck.id}</b> · {selDuck.policy ? selDuck.policy.split(":").pop() : "stand"}
-            </div>
-            <div style={{ color: "#9aa5b1" }}>
-              falls {selDuck.falls} · speed {selDuck.speed.toFixed(2)} / {selDuck.cmdSpeed.toFixed(2)} m/s
-            </div>
-            <div style={{ color: "#9aa5b1" }}>
-              beak {selDuck.beak}
-              {selDuck.holding ? ` · holding ${selDuck.holding}` : ""}
-              {selDuck.skill ? ` · skill ${selDuck.skill}` : ""}
-            </div>
-            <div style={{ color: selDuck.brain.kind === "wander" ? "#43c2b8" : "#9aa5b1" }}>
-              {selDuck.brain.kind} · {selDuck.brain.state} · vx {selDuck.brain.cmd[0].toFixed(2)} wz {selDuck.brain.cmd[2].toFixed(2)}
-            </div>
-            <div style={{ marginTop: 4, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-              brain{" "}
-              <select
-                value={selDuck.brain.kind === "manual" ? "" : selDuck.brain.kind}
-                onChange={(e) => client?.sendBrain(selDuck.id, e.target.value)}
-                style={{ ...BTN, padding: "1px 4px" }}
-              >
-                {(world?.brains ?? ["wander", "follow", "script"]).map((k) => (
-                  <option key={k} value={k}>
-                    {k}
-                  </option>
-                ))}
-                {selDuck.brain.kind === "manual" && <option value="">manual</option>}
-              </select>
-              <label title="apply the brain's gaze intent to the walker's head command (the shipped walker never trained with one)">
-                <input type="checkbox" checked={selDuck.headApplied} onChange={(e) => client?.sendHead(selDuck.id, e.target.checked)} /> head
-              </label>
-            </div>
-            {selDuck.brain.inputs && (selDuck.brain.inputs.tof || selDuck.brain.inputs.det) && (
-              <div style={{ marginTop: 4, display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 8px", color: "#9aa5b1" }}>
-                {(["tof", "det"] as const).map((k) => {
-                  const inp = selDuck.brain.inputs[k];
-                  if (!inp) return null;
-                  const age = inp.age === null ? null : Math.round(inp.age * 1000);
-                  return [
-                    <span key={`${k}l`}>{k}</span>,
-                    <span key={`${k}v`} style={{ color: inp.stale ? "#f2b632" : "#43c2b8" }}>
-                      {age === null ? "never" : `${age} ms`}{inp.stale ? " · stale" : ""}{k === "det" && "n" in inp ? ` · ${inp.n} seen` : ""}
-                    </span>,
-                  ];
-                })}
-                {selDuck.brain.inputs.target && (
-                  <>
-                    <span>target</span>
-                    <span>
-                      {(selDuck.brain.inputs.target.bearing * 57.3).toFixed(0)}° · {selDuck.brain.inputs.target.range?.toFixed(2) ?? "?"} m · {selDuck.brain.inputs.target.since.toFixed(1)} s ago
-                    </span>
-                  </>
-                )}
-                {selDuck.brain.inputs.chase && (
-                  <>
-                    <span>chase</span>
-                    <span title="where the brain predicts the ball will stop (it looks and hunts there) · the ball memory its search walks to">
-                      {selDuck.brain.inputs.chase.role} · {selDuck.brain.inputs.chase.kicks} kicks
-                      {selDuck.brain.inputs.chase.predicted ? ` · ball → ${selDuck.brain.inputs.chase.predicted[0].toFixed(2)}, ${selDuck.brain.inputs.chase.predicted[1].toFixed(2)}` : ""}
-                      {selDuck.brain.inputs.chase.memory ? ` · memory ${selDuck.brain.inputs.chase.memory[0].toFixed(2)}, ${selDuck.brain.inputs.chase.memory[1].toFixed(2)}` : ""}
-                    </span>
-                    {selDuck.brain.inputs.chase.bumped !== undefined && (
-                      <>
-                        <span>bump</span>
-                        <span
-                          style={{ color: selDuck.brain.inputs.chase.bumped !== null && selDuck.brain.inputs.chase.bumped < BUMP_LIVE_S ? "#ffd166" : "#9aa5b1" }}
-                          title="how long since this duck's feet last touched another duck or a person — the contact list here, the IMU and the servo loads on the robot. Inside half a second it stands instead of turning in place."
-                        >
-                          {selDuck.brain.inputs.chase.bumped === null
-                            ? "never"
-                            : selDuck.brain.inputs.chase.bumped < BUMP_LIVE_S
-                              ? `● being bumped · ${selDuck.brain.inputs.chase.bumped.toFixed(2)} s`
-                              : `${selDuck.brain.inputs.chase.bumped.toFixed(1)} s ago`}
-                        </span>
-                      </>
-                    )}
-                    {selDuck.brain.inputs.chase.tofBall && (
-                      <>
-                        <span>tof ball</span>
-                        <span
-                          style={{ color: TOF_BALL_COLOR }}
-                          title="a ball-sized blob the 8×8 ToF sees on the floor at the duck's feet, in its heading frame — the last 30 cm the head camera loses a floor ball in. Drawn as a violet ring on the floor; not fed to the brain as a ball (a blob at the feet is as often the other duck's foot)."
-                        >
-                          {(selDuck.brain.inputs.chase.tofBall[0] * 57.3).toFixed(0)}° · {selDuck.brain.inputs.chase.tofBall[1].toFixed(2)} m
-                        </span>
-                      </>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-            {selDuck.sensors?.det && (
-              <div style={{ marginTop: 4, color: "#9aa5b1" }}>
-                sees:{" "}
-                {selDuck.sensors.det.items.length
-                  ? selDuck.sensors.det.items.map((it, i) => (
-                      <span key={i} style={{ color: it.name ? "#c9d0d8" : "#8a8f98" }}>
-                        {it.cls} {(it.bearing * 57.3).toFixed(0)}° {it.range.toFixed(1)} m{i < selDuck.sensors!.det!.items.length - 1 ? ", " : ""}
-                      </span>
-                    ))
-                  : "nothing"}
-                <span title="person / ball / marker are simulated-only classes today; the robot's NPU detects ducks"> ⓘ</span>
-              </div>
-            )}
-            <div style={{ marginTop: 4, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-              {selDuck.tof && (
-                <>
-                  tof{" "}
-                  <select value={selDuck.tof} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "tof")} style={{ ...BTN, padding: "1px 4px" }}>
-                    {TOF_PRESETS.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
-                      </option>
-                    ))}
-                    {selDuck.tof === "custom" && <option value="custom">custom</option>}
-                  </select>
-                </>
-              )}
-              {selDuck.odom && (
-                <div style={{ marginTop: 4 }}>
-                  odom{" "}
-                  <select value={selDuck.odom} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "odom")} style={{ ...BTN, padding: "1px 4px" }} title="odometry drift the brain lives with (roadmap 1.7)">
-                    <option value="ideal">ideal</option>
-                    <option value="datasheet">datasheet</option>
-                    <option value="hostile">hostile</option>
-                  </select>
-                </div>
-              )}
-              {selDuck.detector && (
-                <>
-                  det{" "}
-                  <select value={selDuck.detector} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "det")} style={{ ...BTN, padding: "1px 4px" }}>
-                    {TOF_PRESETS.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
-                      </option>
-                    ))}
-                    {selDuck.detector === "custom" && <option value="custom">custom</option>}
-                  </select>
-                </>
-              )}
-            </div>
+        <div style={{ display: "flex", alignItems: "flex-start", marginBottom: inspectorOpen ? 6 : 0 }}>
+          <div style={{ flex: 1, color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>
+            Inspector · sensors
           </div>
-        ) : (
-          <div style={{ color: "#9aa5b1", marginBottom: 8 }}>click a duck (or press 1–9)</div>
+          <button
+            onClick={() => setInspectorOpen((v) => !v)}
+            title={inspectorOpen ? "minimize (I)" : "expand (I)"}
+            aria-label={inspectorOpen ? "minimize the inspector" : "expand the inspector"}
+            style={{ background: "none", border: "none", color: "#9aa5b1", cursor: "pointer", fontFamily: "inherit", fontSize: 12, padding: "0 4px", marginLeft: 10, lineHeight: 1 }}
+          >
+            {inspectorOpen ? "—" : "+"}
+          </button>
+        </div>
+        {/* Minimized (I, or the — above): the title bar stays, so the head-camera
+            inset below still docks to a full-width panel edge. */}
+        {inspectorOpen && (
+          <>
+            {selDuck ? (
+              <div style={{ marginBottom: 8 }}>
+                <div>
+                  <b>{selDuck.id}</b> · {selDuck.policy ? selDuck.policy.split(":").pop() : "stand"}
+                </div>
+                <div style={{ color: "#9aa5b1" }}>
+                  falls {selDuck.falls} · speed {selDuck.speed.toFixed(2)} / {selDuck.cmdSpeed.toFixed(2)} m/s
+                </div>
+                <div style={{ color: "#9aa5b1" }}>
+                  beak {selDuck.beak}
+                  {selDuck.holding ? ` · holding ${selDuck.holding}` : ""}
+                  {selDuck.skill ? ` · skill ${selDuck.skill}` : ""}
+                </div>
+                <div style={{ color: selDuck.brain.kind === "wander" ? "#43c2b8" : "#9aa5b1" }}>
+                  {selDuck.brain.kind} · {selDuck.brain.state} · vx {selDuck.brain.cmd[0].toFixed(2)} wz {selDuck.brain.cmd[2].toFixed(2)}
+                </div>
+                <div style={{ marginTop: 4, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  brain{" "}
+                  <select
+                    value={selDuck.brain.kind === "manual" ? "" : selDuck.brain.kind}
+                    onChange={(e) => client?.sendBrain(selDuck.id, e.target.value)}
+                    style={{ ...BTN, padding: "1px 4px" }}
+                  >
+                    {(world?.brains ?? ["wander", "follow", "script"]).map((k) => (
+                      <option key={k} value={k}>
+                        {k}
+                      </option>
+                    ))}
+                    {selDuck.brain.kind === "manual" && <option value="">manual</option>}
+                  </select>
+                  <label title="apply the brain's gaze intent to the walker's head command (the shipped walker never trained with one)">
+                    <input type="checkbox" checked={selDuck.headApplied} onChange={(e) => client?.sendHead(selDuck.id, e.target.checked)} /> head
+                  </label>
+                </div>
+                {selDuck.brain.inputs && (selDuck.brain.inputs.tof || selDuck.brain.inputs.det) && (
+                  <div style={{ marginTop: 4, display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 8px", color: "#9aa5b1" }}>
+                    {(["tof", "det"] as const).map((k) => {
+                      const inp = selDuck.brain.inputs[k];
+                      if (!inp) return null;
+                      const age = inp.age === null ? null : Math.round(inp.age * 1000);
+                      return [
+                        <span key={`${k}l`}>{k}</span>,
+                        <span key={`${k}v`} style={{ color: inp.stale ? "#f2b632" : "#43c2b8" }}>
+                          {age === null ? "never" : `${age} ms`}{inp.stale ? " · stale" : ""}{k === "det" && "n" in inp ? ` · ${inp.n} seen` : ""}
+                        </span>,
+                      ];
+                    })}
+                    {selDuck.brain.inputs.target && (
+                      <>
+                        <span>target</span>
+                        <span>
+                          {(selDuck.brain.inputs.target.bearing * 57.3).toFixed(0)}° · {selDuck.brain.inputs.target.range?.toFixed(2) ?? "?"} m · {selDuck.brain.inputs.target.since.toFixed(1)} s ago
+                        </span>
+                      </>
+                    )}
+                    {selDuck.brain.inputs.chase && (
+                      <>
+                        <span>chase</span>
+                        <span title="where the brain predicts the ball will stop (it looks and hunts there) · the ball memory its search walks to">
+                          {selDuck.brain.inputs.chase.role} · {selDuck.brain.inputs.chase.kicks} kicks
+                          {selDuck.brain.inputs.chase.predicted ? ` · ball → ${selDuck.brain.inputs.chase.predicted[0].toFixed(2)}, ${selDuck.brain.inputs.chase.predicted[1].toFixed(2)}` : ""}
+                          {selDuck.brain.inputs.chase.memory ? ` · memory ${selDuck.brain.inputs.chase.memory[0].toFixed(2)}, ${selDuck.brain.inputs.chase.memory[1].toFixed(2)}` : ""}
+                        </span>
+                        {selDuck.brain.inputs.chase.bumped !== undefined && (
+                          <>
+                            <span>bump</span>
+                            <span
+                              style={{ color: selDuck.brain.inputs.chase.bumped !== null && selDuck.brain.inputs.chase.bumped < BUMP_LIVE_S ? "#ffd166" : "#9aa5b1" }}
+                              title="how long since this duck's feet last touched another duck or a person — the contact list here, the IMU and the servo loads on the robot. Inside half a second it stands instead of turning in place."
+                            >
+                              {selDuck.brain.inputs.chase.bumped === null
+                                ? "never"
+                                : selDuck.brain.inputs.chase.bumped < BUMP_LIVE_S
+                                  ? `● being bumped · ${selDuck.brain.inputs.chase.bumped.toFixed(2)} s`
+                                  : `${selDuck.brain.inputs.chase.bumped.toFixed(1)} s ago`}
+                            </span>
+                          </>
+                        )}
+                        {selDuck.brain.inputs.chase.tofBall && (
+                          <>
+                            <span>tof ball</span>
+                            <span
+                              style={{ color: TOF_BALL_COLOR }}
+                              title="a ball-sized blob the 8×8 ToF sees on the floor at the duck's feet, in its heading frame — the last 30 cm the head camera loses a floor ball in. Drawn as a violet ring on the floor; not fed to the brain as a ball (a blob at the feet is as often the other duck's foot)."
+                            >
+                              {(selDuck.brain.inputs.chase.tofBall[0] * 57.3).toFixed(0)}° · {selDuck.brain.inputs.chase.tofBall[1].toFixed(2)} m
+                            </span>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                {selDuck.sensors?.det && (
+                  <div style={{ marginTop: 4, color: "#9aa5b1" }}>
+                    sees:{" "}
+                    {selDuck.sensors.det.items.length
+                      ? selDuck.sensors.det.items.map((it, i) => (
+                          <span key={i} style={{ color: it.name ? "#c9d0d8" : "#8a8f98" }}>
+                            {it.cls} {(it.bearing * 57.3).toFixed(0)}° {it.range.toFixed(1)} m{i < selDuck.sensors!.det!.items.length - 1 ? ", " : ""}
+                          </span>
+                        ))
+                      : "nothing"}
+                    <span title="person / ball / marker are simulated-only classes today; the robot's NPU detects ducks"> ⓘ</span>
+                  </div>
+                )}
+                <div style={{ marginTop: 4, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  {selDuck.tof && (
+                    <>
+                      tof{" "}
+                      <select value={selDuck.tof} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "tof")} style={{ ...BTN, padding: "1px 4px" }}>
+                        {TOF_PRESETS.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                        {selDuck.tof === "custom" && <option value="custom">custom</option>}
+                      </select>
+                    </>
+                  )}
+                  {selDuck.odom && (
+                    <div style={{ marginTop: 4 }}>
+                      odom{" "}
+                      <select value={selDuck.odom} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "odom")} style={{ ...BTN, padding: "1px 4px" }} title="odometry drift the brain lives with (roadmap 1.7)">
+                        <option value="ideal">ideal</option>
+                        <option value="datasheet">datasheet</option>
+                        <option value="hostile">hostile</option>
+                      </select>
+                    </div>
+                  )}
+                  {selDuck.detector && (
+                    <>
+                      det{" "}
+                      <select value={selDuck.detector} onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "det")} style={{ ...BTN, padding: "1px 4px" }}>
+                        {TOF_PRESETS.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                        {selDuck.detector === "custom" && <option value="custom">custom</option>}
+                      </select>
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: "#9aa5b1", marginBottom: 8 }}>click a duck (or press 1–9)</div>
+            )}
+            {client && <Heatmap client={client} duckId={selected} />}
+          </>
         )}
-        {client && <Heatmap client={client} duckId={selected} />}
       </div>
-      {client && <CamInset client={client} duckId={selected} panelRef={inspectorRef} enabled={showCam} />}
+      {client && <CamInset client={client} duckId={selected} panelRef={inspectorRef} enabled={showCam} open={camOpen} onToggle={() => setCamOpen((v) => !v)} />}
 
-      {/* lesson / keys — collapsible: it is reference text sitting over the room */}
+      {/* keys — collapsible: reference text sitting over the room */}
       {lessonOpen ? (
         <div style={{ ...PANEL, bottom: 10, left: 10, width: 300, color: "#c9d0d8" }}>
           <div style={{ display: "flex", alignItems: "flex-start" }}>
             <div style={{ flex: 1, color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10, marginBottom: 4 }}>
-              What the duck sees
+              Controls
             </div>
             <button
               onClick={() => setLessonOpen(false)}
@@ -1542,26 +1611,20 @@ export default function SimViewer() {
               —
             </button>
           </div>
-          The walking policy is blind: 61 numbers about its own body, none about the room. The 8×8 time-of-flight
-          matrix on its head is what a brain gets instead: 64 distances, 15 times a second, ~45° wide. Dots are
-          where the sensor <i>claims</i> a surface is. The inset under the inspector is the head camera&apos;s view;
-          the boxes on it are the detector&apos;s output - a bearing, an elevation and an apparent width per thing it
-          found, and nothing else about the picture. In auto mode a tiny wander brain reads the middle columns
-          and steers toward the open side; it emits only a twist, the same command the real robot takes.
-          <div style={{ marginTop: 6, color: "#9aa5b1" }}>
-            WASD/QE fly the camera (A/D slide, W/S zoom, Q/E rise) · arrows orbit · Shift+R view home
-            <br />
+          WASD/QE fly the camera (A/D slide, W/S zoom, Q/E rise) · arrows orbit · Shift+R view home
+          <div style={{ marginTop: 6 }}>
             R restart · P drive (the same WASD/arrows, Q/E steer the ducks instead) · T ToF · V cam ·
-            Shift+E edit · 1–9 select · Esc · space scrub
+            I inspector · Shift+E edit · 1–9 select · Esc · space scrub
           </div>
         </div>
       ) : (
         <button
           onClick={() => setLessonOpen(true)}
-          title="what the duck sees · keys"
-          style={{ ...PANEL, bottom: 10, left: 10, color: "#c9d0d8", cursor: "pointer" }}
+          title="controls"
+          aria-label="controls"
+          style={{ ...PANEL, bottom: 10, left: 10, color: "#c9d0d8", cursor: "pointer", lineHeight: 1 }}
         >
-          👁 what the duck sees
+          ℹ️
         </button>
       )}
 
