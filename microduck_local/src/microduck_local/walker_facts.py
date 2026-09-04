@@ -14,10 +14,24 @@ What it measures (2026-09, alpha_walking):
   feet                        reach 0.04 m ahead of the trunk (contact with a 6 cm rim from 0.185 m to its centre)
   camera depression           standing 0.19 rad; walking 0.11 ± 0.02 (the gait holds the head 0.08 rad higher)
   stop                        1 cm coast from 0.3 m/s, no yaw drift
-  reverse                     none: -0.3 m/s commanded moves 4 mm in 2 s
-  turn in place               wz=+1: 0.25 rad in the first second, ~0.6 rad/s after; wz=-1 from a standstill: 0.05 rad/s
-                              — unless the gait is going (after walking, or with vx=0.2: ~0.7 rad/s)
-  sidestep                    vy=±0.3 for 2 s: 8 / 12 cm, with a 0.1 / 0.34 rad yaw drift
+  reverse                     -0.35 / -0.40 back up at 0.20 / 0.23 m/s — FASTER than the walker goes forward
+                              (0.13 / 0.18 at +0.30 / +0.40). Everything from -0.30 up is a DEAD BAND: 4 mm in 6 s.
+  turn in place               a dead band too, and a wide one: cold, every |wz| < 1.0 is EXACTLY zero, and so is
+                              wz=-1; only wz=+1 breaks through, at 0.57 rad/s. Warm (after 2 s of walking) the rate
+                              is roughly linear in the command: 0.15 / 0.28 / 0.47 / 0.61 at +0.25…+1, and
+                              -0.00 / -0.42 / -0.57 / -0.78 at -0.25…-1. So the ceiling is ~0.6-0.8 rad/s AND the
+                              command range (±1.0) is already at it — there is nothing left to ask for.
+  sidestep                    vy=±0.3 for 2 s: 8 / 12 cm, with a 0.1 / 0.34 rad yaw drift; vy=±0.15 moves 1 mm in 3 s
+
+The reverse and turn rows above replace two facts this file asserted for
+months and that three brains were built around — "the walker cannot
+reverse" and "a standing turn barely turns". Both were measured at ONE
+command value that happens to sit inside a dead band (-0.3, and a cold
+wz below 1.0). `command_deadbands()` sweeps the range instead, on an EMPTY
+floor: `make_room`'s 3.0 x 2.5 m room with four boxes cannot hold the
+1.3 m a 6 s reverse covers, so measuring the gait in it measures the
+boxes. The lesson generalises past this file — a locomotion limit read off
+a single command is a reading of the dead band, not of the walker.
 """
 
 from __future__ import annotations
@@ -79,6 +93,68 @@ def camera_pitch() -> None:
         print(f"  {tag:22s}: camera depression {np.mean(deps):.3f} ± {np.std(deps):.3f} rad, height {np.mean(zs):.3f} m")
 
 
+def _flat_world(yaw: float = 0.0):
+    """An empty 12 x 12 m floor with the duck at the origin. `_world()`'s room
+    is 3.0 x 2.5 m with four boxes in it — fine for a 2 s probe, useless for
+    anything that travels, which is how the reverse fact came out wrong."""
+    from .world.scenario import Duck, Scenario, Wall
+    h = 6.0
+    cs = [(-h, -h), (h, -h), (h, h), (-h, h)]
+    sc = Scenario(name="flat", seed=0, floor=(13.0, 13.0),
+                  walls=[Wall(cs[i], cs[(i + 1) % 4], 0.3, 0.02) for i in range(4)],
+                  boxes=[], ducks=[Duck("d0", (0.0, 0.0, float(yaw)))])
+    w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=0)
+    return w, w.ducks["d0"]
+
+
+def command_deadbands() -> None:
+    """Sweep vx and wz across their command ranges instead of sampling one
+    value each. Steady rate over the last 2 s of the command, averaged over
+    four start headings (the only free variable once the floor is empty —
+    the gait is deterministic in the model)."""
+    yaws = (0.0, 1.6, 3.1, 4.7)
+
+    def drive(vx: float, yaw: float, secs: float = 6.0) -> float:
+        w, d = _flat_world(yaw)
+        _settle(w, d)
+        p0, _, c, s = _frame(w, d)
+        ahead = []
+        for _ in range(int(secs / 0.02)):
+            d.set_cmd(w.data, (vx, 0, 0), (0, 0, 0, 0))
+            w.step()
+            p = d.trunk_pos(w.data)
+            ahead.append(c * (p[0] - p0[0]) + s * (p[1] - p0[1]))
+        i2 = int(2 / 0.02)
+        return (ahead[-1] - ahead[i2]) / (secs - 2.0)
+
+    def spin(wz: float, yaw: float, warm: bool, secs: float = 4.0) -> float:
+        w, d = _flat_world(yaw)
+        _settle(w, d)
+        if warm:
+            for _ in range(100):
+                d.set_cmd(w.data, (0.3, 0, 0), (0, 0, 0, 0))
+                w.step()
+        ys = []
+        for _ in range(int(secs / 0.02)):
+            d.set_cmd(w.data, (0, 0, wz), (0, 0, 0, 0))
+            w.step()
+            ys.append(d.yaw(w.data))
+        u = np.unwrap(np.array(ys))
+        i2 = int(2 / 0.02)
+        return float((u[-1] - u[i2]) / (secs - 2.0))
+
+    print("  forward/reverse (steady m/s over sec 2-6, empty floor, 4 headings):")
+    for vx in (-0.40, -0.35, -0.30, -0.25, -0.20, 0.20, 0.25, 0.30, 0.40):
+        v = float(np.mean([drive(vx, y) for y in yaws]))
+        print(f"    vx {vx:+.2f} -> {v:+.3f} m/s" + ("   (dead band)" if abs(v) < 0.01 else ""))
+    print("  turn in place (steady rad/s over sec 2-4; warm = after 2 s of walking):")
+    for wz in (1.0, 0.75, 0.5, 0.25, -0.25, -0.5, -0.75, -1.0):
+        cold = float(np.mean([spin(wz, y, False) for y in yaws]))
+        warm = float(np.mean([spin(wz, y, True) for y in yaws]))
+        print(f"    wz {wz:+.2f} -> cold {cold:+.3f}, warm {warm:+.3f} rad/s"
+              + ("   (cold: dead band)" if abs(cold) < 0.01 else ""))
+
+
 def stop_reverse_turn() -> None:
     w, d = _world()
     for _ in range(200):
@@ -126,6 +202,8 @@ def main() -> None:
     camera_pitch()
     print("stopping, reversing, sidestepping, turning:")
     stop_reverse_turn()
+    print("where the command ranges are actually dead (empty floor):")
+    command_deadbands()
 
 
 if __name__ == "__main__":

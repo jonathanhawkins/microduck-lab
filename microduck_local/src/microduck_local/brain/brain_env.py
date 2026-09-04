@@ -85,7 +85,13 @@ def senses_to_obs(s: Senses, target_cls: str, last_action: np.ndarray,
     if tracker is not None:
         det = s.fresh_det(det_max_age)
         new_frame = det is not None and det.t != tracker._last_frame_t
-        tracker.update(det, s.t, None if s.odom is None else s.odom[2])
+        # `pos` places each hit in the ODOMETRY frame as well (Tracker._place),
+        # which is what lets a brain dead-reckon to a target that has gone
+        # under the camera — the striker's last 0.3 m onto the ball. It adds
+        # `Track.xy`/`vel` and touches no field any of these 80 floats read,
+        # so a follow brain's observation is bit-for-bit what it was.
+        tracker.update(det, s.t, None if s.odom is None else s.odom[2],
+                       None if s.odom is None else (s.odom[0], s.odom[1]))
         tr = tracker.best(target_cls, s.t, min_hits=1)
         if tr is not None:
             hit = new_frame and tr.last_t == det.t                # a NEW frame's detection updated the track

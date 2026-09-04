@@ -4,9 +4,53 @@ one ball, goals in a fixed time, over seeds.
     uv run eval-pitch --seeds 4 --seconds 300 --jobs 2
     uv run eval-pitch --seeds 4 --per-side 2      # 2v2 (teams share a blackboard, brain/team.py)
 
-Per seed: goals scored on each side, kicks and pushes attempted, falls;
-then the means per run. Headless, the same World `pitch` / `pitch-2v2` /
-`pitch-3v3` streams on /sim.
+Per seed: goals scored on each side, kicks and pushes attempted, falls, and
+the CONTINUOUS metrics below (ball progress, possession); then the means per
+run. Headless, the same World `pitch` / `pitch-2v2` / `pitch-3v3` streams
+on /sim.
+
+READ THE `left`/`right` GOAL KEYS THE WAY THE WORLD WRITES THEM. They are
+goal MOUTHS, not team scores: `World._check_goal` puts a ball crossing at +x
+into `goals["right"]`, and `World.goal_for` puts the LEFT team's attack at
++x — so a row's `right` count is the number of goals the LEFT TEAM SCORED.
+The run TOTAL (`left + right`) is unaffected, but every per-side reading of
+a row is inverted if this is missed, and reading it the natural way flipped
+the sign of a whole correlation table here before it was caught.
+
+Measured, 16 seeds x 300 s of 1v1 per arm, shipped lens vs a 120x93 deg one
+(two independent 8-seed batteries, both replicated), coefficient of variation
+and the seeds an arm needs to resolve a 25% shift in the metric at p<0.05 /
+80% power — i.e. the metric's own noise, with the size of this particular
+contrast divided out:
+
+READ `ballAdvance` WITH `ballProgress` BESIDE IT. Advance keeps only the
+forward part (max(0, dx)), so it is INFLATED BY CHURN: a change that merely
+makes the ball move more scores higher on it without sending the ball
+anywhere. Measured, the attacker-handover fix: kicks +64%, advance +0.18
++/- 0.06 (2.9 sigma) — and signed `ballProgress` FLAT at -0.003 +/- 0.136
+(0.0 sigma) with advance per kick HALVED, 0.202 -> 0.106. The ball moved
+more and no further toward the goal. So: advance is the sensitive
+instrument, signed progress is the one that says the motion had a
+direction, and advance-per-kick says whether each touch was worth more.
+Quote all three or none.
+
+    goals            CV 0.76   146 seeds     r with goals   —
+    kicks            CV 0.49    62 seeds     r  0.30 [-0.06, +0.59]
+    falls            CV 1.22   376 seeds     r  0.07 [-0.29, +0.40]
+    ballAdvance      CV 0.40    43 seeds     r  0.50 [+0.19, +0.72]
+    possession       CV 0.16     9 seeds     r  0.33 [-0.02, +0.61]
+    possessionWide   CV 0.11     6 seeds     r  0.23 [-0.13, +0.53]
+    ballProgress     CV 4.20      —          r  0.11 [-0.25, +0.44]
+
+`ballAdvance` is the one to judge a variant on: it is the only metric here
+whose association with goals is resolved away from zero (and the only one at
+all, `kicks` included), at ~3x fewer seeds than goals. `possession` is the
+cheapest DETECTOR of any difference at all — 6-9 seeds against goals' 146 —
+but it is not evidence a variant is better, because what it tracks is how
+much of the run a duck spends standing over the ball. Ball progress summed
+over both teams is near zero by construction in self-play (the two sides
+attack opposite goals) and carries nothing; it is a per-TEAM metric, for an
+asymmetric matchup.
 """
 
 from __future__ import annotations
@@ -20,7 +64,16 @@ import numpy as np
 from .brain import REGISTRY, Senses
 from .brain.brain_env import POLICIES_DIR, onnx_infer
 from .world import World, make_pitch
-from .world.arena import KICK_GOAL_S  # noqa: F401  (the attribution window; the World keeps the counts)
+from .world.arena import (
+    KICK_GOAL_S,  # noqa: F401  (the attribution window; the World keeps the counts)
+)
+from .world.metrics import (  # noqa: F401  (re-exported: tooling imports these from here)
+    CARRY_S,
+    METRIC_FIELDS,
+    POSSESSION_R,
+    POSSESSION_WIDE_R,
+    PitchMetrics,
+)
 
 
 def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
@@ -35,6 +88,7 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
     j = w._ball_joint
     q = int(w.model.jnt_qposadr[j])
     w.data.qpos[q:q + 2] = rng.uniform(-0.2, 0.2, 2)
+    metrics = PitchMetrics(w, {d.id: (d.team or d.id) for d in sc.ducks})
     goal_seq = 0
     while w.t < seconds:
         for d in w.ducks.values():
@@ -47,6 +101,7 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
             if d.skill is None:
                 d.set_cmd(w.data, intent.twist, intent.head)
         w.step()
+        metrics.tick()
         if w.goal_seq != goal_seq:              # a goal: play restarts from the spawns
             goal_seq = w.goal_seq
             kickoff_brains(brains, teams)
@@ -55,7 +110,7 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
             "kickGoals": score["kicked"], "bumpGoals": score["bumped"],   # attributed by the World (KICK_GOAL_S)
             "kicks": {k: b.kicks for k, b in brains.items()}, "pushes": {k: b.pushes for k, b in brains.items()},
             "falls": {k: d.falls for k, d in w.ducks.items()}, "simSeconds": round(w.t, 1),
-            "seconds": seconds}
+            "seconds": seconds, **metrics.row()}
 
 
 def load_done(path: str | None, tag: str, per_side: int, seconds: float) -> dict[int, dict]:
@@ -64,7 +119,16 @@ def load_done(path: str | None, tag: str, per_side: int, seconds: float) -> dict
     its container mid-run, so a killed run should cost the seed it was on and
     nothing else. Rows written under different settings are REFUSED rather
     than silently mixed: the brain's own parameters do not appear in a row,
-    so `--tag` is how a caller says which variant a file belongs to."""
+    so `--tag` is how a caller says which variant a file belongs to.
+
+    A row written BEFORE the ball-progress/possession metrics existed is not
+    refused — the goals, kicks and falls in it are as good as they ever were,
+    and re-running an hour of seeds to recover metrics nobody measured then
+    would be the wrong trade. Its missing metrics come back as None, which
+    every consumer here treats as "not measured": `_seed_line` prints a dash
+    and the summary averages the seeds that have the field and SAYS how many
+    that was. Filling them with 0.0 instead would quietly drag a mean toward
+    zero, which is the one outcome worth engineering against."""
     if not path or not os.path.exists(path):
         return {}
     done: dict[int, dict] = {}
@@ -79,13 +143,35 @@ def load_done(path: str | None, tag: str, per_side: int, seconds: float) -> dict
                     f"{path}:{n} was measured with tag={r.get('tag', '')!r} perSide={r.get('perSide')} "
                     f"seconds={r.get('seconds')}, not tag={tag!r} perSide={per_side} seconds={seconds}. "
                     "Write a different variant to a different file.")
+            for f in METRIC_FIELDS:
+                r.setdefault(f, None)
             done[int(r["seed"])] = r
     return done
 
 
+def _total(r: dict, field: str) -> float | None:
+    """A row's metric summed over both teams, or None if this row predates it."""
+    v = r.get(field)
+    return None if v is None else float(sum(v.values()))
+
+
+def _mean_field(rows: list[dict], field: str) -> tuple[float | None, int]:
+    """(mean over both teams' total, how many rows carried the field)."""
+    vals = [v for v in (_total(r, field) for r in rows) if v is not None]
+    return (float(np.mean(vals)) if vals else None), len(vals)
+
+
+def _fmt(v: dict | None, unit: str) -> str:
+    if v is None:
+        return "—"
+    return " ".join(f"{k} {x:+.2f}" if unit == "m/min" else f"{k} {x:.1f}" for k, x in sorted(v.items())) + f" {unit}"
+
+
 def _seed_line(r: dict) -> str:
     return (f"seed {r['seed']}: goals left {r['left']} · right {r['right']} ({r['kickGoals']} kicked, {r['bumpGoals']} bumped)"
-            f" · kicks {sum(r['kicks'].values())} · pushes {sum(r['pushes'].values())} · falls {r['falls']}")
+            f" · kicks {sum(r['kicks'].values())} · pushes {sum(r['pushes'].values())} · falls {r['falls']}"
+            f" · progress {_fmt(r.get('ballProgress'), 'm/min')}"
+            f" · possession {_fmt(r.get('possession'), 's/min')}")
 
 
 def _run_one_args(a: tuple) -> dict:
@@ -153,6 +239,17 @@ def main() -> None:
           f"{np.mean([sum(r['pushes'].values()) for r in rows]):.1f}/run"
           f" · falls {np.mean([sum(r['falls'].values()) for r in rows]):.2f}/run"
           f" (per duck {np.mean([sum(r['falls'].values()) for r in rows]) / (2 * args.per_side):.2f})")
+    # The continuous metrics, both teams together (in self-play the two sides
+    # run the same brain, so the pair's total is the run's number; the per-team
+    # split in each seed line is what an asymmetric matchup is read from).
+    parts, missing = [], 0
+    for f, unit in (("ballProgress", "m/min"), ("ballAdvance", "m/min"),
+                    ("possession", "s/min"), ("possessionWide", "s/min")):
+        m, n = _mean_field(rows, f)
+        missing = max(missing, len(rows) - n)
+        parts.append(f"{f} {'—' if m is None else f'{m:+.2f}' if unit == 'm/min' else f'{m:.1f}'} {unit}")
+    print("both teams: " + " · ".join(parts)
+          + (f"   ({len(rows) - missing}/{len(rows)} seeds; the rest predate these metrics)" if missing else ""))
 
 
 if __name__ == "__main__":

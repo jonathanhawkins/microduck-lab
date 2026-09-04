@@ -71,6 +71,59 @@ does; this file covers how not to fool yourself.
   so a stage tuning that works has to earn its way back as a term or a
   physics knob before it can ship.
 
+## How much can the benchmark actually resolve? (read before any A/B)
+
+Every rule below exists because it was broken on 2026-09-03 and cost a day
+of wrong conclusions. Two results were published from four-seed batteries
+and later reversed; several "measured off" verdicts turned out to be noise.
+
+1. **Count the EVENTS, not the runs.** An 8-seed x 300 s 1v1 battery holds
+   ~50-130 kicks but only ~20 goals and 3-8 FALLS. The same brain measured
+   twice gave 3 falls and 6 - a chance split (p = 0.5). Quote a difference
+   with its event totals or do not quote it.
+2. **Know what your metric costs.** Measured, 16 seeds an arm: to resolve a
+   25% shift at p<0.05 / 80% power you need **goals 146 seeds, falls 376,
+   kicks 62, ballAdvance 43, possession 9**. If you are about to decide
+   something on goals at 8 seeds, you are about to decide it on nothing.
+   `eval-pitch` prints `ballAdvance` (the discriminator) and `possession`
+   (the cheap screen); goals stay reported and are not the judge.
+3. **Confirm on seeds the effect was NOT found on.** A "confirmation" that
+   re-uses the discovery seeds is not one. A poacher supporter scored 10
+   goals against 3 over four seeds and 21 against 12 over twelve - the
+   twelve CONTAINED the four - then reversed on twelve fresh ones, 13
+   against 19, for 34 against 31 over all 24 (p = 0.80). `--seed0` exists
+   so a battery extends onto fresh seeds instead of re-running the old ones.
+4. **Prefer a paired reading.** Both arms run the same seed layouts, so
+   report per-seed wins/losses alongside the totals; it is strictly more
+   powerful than comparing two means.
+5. **Ask what would inflate your metric.** `ballAdvance` keeps only the
+   forward part of the ball's motion, so anything that makes the ball move
+   MORE scores higher without moving it anywhere: the handover fix raised
+   it 2.9 sigma while signed `ballProgress` stayed flat (0.0 sigma). Read
+   advance and signed progress together, and for any metric ask first which
+   cheap behaviour maximises it.
+6. **A ratio whose numerator is flat is its denominator, upside down.**
+   "Advance per kick" was read here as kick QUALITY and it is not one.
+   Three line-up arms whose kick counts differ 2.6x (185, 72, 83 over the
+   same 24 seeds) have statistically identical total advance (0.400, 0.360,
+   0.342 m/min, every pairwise p > 0.17) — so the ratio moved 0.052 ->
+   0.120 -> 0.099 purely because the denominator fell. Measured DIRECTLY
+   (ball travel in the 2 s after each swing) the arms with the flattering
+   ratio kicked the ball LESS far: 17.7 +/- 3.9 cm against 14.4 +/- 3.4 and
+   13.6 +/- 3.0. Before quoting a per-X figure, test the numerator on its
+   own; if it does not move, you are reporting 1/X with extra steps, and it
+   will point whichever way costs you the most to believe.
+7. **"Measured off" usually means "not shown to help".** Say which one you
+   mean. Several knobs in `ChaseParams` ship off on differences that never
+   cleared the noise; re-screening them with `possession` is cheap and at
+   least one of those verdicts is probably wrong.
+8. **A battery must survive the machine.** Use `--out FILE --tag TAG`:
+   every seed is appended as it lands and a re-run of the same command
+   skips what is already there. A cloud container reclaimed mid-run cost
+   about ninety minutes of 3v3 twice before the benchmarks streamed. The
+   tag is refused if it disagrees, so two variants can never be stitched
+   into one comparison.
+
 ## Verification discipline — the rules that exist because of false reports
 
 1. **Training charts measure the noise-crutched stochastic policy.** Claims

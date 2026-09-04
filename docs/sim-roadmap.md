@@ -19,146 +19,245 @@ the tree, and Track 12 has its first working loop:
   and `Follow` (2.3), `BrainEnv` + `train-brain` + `eval-brain` (3.1, 3.2),
   odometry drift presets (1.7) and an occupancy map per duck in its own
   odometry frame, painted on the page, with a wall-line loop closure
-  against drift (5.1, 5.5: pose error under a 1.5°/s bias halved);
-  the `pitch` scenario with two `chase` brains, the robot's shipped kick
-  policies as skills, goal counting and `eval-pitch` (soccer, first form:
-  1.38 goals, 6.5 kicks, 0.50 falls a run over 300 s and 8 seeds, with a
-  body-aware avoid of the other duck — falls were 2.1 before it — and
-  kick windows at robotd's standing gain), then the second form — the
-  head tracks the ball on the way in, a 3D-placed ToF bumper, wall and
-  retreat rules, goal-centre aiming — at 1.12 / 11.8 / 0.50, then a
-  kickoff after every goal (ball to the centre spot, ducks to their
-  spawns, a 1 s hold, brains and team boards reset): 1v1 2.00 goals, 8.2
-  kicks, 0.50 falls a run over 4 seeds — one kick in four scores where one
-  in ten did — a kick map (the shipped kick leaves +21.6° / −11° off the
-  body heading for the left / right foot from the sweet spot, 4.5–15°/cm
-  of side offset; compensating it in the stance measured 1.38 goals
-  against 2.00 over 8 seeds and ships off: the line-up's 2–3 cm, not the
-  map, scatters the shots; a two-stage line-up that squares up 22 cm
-  behind the spot then walks in on the line puts the ball on the sweet
-  spot — 4 lone shots in 11 against 1 in 12 — and ships off too, kicking
-  3.5 times a run against 8.4 with 0.00 kicked goals against 0.75; goals
-  are now attributed, and most are bumps: 0.75 kicked, 1.25 bumped a run
-  for the shipped brain; what did help is a hunt with its stops — walk the
-  line a lost ball rolled off along, slowly, ending for the ToF, a duck
-  beside or the boards — and a search that walks a slow circle instead of
-  standing (instrumented: during search the ball was in the camera's
-  frustum 1% of the time, 90–120° off the nose, a standing turn barely
-  turns): 2.25 goals, 9.4 kicks, 0.38 falls a run over 8 seeds against
-  2.00 / 8.4 / 0.50; deliberate bumping and a ball memory were measured
-  after it and ship off — the same goals, twice the falls; so does a
-  ball-trajectory prediction (the tracker carries positions and
-  velocities now; a kicked ball leaves at 1.4 m/s, slows at 0.04 m/s²
-  and leaves the level camera at once): yawing the head toward where the
-  ball is going, opening the search that way and walking the hunt to the
-  predicted stop measured 1.12–2.12 goals with 0.75–1.62 falls a run
-  against 2.25 / 0.38 with it off — the head yaws 34° at most and the
-  searching duck's ball sits 90–120° off its nose, so the gaze cannot
-  reach it; the page draws the prediction anyway). Then a bug: the ToF
-  clearance placed hits without the head's rotation, so a dipped head
-  read the floor as a wall 0.35 m ahead — fixed; a second one followed,
-  because the ToF is IN THE HEAD and calling the middle sensor columns
-  "ahead" only holds while the head looks along the walking line (yawed
-  1.2 rad, they reported a wall 0.52 m ahead that was 69° off the nose
-  and the brain stopped for it), so clearance is selected by bearing in
-  the body frame now and a turned head reads honestly blind. **The
-  round's real lesson is about the benchmark itself:** 8 seeds × 300 s
-  of 1v1 holds ~50–130 kicks but only 3–8 FALLS and ~20 goals, so falls
-  barely separate — the same baseline measured twice gave 3 and 6, a
-  chance split (p ≈ 0.5). Claims carry event counts now, and several
-  earlier rows that did not clear them were demoted, the head variants
-  among them. What survives: a wider lens buys far more contact with the
-  ball (kicks 51 → 94 → 105 → 130 at 62/90/120/150°, p < 0.001, paying
-  an honest pixel-limited size gate that costs 120° a duck at 3.9 m —
-  found 73 times in 400 against 260), though the goals do not yet
-  follow; a goal-cone kick gate turns kicks into pushes and gains
-  nothing; the ToF seeing the ball at the feet ships off (a blob at the
-  feet is as often the other duck's foot). Two 3v3 results then failed
-  to replicate, which is the round's second lesson: a bump sense (feet
-  touching feet) looked like it halved the crowd's falls over 4 seeds
-  (5.00 → 1.75) and gives 3.17 and 4.17 a run over two twelve-seed
-  batteries; and a poacher supporter scored 10 goals against 3 over four
-  seeds, 21 against 12 over twelve — then **reversed** on twelve fresh
-  ones, 13 against 19, for 34 against 31 over all 24 (p = 0.80). The
-  middle battery shared the seeds the effect was found on and was never
-  independent. What the bump work did leave is a trace of 838 bumps
-  refuting its own premise (the feet meet a median 0.66 m from the ball,
-  and afterwards it is further from BOTH ducks by the same 7.4 cm) and
-  finding the real defect: it cancelled the ESCAPE turn (70% of its
-  firing in `blocked`, 6 of 8 falls a stand leaning on the other duck)
-  and fed itself (standing on a body keeps touching it: 44 → 105 bumps a
-  run, one freeze of 74 s). It is edge-triggered and state-scoped now) and teams (`brain/team.py`, `pitch-2v2` / `pitch-3v3`):
-  2v2 2.00 goals, 7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50
-  after the traced fix (supporters turning in place against a teammate
-  or the boards: the support spot stays inside the pitch and a supporter
-  with a duck track beside it stands; 0.75 / 5.2 / 4.75 before), and
-  with the hunt and the walking search 2v2 1.50 / 9.8 / 3.50, 3v3 1.50
-  / 5.0 / 4.50 — falls per duck still climb with the roster. Teammates
-  now share their poses on the board; a keep-out around them (a
-  teammate beside is invisible to the camera and the ToF) measured off,
-  3v3 5.25 falls against 4.50, because a fresh trace put 12 of 13 falls
-  beside an *opponent* in a standing turn, and a walking turn for
-  supporters measured off too (2v2 4.00 falls against 3.50, 3v3 5.25
-  against 4.50): a crowded pitch needs a sense of the bodies beside the
-  duck before any rule can act on them. Dribbling, a walk-round and
-  close-range re-planning were built, measured worse, and ship off with
-  the numbers.
+  against drift (5.1, 5.5: pose error under a 1.5°/s bias halved). Two
+  benchmarks grew on top of it — soccer (`eval-pitch`) and follow-me
+  (`eval-brain`) — and the sub-bullets below are what they measured.
   `brains/follow-v1` ships in the repo. Upstream is pinned (microduck_rl
   badc4e7, the 2026-09 CAD re-export; microduck 2c61dcc) and every
-  model-dependent number above was re-measured against it — the tidy loop
+  model-dependent number here was re-measured against it — the tidy loop
   needed its release distance re-measured (the new model's stop drifts
-  1–2 cm further), nothing else moved. Binary framing (0.5) stays open on a measurement:
-  the page's perf readout puts the JSON encode at 0.8 ms per 40 ms frame
-  for two ducks with maps streaming (physics 1.6, sensors 0.6 — the whole
-  loop is ~7% of a core), so JSON holds until rosters of four or more
-  ducks make the encode the largest term. **Measured:** on identical
-  follow-me episodes (12, the pinned model, the detector seeing a person
-  by its legs — its middle leaves the 48° frustum at 1.2 m, inside the
-  follow band, which had every brain losing sight as it closed in) the
-  learned brains hold the distance band 0.81 / 0.76 (**`follow-v4`**, the
-  first brain RETRAINED in this world — v3's recipe, the reflex tier and
-  variety, run to 2M decisions), 0.77 / 0.67 (`follow-v2` under
-  the reflex tier — the env yaws the head toward the tracked target and
-  refuses to walk into something 0.25 m ahead), 0.74 / 0.63 (`follow-v3`,
-  trained with the reflex tier and variety: boxes and a wandering duck)
-  and 0.72 / 0.57 (`follow-v1`, version-1 observation, scored in the world
-  it was trained in) under the datasheet / hostile presets against the
-  scripted controller's 0.48 / 0.41; in sight 0.95 / 0.87, 0.96 / 0.87,
-  0.95 / 0.88, 0.94 / 0.88 vs 0.83 / 0.74 — measured with the capsule
-  that walks through the duck; with the polite person that is now the
-  benchmark's default (stops short, steps around; zero contact) the
-  bands are 0.91 / 0.92 (v4), 0.92 / 0.85 (v2), 0.90 / 0.82 (v3), 0.86 /
-  0.77 (v1) vs 0.76 / 0.67 at 12 episodes. Re-measured at 240 episodes a
-  cell (24 x 10 eval seeds), which moved some of the earlier 12-episode
-  cells by up to 0.04. v4 leads every cell — 9/10 eval seeds on the
-  datasheet preset, 10/10 under hostile noise — and is the first learned
-  brain to move the bump count (15.5 an episode against v2's 21.8); it is
-  the follower to pick. Retraining its recipe against the polite person
-  (`follow-v5`, 240 episodes a cell) did not widen the lead: level on the
-  clean preset (0.93 vs 0.94), −0.01 / −0.02 under hostile noise (ahead
-  on 2/10 and 3/10 eval seeds), 2.6 / 11.5 bumps an episode against v4's
-  0.3 / 4.2 — and 0.06–0.10 behind with double the contact when scored
-  back against the capsule that walks through. A brain the person stops
-  for learns to stand in its way; v4, trained in the harder world, stays
-  the pick.
-  The scripted one loses because it stands still and goes cold; an
-  idle sidestep took it from 0.36 to 0.51 in sight, the head gaze to
-  0.53, and the rest of the gap is the learned brain's continuous motion.
-  A dodge for a person walking at the duck (`ClosingWatch`: the ToF
-  clearance closing faster than the duck's own walk → turn to the freer
-  side, walk) was built, measured on a charge case (the person walks
-  through the duck every 6 s) and ships off: the walker cannot clear a
-  person in the 2–5 s it has (1 cm of sidestep in its first second),
-  contact time is the same either way (4.9 vs 5.3 s an episode) and in
-  ordinary following it fires on a person merely walking toward the duck
-  (in band 0.49 → 0.39). A polite person (`Person.yield_m`: stops short
-  of a duck in its way, steps around after 2.5 s) settles it — the mocap
-  capsule walked through the duck, a real person does not: on the charge
-  case the scripted follow holds the band 0.92 with no contact and no
-  falls, the learned brains 0.93, and the dodge only costs; facing the
-  person and standing is the behaviour. The page's camera inset (V) shows what the head
-  camera sees at the detector's field of view, from the pose the frame
-  was captured at, with the detections as boxes.
+  1–2 cm further), nothing else moved. Binary framing (0.5) stays open on a
+  measurement: the page's perf readout puts the JSON encode at 0.8 ms per
+  40 ms frame for two ducks with maps streaming (physics 1.6, sensors 0.6 —
+  the whole loop is ~7% of a core), so JSON holds until rosters of four or
+  more ducks make the encode the largest term.
+
+  - **Soccer, the first two forms.** The `pitch` scenario with two `chase`
+    brains, the robot's shipped kick policies as skills, goal counting and
+    `eval-pitch` (first form: 1.38 goals, 6.5 kicks, 0.50 falls a run over
+    300 s and 8 seeds, with a body-aware avoid of the other duck — falls
+    were 2.1 before it — and kick windows at robotd's standing gain), then
+    the second form — the head tracks the ball on the way in, a 3D-placed
+    ToF bumper, wall and retreat rules, goal-centre aiming — at 1.12 /
+    11.8 / 0.50, then a kickoff after every goal (ball to the centre spot,
+    ducks to their spawns, a 1 s hold, brains and team boards reset): 1v1
+    2.00 goals, 8.2 kicks, 0.50 falls a run over 4 seeds — one kick in four
+    scores where one in ten did. Goals are attributed now, and most are
+    bumps: 0.75 kicked, 1.25 bumped a run for the shipped brain. What
+    helped is a hunt with its stops — walk the line a lost ball rolled off
+    along, slowly, ending for the ToF, a duck beside or the boards — and a
+    search that walks a slow circle instead of standing (instrumented:
+    during search the ball was in the camera's frustum 1% of the time,
+    90–120° off the nose, a standing turn barely turns): 2.25 goals, 9.4
+    kicks, 0.38 falls a run over 8 seeds against 2.00 / 8.4 / 0.50.
+  - **Built, measured, shipped off, with the numbers kept.** A kick map
+    (the shipped kick leaves +21.6° / −11° off the body heading for the
+    left / right foot from the sweet spot, 4.5–15°/cm of side offset):
+    compensating it in the stance measured 1.38 goals against 2.00 over 8
+    seeds — the line-up's 2–3 cm, not the map, scatters the shots. A
+    two-stage line-up that squares up 22 cm behind the spot then walks in
+    on the line puts the ball on the sweet spot — 4 lone shots in 11
+    against 1 in 12 — and ships off too, kicking 3.5 times a run against
+    8.4 with 0.00 kicked goals against 0.75. A ball-trajectory prediction
+    (the tracker carries positions and velocities now; a kicked ball leaves
+    at 1.4 m/s, slows at 0.04 m/s² and leaves the level camera at once):
+    yawing the head toward where the ball is going, opening the search that
+    way and walking the hunt to the predicted stop measured 1.12–2.12 goals
+    with 0.75–1.62 falls a run against 2.25 / 0.38 with it off — the head
+    yaws 34° at most and the searching duck's ball sits 90–120° off its
+    nose, so the gaze cannot reach it; the page draws the prediction
+    anyway. Deliberate bumping and a ball memory were measured after the
+    circle and ship off — the same goals, twice the falls. A goal-cone kick
+    gate turns kicks into pushes and gains nothing. The ToF seeing the ball
+    at the feet ships off (a blob at the feet is as often the other duck's
+    foot). Dribbling, a walk-round and close-range re-planning were built,
+    measured worse, and ship off with the numbers.
+  - **Two ToF bugs, both real.** The clearance placed hits without the
+    head's rotation, so a dipped head read the floor as a wall 0.35 m ahead
+    — fixed. A second one followed, because the ToF is IN THE HEAD and
+    calling the middle sensor columns "ahead" only holds while the head
+    looks along the walking line (yawed 1.2 rad, they reported a wall
+    0.52 m ahead that was 69° off the nose and the brain stopped for it),
+    so clearance is selected by bearing in the body frame now and a turned
+    head reads honestly blind.
+  - **The round's real lesson is about the benchmark itself.** 8 seeds ×
+    300 s of 1v1 holds ~50–130 kicks but only 3–8 FALLS and ~20 goals, so
+    falls barely separate — the same baseline measured twice gave 3 and 6,
+    a chance split (p ≈ 0.5). Claims carry event counts now, and several
+    earlier rows that did not clear them were demoted, the head variants
+    among them.
+  - **So the benchmark grew metrics that can resolve something**
+    (`world/metrics.py`, ticked on the lab's own step as well as in the
+    battery, so the /sim pitch panel shows the number `eval-pitch`
+    reports). Per team, at the control tick: `possession` (seconds a minute
+    the nearest duck to the ball is ours and inside 0.25 m), `ballAdvance`
+    (metres a minute the ball is carried toward the goal that team attacks,
+    credit persisting 2 s past the last touch so a kick's roll counts for
+    the kicker) and the same sum signed, `ballProgress`. Measured 16 seeds
+    an arm, the seeds ONE ARM needs to resolve a 25% shift: goals 146,
+    falls 376, kicks 62, `ballAdvance` 43, `possession` 9. `ballAdvance` is
+    the only metric here, kicks included, whose correlation with goals is
+    resolved away from zero (0.50 [+0.19, +0.72] over 32 runs), so it is
+    the discriminator, `possession` is the cheap screen and goals stay
+    reported without being the judge. **`ballAdvance` is never quoted
+    alone:** it keeps only forward motion, so churn inflates it — the
+    attacker fix below moved it +0.18 ± 0.06 (2.9 σ) with kicks +64% while
+    signed `ballProgress` stayed flat (−0.003 ± 0.136, 0.0 σ) and the
+    advance per kick halved (0.202 → 0.106).
+  - **The camera, priced as hardware — and the answer is pixels per
+    radian.** A wider lens buys far more contact with the ball (kicks 51 →
+    94 → 105 → 130 at 62/90/120/150°, p < 0.001, paying an honest
+    pixel-limited size gate that costs 120° a duck at 3.9 m — found 73
+    times in 400 against 260), though the goals do not follow (22 against
+    19). Pointed at the tidy task the same lens LOSES: 24 seeds a lens,
+    paired on the same layouts, 62° tidies 0.889, 90° 0.743, 120° 0.632 —
+    worse on 24 of 24 seeds, sign p = 1e-7 — and it breaks in the scan (a
+    toy at 1–1.5 m is found in 36% of the frames it appears in at 62° and
+    2% at 120°; the geometric floor for a 3.2 cm brick drops 1.83 m →
+    0.95 m and scanning goes from 8% of the run to 40%). At 640 px the
+    120° lens tidies 0.819, back inside the shipped lens's noise, because
+    305 px/rad is what 62° / 320 px already gave. And more pixels at the
+    SHIPPED lens buy nothing: 62° on 640 px (591 px/rad against 296) tidies
+    0.917 against 0.875 on the same 12 layouts, and moves no soccer metric
+    over 12 paired seeds (possession −0.49 ± 0.70, `ballAdvance`
+    −0.10 ± 0.10, 71 kicks against 97). So the recommendation is one
+    finding, not two: the shipped camera is adequate, and what breaks it is
+    widening the lens without adding the pixels to pay for it.
+  - **Teams** (`brain/team.py`, `pitch-2v2` / `pitch-3v3`): 2v2 2.00 goals,
+    7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50 after the traced fix
+    (supporters turning in place against a teammate or the boards: the
+    support spot stays inside the pitch and a supporter with a duck track
+    beside it stands; 0.75 / 5.2 / 4.75 before), and with the hunt and the
+    walking search 2v2 1.50 / 9.8 / 3.50, 3v3 1.50 / 5.0 / 4.50 — falls per
+    duck still climb with the roster. Teammates now share their poses on
+    the board; a keep-out around them (a teammate beside is invisible to
+    the camera and the ToF) measured off, 3v3 5.25 falls against 4.50,
+    because a fresh trace put 12 of 13 falls beside an *opponent* in a
+    standing turn, and a walking turn for supporters measured off too (2v2
+    4.00 falls against 3.50, 3v3 5.25 against 4.50): a crowded pitch needs
+    a sense of the bodies beside the duck before any rule can act on them.
+  - **The attacker claim is a predicted TIME to the ball, not a distance.**
+    The role changed hands 14.0 times a duck a run with a median tenure of
+    4.30 s, and the board's attacker was the team's nearest duck only 56.1%
+    of the time: a straight line ignores the turn (this walker turns at
+    ~0.7 rad/s once the gait is going, so a duck facing away at 0.4 m is
+    4.7 s from the ball and one facing it at 0.6 m is 1.0 s), reads a lost
+    sighting as resignation (the level camera loses a floor ball inside
+    0.3 m — exactly where the attacker lines up) and lets a stale claim
+    compete on equal terms. Costed as a predicted time, with blind claims
+    priced off the board's freshest fix, age charged per second, and the
+    role moving only for a challenger 0.6 s quicker held 1.2 s
+    continuously: over 6 seeds × 300 s of 3v3, 516 attacker spells against
+    365 and replicated on three seeds it was not tuned on — handovers 14.0
+    → 9.8 a duck a run, median tenure 4.30 → 6.96 s, spells under a second
+    21.3% → 10.4%, the attacker really the nearest duck 56.1% → 68.2% and
+    really the quickest 68.4% → 79.3%. It did NOT improve the play (signed
+    progress flat, advance per kick halved, possession down 13%) or the
+    crowding it was meant to explain (nobody within 0.3 m of the ball 41.2%
+    → 40.9%, two teammates inside 0.5 m of it 24.5% → 23.7%), so it stands
+    on role stability and claims nothing about the score. Aiming the claim
+    at an intercept measured WORSE — 18.2 handovers a duck a run against
+    12.3, a median spell of 3.0 s against 5.8 — and ships at 0.
+  - **The bump rule, measured properly at last.** A bump is feet touching
+    feet (the World's own contact list — the only collision geometry in
+    the walk scene, and what a duck-duck fall is), and a bumped duck
+    stands for half a second instead of turning in place. The claim it
+    shipped on — "halves the crowd's falls", 3v3 5.00 → 1.75 a run over
+    4 seeds — did
+    not replicate: the same rule gives 3.17 a run over twelve seeds and
+    4.17 over twelve others. Against NO rule it looked real on twelve fresh
+    layouts measured twice (falls 5.50 → 3.62 a run, −1.88 ± 0.84 per
+    layout, p = 0.055, better on 10 of 12; the two batteries alone give
+    −1.58 ± 0.92 and −2.17 ± 1.01, and pooling them as 24 independent
+    seeds gives p = 0.012, which is repeated measures, not replication).
+    **Then it failed its confirmation.** On twelve layouts nobody had run
+    (200–211) the effect is absent and slightly reversed: falls 4.08 →
+    4.33, +0.25 ± 1.04, p = 0.88, better on 5 of 12. Over all 24 DISTINCT
+    layouts: −0.81 ± 0.69, p = 0.264. **"A third fewer falls" is
+    withdrawn** — the same shape as the poacher, and caught by the same
+    rule (confirm on seeds the effect was not found on). Nothing it was
+    suspected of costing moved either (kicks +0.83 p = 0.51, goals −0.58
+    p = 0.50, advance and progress flat), so `team_bump_stand_s` stays on
+    as a default nobody has earned in either direction: falls want ~376
+    seeds and this is 24.
+    What the bump work also left is a trace of 838 bumps refuting
+    its own premise (the feet meet a median 0.66 m from the ball, and
+    afterwards it is further from BOTH ducks by the same 7.4 cm) and
+    finding the real defect: it cancelled the ESCAPE turn (70% of its
+    firing in `blocked`, 6 of 8 falls a stand leaning on the other duck)
+    and fed itself (standing on a body keeps touching it: 44 → 105 bumps a
+    run, one freeze of 74 s). It is edge-triggered and state-scoped now.
+  - **What fresh seeds did to the round's findings.** A poacher
+    supporter scored 10 goals against 3 over four seeds, 21 against 12 over
+    twelve — then **reversed** on twelve fresh ones, 13 against 19, for 34
+    against 31 over all 24 (p = 0.80); the middle battery shared the seeds
+    the effect was found on and was never independent. Then the shelf
+    itself was re-screened with `possession`, which costs 9 seeds where
+    goals cost 146: seven shelved chase knobs and a baseline, eight
+    batteries of 12 fresh seeds each, every arm paired against the
+    baseline run interleaved in the same window —
+    and NONE was rehabilitated. The only arm that cleared p < 0.05, a
+    sweeping search head (possession +3.75 ± 1.21, p = 0.010, up on 10 of
+    12 seeds), is a **false positive**: everything churn cannot inflate
+    says worse — advance flat, advance per kick 0.091 → 0.073, goals 2.17 →
+    1.17 a run, falls 0.67 → 1.67. A ball memory, the one candidate worth
+    extending, DISSOLVED rather than reversed: signed progress +0.34 on the
+    discovery seeds, +0.20 on the next twelve, −0.11 on the twenty-four
+    after that, pooling to +0.08 ± 0.10 (p = 0.45, up on 25 of 48). Both
+    lessons are tooling now: `--seed0` extends a battery onto seeds the
+    effect was NOT found on instead of re-running the old ones, and
+    `--out FILE --tag TAG` appends every seed as it lands, skips what a
+    file already holds and refuses a file written under a different tag,
+    roster or run length — written after this container was reclaimed
+    mid-battery twice, at about ninety minutes of 3v3 each time.
+  - **Follow-me.** Measured on identical
+    follow-me episodes (12, the pinned model, the detector seeing a person
+    by its legs — its middle leaves the 48° frustum at 1.2 m, inside the
+    follow band, which had every brain losing sight as it closed in) the
+    learned brains hold the distance band 0.81 / 0.76 (**`follow-v4`**, the
+    first brain RETRAINED in this world — v3's recipe, the reflex tier and
+    variety, run to 2M decisions), 0.77 / 0.67 (`follow-v2` under
+    the reflex tier — the env yaws the head toward the tracked target and
+    refuses to walk into something 0.25 m ahead), 0.74 / 0.63 (`follow-v3`,
+    trained with the reflex tier and variety: boxes and a wandering duck)
+    and 0.72 / 0.57 (`follow-v1`, version-1 observation, scored in the world
+    it was trained in) under the datasheet / hostile presets against the
+    scripted controller's 0.48 / 0.41; in sight 0.95 / 0.87, 0.96 / 0.87,
+    0.95 / 0.88, 0.94 / 0.88 vs 0.83 / 0.74 — measured with the capsule
+    that walks through the duck; with the polite person that is now the
+    benchmark's default (stops short, steps around; zero contact) the
+    bands are 0.91 / 0.92 (v4), 0.92 / 0.85 (v2), 0.90 / 0.82 (v3), 0.86 /
+    0.77 (v1) vs 0.76 / 0.67 at 12 episodes. Re-measured at 240 episodes a
+    cell (24 x 10 eval seeds), which moved some of the earlier 12-episode
+    cells by up to 0.04. v4 leads every cell — 9/10 eval seeds on the
+    datasheet preset, 10/10 under hostile noise — and is the first learned
+    brain to move the bump count (15.5 an episode against v2's 21.8); it is
+    the follower to pick. Retraining its recipe against the polite person
+    (`follow-v5`, 240 episodes a cell) did not widen the lead: level on the
+    clean preset (0.93 vs 0.94), −0.01 / −0.02 under hostile noise (ahead
+    on 2/10 and 3/10 eval seeds), 2.6 / 11.5 bumps an episode against v4's
+    0.3 / 4.2 — and 0.06–0.10 behind with double the contact when scored
+    back against the capsule that walks through. A brain the person stops
+    for learns to stand in its way; v4, trained in the harder world, stays
+    the pick.
+    The scripted one loses because it stands still and goes cold; an
+    idle sidestep took it from 0.36 to 0.51 in sight, the head gaze to
+    0.53, and the rest of the gap is the learned brain's continuous motion.
+    A dodge for a person walking at the duck (`ClosingWatch`: the ToF
+    clearance closing faster than the duck's own walk → turn to the freer
+    side, walk) was built, measured on a charge case (the person walks
+    through the duck every 6 s) and ships off: the walker cannot clear a
+    person in the 2–5 s it has (1 cm of sidestep in its first second),
+    contact time is the same either way (4.9 vs 5.3 s an episode) and in
+    ordinary following it fires on a person merely walking toward the duck
+    (in band 0.49 → 0.39). A polite person (`Person.yield_m`: stops short
+    of a duck in its way, steps around after 2.5 s) settles it — the mocap
+    capsule walked through the duck, a real person does not: on the charge
+    case the scripted follow holds the band 0.92 with no contact and no
+    falls, the learned brains 0.93, and the dodge only costs; facing the
+    person and standing is the behaviour. The page's camera inset (V) shows what the head
+    camera sees at the detector's field of view, from the pose the frame
+    was captured at, with the detections as boxes.
 - Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
   a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
   12.13), the tether toggle (12.10: `--tether-ms`, `POST /world/tether`).
@@ -351,7 +450,12 @@ around **a world** rather than a roster of isolated ducks.
   leans on.
 - **Match / lesson strip** is scenario-dependent: a scoreboard for soccer, a
   coverage percentage for mapping, a "distance held" gauge for follow-me, and
-  the lesson card for the scenario.
+  the lesson card for the scenario. **Built for soccer**, and it carries more
+  than the score, because goals are ~2.5 a run and a viewer watching them
+  sees almost nothing: the pitch panel shows the three per-team rates the
+  benchmark judges by — `possession` (9 seeds to resolve a 25% shift),
+  `advance` (43) and the signed version, red when a team is losing ground —
+  off the same `PitchMetrics` the battery uses.
 - **Possess.** `P` takes over the selected agent with WASD (the protocol
   already carries `{"cmd"}`): drive the person the duck should follow, or
   drive a duck yourself in a match against brains. Turning yourself into a
@@ -444,9 +548,9 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 3.2 | **Follow-me** | Scenario: a person capsule walks a random path; reward = keep 0.5–0.8 m and bearing near zero, penalize losing sight, collisions, jerky intents. Compare RL vs the scripted controller in the same scenario with the same noise preset. | M | ★★★★★ |
 | 3.3 | **Obstacle avoidance from ToF only** | Wander without collisions in procedural rooms; the classic "learn a policy over a depth image" lesson at 64 pixels. | M | ★★★★ |
 | 3.4 | **Go-to under odometry drift** | Reach a target given only drifting odometry; lesson on why closed-loop sensing beats dead reckoning. | S | ★★★ |
-| 3.5 | **Hierarchical brain** | Add a discrete head to the brain action: which reflex policy to run (walk / stand / kick / ground-pick). Needed for soccer kicking and for "sit when petted". | M | ★★★★ |
+| 3.5 | **Hierarchical brain** | Add a discrete head to the brain action: which reflex policy to run (walk / stand / kick / ground-pick). Needed for soccer kicking and for "sit when petted". **Done in its first form** (`brain/striker.py`): a kick logit per foot on top of the continuous twist, and the option is EXECUTED BY THE REFLEX TIER — it latches, stops the body, fires after 0.3 s of standing — because a kick issued mid-stride is the fall mode (4 falls in 25 episodes, all within 0.6 s of a kick; a speed-only gate made it worse at 11/25, the latch took it to 0–1). A cooldown is needed too: without it PPO found a lock, one kick every 0.93 s, so the duck never walks and never samples anything else. Both are world fixes, not reward terms. | M | ★★★★ |
 | 3.6 | **Brain teach panel** | Same UX as tricks: plain-English recipe cards, sliders, live snapshots hot-loaded on the trainee duck in `/sim`. Reuse `TeachPanel` with a brain behavior family. | M | ★★★★ |
-| 3.7 | **Head-aware locomotion (reflex side)** | A walk policy fine-tuned so head-pose commands are honoured while walking (the shipped walker only sees keep-alive ranges). Trained on the existing `train-walk` path with wider `HEAD_CMD_RANGES`, still inside the contract. Ports to `microduck_rl` as an mjlab cfg change. | M | ★★★★ |
+| 3.7 | **A faster body yaw (reflex side)** | Was "head-aware locomotion": a walk policy fine-tuned so head-pose commands are honoured while walking, on the premise that the shipped walker only sees keep-alive ranges. **Half of it is already done and the other half was aimed at the wrong joint.** Measured (`walker-facts`): the shipped walker tracks a head-yaw command to 1.42 rad WHILE WALKING at 7.5 rad/s, for a 12% forward-speed cost and no falls — `HEAD_CMD_RANGES`' ±0.07 is the curriculum's first stage, not the policy's range, and upstream runs `head_pose_range` out to ±1.40 with head-pose tracking as a primary reward. There is nothing to train there. What IS a wall is the BODY yaw: ~0.65 rad/s in a real run, ~0.6–0.8 at the ceiling, with `ANG_VEL_Z_RANGE`'s ±1.0 already delivering it — at full command there is nothing left to ask for. A 1v1 run spends **47% of itself rotating on the spot** (measured over 1200 duck-seconds, sweeping 371 rad at 0.655 rad/s; a 3v3 run is worse). Holding the yaw demand fixed, a walker that turned at 1.5 rad/s would free **~27% of every run** — larger than any brain-level change measured in this repo. So: retrain for TURN RATE, and widen the twist command range with it. | M | ★★★★★ |
 
 ### Track 4: Multi-duck and soccer
 
@@ -455,9 +559,9 @@ author's judgement on platform leverage + wow + teaching, argued in section 5.
 | 4.1 | **Multi-duck world** | N ducks in one `mjData` with duck–duck collisions; per-duck reflex + brain; palette drag onto any duck. | (0.1/0.2) | ★★★★★ |
 | 4.2 | **Soccer pitch scenario** | Pitch, two goals, the 70 mm / 15 g ball from upstream, spawn slots, out-of-bounds reset, scoreboard, match clock. | M | ★★★★★ |
 | 4.3 | **Ball perception** | Detector class `ball` (bearing, size ⇒ distance) plus ToF blob; honest label in the UI that the real robot cannot see a ball until someone trains that detector class. | S | ★★★★ |
-| 4.4 | **Striker brain (RL)** | 1v0: dribble toward the goal; reward = ball progress toward goal, being behind the ball, no collisions; discrete kick selection via 3.5. | M | ★★★★★ |
+| 4.4 | **Striker brain (RL)** | 1v0: dribble toward the goal; reward = ball progress toward goal, being behind the ball, no collisions; discrete kick selection via 3.5. **Built, trained and measured — and it loses.** `brain/striker.py` + `train-brain --task striker` + `eval_striker`: 88 obs (the 80-float brain contract plus goal/ball geometry, all from odometry and detections), 5 actions (twist + a kick logit a foot, 3.5's head), reward = the benchmark's own signed `ballProgress`, kick made samplable by a spawn ladder rather than by pay. `striker-v1` (600k decisions) against the scripted `Chase` on identical seeds: 1v0 over 24 paired seeds, advance 0.86 → 0.31 (paired −0.550, t = −5.74, down on 22 of 24) and possession 11.8 → 5.9 s/min; 1v1 over 36 paired seeds (24 + 12 fresh), signed progress **+0.10 → −0.16** — the scripted brain carries the ball toward the goal it attacks and this one toward its own, and both halves agree (−0.068 discovery, −0.067 fresh). Rendered and read: it does not reach the ball, drifting at ~0.04 m/s and firing the kick at empty floor (3612 kicks against 116; 43× less ball moved per touch). Not a reward problem — the same reward pays the scripted brain +6.3 an episode and this one −0.5 — an APPROACH problem. Two failures were fixed in the world rather than the pay (a kick mid-stride is the fall mode; a kick that can re-fire is a lock that stops the duck walking). The scaffolding is done and reusable; the brain is not worth shipping. | M | ★★★★★ |
 | 4.5 | **Self-play ladder** | 1v1, then 2v2 with parameter sharing; league of past checkpoints as opponents; ELO in the scoreboard; the lesson is non-stationarity. | L | ★★★★★ |
-| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". **Done (first form):** `Duck.team`, `make_pitch(per_side)`, a team blackboard with attacker/support roles (`brain/team.py`), `pitch-2v2` / `pitch-3v3` built-ins, `eval-pitch --per-side`, a kickoff after every goal; measured 2v2 2.00 goals, 7.8 kicks, 2.75 falls a run, 3v3 1.00 / 7.8 / 3.50 with supporters that stay off the boards and stand beside a teammate (falls per duck climb with the roster: 0.25 → 0.69 → 0.58). | M | ★★★★ |
+| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". **Done (first form):** `Duck.team`, `make_pitch(per_side)`, a team blackboard with attacker/support roles (`brain/team.py`), `pitch-2v2` / `pitch-3v3` built-ins, `eval-pitch --per-side`, a kickoff after every goal; measured 2v2 2.00 goals, 7.8 kicks, 2.75 falls a run, 3v3 1.00 / 7.8 / 3.50 with supporters that stay off the boards and stand beside a teammate (falls per duck climb with the roster: 0.25 → 0.69 → 0.58). The possession stats are done too (`world/metrics.py`): per-team `possession`, `ballAdvance` and signed `ballProgress` at the control tick, reported by `eval-pitch` and drawn live on the /sim pitch panel from the same class. The attacker role is a predicted TIME to the ball (handovers 14.0 → 9.8 a duck a run, median tenure 4.30 → 6.96 s), and the bump-stand rule's fall reduction FAILED its confirmation — real-looking on twelve layouts measured twice (5.50 → 3.62 a run, −1.88 ± 0.84, p = 0.055) and absent on twelve fresh ones (4.08 → 4.33, p = 0.88), for −0.81 ± 0.69, p = 0.264 over all 24 distinct layouts; it stays on as an unearned default, costing nothing measurable. Heatmaps, goal replay and the "possess a duck" mode are still plans. | M | ★★★★ |
 | 4.7 | **Goal / pitch sensing honesty** | Options: known pitch + drifting odometry (real-ish), or detector classes for goal markers. Expose the choice in the scenario; teach why it matters. | S | ★★★ |
 | 4.8 | **Flocking / follow-the-leader** | Upstream's sketch verbatim: RSSI holds spacing, ToF handles the duck ahead; then a learned version. Cheap once 1.2 + 1.6 exist. | S | ★★★ |
 | 4.9 | **Synchronized dance** | Shared BLE beat drives head-bobs across ducks; the speaker plays each duck's voice on the beat. Pure delight, ten lines once 1.6 and 6.x exist. | S | ★★ |
@@ -814,9 +918,15 @@ intents:
   detections (a `media.frame` call vs publishing from `mediad`). The bridge
   mirrors the sim's `{class, bearing, elevation, bbox_w, conf}` and adapts
   when upstream lands one.
-- **Head-pose commands while walking.** The shipped walker was trained with
-  keep-alive head ranges only; a brain that steers the gaze while walking
-  will need 3.7 (or the upstream head-pose curricula) to be honoured.
+- ~~**Head-pose commands while walking.**~~ **This was wrong and is struck
+  out.** The shipped walker was NOT trained with keep-alive head ranges only
+  — `HEAD_CMD_RANGES`' ±0.07 is the curriculum's first stage, and upstream
+  runs `head_pose_range` out to ±1.40 with head-pose tracking as a primary
+  reward. Measured on the shipped policy: it holds a commanded head yaw at
+  1.42 rad *while walking at 0.3*, slewing at 7.5 rad/s, for a 12%
+  forward-speed cost and no falls. A brain that steers the gaze while
+  walking needs nothing trained; what it needs is a reason, and the one
+  tried so far (a searching sweep) made the body turn MORE on 5 of 5 seeds.
 - **Multi-duck on hardware** is BLE + ToF only; soccer on real ducks is a
   long way off and the page should say so.
 - **`MjSpec` composition of the upstream MJCF.** Attaching several copies of

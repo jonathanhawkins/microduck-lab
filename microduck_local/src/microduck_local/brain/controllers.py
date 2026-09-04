@@ -14,11 +14,12 @@ and the lesson page shows exactly which zones it looked at.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, fields, replace
 
 import numpy as np
 
-from .gait import TURN_KICK, GaitWatch, turn
+from .gait import TURN_KICK, GaitWatch, back_up, turn
 from .runtime import REGISTRY, Intent, Senses, age_inputs
 from .tracker import Tracker, TrackerParams
 
@@ -330,7 +331,7 @@ class FollowParams:
     idle_coast: bool = True        # …also while coasting on a lost track
     coast_speed: float = 0.0       # walking speed on a coasted track (0: stand and turn, measured safer)
     lost_s: float = 2.0            # keep the last bearing this long, then search
-    search_wz: float = 1.0             # the shipped walker barely turns in place below 1.0
+    search_wz: float = 1.0             # below 1.0 a COLD walker does not turn at all (exactly 0, both ways)
     tof_stop: float = 0.35         # never walk into what the ToF says is right there
     head_yaw_gain: float = 0.8     # look toward the target (the robot's own gaze intent)
     # Get out of the path of whatever walks at me (ClosingWatch): OFF.
@@ -475,8 +476,9 @@ class ChaseParams:
     them, because "we tried it and it was worse" is the expensive part and
     deleting it invites the next person to spend the afternoon again.
 
-    Shipping OFF (0 / False), with their measurements below: `two_stage`
-    and `search_walk_after` (line-up precision), `kick_deflect_*` (the kick
+    Shipping OFF (0 / False), with their measurements below: `two_stage`,
+    `lineup_lat` (its speed-up) and `search_walk_after` (line-up
+    precision), `kick_deflect_*` (the kick
     map in the stance), `kick_cone` (shoot only from close), `predict_s`,
     `head_yaw_when`, `predict_steer`, `look_aim`, `search_sweep` (what the
     head does about the ball), `tof_ball_m` (the ToF seeing a ball at the
@@ -536,6 +538,27 @@ class ChaseParams:
     # 0.00 against 0.75 kicked goals a run; bumped goals were 1.25 either
     # way. With this walker the kick that happens beats the kick that is
     # placed. `two_stage` switches it on.
+    # AND READ ITS ADVANCE-PER-KICK WITH THE ADVANCE ITSELF. 0.163 against
+    # the shipped 0.091 is a RATIO whose denominator is the thing this
+    # arm changes. Re-measured over 12 paired seeds x 300 s (seeds
+    # 100-111): shipped 87 kicks / advance +0.82 m/min, two_stage 35
+    # kicks / +0.76, the `lineup_lat` variant 44 kicks / +0.71 - the
+    # advance is FLAT to under 1 sigma across arms whose kick counts
+    # differ by 5.8 - so advance-per-kick here is 1/kicks, and any change
+    # that kicks LESS scores higher on it while moving the ball no
+    # further. Measured directly instead, the ball's travel in the 2 s
+    # after the swing: 17.7 +- 3.9 cm a kick shipped (34 kicks), 14.4 +-
+    # 3.4 two-stage (17), 13.6 +- 3.0 with the faster line-up (20). The
+    # placed kick is not worth more. Traced, it is not placed either: the
+    # swing fires with the ball a median 21 cm (shipped) / 25 cm
+    # (two_stage) ahead of the trunk where the sweet spot is 6-10, in
+    # 3 of 17 two-stage kicks and 7 of 34 shipped ones inside a generous
+    # box round it - the spot is planned at `refresh_min` or further and
+    # the ball moves 20-28 cm during the attempt, so what scatters the
+    # shot is the plan going stale, which a LONGER line-up makes worse.
+    # The cost in the same paired block: goals 36 -> 21 (-2.3 sigma,
+    # better on 11 of 12 seeds) and possession 18.6 -> 13.1 s/min
+    # (-4.4 sigma).
     two_stage: bool = False
     approach_back: float = 0.22
     approach_speed: float = 0.25
@@ -549,12 +572,38 @@ class ChaseParams:
     k_lat: float = 4.0
     k_head: float = 1.5
     approach_wz: float = 0.5
+    # Stage one's whole job is to put the duck ON the kick line, squared up,
+    # behind the spot - so a duck that is already there has nothing to walk
+    # back for. `lineup_lat` is how near the line counts as on it (stage
+    # two's cross-track law closes the rest); 0 makes every line-up go via
+    # the pre-spot, which is how the two-stage line-up was first measured.
+    # Traced over 12 duck-runs of 300 s of 1v1 with `two_stage`: 27 s of
+    # every 300 is the walk to the pre-spot and 4 s the square-up on it,
+    # against 12 s of walk-in, and 55 attempts a run end in the back-off
+    # below - the pre-spot BEHIND the duck. (That back-off turns away and
+    # walks; `gait.back_up` would reach it without turning at all, and is
+    # the obvious thing to measure here now that the walker is known to
+    # reverse at 0.23 m/s. Untried.)
+    # MEASURED at 0.06, `two_stage` on, against `two_stage` alone: the
+    # line-up really does get faster - a kicking attempt 5.63 s -> 4.43 s
+    # (its walk to the pre-spot 1.79 -> 1.19 s, the square-up on it 0.89 ->
+    # 0.68), the pre-spot back-off 55 attempts -> 35 a run, 40% -> 42% of
+    # attempts reaching the walk-in and 6.7% -> 8.7% of them firing - and
+    # the play does not move: over 24 PAIRED seeds x 300 s of 1v1 (two
+    # blocks of 12, the second fresh) kicks 72 -> 83, ballAdvance -0.036
+    # +- 0.050, signed progress -0.105 +- 0.061, goals 45 -> 34 (sign
+    # p = 0.24), falls 16 -> 11. Ships at 0: a real speed-up that buys
+    # nothing the benchmark can see. Note the first 12 seeds promised +26%
+    # kicks and a THIRD of the falls and the fresh 12 gave neither, which
+    # is what 16 fall events and 35 kicks a block are worth.
+    lineup_lat: float = 0.0
+
     # Traced: a re-plan with the ball already inside `backoff_range` puts
     # the pre-spot behind the duck, and the turn in place toward it is a
     # turn against the ball. Back off instead (turn away, walk clear - the
     # retreat manoeuvre) and line up again from further out. And a search
     # begun with the ball at the feet turns in place without ever seeing
-    # it (a standing turn barely turns): after `search_walk_after` with
+    # it (a cold standing turn is exactly 0 rad/s): after `search_walk_after` with
     # no sighting, walk `search_walk_s` to change the view.
     backoff_range: float = 0.35
     search_walk_after: float = 0.0     # 0: off (measured with the two-stage line-up, see above)
@@ -747,11 +796,28 @@ class ChaseParams:
     # A bump (Senses.bumped: the body is touching another body - contacts in
     # the sim, the IMU / servo loads on the robot): no turn in place for
     # `bump_stand_s` after the contact STARTED. 12 of 13 traced 3v3 falls
-    # were standing turns beside an unseen opponent, and the rule halves the
-    # crowd's falls (4 seeds x 300 s: 3v3 5.00 -> 1.75 a run at 0.5 s, 2v2
-    # 4.00 -> 2.25) - but the first version of it also cost 1v1 1.50 goals
-    # and 1.00 falls against 2.38 / 0.38, and a trace of 838 bumps said
-    # exactly why, refuting the obvious guess on the way:
+    # were standing turns beside an unseen opponent. MEASURED against no
+    # rule at all, and THE FALL REDUCTION DID NOT REPLICATE:
+    #   seeds 24-35        falls 4.83 -> 3.25   -1.58 +/- 0.92  p = 0.14
+    #   seeds 24-35 again  falls 6.17 -> 4.00   -2.17 +/- 1.01  p = 0.060
+    #   seeds 200-211      falls 4.08 -> 4.33   +0.25 +/- 1.04  p = 0.88
+    #   all 24 DISTINCT layouts             -0.81 +/- 0.69  p = 0.264
+    # The first two are the same twelve layouts measured twice (per layout
+    # -1.88 +/- 0.84, p = 0.055; pooling them as 24 says p = 0.012, which
+    # is repeated measures, not replication, and is what this comment said
+    # first). On twelve layouts nobody had run the effect is absent and
+    # slightly reversed. "A third fewer falls" is WITHDRAWN - the
+    # poacher's shape exactly, caught by AGENTS.md's third rule.
+    #
+    # It stays on for rosters anyway, as a default nobody has earned in
+    # either direction: the pooled point estimate still favours it
+    # (better on 15/24) and nothing it was suspected of costing moved
+    # (kicks +0.83 p = 0.51, goals -0.58 p = 0.50, advance and progress
+    # flat on the fresh block), so flipping it off would be reading noise
+    # the other way. Falls want ~376 seeds for a 25% shift; this is 24.
+    # `bump_back` below is the arm worth measuring against it next. Its first form
+    # cost 1v1 1.50 goals and 1.00 falls against 2.38 / 0.38, and a trace
+    # of 838 bumps said why, refuting the obvious guess on the way:
     #   * NOT possession. The feet meet a median 0.66 m from the ball; both
     #     ducks are inside 0.35 m of it in 18% of bumps; and two seconds
     #     later the ball is further from BOTH ducks by the same +0.074 m.
@@ -777,6 +843,47 @@ class ChaseParams:
     # A contact episode ends after this long without one; the freeze runs
     # from its onset and is never extended by staying in contact.
     bump_gap_s: float = 1.0
+    # Back up instead of standing, for this long. UNTRIED, ships at 0.
+    #
+    # Standing is what the rule does today, and standing does not END the
+    # contact: measured from 0.10 m of separation, 16 trials, a standing
+    # duck was still at 0.099 m four seconds later and cleared 0.30 m in
+    # 0 of 16. A straight reverse cleared it in a median 1.6 s (14/16),
+    # beating turn-90-and-walk (2.7 s) and turn-180-and-walk (3.2 s) - and
+    # unlike either it keeps the ball in frame, so no `search` follows.
+    # The walker reverses at 0.23 m/s, faster than it walks forwards; the
+    # "it cannot" above this was a dead-band reading (see `gait.back_up`).
+    #
+    # Why it is the obvious next thing to measure here: the two failure
+    # modes the trace found are both a duck that cannot separate. "6 of 8
+    # falls were a stand pressed against the other duck: the walker leans
+    # on it" is a stand that had somewhere to go. "Standing on a body keeps
+    # touching it - 44 -> 105 bumps a run" is the same. And the states this
+    # rule is kept OUT of are excluded because "the turn IS the escape" -
+    # which was true only while a reverse was believed impossible.
+    #
+    # MEASURED, and it is the most closed null in this file. Three arms on
+    # the same twelve fresh layouts (3v3, seeds 200-211, 300 s a seed):
+    #
+    #            falls  kicks  goals   possession  advance
+    #   no rule   4.08   6.50   2.17     11.83      0.40
+    #   stand     4.33   7.33   1.58     13.00      0.42
+    #   back      4.33   6.67   2.00     11.97      0.44
+    #
+    # stand -> back on falls is EXACTLY 0.00 +/- 1.13, p = 1.000 (52 events
+    # against 52); nothing else resolves either. And the knob is NOT inert:
+    # instrumented over one 3v3 run it issues 690 reverse commands (13.8 s
+    # a run) and cuts the ticks spent touching another body from 4473 to
+    # 2529 of 90000 - a 43% drop, exactly the self-feeding the 838-bump
+    # trace found ("standing on a body keeps touching it").
+    #
+    # So: the mechanism is real, it operates, and it does not matter. Time
+    # in contact is not what makes a 3v3 duck fall. That agrees with the
+    # probe it was built on - a turn beside a STATIC body fell 0 times in
+    # 98 trials down to 8 cm; the falls need a duck that is MOVING into
+    # you - and it means the remaining lever is the closing duck, not the
+    # contact. Ships at 0, as a measured null rather than an untried idea.
+    bump_back: float = 0.0
     # Teammates' poses off the team board (brain/team.py): a teammate
     # inside `mate_keepout` counts as a duck beside me (no turn in place,
     # no hunt) and, ahead, as a duck to avoid - the camera and the ToF
@@ -800,6 +907,50 @@ class ChaseParams:
     yield_s: float = 1.5
     yield_cooldown_s: float = 3.0
 
+    @staticmethod
+    def from_env(spec: str | None = None) -> "ChaseParams":
+        """The defaults with `MICRODUCK_CHASE` applied — how a battery says
+        which variant it is measuring:
+
+            MICRODUCK_CHASE="two_stage=1,approach_speed=0.4" uv run eval-pitch …
+
+        Every knob above ships on a measurement, and until now the only way
+        to measure one was to edit its default, run, and edit it back — a
+        step that is invisible in the battery's own record and was done
+        wrong at least once. `--tag` says which variant a row belongs to;
+        this says what the variant IS, from the same command line.
+
+        An unknown name or an unreadable value RAISES: a typo that silently
+        measured the default would be the expensive kind of mistake here.
+        Tuple-valued knobs are not settable this way."""
+        p = ChaseParams()
+        if spec is None:
+            spec = os.environ.get("MICRODUCK_CHASE", "")
+        if not spec.strip():
+            return p
+        kinds = {f.name: getattr(p, f.name) for f in fields(p)}
+        over: dict = {}
+        for item in spec.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            k, sep, v = item.partition("=")
+            k, v = k.strip(), v.strip()
+            if not sep or k not in kinds:
+                raise ValueError(f"MICRODUCK_CHASE: {item!r} is not <ChaseParams field>=<value>")
+            cur = kinds[k]
+            if isinstance(cur, bool):
+                if v.lower() not in ("0", "1", "true", "false", "on", "off"):
+                    raise ValueError(f"MICRODUCK_CHASE: {k}={v!r} is not a boolean")
+                over[k] = v.lower() in ("1", "true", "on")
+            elif isinstance(cur, str):
+                over[k] = v
+            elif isinstance(cur, tuple):
+                raise ValueError(f"MICRODUCK_CHASE: {k} is a tuple; set it in code")
+            else:
+                over[k] = float(v)
+        return replace(p, **over)
+
 
 def _wrap(a: float) -> float:
     return math.atan2(math.sin(a), math.cos(a))
@@ -821,10 +972,14 @@ class Chase:
     DET_MAX_AGE = 0.4
     TOF_MAX_AGE = 0.25
 
-    def __init__(self, p: ChaseParams = ChaseParams(), goal: tuple[float, float] | None = None,
+    def __init__(self, p: ChaseParams | None = None, goal: tuple[float, float] | None = None,
                  team=None, duck_id: str = "", bounds: tuple[float, float] | None = None,
                  goal_w: float = 0.0):
-        self.p = p
+        # No params given (the lab, the benchmark, the /sim page): the
+        # shipped defaults, with `MICRODUCK_CHASE` applied so a battery can
+        # name its variant on the command line. A caller that passes `p`
+        # (brain/team.py's roster kwargs, a test) is never overridden.
+        self.p = ChaseParams.from_env() if p is None else p
         self.goal = None if goal is None else (float(goal[0]), float(goal[1]))
         self.goal_w = float(goal_w)        # the mouth's width: how wide a target the ball has (kick_cone)
         self.bounds = None if bounds is None else (float(bounds[0]), float(bounds[1]))   # the pitch's half-extents inside the boards
@@ -961,6 +1116,23 @@ class Chase:
             vx, _, wz = turn(bearing, cold)
             return vx, wz, dist, bearing
         return (0.25 if dist < slow_in else p.speed), float(np.clip(p.k_turn * bearing, -1.0, 1.0)), dist, bearing
+
+    def _on_the_line(self, odom, spot, u: float, heading_err: float) -> bool:
+        """Is the duck already where stage one is trying to put it — on the
+        kick line, squared up, still short of the spot? Then stage two can
+        start here (`lineup_lat` > 0; 0 sends every line-up via the pre-spot,
+        which is how `two_stage` was first measured).
+
+        Only INSIDE the pre-spot's own distance: further back the walk to the
+        pre-spot runs at `speed`, which beats the walk-in's `approach_speed`,
+        and the ball is far enough that the square-up there is free."""
+        p = self.p
+        if p.lineup_lat <= 0.0:
+            return False
+        along = (spot[0] - odom[0]) * math.cos(u) + (spot[1] - odom[1]) * math.sin(u)
+        lat = -(odom[0] - spot[0]) * math.sin(u) + (odom[1] - spot[1]) * math.cos(u)
+        return (p.lineup_tol < along <= p.approach_back and abs(lat) <= p.lineup_lat
+                and abs(heading_err) <= p.aim_tol)
 
     # -- the machine ----------------------------------------------------------
     def step(self, senses: Senses) -> Intent:
@@ -1117,6 +1289,10 @@ class Chase:
                 self.spot = new
             sx, sy, foot, u, mode = self.spot
             heading_err = _wrap(u - odom[2])
+            if mode == "kick" and p.two_stage and not self.lined \
+                    and self._on_the_line(odom, (sx, sy), u, heading_err):
+                self.lined = True                               # nothing to go back for
+                self.t_state = t                                # stage two gets its own clock
             if mode == "kick" and p.two_stage and not self.lined:
                 # Stage one: the pre-spot behind the kick spot on the line;
                 # square up there, where a turn in place cannot touch the ball.
@@ -1260,7 +1436,7 @@ class Chase:
                     vx, wz = 0.0, 0.0                           # a standing look down: a near ball is below the level camera
                     gaze_at = p.dip_range
                 elif p.search_walk_after and since > p.search_walk_after and (since - p.search_walk_after) % (p.search_walk_after) < p.search_walk_s:
-                    vx, wz = p.speed, 0.0                       # a standing turn barely turns: move to see from elsewhere
+                    vx, wz = p.speed, 0.0                       # a cold standing turn is exactly 0 rad/s: move to see from elsewhere
         # A wall beside us: no turn in place toward it (measured: a line-up
         # turning against the boards tipped over). Turn toward the side
         # with more room — in a corner that is still a turn, the one move
@@ -1303,9 +1479,15 @@ class Chase:
             look_at = p.search_sweep * math.sin(2.0 * math.pi * (t - self._search_t0) / p.search_sweep_s) / p.head_yaw_gain
         if look_at is not None and senses.skill is None and (p.head_yaw_when == "always" or self.state in ("search", "look")):
             head = (head[0], head[1], float(np.clip(p.head_yaw_gain * look_at, -p.head_yaw_max, p.head_yaw_max)), head[3])
-        if p.bump_stand_s > 0 and t - self._bump_t0 < p.bump_stand_s and vx <= TURN_KICK and wz != 0.0 \
+        # The two arms of the same rule, on the SAME gate - a turn in place,
+        # beside a body, in a state where that turn is not itself the escape
+        # - so an A/B between them measures the action and nothing else.
+        if t - self._bump_t0 < max(p.bump_stand_s, p.bump_back) and vx <= TURN_KICK and wz != 0.0 \
                 and self.state in p.bump_stand_states:
-            vx, wz = 0.0, 0.0                                   # touching a body: stand, do not turn in place
+            if p.bump_back > 0 and t - self._bump_t0 < p.bump_back:
+                vx, _, wz = back_up()                           # back out of it, which standing never does
+            elif p.bump_stand_s > 0:
+                vx, wz = 0.0, 0.0                               # touching a body: stand, do not turn in place
         self.last = (vx, 0.0, wz)
         return Intent(twist=self.last, head=head, note=self.role if self.role != "attack" else self.state, skill=skill)
 

@@ -362,3 +362,28 @@ def test_a_tethered_brain_reads_its_latency_off_the_sensor_ages_and_stops_earlie
     from microduck_local.brain.runtime import Intent
     out = [th.intent_out(Intent(twist=(k * 0.1, 0.0, 0.0)), 0.05 * k) for k in range(8)]
     assert out[0].twist[0] == 0.0 and abs(out[5].twist[0] - 0.2) < 1e-9        # at t=0.25 the one from t=0.10... within a tick
+
+
+def test_tidy_can_back_straight_out_of_the_rim_instead():
+    """`backoff_back_s`: the sidestep-turn-walk above exists because the
+    walker "cannot walk backwards" — a dead-band reading. It reverses at
+    0.228 m/s, so the whole ~7.3 s sequence buys a separation a 2 s reverse
+    buys, and backing out never turns in place at the rim at all, which is
+    the fall mode the sidestep was dodging. Untried against the sequence,
+    so it ships at 0; this pins the wiring."""
+    from microduck_local.brain import Senses
+    from microduck_local.brain.gait import BACK_SPEED
+    from microduck_local.brain.tidy import Tidy, TidyParams
+
+    assert TidyParams().backoff_back_s == 0.0                      # ships off
+    b = Tidy(TidyParams(backoff_back_s=2.0))
+    b.state, b.t_state, b.scan_turned = "backoff", 10.0, 0.0
+    b._prev_yaw = 0.0
+    first = b.step(Senses(t=10.02, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert first.twist == (BACK_SPEED, 0.0, 0.0) and "reverse" in first.note
+    assert "sidestep" not in first.note                            # the sequence is skipped whole
+    mid = b.step(Senses(t=11.9, speed=0.0, odom=(-0.4, 0.0, 0.0)))
+    assert mid.twist[0] == BACK_SPEED and mid.twist[2] == 0.0      # straight back, no turn at the rim
+    assert b.state == "backoff"
+    b.step(Senses(t=12.1, speed=0.0, odom=(-0.45, 0.0, 0.0)))
+    assert b.state == "scan" and b.est is None                     # then straight to the scan
