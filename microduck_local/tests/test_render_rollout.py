@@ -218,3 +218,19 @@ def test_default_pose_is_the_action_origin():
     """load_driver('limp') assumes the contract's target = DEFAULT_POSE +
     action; if that ever changes, the null control stops being null."""
     assert C.DEFAULT_POSE.shape == (C.NUM_JOINTS,)
+def test_handoff_due_defers_to_a_behavior_that_owns_the_condition():
+    """The two implementations used to be copies kept in step by a comment.
+    A behavior carrying handoff_fn now drives BOTH — this asserts the render
+    side reads the field and that the flip rule cannot override it."""
+    asked = []
+
+    def own(env):
+        asked.append(env)
+        return True
+
+    e = types.SimpleNamespace(behavior=types.SimpleNamespace(handoff_fn=own))
+    assert handoff_due(e) is True and asked == [e]
+    # No rotation, no feet down, no gyro: the flip rule would have said no
+    # (and would have raised reaching .data) — the behavior's word is final.
+    e.behavior = types.SimpleNamespace(handoff_fn=lambda env: False)
+    assert handoff_due(e) is False

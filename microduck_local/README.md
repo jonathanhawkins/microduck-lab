@@ -2350,6 +2350,223 @@ carry `training.stage {idx, count, label}` plus cumulative
 whole chain, and an explicit `initFrom` skips it (single run, final stage's
 env).
 
+### 🔎 `find_ball` — the eyes for soccer and fetch
+
+The shipped kick policies are ball-blind (upstream's `ball_kick` cfg: "the
+operator aims the robot at the ball"); `find_ball` is the aiming. It is a
+whole-body policy that sweeps (on a scan clock) for a ball it cannot see, nods down for the
+near ones (the camera is 25 cm up and level, so anything inside ~0.5 m is
+below a level gaze), steps the body round to face it, and keeps it centred
+while it rolls or jumps elsewhere. The intended handoff is the robot's own
+pattern: `find_ball` until the ball is centred and the body square, then
+`ball_kick_*` / `alpha_ground_pick`.
+
+There is no ball in the physics. The env tracks a point on the floor and
+projects it through the robot's own `head_camera` MJCF element, so what the
+policy sees is what a detector on the robot hands it — and it rides the
+four **head command slots** (`obs[51:55]`), the same way the imitation
+clip's phase rides two body slots. The 61-dim contract is untouched; the
+daemon fills the slots for this brain:
+
+| slot | meaning |
+|---|---|
+| 51 | horizontal bearing across the frame, −1 hard left … +1 hard right (`duck_detect::Detection::bearing`); 0 when not seen |
+| 52 | vertical bearing, −1 bottom … +1 top; 0 when not seen |
+| 53 | 1.0 while the detector reports the ball, else 0 |
+| 59, 60 | **scan clock**: sin/cos of a phase running at 1/4 s while the ball is lost, restarting at 0 at every loss, parked at (0, 1) while seen — the imitation recipe's phase trick, because a memoryless policy cannot sweep on its own (a sweep is a limit cycle in head yaw; 2M PPO steps produced a static gaze-vs-belief instead) but can map a phase to a sweep |
+| 54 | the daemon's **belief**: the ball's bearing in the duck's yaw frame ÷ π (+ = left) × confidence. 1.0 while seen; while lost, the last bearing dead-reckoned by the gyro yaw rate with confidence fading as exp(−t/4 s) down to a 0.15 floor. At episode start: a noisy prior at half confidence in 70% of episodes (the ball was in view before this brain took over), else the fixed convention +0.15 — "nothing known, sweep left first" |
+
+Detector realism: reports every 2 control steps (25 Hz against the 50 Hz
+loop), ±0.02 bearing jitter under `obs_noise`, and an optional dropout knob.
+FOV is the real camera's — a 1920×1080 / 2.75 µm / 1/2.9″ sensor behind a
+2.9 mm lens (116° × 60°), mounted rotated 90°, so in the robot's frame it is
+**60° across and 116° up**: tall and narrow, the right shape for hunting a
+ball on the floor (`MICRODUCK_BALL_HFOV_DEG` / `_VFOV_DEG`).
+
+Two numbers from the sensitivity sweeps in `docs/roadmap.md` are worth
+carrying into any hardware discussion:
+
+- **The detector needs ≥ 10 Hz.** 50 / 25 / 17 / 10 Hz are indistinguishable;
+  between 10 and 6 Hz the behavior falls off a cliff (centred share 60% → 23%,
+  kick handoff 75% → 13%). The sensor's 90 fps is ~9× more than the pipeline
+  can use, so frame rate is not where compute should go.
+- **Mount it portrait.** Rotated the other way (116° across, 60° up) costs
+  ~10 points of in-frame share and 40% more time to the kick handoff.
+
+Absolute HFOV barely matters — found rate is flat from 24° to 90°, because the
+detector reports bearing *normalized by the field of view*, so the geometry
+cancels. VFOV is the axis that bites. And note the projection is already right
+for a fisheye: `_ball_sense` divides an angle by the half-FOV angle, which is
+the equidistant f-θ mapping a 116° lens actually uses.
+
+The recipe pays for the ball being in frame, centred (two-layer Gaussian),
+and for the body facing it; while the ball is lost the only income is a
+bounded **coverage** pay for pointing the camera at a (10° yaw × near-floor /
+level pitch band) cell it has not looked at this sweep — a wiggle re-covers the same cells
+and earns nothing, a steady sweep pays every step. There is deliberately
+**no per-step search penalty**: falling over would then be the cheapest
+way out of a hard search. Balls spawn anywhere around the duck (0.3–1.5 m)
+and every ~3 s either teleport (a new search) or roll off at 0.3–0.9 m/s
+(a track, then a re-acquisition from the belief slot). The belief slot is
+also what makes the sweep learnable at all: with the ball equally likely on
+either side and no cue in the obs, turning left and right earn the same
+advantage and the mean action stays at zero while the exploration noise
+does the finding — the first stage-1 export stood and stared at a ball 42°
+off while the stochastic trainer saw it half the time. The three-stage
+curriculum ladders only the world: ball in the front 140° → anywhere,
+moving → mostly rolling. `symmetric=False` on purpose: from a symmetric
+start a mirror-consistent policy cannot choose which way to look first.
+
+```bash
+uv run train-behavior find_ball                     # single run, final-stage knobs
+# or stage by hand (the lab's 🎓 panel runs the chain for you):
+MICRODUCK_BALL_BEARING_MAX=1.2 MICRODUCK_BALL_EVENT_RATE=0.15 \
+    uv run train-behavior find_ball --steps 1_000_000 --run-name fb-s1
+uv run train-behavior find_ball --steps 2_000_000 --run-name fb-s2 --init-from runs/fb-s1
+uv run render-rollout --policy runs/fb-s2/policy.onnx --out /tmp/rr-fb   # ball + gaze dot drawn in
+uv run eval-find-ball runs/fb-s2/policy.onnx        # FINDING + AIMING tables (below)
+uv run eval-find-ball runs/fb-s2/policy.onnx --events 0.33   # ...and judge FALLS here
+```
+
+`eval-find-ball` prints **two** tables, because the first cannot see this
+behavior's actual failure. **FINDING** is time-to-first-sight, share of steps
+in frame and centred, and falls. **AIMING** is `head_yaw|centred` (mean head
+yaw over the steps the ball was centred — the handoff gate wants < 14°),
+`psi_final` / `psi_turned` (where the body ended up, and how much of the start
+bearing it actually turned out) and the share of episodes where the kick
+**handoff** fired. A gaze policy scores 100% in frame and 98% centred in
+FINDING while never once satisfying the handoff, which is exactly what the
+shipped s5 export does — see below.
+
+`--events` is worth knowing about: it defaults to 0 (a static ball, one search
+per episode, so each episode answers one question), but the recipe *trains* at
+0.33 and `render-rollout` runs at 0.33, and **the two regimes disagree about
+which policy is safest** — one A/B arm measured 0 falls at `--events 0` and 1
+at 0.33, another went 4 → 10. Judge falls at `--events 0.33`.
+
+`--env KEY=VALUE` (repeatable, same spelling as `render-rollout`'s) sets any
+behavior knob for the battery, which is how the sensitivity sweeps in
+`docs/roadmap.md` are run — e.g. `--env MICRODUCK_BALL_HFOV_DEG=40`. It wins
+over `--events` / `--prior` for the same key.
+
+**Measured (2026-09-03, `uv run eval-find-ball`, 40 static-ball episodes ×
+8 s per export, deterministic ONNX, randomizers off — the battery sweeps
+bearings round the circle; "found" = ball entered the frame within 8 s):**
+
+| export | front found / median | side found / median | back found / median | falls /40 |
+|---|---|---|---|---|
+| s1c (front window + belief + clock) | 100% / 0.03 s | 20% / 0.29 s | 0% | 0 |
+| s2 (anywhere, moving) | 100% / 0.03 s | 55% / 1.22 s | 0% | 0 |
+| s3 (rolling) | 100% / 0.03 s | 80% / 0.84 s | 40% / 2.64 s | 1 |
+| s4 (+ raised-cosine facing) | 100% / 0.03 s | 85% / 0.62 s | 30% / 3.16 s | 0 |
+| s5 (+ turn_to_belief, no up-band) | 100% / 0.03 s | 85% / 0.60 s | 60% / 0.94 s | 2 |
+| tight facing, placeholder camera | 100% / 0.03 s | 90% / 0.49 s | 100% / 1.92 s | 0 |
+
+Those rows are the cloud lineage plus the first Mac retrain, all measured on a
+static ball under the **placeholder** 48°×62° camera and normalized-bearing
+tolerances. They are kept because the shape of the progression is the story,
+but they are not comparable to the shipped brain: the camera, the tolerance
+units and the `centred` metric have all since changed.
+
+**The shipped export** (`policies/find_ball/`, see its README) is measured the
+way this behavior should be — real camera, ball events on, 60 episodes:
+95% found, **92% of episodes reach the kick handoff**, head yaw 9.5° against
+the gate's 14°, 2 falls / 60.
+
+Three separate things got it there, and conflating them would credit the wrong
+one. Most of the original gap was **under-training** — the shipped cloud export
+was not a converged instance of its own recipe, and retraining the *unchanged*
+terms halved the head yaw and removed the falls on its own. Then the tighter
+facing layer. Then, once the real camera turned out to be a 116° fisheye, two
+corrections that had nothing to do with any policy: aim tolerances expressed in
+**degrees** instead of normalized bearing (a lens swap was silently rescaling
+the reward), and a **leaning-spawn curriculum** that teaches the duck to
+recover from a tip instead of only ever meeting one on the way down.
+
+**It aimed its head, not its body — mostly fixed, and the best lesson here.**
+Handing off to a kick exposed it: over a full 8 s episode with the ball 15°
+off, the s5 export held the camera perfectly centred (bearing +0.11, elevation
+0.00, in frame 100% of steps) using **21° of head yaw**, while the body bearing
+stayed at 18–20° and drifted slightly further away. Every metric the battery
+had called that a success, which is why `eval-find-ball` now prints an AIMING
+table too. The head does the eyes-on job alone and for free; turning the body
+costs steps, smoothness penalties and fall risk, so the policy took the cheap
+option — and the two terms that were supposed to prevent that could not:
+`face_the_ball`'s tight layer at 0.4 rad still paid ~2/3 at 19° off, leaving
+the last 20° with almost no gradient behind it, and `turn_to_belief` only fires
+while the ball is *out* of frame, so once the head found it nothing paid for
+the body to catch up.
+
+Head yaw is now **9.5°** against 41°, under the handoff gate's 14°, and the
+handoff fires on **92%** of episodes against 15%. The body does the aiming.
+
+What is left is a genuine trade rather than a bug, and `docs/roadmap.md` has
+the evidence: falls and in-frame share sit on a **frontier** for this recipe,
+because the duck's effective fall line is ~20–25° of tilt — a body turn that
+produces a 30° lean is already a fall, so the only way to fall less is to turn
+less. Three reward sweeps and a spawn curriculum all slid along that line
+rather than moving it. The shipped brain picks the point that maximises the
+handoff (the deliverable) and keeps falls at 2/60, paying in-frame share for
+it. Moving the frontier needs a change to *how the duck turns* — stepping round
+instead of pivoting into a lean — which is a locomotion problem, not this
+recipe's reward.
+
+All three candidate fixes have been A/B'd on an M-series Mac, one at a time
+against a seed-matched control — **the tables and one clear negative result
+are in `docs/roadmap.md` item 1** — and the winner is shipped: the tight layer
+is now 0.2 rad, which nearly doubles the kick handoff (38% → 68% of episodes
+with ball events on) for one extra fall in sixty. `body_aimed` — a term that
+prices the handoff state directly, rather than hoping body-facing falls out of
+a bearing Gaussian — stays in the recipe at **weight 0**: it is by far the
+strongest lever on the aim (head yaw to 8°, handoff to 83%) and it also
+triples the falls, and falls are the veto here. Ungating `turn_to_belief` was
+the negative result: it is worse than the untouched control on every axis,
+because a yaw-rate pay that never switches off makes *arriving* worth nothing.
+
+The export ships in `policies/find_ball/` (see its README). Balls that start
+directly behind are the same problem seen from further away: the head's ±170°
+reaches them but the body has to commit to a turn, and the falls are that
+turn. That used to be the back bucket's whole story — s5 found 60% of back
+balls and fell on two of four in a render — and it mostly is not any more:
+the shipped export finds **100%** of them with **0 falls / 40** static and
+1 / 60 with events on. What is left is slower rather than broken (median
+1.92 s to first sight from behind, against 0.03 s from the front).
+The three things that made the sweep learnable at all are worth knowing
+before touching the recipe (the module header tells the whole story): the
+belief slot (a symmetric obs leaves the mean action with nothing to learn
+while the noise finds the ball), the scan clock (a memoryless policy cannot
+sweep without a phase), and a facing term that slopes all the way round.
+This whole chain took ~2.5 h on a 4-core cloud CPU at ~1.2k steps/s; an
+M5 Max runs the same at ~12× that.
+
+**Handing off to the kick.** The behavior declares its own handoff condition
+(`Behavior.handoff_fn`), so `render-rollout --handoff` and the lab's showcase
+duck ask the identical question rather than keeping two copies of a rule in
+step: the detector reports the ball centred (|bx|, |by| < 0.25) **and** the
+head is straight ahead (|head_yaw| < 0.25 rad), held 0.5 s. Head centred on
+the ball plus head aligned with the body means the *body* is pointing at it,
+which is the precondition the ball-blind `ball_kick_*` policies were trained
+under — and both halves are detector output plus joint encoders, so the daemon
+can run the same test. `handoff_policy` names the kick; `handoff_recenter` is
+off, because the lab's post-handoff yaw correction exists to undo the drift a
+*landing* imparts and would spin away a turn that was the whole point.
+
+What the gate cannot assert is **range**: the detector here reports a bearing,
+not a box size, so "aimed" is all it honestly knows. `ball_kick_*` wants the
+ball ~9 cm in front of the kicking foot, so a clean handoff that then whiffs is
+the expected first result and the argument for an approach behavior.
+
+```bash
+uv run render-rollout --policy policies/find_ball/policy.onnx \
+    --handoff ../microduck/policies/ball_kick_right.onnx --out /tmp/rr-soccer
+```
+
+`render-rollout` draws the ball (orange) and a gaze dot 30 cm down the
+optical axis (cyan while the ball is in frame, red while lost), adds a
+`ball …` caption line per frame and a `ball:` summary line (time to first
+sight, share of steps in frame / centred, losses); the lab streams the ball
+to the viewer, which draws it next to the duck.
+
 `behaviors/core.py` also has a **term CATALOG** — composable optional terms
 mirroring the official stack's reward vocabulary (`head_up`, `flat_feet`,
 `calm_body`, `no_limit_parking`, `smooth_torque`, `soft_landings`). A /teach

@@ -134,7 +134,18 @@ trunk_z=0.103 (stand 0.120)        <- height vs the STAND-keyframe reference
 head_z =0.044 (stand 0.233)        <- head (jaw_soft) height vs its reference
 deg: pitch=-49 tilt=49 rot=+308    <- pitch wraps +/-180; rot accumulates
 feet L=1 R=1  floor:jaw_soft       <- foot contacts; non-foot bodies on the ground
+SEEN x+0.12 y-0.30 d1.4 p+12       <- find_ball only: detector bearing across/up the
+                                      frame (-1..1), range, TRUE body bearing (deg, + left)
+LOST 1.2s m+0.55 d1.4 p-150        <- ... or seconds lost (= the scan clock) and the
+                                      belief slot (obs[54])
 ```
+
+For `find_ball` the render also draws the ball (orange) and a gaze dot 30 cm
+down the camera axis — cyan while the ball is in frame, red while lost — and
+the summary adds a `ball:` line (time to first sight, share of steps in
+frame / centred, losses, ball events). A policy that "finds" the ball only
+when it spawns in front, or sweeps with its head up and never nods for the
+near ones, shows up as `first seen never` on the rear/near spawns.
 
 The three failure patterns learned the hard way here, and how the sheet
 exposes each:

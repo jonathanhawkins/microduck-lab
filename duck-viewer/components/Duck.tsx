@@ -109,6 +109,7 @@ export function Duck({
   const labelDivRef = useRef<HTMLDivElement>(null);
   const spawnDivRef = useRef<HTMLDivElement>(null);
   const ringRef = useRef<THREE.Mesh>(null);
+  const ballRef = useRef<THREE.Mesh>(null);
   const tmpP = useMemo(() => new THREE.Vector3(), []);
   const tmpQ = useMemo(() => new THREE.Quaternion(), []);
 
@@ -151,6 +152,19 @@ export function Duck({
         ringRef.current.position.lerp(tmpP, alpha);
       }
     }
+    // The find_ball ball: streamed as [x, y, z, r] in the duck's own frame
+    // (it lives in the env, not the physics, so it is not a body). Hidden
+    // for every other brain.
+    if (ballRef.current) {
+      const ball = duck.ball;
+      ballRef.current.visible = !!ball;
+      if (ball) {
+        tmpP.set(ball[0], ball[1], ball[2]);
+        ballRef.current.position.lerp(tmpP, alpha);
+        const r = ball[3] || 0.035;
+        ballRef.current.scale.set(r, r, r);
+      }
+    }
     if (labelDivRef.current) {
       const s = labelDivRef.current.style;
       // HUD 🏷 toggle, applied per-frame like the rest of the label styling
@@ -186,6 +200,12 @@ export function Duck({
           <group key={b} ref={(el) => void (bodyRefs.current[b] = el)} />
         )
       )}
+      {/* the ball a 🔎 find_ball duck is looking for (unit sphere, scaled to
+          the streamed radius) — orange like the real 70 mm kick ball */}
+      <mesh ref={ballRef} visible={false} castShadow>
+        <sphereGeometry args={[1, 24, 16]} />
+        <meshStandardMaterial color="#ff8c00" roughness={0.5} />
+      </mesh>
       {/* drop-target ring, flat on the floor (XY plane in this Z-up group).
           hideInCapture: 📷 snapshots hide it for their capture render. */}
       <mesh

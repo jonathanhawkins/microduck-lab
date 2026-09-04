@@ -67,6 +67,11 @@ export interface DuckFrame {
    *  `handoff` names the brain taking it. */
   handed?: boolean;
   handoff?: string | null;
+  /** The ball a 🔎 find_ball duck is looking for — [x, y, z, radius] in the
+   *  duck's own world frame, like `bodies`. It lives in the env, not the
+   *  physics, so it is streamed here rather than as a body. null/absent for
+   *  every other brain. */
+  ball?: number[] | null;
   bodies: number[][]; // per body: [x, y, z, qw, qx, qy, qz]
 }
 

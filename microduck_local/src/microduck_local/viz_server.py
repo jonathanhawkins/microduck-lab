@@ -487,8 +487,18 @@ class Duck:
         self._settle = 0
 
     def _handoff_due(self) -> bool:
-        """The trick is finished and the duck is on both feet."""
+        """The trick is finished and the duck is on both feet.
+
+        A behavior may own this (Behavior.handoff_fn) — find_ball hands to a
+        kick once it is squared up on the ball, which has nothing to do with
+        rotation. render_rollout.handoff_due consults the same field, so a
+        behavior that brings a predicate gets both callers from one
+        implementation instead of two copies kept in step by comment.
+        """
         env = self.env
+        fn = getattr(getattr(env, "behavior", None), "handoff_fn", None)
+        if fn is not None:
+            return bool(fn(env))
         rot = getattr(env, "_bf_rot", None)
         if rot is None or rot < 5.2:
             return False
@@ -518,6 +528,11 @@ class Duck:
         """
         if not self.handed:
             self._settle = 0
+            return None
+        # Opt-out for a behavior whose heading is the point: find_ball turned
+        # to face the ball, and "drive yaw back to the spawn heading" would
+        # undo exactly the work it just did (and aim the kick at nothing).
+        if not getattr(getattr(self.env, "behavior", None), "handoff_recenter", True):
             return None
         q = self.env.data.qpos[3:7]
         yaw = float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]),
@@ -858,6 +873,20 @@ def load_policy_infer(policy_id: str):
     return infer
 
 
+def _same_run_dir(p: Path) -> bool:
+    """Is `p` the run dir that `run:<p.name>` resolves to?
+
+    is_trick_duck() and the palette both address a run by BARE NAME under
+    RUNS_DIR, so tagging a duck `run:<name>` is only honest when the directory
+    it came from really is that one. A run dir given by some other path
+    (a scratch copy, another checkout, MICRODUCK_RUNS_DIR pointing elsewhere)
+    keeps policy_id=None and the old conservative behavior."""
+    try:
+        return p.resolve() == (RUNS_DIR / p.name).resolve()
+    except OSError:
+        return False
+
+
 def build_ducks(args) -> list[Duck]:
     ducks: list[Duck] = []
 
@@ -891,7 +920,18 @@ def build_ducks(args) -> list[Duck]:
                 export(p, onnx)
                 print(f"[lab] exported {onnx} on the fly")
             if onnx.exists():
-                add(p.name, _onnx_infer(onnx), onnx_path=str(onnx))
+                # policy_id, not just a label: is_trick_duck() classifies on a
+                # "run:" prefix, so without this a run dir passed on the CLI is
+                # not recognised as a trick and the lab drives it with the
+                # WASD velocity command. For a ball/trick brain that command is
+                # pure out-of-distribution noise — `duck-lab runs/find_ball`
+                # measured 1058 falls and r̄ -3.2 in four minutes, while the
+                # identical dir dropped from the 🧠 palette (which does set
+                # policy_id) stood there quite happily.
+                same = _same_run_dir(p)
+                add(p.name, _onnx_infer(onnx),
+                    policy_id=f"run:{p.name}" if same else None,
+                    onnx_path=str(onnx))
             else:
                 print(f"[lab] skipping {p}: no policy.onnx / model.zip")
         else:
@@ -2087,15 +2127,18 @@ def handoff_for(path: str | None):
         return None
     if not b.curriculum:
         return None
-    # Only offer the hand-off if the duck can ever ASK for it. _handoff_due
-    # tests env._bf_rot, the rotation accumulator that only the flip family's
-    # state_fn advances — a headstand never sets it, so attaching alpha_stand
-    # to that chain advertised "handoff: alpha_stand" in every frame for a
-    # swap that could not happen.
-    if getattr(b, "state_fn", None) is not behaviors_mod._bf_update:
+    # Only offer the hand-off if the duck can ever ASK for it. A behavior
+    # that declares handoff_fn answers that itself; otherwise the fallback
+    # rule tests env._bf_rot, the rotation accumulator that only the flip
+    # family's state_fn advances — a headstand never sets it, so attaching
+    # alpha_stand to that chain advertised "handoff: alpha_stand" in every
+    # frame for a swap that could not happen.
+    if (getattr(b, "handoff_fn", None) is None
+            and getattr(b, "state_fn", None) is not behaviors_mod._bf_update):
         return None
+    policy = getattr(b, "handoff_policy", None) or HANDOFF_POLICY
     try:
-        return load_policy_infer(HANDOFF_POLICY), HANDOFF_POLICY.split(":", 1)[-1]
+        return load_policy_infer(policy), policy.split(":", 1)[-1]
     except Exception:
         return None
 
@@ -3610,6 +3653,10 @@ def make_app(ducks: list[Duck]):
                         "assist": bool(getattr(d.env, "spotter_active", False)),
                         "handed": bool(getattr(d, "handed", False)),
                         "handoff": getattr(d, "handoff_label", None),
+                        # Task objects that live in the env, not the
+                        # physics: the find_ball ball as [x, y, z, r] so
+                        # the viewer can draw what the duck is looking for.
+                        "ball": behaviors_mod.ball_marker_payload(d.env),
                         "bodies": d.pose_payload(),
                     } for d in st.ducks],
                 })

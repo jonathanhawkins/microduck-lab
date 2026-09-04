@@ -153,6 +153,9 @@ class FrameDiag:
     ground_bodies: tuple[str, ...]   # non-foot bodies resting on the floor
     driver: str
     handed_off: bool
+    # One extra line from the behavior's own caption_fn (the ball's bearing
+    # and whether the camera has it) — "" for behaviors without task state.
+    extra: str = ""
 
 
 def short_label(label: str, width: int = 13) -> str:
@@ -197,13 +200,18 @@ def format_caption(d: FrameDiag, stand_z: float, head_ref_z: float) -> tuple[str
     head_ref = "n/a" if not math.isfinite(head_ref_z) else f"{head_ref_z:.3f}"
     rot = "" if d.rot_deg is None else f" rot={d.rot_deg:+.0f}"
     ground = pack_names(d.ground_bodies, CAPTION_COLUMNS - len("feet L=1 R=1  floor:"))
-    return (
+    lines = [
         f"#{d.index:02d} t={d.t:5.2f}s drv={short_label(d.driver)}",
         f"trunk_z={d.trunk_z:.3f} (stand {stand_z:.3f})",
         f"head_z ={head} (stand {head_ref})",
         f"deg: pitch={d.pitch_deg:+.0f} tilt={d.tilt_deg:.0f}{rot}",
         f"feet L={int(d.contact_l)} R={int(d.contact_r)}  floor:{ground}",
-    )
+    ]
+    if d.extra:
+        # Budgeted like the ground list: a task line that overran the tile
+        # would be silently misread (test_render_rollout locks the width).
+        lines.append(d.extra[:CAPTION_COLUMNS])
+    return tuple(lines)
 
 
 # ------------------------------------------------------------------- drivers
@@ -253,7 +261,17 @@ def load_driver(spec: str) -> Driver:
 
 
 def handoff_due(env) -> bool:
-    """Mirrors viz_server.Duck._handoff_due."""
+    """Mirrors viz_server.Duck._handoff_due.
+
+    A behavior may bring its own condition (Behavior.handoff_fn) — then
+    there is one implementation and this "mirrors" note is a fact rather
+    than a promise. The flip family's rule below is the original, kept
+    inline because it predates the field and is what every existing
+    showcase chain hands off on.
+    """
+    fn = getattr(getattr(env, "behavior", None), "handoff_fn", None)
+    if fn is not None:
+        return bool(fn(env))
     rot = getattr(env, "_bf_rot", None)
     if rot is None or rot < HANDOFF_ROT_RAD:
         return False
@@ -321,6 +339,8 @@ class Probe:
         rot = getattr(env, "_bf_rot", None)
         head_z = (float(env.data.xpos[self.head_bid][2])
                   if self.head_bid >= 0 else float("nan"))
+        cap = getattr(getattr(env, "behavior", None), "caption_fn", None)
+        extra = cap(env) if cap is not None else ""
         return FrameDiag(
             index=index,
             t=step * C.CTRL_DT,
@@ -334,6 +354,7 @@ class Probe:
             ground_bodies=self._ground_bodies(),
             driver=driver,
             handed_off=handed,
+            extra=extra,
         )
 
 
@@ -358,10 +379,14 @@ def run_episode(env, renderer, cam, probe: Probe, seed: int, driver: Driver,
     handed = False
     handoff_t: float | None = None
 
+    markers_fn = getattr(getattr(env, "behavior", None), "markers_fn", None)
+
     def capture(step: int) -> None:
         cam.lookat[:] = (float(env.data.xpos[env.trunk_body_id][0]),
                          float(env.data.xpos[env.trunk_body_id][1]), LOOKAT_Z)
         renderer.update_scene(env.data, camera=cam)
+        if markers_fn is not None:
+            draw_markers(renderer.scene, markers_fn(env))
         frames.append(renderer.render().copy())
         label = (handoff.label if handed and handoff else driver.label)
         diags.append(probe.sample(len(diags), step, label, handed))
@@ -387,7 +412,28 @@ def run_episode(env, renderer, cam, probe: Probe, seed: int, driver: Driver,
         "handoff_t": handoff_t,
         "spawn": getattr(env, "last_spawn", None),
     }
+    report_fn = getattr(getattr(env, "behavior", None), "report_fn", None)
+    meta["report"] = list(report_fn(env)) if report_fn is not None else []
     return frames, diags, meta
+
+
+def draw_markers(scene, markers) -> None:
+    """Add the behavior's task objects (a ball, a gaze dot) to a rendered
+    scene as visual-only spheres — they exist in the env, not the physics,
+    so the renderer has to be told about them."""
+    import mujoco
+
+    for pos, radius, rgba in markers:
+        if scene.ngeom >= scene.maxgeom:
+            break
+        g = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(
+            g, mujoco.mjtGeom.mjGEOM_SPHERE,
+            np.array([radius, radius, radius], dtype=np.float64),
+            np.asarray(pos, dtype=np.float64),
+            np.eye(3, dtype=np.float64).flatten(),
+            np.asarray(rgba, dtype=np.float32))
+        scene.ngeom += 1
 
 
 def summarize(diags: Sequence[FrameDiag], meta: dict, probe: Probe) -> list[str]:
@@ -433,6 +479,7 @@ def summarize(diags: Sequence[FrameDiag], meta: dict, probe: Probe) -> list[str]
         lines.append(f"handoff fired at t={meta['handoff_t']:.2f} s")
     elif meta.get("had_handoff"):
         lines.append("handoff NEVER fired (trick did not complete on both feet)")
+    lines.extend(meta.get("report") or ())
     return lines
 
 
@@ -652,8 +699,10 @@ def main() -> None:
           f"(stride {stride} of the 50 Hz control loop), backend "
           f"{mujoco.GLContext.__module__}")
     if handoff:
-        print(f"handoff: {args.handoff} (label {handoff.label}) at rot>="
-              f"{HANDOFF_ROT_RAD} rad with both feet down")
+        own = getattr(getattr(env, "behavior", None), "handoff_fn", None)
+        when = (f"{env.behavior.id}'s own condition ({own.__name__})" if own
+                else f"rot>={HANDOFF_ROT_RAD} rad with both feet down")
+        print(f"handoff: {args.handoff} (label {handoff.label}) at {when}")
 
     for ep in range(args.episodes):
         frames, diags, meta = run_episode(
