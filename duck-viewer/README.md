@@ -143,7 +143,9 @@ lab restarts.
 
 `http://localhost:63317/sim` renders the lab's **world mode** (start the lab
 with `uv run duck-lab --world living-room`, or load a scenario from the
-page's picker). One room, many ducks, and what each duck senses:
+page's picker). The lab page's `🦆 duck lab` panel carries a `sim →` link to
+get here, and this page's `← lab` goes back. One room, many ducks, and what
+each duck senses:
 
 - **Scenario picker + load** (top bar): built-ins and anything saved under
   `microduck_local/scenarios/`. Walls, static boxes and the floor come from

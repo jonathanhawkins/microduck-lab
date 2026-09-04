@@ -2,10 +2,17 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "duck-viewer-attach",
+      "url": "http://localhost:63317"
+    },
+    {
       "name": "duck-viewer",
       "cwd": "duck-viewer",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "port": 63317,
       "autoPort": true
     },
@@ -13,7 +20,10 @@
       "name": "duck-viewer-prod",
       "cwd": "duck-viewer",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "start"],
+      "runtimeArgs": [
+        "run",
+        "start"
+      ],
       "port": 3999,
       "autoPort": true
     }
