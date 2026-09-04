@@ -2261,6 +2261,39 @@ datasheet sensor noise, upstream models at the pinned shas):
 | hostile drift | onboard | 0.79 | 0.75 |
 | ideal | 250 ms round trip | 0.81 | 0.19 |
 
+**The detector rate, and how the 10 Hz floor was removed.** Halving the
+camera detector from 10 Hz to 5 Hz used to cost **−0.55 toys** (64 paired
+layouts, p = 0.0003, worse on 35 of 64), and it broke the GRASP
+specifically — success 85% → 67%, attempts per pick 1.19 → 1.50, while
+picks barely moved. The duck found toys fine and fumbled them.
+
+The cause was a stale pose, not the rate: `_locate` read the camera's
+height and pitch off the frame but took x, y and yaw from the CURRENT
+odometry, so a frame one detector period old was placed from a pose the
+duck had already left — ~3 cm at 10 Hz, ~6 cm at 5 Hz, against a 3 cm toy.
+`TidyParams.stale_fix` keeps a second of the duck's own odometry and places
+the detection at the frame's timestamp. No ground truth, no new sensor.
+
+It only works **paired with `reach_pad`**, and that is the interesting
+part: the stop distance had been hand-fitted while the bias was present,
+so removing the bias alone made things *worse*. The 2×2 at 5 Hz:
+
+| | tidied | grasp | |
+|---|---|---|---|
+| fix off, pad +0.010 — what shipped | 0.771 | 69% | |
+| fix on, pad +0.010 | 0.807 | 68% | +0.22, p = 0.29 |
+| fix off, pad −0.008 (the control) | 0.688 | 52% | **−0.50, p = 0.046** |
+| **fix on, pad −0.008** | **0.849** | **95%** | **+0.47, p = 0.029** |
+
+Neither factor helps alone and one actively hurts. Pooled over 64 layouts
+the pair is **+0.41 toys at 5 Hz (p = 0.0066)** and **neutral at 10 Hz
+(+0.03, p = 0.88)**, with the grasp better at both rates (85% → 91% at
+10 Hz, 67% → 94% at 5 Hz). Against 10 Hz as it shipped, 5 Hz with the pair
+is −0.14 and **not resolved** (p = 0.32; SE 0.12, so a residual up to
+~0.25 toys would not have been seen). **The 10 Hz floor is no longer
+measurable** — which matters because a bigger NPU inference input is bought
+with frame rate (`docs/camera-hardware.md`).
+
 All four rows are on the 2026-09 CAD re-export (microduck_rl badc4e7),
 with the staged approach for rim toys, the sidestep-then-turn back-off,
 the slower last leg, and the brain steering by its own loop-closed pose

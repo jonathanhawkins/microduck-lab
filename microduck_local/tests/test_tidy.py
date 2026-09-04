@@ -432,7 +432,7 @@ def test_a_detection_is_placed_from_the_pose_the_duck_had_when_it_was_taken():
     from microduck_local.sensors.detector import Detection
 
     assert not hasattr(Detection("toy", "t0", 0.0, -0.5, 0.02, 0.4, 0.9), "t")
-    assert TidyParams().stale_fix is False                     # ships off
+    assert TidyParams().stale_fix is True                      # ships ON, paired with reach_pad
 
     def placed(fix: bool):
         b = Tidy(TidyParams(stale_fix=fix))
@@ -448,3 +448,38 @@ def test_a_detection_is_placed_from_the_pose_the_duck_had_when_it_was_taken():
     assert abs(stale[0] - fixed[0]) > 0.25                     # ...30 cm of travel = 30 cm of error
     assert abs(fixed[0] - (0.0 + fixed[2])) < 1e-6             # anchored at the 9.8 s pose (x = 0)
     assert abs(stale[0] - (0.30 + stale[2])) < 1e-6            # against the pose of now
+
+
+def test_the_stale_fix_and_the_stop_pad_ship_as_a_MATCHED_PAIR():
+    """`stale_fix` and `reach_pad` must move together, and this pins that.
+
+    The old pad (+0.01) was hand-fitted while the bias was present: the
+    bias put the toy ahead along the travel direction, the duck walked past
+    its own estimate and arrived at a TRUE 8.7 cm, which is where the grasp
+    wants it. Correcting the placement alone leaves the duck stopping
+    honestly and 1.7 cm short - it LOST 0.38 toys (p = 0.031, grasp
+    88% -> 76%) despite the estimate being strictly better.
+
+    The 2x2 at 5 Hz, 32 seeds, is why this is a test and not a comment:
+
+        fix OFF, pad +0.010   0.771 tidied, grasp 69%   <- what shipped
+        fix ON,  pad +0.010   0.807               68%   (+0.22, p = 0.29)
+        fix OFF, pad -0.008   0.688               52%   (-0.50, p = 0.046)
+        fix ON,  pad -0.008   0.849               95%   (+0.47, p = 0.029)
+
+    Neither factor helps alone and one actively hurts; only the pair wins.
+    Anyone changing one of these defaults without the other should see this
+    fail. AGENTS.md rule 7."""
+    from microduck_local.brain.tidy import TidyParams
+    from microduck_local.world.arena import PICK_REACH_AHEAD
+
+    p = TidyParams()
+    assert p.stale_fix is True and p.reach_pad == -0.008, (
+        "stale_fix and reach_pad ship as a pair - see the 2x2 above")
+    # The correction is the measured 1.8 cm the bias was worth, not a fitted
+    # search: old pad 0.01 minus 0.018.
+    assert abs(p.reach_pad - (0.01 - 0.018)) < 1e-9
+    # And it still stops the duck SHORT of the beak's landing point plus a
+    # toy radius - i.e. the beak lands just beyond the toy's centre.
+    stop = p.reach_ahead + p.reach_pad
+    assert 0.06 < stop < PICK_REACH_AHEAD, "the stop must sit inside the beak's reach"

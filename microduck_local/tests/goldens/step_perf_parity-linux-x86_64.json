@@ -561,10 +561,11 @@
    ]
   ],
   "run-bam": [
-   "0eeb52a33a35b7b1c4e20296c78a83d0a359ce6269bbc3c4924fc9f2a7f2ea58",
+   "de90b9feddc7202f0e56197c4b74a6e38fe94cf0d06a96b52b4781b6fd9e8505",
    {
     "air_time": "0x0.0p+0",
     "calm_roll_penalty": "-0x1.d9053c053d5f8p+2",
+    "fall_penalty": "0x0.0p+0",
     "foot_clearance_penalty": "-0x1.ea013dfb43133p-2",
     "head_up": "0x1.2dda93f300000p+7",
     "keep_pace": "0x1.7f17f316e16bep+1",
@@ -585,6 +586,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -7.390944485775883,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.4785203632934724,
       "head_up": 150.92691001296043,
       "keep_pace": 2.9929183828088233,
@@ -605,6 +607,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -3.8212394137760906,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": 0.0,
       "head_up": 104.95618286728859,
       "keep_pace": 80.93502776702576,
@@ -625,6 +628,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -11.376050494600815,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.38231380065555987,
       "head_up": 105.12787467241287,
       "keep_pace": 0.0,
@@ -645,6 +649,7 @@
      "terms": {
       "air_time": 30.0,
       "calm_roll_penalty": -3.7600783740136663,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.49677179767926216,
       "head_up": 148.85069489479065,
       "keep_pace": 6.903645234012038,
@@ -665,6 +670,7 @@
      "terms": {
       "air_time": 3.0,
       "calm_roll_penalty": -8.52758253258506,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.3567056864811477,
       "head_up": 110.2372477054596,
       "keep_pace": 1.5515777987991788,
@@ -685,6 +691,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -11.71683043681826,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.3507696565829286,
       "head_up": 120.55490520596504,
       "keep_pace": 11.901614641966273,
@@ -705,6 +712,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -0.06767182690450327,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.05833288763651898,
       "head_up": 9.989001780748367,
       "keep_pace": 0.0,
@@ -719,10 +727,11 @@
    ]
   ],
   "run-xml": [
-   "2d07991b3d6fe28369390548a0b7b152b22d561f6659e2eae66f69fd4860c43f",
+   "c9c0df1ba34975d797e817d3827bd544f3b83df49ba797bcec63b2f1a2254b73",
    {
     "air_time": "0x0.0p+0",
     "calm_roll_penalty": "-0x1.70bb42b61186ap+3",
+    "fall_penalty": "0x0.0p+0",
     "foot_clearance_penalty": "-0x1.cdfc74817aa1ap-1",
     "head_up": "0x1.97c0bfae00000p+7",
     "keep_pace": "0x1.02a20ea291a18p+5",
@@ -743,6 +752,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -11.522858958818876,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.9023167045646148,
       "head_up": 203.87646239995956,
       "keep_pace": 32.32912947661333,
@@ -763,6 +773,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -4.807773981202896,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.2549490954185188,
       "head_up": 50.136634200811386,
       "keep_pace": 3.1770280922963323,
@@ -783,6 +794,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -10.431252708788993,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.3787830225785364,
       "head_up": 90.8238020837307,
       "keep_pace": 0.0,
@@ -803,6 +815,7 @@
      "terms": {
       "air_time": 27.0,
       "calm_roll_penalty": -9.343903163832213,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.6099428981789153,
       "head_up": 146.03930857777596,
       "keep_pace": 20.63040729126458,
@@ -823,6 +836,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -0.07352030471748708,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.08697197208846888,
       "head_up": 13.750331193208694,
       "keep_pace": 4.534248920830383,
@@ -843,6 +857,7 @@
      "terms": {
       "air_time": 12.0,
       "calm_roll_penalty": -13.636729066597418,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.5224059357056956,
       "head_up": 120.02626910805702,
       "keep_pace": 13.957732125646622,
@@ -863,6 +878,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -9.543523055847746,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.35591885985400856,
       "head_up": 92.68656021356583,
       "keep_pace": 5.339551685293251,
@@ -883,6 +899,7 @@
      "terms": {
       "air_time": 0.0,
       "calm_roll_penalty": -0.357221440338036,
+      "fall_penalty": 0.0,
       "foot_clearance_penalty": -0.09086994055131897,
       "head_up": 27.126077711582184,
       "keep_pace": 0.9384124607522496,
@@ -1423,11 +1440,11 @@
   ]
  },
  "provenance": {
-  "cpu": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
   "microduck_rl": "badc4e7ffe5507fd7acb1a21487bd2925c1afe5a",
   "mujoco": "3.10.0",
   "numpy": "2.5.2",
-  "platform": "Linux-6.18.44-fc-v22-x86_64-with-glibc2.39",
+  "platform": "Linux-6.18.44-fc-v24-x86_64-with-glibc2.39",
   "python": "3.12.3"
  }
 }

@@ -43,12 +43,22 @@ from .runtime import REGISTRY, Intent, Senses, age_inputs
 class TidyParams:
     reach_ahead: float = PICK_REACH_AHEAD
     reach_left: float = PICK_REACH_LEFT
-    # Slack added to `reach_ahead` in the stop rule. It was a bare 0.01
-    # literal in four places; it is named because it is NOT geometry
+    # Slack added to `reach_ahead` in the stop rule: the duck settles when
+    # the toy's ESTIMATE is `reach_ahead + reach_pad` ahead. Not geometry
     # (`reach_ahead` is - it is where the beak tip lands) but a fitted
-    # constant, and `stale_fix` showed it was fitted against a BIASED
-    # toy estimate. See `stale_fix`.
-    reach_pad: float = 0.01
+    # constant, and it was fitted against a BIASED estimate.
+    #
+    # It was +0.01 while `stale_fix` was off, and the two are a matched
+    # pair: the old bias put the toy ahead along the travel direction, so
+    # the duck walked past its own estimate and arrived at a TRUE 8.7 cm -
+    # which is what the grasp wants. With the bias gone it stops honestly
+    # and 1.7 cm short. -0.008 is that correction, taken from the measured
+    # 8.7 -> 10.5 cm rather than fitted by search, so it is not tuned to
+    # these 64 layouts. See `stale_fix` and AGENTS.md rule 7.
+    #
+    # It must NOT be changed without `stale_fix`: -0.008 with the fix OFF
+    # is the worst cell of the 2x2 (-0.50 toys, p = 0.046, grasp 52%).
+    reach_pad: float = -0.008
     approach_speed: float = 0.3        # the walker delivers ~half; below ~0.2 it stands still
     k_turn: float = 2.5
     head_down: float = 0.6             # head_pitch intent while walking in: camera ~37° down
@@ -236,12 +246,32 @@ class TidyParams:
     # picks barely move. The duck finds toys fine and fumbles them.
     #
     # The fix uses nothing the robot lacks: it keeps a second of its own
-    # odometry and looks up the pose at `det.t`. No ground truth, no new
-    # sensor. UNTRIED against the current behaviour, so it ships at False;
-    # if it lifts the 5 Hz arm it converts directly into NPU headroom,
-    # because a bigger inference input is bought with frame rate
+    # odometry and looks up the pose at the frame's timestamp. No ground
+    # truth, no new sensor.
+    #
+    # MEASURED, and it only works PAIRED WITH `reach_pad` - alone it lost
+    # 0.38 toys despite cutting the estimate's error from 5.4 to 3.7 cm,
+    # because the stop distance had absorbed the bias. The 2x2, 64 paired
+    # layouts, `reach_pad` moved with it:
+    #
+    #                       tidied   grasp        att/pick
+    #   10 Hz, before        0.878   366/433 85%    1.19
+    #   10 Hz, both          0.883   361/395 91%    1.09   +0.03, p = 0.88
+    #    5 Hz, before        0.786   342/510 67%    1.50
+    #    5 Hz, both          0.854   355/379 94%    1.07   +0.41, p = 0.0066
+    #
+    # So: NEUTRAL at 10 Hz and worth +0.41 toys at 5 Hz, with the grasp
+    # better at both rates (it is the grasp this fixes; at 10 Hz the grasp
+    # was not the binding constraint, which is why tidied does not move).
+    #
+    # That buys the thing it was built for. Halving the detector rate costs
+    # -0.55 toys as it ships (p = 0.0003, worse on 35 of 64); with these
+    # two the 5 Hz arm is -0.14 against 10 Hz and NOT RESOLVED (p = 0.32,
+    # SE 0.12 - a real residual up to ~0.25 toys would not have been seen
+    # here). The 10 Hz detector floor is no longer measurable, and frame
+    # rate is what a bigger inference input is bought with
     # (docs/camera-hardware.md).
-    stale_fix: bool = False
+    stale_fix: bool = True
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
     hold_blind_m: float = 0.12         # ToF returns closer than this while holding are the toy in the beak
