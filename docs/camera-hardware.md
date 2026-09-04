@@ -247,6 +247,42 @@ benchmark provided the lens is calibrated and the NPU runs a 640 px input.**
 Neither is new hardware. §4 covers whether the NPU has the budget for the
 second.
 
+### And on a second benchmark it is better than break-even
+
+Tidying is one measure and "costs nothing" is a weak conclusion to rest a
+hardware decision on, so the same three cameras were put through a
+*different* benchmark measured a *different* way: the soccer line-up, whose
+2–3 cm scatter the roadmap already blames for the shots that miss. Every
+ball sighting in 3 seeds × 180 s of 1v1, placement checked against truth:
+
+| camera | ball sightings | placement error | line-up error |
+|---|---|---|---|
+| 62 × 48, 320 px — the baseline | 16 881 | 7.8 cm | 5.6 cm |
+| 116 × 60, 320 px, uncalibrated — as it ships | 16 374 | 9.0 cm | **7.5 cm** |
+| 116 × 60, **640 px, calibrated** | **21 045** | 7.0 cm | **5.4 cm** |
+
+("line-up error" is the median for a ball inside 0.6 m and nearly still —
+the case that scores. These are medians over sightings, not paired seeds:
+sightings within a run are correlated, so read the sizes, not a p-value.)
+
+Two things the tidy benchmark could not show:
+
+1. **The wide lens's actual benefit appears once the resolution is
+   restored** — 25% more ball sightings (16 881 → 21 045) for the same
+   play. That is what 116° is *for*, and at 320 px it was entirely eaten by
+   the resolution penalty (the as-ships module sees no more than the
+   baseline and places what it sees 34% less accurately).
+2. **The recommendation is slightly better than the baseline here**, not
+   merely level: 5.4 cm against 5.6. So "costs nothing on tidy" understates
+   it — on the perception measure the wide lens is a small net win.
+
+Worth being clear about what limits that number: at 5.4–5.6 cm the ball's
+placement error is dominated by the **detector's own bearing and range
+noise**, not by the frustum and not by either known bias (the stale pose
+contributes 1.7 cm of it; ball motion 0.6 cm — `brain/tracker.py`). A
+better lens moves it a little. Closing the line-up's 2–3 cm scatter is a
+detector-quality problem, and that is a different piece of work.
+
 *Caveat that remains.* The crop arm assumes the stock Pi lens (§1). Nothing
 above is affected if that assumption is wrong — the 39 × 22.5 arm would
 simply be describing a camera the robot does not have, and the question of

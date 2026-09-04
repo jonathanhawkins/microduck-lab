@@ -310,6 +310,42 @@ the tree, and Track 12 has its first working loop:
   floor), never `ep_rew`: it is an episode SUM and tracks survival, which
   reversed a verdict on a real pair of runs.
 
+- **Fourth round: the camera stopped being an assumption, and the 10 Hz
+  detector floor came out.** Every behaviour result here was measured at
+  62 x 48 deg — the IMX219's FULL-ARRAY figure for a camera the robot pins
+  to a 1080p crop (39.0 x 22.5 with the stock lens), while the vendor's
+  replacement module is 116 x 60. Swept through `eval-tidy` on 64 paired
+  layouts, **the sim's baseline is better than either real candidate**: the
+  crop costs -1.53 +/- 0.17 toys (p < 0.0001, worse on 48 of 64) with falls
+  up 25 -> 144 events, the new module -2.03 (p < 0.0001, worse on 29 of 32,
+  better on 0). They fail in OPPOSITE ways — the crop has the best angular
+  resolution of the three and fails on field of view; the module has the
+  best field of view and fails on resolution. The module's cost then
+  decomposed, because its lens is not rectilinear: modelling the bearing
+  error a pinhole-calibrated reader makes on an equidistant lens (9.7 deg
+  at 116 against 1.2 at 62, past the chase brain's aim tolerance) splits
+  the 2.03 into **-1.12 geometry and -0.91 bearing error**, and the second
+  half is a calibration rather than hardware. Run as ONE arm rather than a
+  sum of two: **116 x 60 at 640 px with a calibrated lens tidies 0.880
+  against the baseline's 0.880 — +0.00 toys, p = 1.0000.** The two fixes
+  are additive (+0.91, +1.09, both +2.03) and either alone still loses.
+  Then the chain closed on compute: 640 px is 4x the pixels, which does not
+  fit a 10 Hz frame budget and plausibly fits a 5 Hz one — and 5 Hz used to
+  cost -0.55 toys (p = 0.0003), breaking the GRASP (85% -> 67%). The cause
+  was a stale pose, not the rate, and **fixing it alone made things worse**
+  (-0.38, p = 0.031) because the stop distance downstream had been fitted
+  against the bias. Corrected together: +0.41 toys at 5 Hz (p = 0.0066),
+  neutral at 10 Hz, grasp 94%, and 5 Hz is now indistinguishable from 10.
+  The transferable rule is that one — *a hand-fitted constant downstream of
+  a biased estimate has absorbed some of that bias* — and it comes with the
+  control cell that makes it readable (the corrected constant WITHOUT the
+  fix was the worst of the four arms). Two smaller results: the vertical
+  FOV measured off a STANDING duck (camera 11 deg down at 23.5 cm; 60 deg
+  buys 5.5 cm of floor over 48), and the ToF floor-ball re-opened at that
+  60 deg and closing harder — redundant on 88-94% of its firings and wrong
+  two times in three in the case it exists for. Full workings in
+  `docs/camera-hardware.md`; the tidy numbers in `microduck_local/README.md`.
+
 Numbers that shaped the design, all measured in this world: the walker only
 turns in place at a yaw command of 1.0 and stands still below ~0.2 m/s
 asked; it honours a head-pitch intent of +0.6 (camera 37° down, no falls,
