@@ -468,11 +468,42 @@ two sides symmetric, not swap them. Worth understanding before tuning either.
       geometry), so only the ball-LOST rows above are trustworthy. They are
       the rows that matter — the belief exists for when the ball is lost.
 
-      **Queued from this:** a blind-TRAINED arm (`MICRODUCK_BALL_PRIOR_PROB=0`
-      through the whole curriculum, run `teach-find_ball-31f14b`). Everything
-      above is measured on a brain that saw a prior in 70% of its training
-      episodes; if the prior is dead weight, the recipe should stop generating
-      it, not just stop trusting it.
+      **CORRECTION, from the blind-TRAINED arm this queued**
+      (`MICRODUCK_BALL_PRIOR_PROB=0` through the whole curriculum, run
+      `teach-find_ball-31f14b`). Everything above is measured on a brain that
+      saw a prior in 70% of its training episodes, and **it does not
+      generalize**: fed a prior, the blind-trained brain gets BETTER, not
+      worse. The effect is an interaction between how a brain trained and what
+      it is fed at run time — not a fact about priors. 60 episodes per cell:
+
+      | | evaluated BLIND | evaluated WITH prior |
+      |---|---|---|
+      | **trained with prior** (the shipped brain) | 98% found · 85% in frame · 84% centred · **93% handoff** · 1 fall | 93% · 75% · 72% · 75% handoff · 2 falls |
+      | **trained blind** | 100% · 94% · 86% · 68% handoff · 0 falls | **100% · 95% · 92%** · 73% handoff · **0 falls** (worst-case first sight **0.98 s**, against 6.30 s fed nothing) |
+
+      Neither arm dominates, and the two halves of the task come apart:
+
+      - **Best FINDER: blind-trained, fed a prior** — 95% in frame, 92%
+        centred, no falls, and a worst case of 0.98 s where every other cell
+        has a 6-8 s tail. Training without the prior makes a brain that
+        searches better and then *uses* a prior well when handed one.
+      - **Best AIMER: the shipped prior-trained brain, fed nothing** — 93% of
+        episodes reach the kick handoff, against 68-75% in all three other
+        cells. Aiming is the deliverable, so this is the cell that matters
+        most today.
+
+      So the section's decide-on ("does the daemon need to synthesize a
+      prior?") splits by which brain ships. **For the brain in
+      `policies/find_ball/`, no — feed it the sweep convention and it aims
+      better** (93% vs 75%). The stronger claim, that a prior is dead weight
+      in general, is WRONG and the row above is the counterexample.
+
+      `MICRODUCK_BALL_PRIOR_PROB` is left at its 0.7 default: nothing here
+      justifies changing what the recipe trains, and the two candidate
+      recipes trade finding against aiming rather than one beating the other.
+      The experiment worth running next is the obvious missing cell —
+      blind-trained, then judged on the handoff after more steps — since the
+      only thing it is clearly worse at is the one thing this behavior is for.
 
 ### 4. The soccer handoff — the demo that proves the point
 
