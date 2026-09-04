@@ -23,6 +23,8 @@ import argparse
 import collections
 import math
 
+from pathlib import Path
+
 import numpy as np
 
 from .brain import REGISTRY, Senses
@@ -46,13 +48,16 @@ def main() -> None:
     ap.add_argument("--seconds", type=float, default=300.0)
     ap.add_argument("--every", type=float, default=0.0, help="print a position line every N s (0 = off)")
     ap.add_argument("--history", type=float, default=2.0, help="seconds of context printed before a fall")
+    ap.add_argument("--walker", default=None, metavar="PATH",
+                    help="run this walk policy instead of the shipped alpha_walking.onnx")
     ap.add_argument("--odom", default="ideal", choices=["ideal", "datasheet", "hostile"])
     ap.add_argument("--tether-ms", type=float, default=0.0, help="brain round-trip latency, as eval-tidy applies it")
     args = ap.parse_args()
 
     sc = make_playroom(seed=args.seed, n=args.toys)
     sc.ducks[0].odom = args.odom
-    w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=args.seed)
+    w = World(sc, infer_for={"d0": onnx_infer(Path(args.walker) if args.walker
+                                              else POLICIES_DIR / "alpha_walking.onnx")}, seed=args.seed)
     d = w.ducks["d0"]
     brain = REGISTRY.make("tidy")
     bx, by = sc.basket.pos

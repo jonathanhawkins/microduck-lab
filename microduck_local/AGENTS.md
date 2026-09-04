@@ -203,8 +203,10 @@ and later reversed; several "measured off" verdicts turned out to be noise.
 ## Performance work
 
 `README.md` documents the measured optimization history (shared-model fork
-vec env, semaphore IPC, numba BAM kernels, MPS updates) including the ones
-that were **rejected for hurting learning**. Follow that precedent: measure
+vec env, semaphore IPC, numba BAM kernels and the fused substep, MPS updates,
+the per-machine thread profile) including the ones that were **rejected** —
+for hurting learning, for not reproducing, or for costing more than they
+bought. Follow that precedent: measure
 with `bench-envs` (real PPO, not raw stepping), and A/B learning quality
 before shipping any throughput win as a default.
 
@@ -232,6 +234,30 @@ profile may contain:
   `uv run bench-envs --compare-profiles` runs both arms interleaved with the
   same repeats, which is the only form of that comparison worth reading
   (`--profile mac` on a Linux box reproduces the old behavior exactly).
+
+**Prototype the win before you plumb it.** A profile decomposition tells you
+where time *is*, not what removing it *buys* — the two differ once the pieces
+interact. The double-buffered rollout was estimated at ~18% from the vec-step
+split (hide the parent's 1.95 ms of forward + dispatch behind worker
+compute); prototyped in 60 lines with two independent vec envs and no repo
+changes, it measured +6.2/+7.1/+6.2% at 8/16/32 envs, because splitting pays
+a second wait's sync cost and two half-batch forwards cost more than one full
+one. That prototype cost an hour; the real version would have rewritten the
+rollout buffer path. **When a change would touch a correctness-critical
+seam, build the throwaway that measures it first** — and let the measured
+number, not the estimate, decide whether to build the real one.
+
+**Price a change by what it redefines, not by its diff.** The same rollout
+split was rejected at ~5% end-to-end because it changes *what a step is*:
+`test_overlap.py::test_collect_matches_stock_sb3_bitwise` pins the vendored
+collect loop against stock SB3 and a split fleet cannot satisfy it,
+`VecNormalize` updates `obs_rms` once per step so halves change the running
+normalizer that gets baked into every exported ONNX, and the rollout buffer's
+`add()` takes a whole row. A change that forces you to delete an invariant
+test is not a throughput change, it is an architecture change; hold it to
+that bar. The three that did ship (thread policy, numba warm-up, the fused
+BAM substep) are all provably invisible to the math and each *added* a test
+rather than removing one.
 
 **A cloud VM is not a stable ruler.** On the box these profiles were measured,
 the *identical* script and configuration ran 13.1 s in one window and 19.5 s

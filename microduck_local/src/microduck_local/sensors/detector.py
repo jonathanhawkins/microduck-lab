@@ -38,10 +38,39 @@ SHIPPED_FOV_H_DEG = 62.0
 _SHIPPED_PX_PER_RAD = SHIPPED_PX_H / np.deg2rad(SHIPPED_FOV_H_DEG)
 
 
+# THE CAMERA: see docs/camera-hardware.md, which is the single home for this
+# and carries the workings. The three facts that bear on the numbers below:
+#
+# 1. `fov_h_deg` / `fov_v_deg` ARE THE FULL-ARRAY FIGURE FOR A CAMERA THE
+#    ROBOT DOES NOT RUN THAT WAY. Upstream identifies an IMX219 (Pi Camera
+#    v2, quoted 62.2 x 48.8) but `mediad` pins the SENSOR to 1920x1080, which
+#    on that part is a centred CROP - libcamera: "(680, 692)/1920x1080 crop",
+#    59% of the columns and 44% of the rows. With the stock f = 3.04 mm lens
+#    that is 39.0 x 22.5 deg, so this spec may be ~23 deg too wide and ~25
+#    deg TOO TALL. Unconfirmed (the lens is not in the repo, only the driver
+#    overlay), so nothing here is re-baselined on it.
+# 2. `px_h` IS THE NPU'S YOLO11n INPUT, NOT THE SENSOR. The sensor carries
+#    1920 px across it, six times what the detector consumes, so a wider lens
+#    is paid for by the INFERENCE INPUT and not by new hardware.
+# 3. THE REPLACEMENT MODULE IS 116 x 60 deg (vendor: 1/2.9", 2.75 um BSI,
+#    1920x1080 native, 90 fps, D 142.2 / H 116 / V 60, EFL ~2.9 mm). That is
+#    essentially the lens sweep's 120 deg arm, which this repo has already
+#    measured: at 320 px it tidied 0.632 against 0.889, worse on 24 of 24
+#    seeds; at 640 px it recovered to 0.819. So the NPU input size decides
+#    whether it helps or hurts. Its 60 deg VERTICAL is a clear win either way.
+#
+# One modelling gap it opens: that lens is NOT rectilinear (a pinhole EFL
+# solved from H, V and D gives 1.65 / 2.57 / 1.04 mm - inconsistent; an
+# equidistant model gives 2.61 / 2.84 / 2.44 mm, near the quoted 2.9). This
+# detector maps pixel offset to bearing with a pinhole model and no
+# distortion term, which is wrong exactly at the frame edges - where a 116
+# deg lens keeps its extra view. Recorded, not built.
+
+
 @dataclass(frozen=True)
 class DetectorSpec:
-    fov_h_deg: float = 62.0      # ASSUMPTION: a Pi-camera-class module; not in upstream docs
-    fov_v_deg: float = 48.0
+    fov_h_deg: float = 62.0      # ASSUMPTION: a Pi-camera-class module; the lens is still not specified
+    fov_v_deg: float = 48.0      # ASSUMPTION, and 4:3-shaped: the sensor is 16:9 (see above)
     max_range_m: float = 4.0
     rate_hz: float = 10.0
     site: str = "head_camera"
@@ -57,6 +86,45 @@ class DetectorSpec:
     # so a small distant target must be found LESS often, not just as often.
     w_none_rad: float = np.deg2rad(1.0)     # ~5 px of a 320 px frame over 62°
     w_full_rad: float = np.deg2rad(4.0)     # ~21 px: always found (before noise)
+    # How the lens maps a ray to the frame, and so what a consumer that maps
+    # a BOX BACK TO A BEARING gets wrong.
+    #
+    # "pinhole" (the default, and what every result in this repo was measured
+    # on): bearings come back exact. "equidistant" models a wide lens whose
+    # r = f*theta - which the replacement module is: a pinhole focal length
+    # solved from its quoted H/V/D disagrees (1.65 / 2.57 / 1.04 mm) while an
+    # equidistant one agrees near the quoted 2.9 mm EFL. See
+    # docs/camera-hardware.md.
+    #
+    # The error modelled is the one a PINHOLE-CALIBRATED reader makes on such
+    # a lens: it fits its focal length to the quoted FOV edge, so on-axis and
+    # edge bearings come back right and everything between is pushed outward.
+    # Systematic, not noise, and it grows fast with width - worst case
+    # 1.2 deg at 62 deg but 9.7 deg at 116 deg, peaking near 28 deg off-axis.
+    # That is larger than the chase brain's 3.4-6.9 deg aim tolerance, and it
+    # is a cost of a wide lens the lens sweep never modelled because at
+    # 62 deg it barely exists.
+    #
+    # NOTE the SIZE GATE is already equidistant-shaped: `px_per_rad` is
+    # uniform across the field, which is exactly what r = f*theta gives and
+    # is NOT what a pinhole lens does (a pinhole frame resolves more finely
+    # toward its edges). So this field changes the BEARING only; the width
+    # thresholds were always modelling the wide-lens case.
+    projection: str = "pinhole"
+
+    def seen_angle(self, true_rad: float, fov_deg: float) -> float:
+        """The angle a pinhole-calibrated reader reports for a true one.
+
+        Identity under "pinhole". Under "equidistant" the reader infers
+        `atan(theta * tan(theta_max) / theta_max)`: right on axis, right at
+        the edge it calibrated on, pushed outward in between."""
+        if self.projection != "equidistant":
+            return float(true_rad)
+        tmax = np.deg2rad(fov_deg) / 2
+        if tmax <= 1e-9:
+            return float(true_rad)
+        t = float(np.clip(true_rad, -tmax, tmax))
+        return float(np.sign(t) * np.arctan(abs(t) * np.tan(tmax) / tmax))
 
     @property
     def px_per_rad(self) -> float:
@@ -241,7 +309,12 @@ class Detector:
             if hit_root != tgt_root and dist < rng - tgt.radius:
                 return None
         width = 2.0 * float(np.arctan(tgt.radius / rng))
-        return bearing, elev, width, rng
+        # The frustum tests above used the TRUE angles - what the lens can
+        # physically see. What the brain receives is what a reader infers
+        # from the box: the same under a pinhole model, pushed outward under
+        # a wide one.
+        return (self.spec.seen_angle(bearing, self.spec.fov_h_deg),
+                self.spec.seen_angle(elev, self.spec.fov_v_deg), width, rng)
 
     # -- measurement -------------------------------------------------------
     def capture(self, data: mujoco.MjData, t: float) -> DetectionFrame:

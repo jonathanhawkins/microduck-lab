@@ -164,10 +164,10 @@ uv run bench-envs --compare-vec --compare-threads
 ## Cloud and Linux training (`machine.py`)
 
 Every number above was measured on an 18-core M5 Max, and **that stays the
-default** — this harness is written for a Mac and advertised as one. But two
-of those tunings are wrong on a small Linux or cloud box, badly enough to
-lose a third of the machine, so `machine.py` detects which machine it is on
-and picks a profile. `uv run machine-facts` prints what yours resolved to.
+default** — this harness is written for a Mac and advertised as one. But one
+of those tunings is wrong on a small Linux or cloud box, badly enough to lose
+a third of the machine, so `machine.py` detects which machine it is on and
+picks a profile. `uv run machine-facts` prints what yours resolved to.
 
 **What goes wrong on a 4-core cloud box.** The trainer, not the physics
 workers, eats the machine. torch's OpenMP pool spin-waits between the tiny
@@ -262,15 +262,52 @@ matters more than core count: one env steps in 0.34 ms here against 0.135 ms
 on the M5 Max, so a 4-vCPU box will not match the laptop whatever the
 threading does.
 
-Two things measured and **not** adopted: `OMP_WAIT_POLICY=PASSIVE` on top of
-phase-aware threads is a small loss (the update's threads then sleep between
-minibatches — update 3.3 s → 5.1 s at 16 envs), and pinning OpenBLAS to one
-thread is neutral, because the workers never spawn BLAS pools on 61-dim ops.
+**Measured and not adopted** (recorded so nobody pays for them twice):
+
+- `OMP_WAIT_POLICY=PASSIVE` on top of phase-aware threads — a small loss; the
+  update's threads then sleep between minibatches (update 3.3 s → 5.1 s at 16
+  envs). It is the best *no-code* fallback on its own, at +20%, but the two
+  do not stack.
+- Pinning OpenBLAS to one thread — neutral. The workers never spawn BLAS
+  pools on 61-dim ops.
+- **Pinning each worker to a core** (`sched_setaffinity`, round robin). 32
+  processes on 4 cores means the scheduler may migrate every worker on every
+  wake, so this looked obvious. Six interleaved runs: median 9.80 ms pinned
+  vs 9.56 ms default — neutral to slightly worse. Linux's scheduler is
+  already doing a better job than the naive pinning.
+- **A double-buffered (split-fleet) rollout.** Step half the fleet while the
+  parent computes actions for the other half, hiding its serial ~1.95 ms of
+  forward + dispatch behind worker compute. Prototyped with two independent
+  16-env vec envs, interleaved arms: **+6.2% at 8 envs, +7.1% at 16, +6.2%
+  at 32** — real, but a third of the ~18% the arithmetic suggested, because
+  splitting pays a second wait's sync cost and two batch-16 forwards cost
+  more than one batch-32. Not adopted, because ~5% end-to-end does not buy
+  what it costs: it *redefines what a step is*. The bitwise-collection test
+  (`test_overlap.py`) pins the vendored collect loop against stock SB3 and a
+  split fleet cannot satisfy it; `VecNormalize`
+  updates `obs_rms` once per step, so halves give two updates of 16 rows and
+  a different running normalizer — which is baked into every exported ONNX;
+  and the rollout buffer's `add()` takes a full row, so half-rows need
+  staging in the most correctness-sensitive code here. The scratch prototype
+  is not in the tree; re-derive it from these numbers before reopening.
+
 Two known gaps: the lock file resolves CUDA torch wheels on Linux (a 7.2 GB
 venv for a CPU trainer — CI installs from the CPU index first, and a
 `[tool.uv.sources]` entry would fix `uv sync` too), and `--update-device`'s
 `auto` only knows about MPS, so a CUDA cloud box needs an explicit
 `--update-device cuda` (the code path is device-generic but unmeasured).
+
+**Where the remaining time goes on this box**, at 32 envs after all of the
+above: the vec-step is ~10.8 ms — policy forward 0.96 ms (8.9%),
+`step_async` 1.00 ms (9.2%), `step_wait` 8.83 ms (81.9%). Uncontended physics
+for 32 envs on 4 cores would be ~4.9 ms, and the gap is the memory contention
+of 32 concurrent mjData working sets that the `--ipc-floor` decomposition
+below already pins down on a quieter machine. Worth noting that the two
+agree from opposite directions: that section predicted a rollout-loop rewrite
+could recover "at best ... about 6% of wall", and the split-fleet prototype
+went and measured 6.2-7.1%. The next real step-change is batched physics (one
+`mujoco.rollout` call for the whole fleet), which needs the BAM actuator in C
+rather than Python — it targets the physics row, not the plumbing.
 
 ### The 2026-08-31 speed pass (measured, in order applied)
 
@@ -286,6 +323,23 @@ venv for a CPU trainer — CI installs from the CPU index first, and a
   order preserved — held to the golden float64 rollouts in
   `test_bam_perf_parity.py`. numba is optional; without it the numpy path
   remains.
+- **One kernel for the whole BAM substep** (2026-09-04, `_bam_substep_kernel`):
+  the three kernels above still crossed the Python boundary ~8 times and
+  allocated ~5 arrays of 14 floats per substep. Profiled *in situ* — timed
+  between real `mj_step` calls, so the constraint set is honest — no piece
+  dominated: motor torque 6.0 µs, the efc scan 6.7, the friction budget 7.0,
+  writes and clamp 6.3. It was dispatch and allocation spread thin, which is
+  what a single call fixes. **+10.4% per `env.step`** (median of 8 interleaved
+  measurements) and **+4.0% end-to-end** at 32 envs (median of 6 interleaved
+  pairs, individual pairs −5.5% to +17.2% — the training loop is much noisier
+  than one env). The dilution is the arithmetic working out: `env.step` is
+  ~45% of a vec-step here, and 0.45 × 10.4% ≈ 4.7%. Bit-identical: the golden
+  rollout still passes, and a new live pair test asserts fused == unfused to
+  the bit on qpos, qvel, every torque and the model fields.
+  The kernel writes *through* cached slice views
+  into MuJoCo's own arrays, so it is gated on the DOF selection being a
+  contiguous slice (a fancy-index selection would hand it a copy and the
+  writes would vanish). `MICRODUCK_BAM_FUSED=0` restores the previous path.
 - **`FastActorCriticPolicy`** (`symmetry.py`): hand-rolled diag-Gaussian
   rollout forward, 234 → 215 us at batch 32. Small and exact (log-probs match
   `evaluate_actions` to float tolerance — `test_fast_policy.py`).
@@ -764,8 +818,88 @@ its current intent live.
   this breaks a test instead of a benchmark six months later. **The general
   rule: a locomotion limit read off a single command value is a reading of
   the dead band, not of the robot.** The brains still use their old
-  workarounds — swapping `tidy`'s backoff re-opens the fall and tether rows
-  it was measured on, so that is its own A/B, not a drive-by.
+  workarounds, and the first one re-measured says why.
+
+  **`tidy`'s back-off, tried with a reverse: worse, and the reason is the
+  interesting part.** Leaving the basket is a 1.5 s left sidestep, a 2.6 rad
+  turn in place and a 1.5 s walk — about 7.3 s, after every delivery — and
+  its comment justified that sequence with "the walker cannot walk
+  backwards". `backoff_back_s` replaces the lot with a straight reverse. On
+  16 paired seeds × 300 s × 6 toys: **in the basket 5.31 → 4.94** (0.885 →
+  0.823 of the toys, −0.38 ± 0.18, p = 0.111, better on 2 of 16 and worse
+  on 8, six ties). Falls 0.31 → 0.44 — 5 events against 7, unresolvable at
+  this size, so the "it removes the turn-at-the-rim fall mode" half is
+  neither shown nor refuted.
+
+  The saving was real. Traced over 3 seeds, seconds a 300 s run:
+
+  | | backoff | scan | explore | approach | deliver |
+  |---|---|---|---|---|---|
+  | sequence | 39.5 | 60.1 | 20.5 | 64.0 | 72.2 |
+  | reverse 2 s | **9.4** | 76.5 | 10.0 | **114.5** | 53.5 |
+
+  The reverse cuts the back-off by 30 s a run exactly as promised — and
+  `approach` grows by 50. A reversing duck ends 0.56 m from the basket
+  centre against 1.05 m after the sequence, right on the `basket_keepout`
+  line, so it scans from beside the basket and then walks the length of the
+  room to whatever it finds. **The turn-and-walk is not overhead.** The
+  comment called it "leaving the rim"; what it actually does is put the
+  duck back in the *room*, where the toys are, pointed away from the
+  basket. The 30 s it costs buys shorter approaches for the rest of the
+  cycle and is repaid with interest.
+
+  **Then the matched version, at 80 seeds — and the back-off turns out to
+  be doing two jobs.** "A reverse that keeps the walk-out" does not exist:
+  after backing out the duck *faces* the basket, so there is no walking
+  clear without the 2.6 rad turn, which is the expensive part. What the
+  histogram indicts is the distance, so the variants are about reaching
+  1.05 m. Measured open-loop from a post-drop pose:
+
+  | | 2 s | 3 s | 4 s | 5 s | 6 s |
+  |---|---|---|---|---|---|
+  | straight reverse | 0.57 | 0.80 | **1.04** | 1.28 | — |
+  | reverse arc, `wz` 1 | 0.51 | 0.64 | 0.69 | 0.65 | 0.56 |
+
+  The **arc is geometrically dead** — it curves back toward where it began,
+  so distance from the basket peaks at 0.72 m near 4 s and then falls away;
+  the duck circles the basket instead of leaving it. That is the same arc
+  property that had already fooled one reading of `back_up`, this time
+  saving a battery instead of costing a docstring. And the 2 s arm's
+  deficit has a simpler name: it reached 0.57 m, so it was never "reverse
+  vs sequence", it was **half a retreat against a full one**.
+
+  So: `backoff_back_s` 4.0, the same 1.04 m in 4.0 s instead of 7.3 s.
+
+  | | in the basket | | falls a run | |
+  |---|---|---|---|---|
+  | screen, seeds 0–15 (16) | 5.31 → 5.56 | p = 0.43 | 0.31 → 0.62 | p = 0.40 |
+  | **confirm, 16–79 (64)** | 5.27 → 5.12 | p = 0.39 | 0.41 → 0.77 | **p = 0.003** |
+  | **pooled (80)** | 5.28 → 5.21 | p = 0.69 | 0.39 → 0.74 | **p = 0.002** |
+
+  The screen's +0.25 toys **reversed** on fresh layouts and pools to
+  nothing (0.879 → 0.869 tidied; 25 seeds better, 25 worse, 30 tied). The
+  falls did the opposite — they replicated and *sharpened* with n, which is
+  what a real effect does and what none of the soccer effects ever did.
+  +90%, 31 events against 59, and not exposure: work done is flat (picks
+  +1%, deliveries +2%), so falls per pick nearly doubled, 0.067 → 0.128,
+  p = 0.002.
+
+  Traced, the falls are not where the argument put them. **Not the reverse
+  itself** (1 of 11 while backing), **not the walls** (median clearance
+  1.25 m in both arms), and back-off falls actually went *down*, 3 → 2 — so
+  the "no turn at the rim" half was right. They moved to `approach`, 1 → 4.
+  Since the two arms are distance-matched by construction, the variable
+  left is **heading**: the sequence ends facing away from the basket, a
+  reverse ends facing it, and the next route then sets out across the
+  basket zone — whose 6 cm rim sits below the ToF guard until the last
+  0.26 m and trips the walker.
+
+  **The 7.3 s buys two things, not one: distance and heading.** Each
+  variant bought a different half — 2 s gave neither and cost tidying, 4 s
+  gives distance without heading and costs falls. The dead-band fix was
+  real, the mechanism argument on top of it was sound, the manoeuvre was
+  genuinely faster, and "make the back-off faster" was the wrong frame
+  throughout. It ships at 0, with the numbers in the parameter's comment.
 
 - **Odometry drift** (roadmap 1.7): the `(x, y, yaw)` a brain gets is dead
   reckoning — a per-run distance scale, a gyro bias, per-step noise — under
@@ -1683,6 +1817,31 @@ if anything fewer). Tidying, the same 12 layouts as the shipped lens:
 0.917 against 0.875 (66 of 72 toys against 63), +0.25 toys a seed, better
 on 5 seeds and worse on 2 — inside the noise on the cheap screen and on
 the discriminator both.
+
+**And then the hardware answered back, which changes what this battery
+means.** The vendor spec for the replacement module is **D 142.2° / H 116° /
+V 60°** on a 1/2.9", 2.75 µm, natively-1080p sensor at up to 90 fps — so
+**116° is essentially the 120° arm above, already measured here.** At the
+NPU's current 320 px YOLO input that is 158 px/rad: the row that tidied
+0.632, worse on 24 of 24 seeds. At 640 px it is 316 px/rad: the row that
+came back to 0.819. **The deciding variable is the inference input, not the
+camera** — and the sensor is not the constraint either, since 1920 px across
+is six times what the detector consumes. The 60° vertical is a clear win
+either way.
+
+Two things also came out of tracing what the robot actually has, and both
+say the baseline below is not the robot's. Upstream identifies an **IMX219**
+(Pi Camera v2, quoted 62.2° × 48.8° — where the 62/48 here came from), but
+`mediad` pins the *sensor* to 1920 × 1080, which on that part is a centred
+**crop** (`(680, 692)/1920x1080`, 59% of the columns and 44% of the rows).
+With the stock lens that is **39.0° × 22.5°** — so this baseline may be ~23°
+too wide and ~25° too tall, and the vertical error is the one that bites.
+And the new lens is **not rectilinear** (a pinhole focal length solved from
+H, V and D disagrees; an equidistant model agrees near the quoted 2.9 mm
+EFL), while `Detector` maps pixels to bearing with a pinhole model and no
+distortion — wrong exactly at the edges, which is where a wide lens keeps
+its extra view. `docs/camera-hardware.md` holds all of it, with the open
+questions.
 
 So the whole recommendation, as one finding: **the shipped camera is
 adequate, and what breaks it is widening the lens without adding pixels.**

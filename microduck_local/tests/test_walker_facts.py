@@ -126,3 +126,35 @@ def _body_axis_speed(vx: float, wz: float, secs: float = 6.0) -> float:
         along += (p[0] - prev[0]) * math.cos(y) + (p[1] - prev[1]) * math.sin(y)
         prev = p.copy()
     return along / secs
+
+
+def test_the_turn_cap_is_one_constant_every_brain_reads():
+    """`gait.max_wz()`: a faster walker is useless if the brains still ask for
+    1.0. Every scripted turn command goes through this — `turn()`, the clips
+    in `controllers.py`, and `tidy`'s scan — so an experiment raises the cap
+    beside the walker it is testing and the brains actually command it."""
+    import os
+
+    from microduck_local.brain.controllers import FollowParams
+    from microduck_local.brain.gait import TURN_KICK, clip_wz, max_wz, turn
+
+    assert max_wz() == C.ANG_VEL_Z_RANGE[1] == 1.0            # the shipped default
+    assert turn(+1, cold=False) == (0.0, 0.0, 1.0)
+    assert clip_wz(5.0) == 1.0 and clip_wz(-5.0) == -1.0 and clip_wz(0.4) == 0.4
+    old = os.environ.get("MICRODUCK_MAX_WZ")
+    os.environ["MICRODUCK_MAX_WZ"] = "1.6"
+    try:
+        assert max_wz() == 1.6
+        assert turn(+1, cold=False) == (0.0, 0.0, 1.6)         # the turn helper follows it
+        assert turn(-1, cold=True) == (TURN_KICK, 0.0, -1.6)
+        assert clip_wz(5.0) == 1.6                             # and so do the clips
+        os.environ["MICRODUCK_MAX_WZ"] = "not-a-number"
+        assert max_wz() == 1.0                                 # a typo falls back, never crashes a battery
+    finally:
+        if old is None:
+            del os.environ["MICRODUCK_MAX_WZ"]
+        else:
+            os.environ["MICRODUCK_MAX_WZ"] = old
+    assert FollowParams().search_wz == 1.0                     # the dead knob is still declared
+    assert not any("p.search_wz" in l for l in                 # ...and still nobody reads it
+                   open("src/microduck_local/brain/controllers.py"))

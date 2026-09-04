@@ -68,10 +68,17 @@ except ImportError:  # pragma: no cover - numpy fallback keeps behavior
 #
 # BAM runs EVERY physics substep, and its cost is ~48 numpy ops on 14-element
 # arrays — pure dispatch overhead (~0.7 us/op), 0.14 ms per control step,
-# more than mj_step itself. The two kernels below fuse the arithmetic-only
-# parts into single compiled loops. They are BITWISE ports, held to the
-# golden float64 rollouts in test_bam_perf_parity.py; the rules that make
-# that possible:
+# more than mj_step itself. The kernels below fuse the arithmetic-only parts
+# into single compiled loops. They are BITWISE ports, held to the golden
+# float64 rollouts in test_bam_perf_parity.py; the rules that make that
+# possible:
+#
+# `_bam_substep_kernel` is the whole substep in ONE call and is what
+# `before_step` actually uses; the three narrower kernels remain because the
+# public `compute_motor_torque` / `friction_budget` / `_dof_friction_force`
+# are called directly by the validation harness and the parity tests, and
+# because they are the readable statement of what the fused one does.
+# The rules:
 #
 # * Only IEEE-exact ops move into a kernel (+ - * / abs min max compares).
 #   np.exp / np.power (the Stribeck factor) STAY in numpy: their vectorized
@@ -119,6 +126,96 @@ if _njit is not None:
             fl = fl + s * quad
             out[i] = fl * friction_scale
     @_njit(cache=True)
+    def _bam_substep_kernel(
+        q, dq, q_target, vin, kt, kt2, R, kp_fw, error_gain,
+        has_imax, max_current, max_pwm,
+        qfrc_constraint, qfrc_bias,
+        efc_type, efc_id, efc_force, nefc, fric_type, dof_slot,
+        stribeck, fbase, fstrib, lfe, lfm, lfes, lfms, lfeq, lfmq,
+        friction_scale, force_limit, fvisc,
+        motor, applied, fl, dof_frictionloss, dof_damping, qfrc_applied,
+    ):
+        """The WHOLE per-substep pipeline in one compiled call.
+
+        The three kernels above already fused the arithmetic, but the substep
+        still crossed the Python boundary ~8 times and allocated ~5 arrays for
+        14 floats apiece. Profiled in situ (interleaved with real mj_step, so
+        the constraint set is honest), no single piece dominated — motor
+        torque 6.0 us, the efc scan 6.7, the friction budget 7.0, the writes
+        and clamp 6.3 — it was dispatch and allocation spread thin. This does
+        all of it in one call against caller-owned buffers.
+
+        BITWISE identical to the unfused path, and the rules are the same ones
+        the kernels above follow: only IEEE-exact ops (+ - * / abs min max
+        compares) live here, every expression keeps the numpy version's
+        operand order, and `stribeck` (np.exp/np.power) plus the battery-sag
+        reduction (np.sum, which is pairwise) stay in numpy where their bits
+        are defined. Held to the golden float64 rollout in
+        test_bam_perf_parity.py.
+
+        Buffer aliasing is load-bearing and safe: `applied` carries the
+        PREVIOUS substep's torque into the friction loop and is overwritten
+        with this substep's only in the final loop, which runs after every
+        read of it. Do not merge those two loops.
+        """
+        n_j = q.shape[0]
+        # --- firmware control law + DC motor (see _motor_torque_kernel) ---
+        for i in range(n_j):
+            duty = (q_target[i] - q[i]) * kp_fw * error_gain
+            if has_imax:
+                duty_center = (kt * dq[i]) / vin
+                duty_span = (R * max_current) / vin
+                lo = duty_center - duty_span
+                hi = duty_center + duty_span
+                duty = min(max(duty, lo), hi)
+            duty = min(max(duty, -max_pwm), max_pwm)
+            volts = vin * duty
+            motor[i] = kt * volts / R - kt2 * dq[i] / R
+
+        # --- our own dof-friction constraint force (see _dof_friction_kernel).
+        # Accumulated into `fl` as scratch, in efc row order — the order
+        # np.bincount visits its input, so the float64 sums match to the bit.
+        for i in range(n_j):
+            fl[i] = 0.0
+        for k in range(nefc):
+            if efc_type[k] == fric_type:
+                s = dof_slot[efc_id[k]]
+                if s >= 0:
+                    fl[s] += efc_force[k]
+
+        # --- external load: (constraint - bias) - our own friction force.
+        # `b - a` is IEEE-identical to `-a + b`, as external_torque documents.
+        for i in range(n_j):
+            fl[i] = (qfrc_constraint[i] - qfrc_bias[i]) - fl[i]
+
+        # --- m6 friction budget (see _friction_budget_kernel). The motor-side
+        # load is the torque APPLIED on the previous solve, per bam.mjlab.
+        for i in range(n_j):
+            s = stribeck[i]
+            mot = applied[i]
+            ext = fl[i]
+            budget = fbase + s * fstrib
+            budget = budget + abs(ext * lfe - mot * lfm)
+            budget = budget + s * abs(ext * lfes - mot * lfms)
+            abs_ext = abs(ext)
+            abs_mot = abs(mot)
+            if abs_mot > abs_ext:
+                quad = lfeq * (abs_ext * abs_ext)
+            else:
+                quad = lfmq * (abs_mot * abs_mot)
+            budget = budget + s * quad
+            fl[i] = budget * friction_scale
+
+        # --- publish: friction fields, then the clamped torque. Last loop, so
+        # every read of `applied` above saw the previous substep's value.
+        for i in range(n_j):
+            dof_frictionloss[i] = fl[i]
+            dof_damping[i] = fvisc
+            t = min(max(motor[i], -force_limit), force_limit)
+            applied[i] = t
+            qfrc_applied[i] = t
+
+    @_njit(cache=True)
     def _dof_friction_kernel(efc_type, efc_id, efc_force, n, fric_type,
                              dof_slot, out):
         # Accumulates in efc row order — the same order np.bincount visits
@@ -132,6 +229,7 @@ else:  # pragma: no cover
     _motor_torque_kernel = None
     _friction_budget_kernel = None
     _dof_friction_kernel = None
+    _bam_substep_kernel = None
 
 
 # --------------------------------------------------------------------- params
@@ -459,6 +557,31 @@ class BamXL330Actuator:
         self.last_vin = self.vin_nominal
         self.last_frictionloss = np.zeros(self.num_joints, dtype=np.float64)
 
+        # ---- the fused per-substep path (see _bam_substep_kernel) ----------
+        # Enabled only when numba is present AND our DOF selection is a
+        # contiguous slice, because the kernel writes THROUGH these views into
+        # MuJoCo's own arrays: a fancy-index selection would hand it a private
+        # copy and the writes would silently go nowhere. The views are taken
+        # once — MjData and MjModel are built per env and never rebuilt (reset
+        # reuses both), and every writer touches these arrays in place.
+        # The three buffers the kernel fills are the SAME objects the unfused
+        # path rebinds each substep, so `reset()`'s in-place zeroing and every
+        # reader (`applied_torque`, `last_frictionloss`) keep working.
+        # MICRODUCK_BAM_FUSED=0 forces the unfused path — the escape hatch if a
+        # platform ever disagrees, and how the A/B behind it is reproduced.
+        self._fused = None
+        if (_bam_substep_kernel is not None
+                and os.environ.get("MICRODUCK_BAM_FUSED", "1") not in ("0", "")
+                and isinstance(self._dof_ix, slice)
+                and isinstance(self._qpos_ix, slice)):
+            self._fused = _bam_substep_kernel
+            self._qfrc_constraint_v = data.qfrc_constraint[self._dof_ix]
+            self._qfrc_bias_v = data.qfrc_bias[self._dof_ix]
+            self._qfrc_applied_v = data.qfrc_applied[self._dof_ix]
+            self._frictionloss_v = model.dof_frictionloss[self._dof_ix]
+            self._damping_v = model.dof_damping[self._dof_ix]
+            self._friction_cnstr_type_i32 = np.int32(self._friction_cnstr_type)
+
         self._prepare_model(stiff_frictionloss)
 
     # ------------------------------------------------------------- model setup
@@ -679,7 +802,9 @@ class BamXL330Actuator:
         else:
             q_target = self._target
 
-        # Battery sag under load, from the PREVIOUS step's torques.
+        # Battery sag under load, from the PREVIOUS step's torques. Stays in
+        # numpy: `.sum()` is pairwise, and reimplementing that summation order
+        # is exactly the kind of libm-shaped trap the kernels avoid.
         vin = self.vin_nominal
         if self.vin_drop_gain is not None:
             np.abs(self._prev_motor_torque, out=self._abs_buf)
@@ -687,6 +812,33 @@ class BamXL330Actuator:
             if self.vin_min is not None:
                 vin = max(vin, self.vin_min)
         self.last_vin = vin
+
+        if self._fused is not None:
+            # One compiled call for the whole rest of the substep. Reads the
+            # model/data fields through the cached slice VIEWS, so the writes
+            # land in MuJoCo's own arrays with no fancy-index round trip.
+            # `_prev_motor_torque` is the motor buffer itself: the sag above
+            # has already consumed last substep's values by the time the
+            # kernel overwrites them.
+            d_ = self.data
+            self._fused(
+                q, dq, q_target, vin, self._kt, self._kt ** 2, self._R,
+                self.kp_fw, self.error_gain,
+                self.max_current is not None,
+                0.0 if self.max_current is None else float(self.max_current),
+                self.max_pwm,
+                self._qfrc_constraint_v, self._qfrc_bias_v,
+                d_.efc_type, d_.efc_id, d_.efc_force, int(d_.nefc),
+                self._friction_cnstr_type_i32, self._dof_slot,
+                np.exp(-np.power(np.abs(dq) / self._dtheta_strib, self._alpha)),
+                self._fbase, self._fstrib, self._lfe, self._lfm, self._lfes,
+                self._lfms, self._lfeq, self._lfmq, self.friction_scale,
+                self.force_limit, self._fvisc,
+                self._prev_motor_torque, self._applied_torque,
+                self.last_frictionloss,
+                self._frictionloss_v, self._damping_v, self._qfrc_applied_v,
+            )
+            return self._applied_torque
 
         motor_torque = self.compute_motor_torque(q, dq, q_target, vin)
         # compute_motor_torque returns a fresh array and nothing below mutates

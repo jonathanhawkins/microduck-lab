@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections import deque
 
+import collections
 import math
 from dataclasses import dataclass
 
@@ -34,7 +35,7 @@ import numpy as np
 
 from ..world.arena import PICK_REACH_AHEAD, PICK_REACH_LEFT
 from .controllers import WanderParams, _column_clearance, wander_from_tof
-from .gait import TURN_KICK, GaitWatch, back_up, turn
+from .gait import TURN_KICK, GaitWatch, back_up, max_wz, turn
 from .mapping import GridSpec, OccupancyGrid
 from .runtime import REGISTRY, Intent, Senses, age_inputs
 
@@ -137,12 +138,105 @@ class TidyParams:
     # happy with: it turns in place anyway, and by then the duck is outside
     # `basket_keepout`.
     #
-    # UNTRIED against the sequence, so it ships at 0. `eval-tidy` is the
-    # right place to settle it - 16 seeds resolve a shift in `tidied`,
-    # where soccer's falls need ~376 - and it must be read on BOTH the
-    # tidied fraction and the falls, since the sequence is what the fall
-    # and tether rows in the README were measured on.
+    # MEASURED, and it is WORSE. 16 paired seeds x 300 s x 6 toys:
+    # in the basket 5.31 -> 4.94 (0.885 -> 0.823 of the toys, -0.38 +/-
+    # 0.18, p = 0.111, better on 2 of 16 and worse on 8, six ties), falls
+    # 0.31 -> 0.44 (5 events against 7 - unresolvable either way at this
+    # size, so the "it removes the fall mode" half is neither shown nor
+    # refuted). Ships at 0.
+    #
+    # The saving was real and the diagnosis is the useful part. Traced over
+    # 3 seeds, seconds a 300 s run:
+    #
+    #                backoff   scan   explore   approach   deliver
+    #   sequence       39.5    60.1     20.5       64.0      72.2
+    #   reverse 2 s     9.4    76.5     10.0      114.5      53.5
+    #
+    # The reverse does cut the back-off by 30 s a run, exactly as promised
+    # - and `approach` grows by 50. The duck ends a reverse 0.56 m from the
+    # basket centre (against 1.05 m after the sequence), which is on the
+    # `basket_keepout` line, so it scans from beside the basket and then
+    # walks the length of the room to whatever it finds.
+    #
+    # So the turn-and-walk is NOT overhead. "Leaving the rim" is what the
+    # comment above called it; what it actually does is put the duck back
+    # in the ROOM, where the toys are, pointed away from the basket. The
+    # 30 s it costs buys shorter approaches for the rest of the cycle and
+    # is paid back with interest. A faster back-off that skips the
+    # repositioning is not faster.
+    #
+    # "A reverse that keeps the walk-out" was the first idea and it does
+    # not exist: after backing out the duck FACES the basket, so there is
+    # no walking clear without the 2.6 rad turn, which is the expensive
+    # part. What the histogram actually indicts is the DISTANCE the duck
+    # ends at, so the two coherent variants are both about reaching 1.05 m:
+    #
+    #   `backoff_back_s` 4-5   a longer straight reverse. Same distance,
+    #                          about half the time. Ends facing the basket,
+    #                          which `scan` turns out of anyway.
+    #   `backoff_back_wz` != 0 reverse WHILE turning. The walker reverses at
+    #                          -0.209 m/s along its own body axis with wz at
+    #                          1.0 (against -0.219 straight) while turning at
+    #                          0.30-0.40 rad/s, so the retreat and the
+    #                          turn-around happen at once instead of in
+    #                          series - see `gait.back_up`, which measured
+    #                          the arc after a render caught the frame
+    #                          mistake in reading it.
+    #
+    # Both ship at 0, and `backoff_back_s` 4.0 is now MEASURED at 80 seeds:
+    #
+    #                        in the basket            falls a run
+    #   screen   0-15 (16)   5.31 -> 5.56  p=0.43   0.31 -> 0.62  p=0.40
+    #   CONFIRM 16-79 (64)   5.27 -> 5.12  p=0.39   0.41 -> 0.77  p=0.003
+    #   pooled        (80)   5.28 -> 5.21  p=0.69   0.39 -> 0.74  p=0.002
+    #
+    # The screen's +0.25 toys did not replicate - it reversed, and pooled
+    # the tidied fraction is flat (0.879 -> 0.869, 25 seeds better, 25
+    # worse, 30 tied). The FALLS did replicate and sharpened with n, which
+    # is what a real effect does: +90% (31 events against 59), and not
+    # exposure - work done is flat (picks +1%, deliveries +2%) so falls per
+    # pick nearly doubled, 0.067 -> 0.128, p = 0.002.
+    #
+    # Where they come from, traced over 12 seeds: NOT the reverse itself
+    # (1 of 11 falls happened while backing) and NOT the walls (median
+    # clearance 1.25 m in both arms). Back-off falls actually went DOWN
+    # (3 -> 2), so the "no turn at the rim" half was right. They moved to
+    # `approach` (1 -> 4).
+    #
+    # The two arms are DISTANCE-MATCHED by construction (1.04 m against
+    # 1.05 m), so the live variable left is orientation: the sequence ends
+    # facing AWAY from the basket and a reverse ends facing it, and the
+    # next route then sets out across the basket zone, whose 6 cm rim is
+    # below the ToF guard until the last 0.26 m and trips the walker.
+    #
+    # So the 7.3 s buys two things, not one - distance AND heading - and
+    # each variant bought a different half: 2 s gave neither (0.57 m) and
+    # cost tidying; 4 s gives distance without heading, and costs falls.
+    # That is the whole result, and it is why "make the back-off faster" is
+    # the wrong frame.
     backoff_back_s: float = 0.0
+    backoff_back_wz: float = 0.0
+    # Place a detection with the odometry the duck had WHEN THE FRAME WAS
+    # TAKEN, not the odometry it has now.
+    #
+    # `_locate` reads the camera's height and pitch off the frame ("the frame
+    # says where the camera was") but takes x, y and yaw from the CURRENT
+    # odometry - so a frame that is one detector period old is placed from a
+    # pose the duck has already left. At `approach` speed that is 3 cm of
+    # error at 10 Hz and 6 cm at 5 Hz, against a 3 cm toy.
+    #
+    # That is the shape of the measured detector-rate cliff: 10 -> 5 Hz costs
+    # 0.55 of 6 toys (64 paired seeds, p = 0.0003), and it is the GRASP that
+    # breaks - success 85% -> 67%, attempts per pick 1.19 -> 1.50 - while
+    # picks barely move. The duck finds toys fine and fumbles them.
+    #
+    # The fix uses nothing the robot lacks: it keeps a second of its own
+    # odometry and looks up the pose at `det.t`. No ground truth, no new
+    # sensor. UNTRIED against the current behaviour, so it ships at False;
+    # if it lifts the 5 Hz arm it converts directly into NPU headroom,
+    # because a bigger inference input is bought with frame rate
+    # (docs/camera-hardware.md).
+    stale_fix: bool = False
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
     hold_blind_m: float = 0.12         # ToF returns closer than this while holding are the toy in the beak
@@ -192,6 +286,8 @@ class Tidy:
         self._head_since = -9.0
         self._cam: tuple[float, float] | None = None
         self._cam_yaw = 0.0
+        self._cam_t: float | None = None
+        self._odom_hist: collections.deque = collections.deque(maxlen=60)   # ~1.2 s at 50 Hz
         # Where toys were last seen (odom frame) — the work queue — and the
         # basket once it has been seen at all: it does not move.
         self.memory: dict[str, tuple[float, float, float]] = {}
@@ -353,7 +449,10 @@ class Tidy:
             cam_z, cam_pitch = (p.cam_z_down, p.cam_pitch_down) if self._head_down else (p.cam_z_level, p.cam_pitch_level)
         depression = max(cam_pitch - det.elevation, 0.05)     # rad below horizontal
         horiz_cam = float(np.clip((cam_z - target_z) / math.tan(depression), 0.0, 4.0))
-        x, y, yaw = odom
+        # The frame was taken up to one detector period ago; place it from
+        # the pose of THEN, not of now (see `stale_fix`).
+        x, y, yaw = (self._odom_at(self._cam_t, odom)
+                     if (p.stale_fix and getattr(self, "_cam_t", None) is not None) else odom)
         a = yaw + det.bearing + getattr(self, "_cam_yaw", 0.0)      # camera-frame bearing → body → odom
         # Beyond `far_range` the elevation says almost nothing about range
         # (at 2.3 m the map is 34 m per radian: 0.02 rad of head bob is
@@ -362,6 +461,18 @@ class Tidy:
         # good, so a far sighting means "walk that way, at least this far".
         rng = min(p.cam_ahead + horiz_cam, p.far_range)
         return x + rng * math.cos(a), y + rng * math.sin(a), rng
+
+    def _odom_at(self, t: float, now):
+        """The odometry the duck had at time `t` - the pose a frame stamped
+        `t` should be placed from. Nearest sample within half a control step
+        either side; `now` if the history cannot cover it (a fresh brain, or
+        a frame older than the ring)."""
+        best, best_dt = None, 1e9
+        for ts, pose in self._odom_hist:
+            dt = abs(ts - t)
+            if dt < best_dt:
+                best, best_dt = pose, dt
+        return best if (best is not None and best_dt <= 0.5) else now
 
     def _set_head(self, down: bool, t: float) -> None:
         if down != self._head_down:
@@ -447,9 +558,13 @@ class Tidy:
         self.latency = min(p.latency_max_s, 2.0 * min((a for _, a in self._ages), default=0.0))
         self.stop_margin = p.latency_gain * max(0.0, float(senses.speed)) * self.latency
         odom = self._pose(senses)
+        self._odom_hist.append((t, odom))              # for `stale_fix`: where the duck WAS
         fr = senses.fresh_det(self.DET_MAX_AGE)
         self._cam = (fr.cam_z, fr.cam_pitch) if (fr is not None and fr.cam_z > 0.0) else None
         self._cam_yaw = getattr(fr, "cam_yaw", 0.0) if fr is not None else 0.0
+        # WHEN the frame was taken. A `Detection` carries no timestamp - only
+        # the frame does - so `stale_fix` reads it from here, not from `det`.
+        self._cam_t = fr.t if fr is not None else None
         self._gait.update(senses)                      # is the gait going? (see _turn)
         if self.state in ("scan", "explore", "approach"):
             self._note_basket(senses, odom, t)
@@ -483,7 +598,7 @@ class Tidy:
                             self.est = None
                             self._update_estimate(odom, dd, p.toy_z, t)
                             self.est = saved
-                twist = (0.0, 0.0, p.scan_wz)
+                twist = (0.0, 0.0, max(p.scan_wz, max_wz()) if p.scan_wz >= 1.0 else p.scan_wz)
                 if self._prev_yaw is not None:
                     d = odom[2] - self._prev_yaw
                     self.scan_turned += math.atan2(math.sin(d), math.cos(d))   # SIGNED: the gait wobbles ±0.02 rad a step
@@ -623,7 +738,7 @@ class Tidy:
                 self.t_seen = t
                 self._enter("deliver", t)
             else:
-                twist = (0.0, 0.0, p.scan_wz)
+                twist = (0.0, 0.0, max(p.scan_wz, max_wz()) if p.scan_wz >= 1.0 else p.scan_wz)
                 if t - self.t_state > 14.0:              # a full turn and then some: walk somewhere else
                     self._enter("carry_explore", t)
 
@@ -743,8 +858,8 @@ class Tidy:
 
             if p.backoff_back_s > 0:
                 if t - self.t_state < p.backoff_back_s:
-                    twist = back_up()
-                    note += " · reverse"
+                    twist = back_up(p.backoff_back_wz)
+                    note += " · reverse" + ("" if not p.backoff_back_wz else " (arc)")
                 else:
                     _done_backing_off()
             else:

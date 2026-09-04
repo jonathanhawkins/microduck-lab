@@ -19,7 +19,7 @@ from dataclasses import dataclass, fields, replace
 
 import numpy as np
 
-from .gait import TURN_KICK, GaitWatch, back_up, turn
+from .gait import TURN_KICK, GaitWatch, back_up, clip_wz, max_wz, turn
 from .runtime import REGISTRY, Intent, Senses, age_inputs
 from .tracker import Tracker, TrackerParams
 
@@ -331,7 +331,13 @@ class FollowParams:
     idle_coast: bool = True        # …also while coasting on a lost track
     coast_speed: float = 0.0       # walking speed on a coasted track (0: stand and turn, measured safer)
     lost_s: float = 2.0            # keep the last bearing this long, then search
-    search_wz: float = 1.0             # below 1.0 a COLD walker does not turn at all (exactly 0, both ways)
+    # DEAD KNOB - declared, never read. The search turn goes through
+    # `gait.turn()`, which takes its magnitude from `gait.max_wz()`. Left in
+    # place with this note rather than deleted because deleting it silently
+    # would let the next person re-add it; sweeping it would measure exactly
+    # nothing, which is the failure mode this file documents elsewhere.
+    # (Below 1.0 a COLD walker does not turn at all - exactly 0, both ways.)
+    search_wz: float = 1.0
     tof_stop: float = 0.35         # never walk into what the ToF says is right there
     head_yaw_gain: float = 0.8     # look toward the target (the robot's own gaze intent)
     # Get out of the path of whatever walks at me (ClosingWatch): OFF.
@@ -423,7 +429,7 @@ class Follow:
             if p.k_lead and self._prev_track is not None and senses.t > self._prev_track[0]:
                 rate = (target.bearing - self._prev_track[1]) / (senses.t - self._prev_track[0])
             self._prev_track = (senses.t, target.bearing)
-            wz = float(np.clip(p.k_turn * target.bearing + p.k_lead * float(np.clip(rate, -2.0, 2.0)), -1.0, 1.0))
+            wz = clip_wz(p.k_turn * target.bearing + p.k_lead * float(np.clip(rate, -2.0, 2.0)))
             err = target.range - p.distance
             vx = float(np.clip(p.k_speed * err, 0.0, p.max_speed))
             if abs(target.bearing) > p.turn_first:
@@ -454,7 +460,7 @@ class Follow:
             # brain/gait.py).
             vx, vy = 0.0, 0.0
             if self.state == "search":
-                wz = 1.0
+                wz = max_wz()
             else:
                 self.state = "blocked"
         # Something walking at me - the person turning back, another duck -
@@ -1115,7 +1121,7 @@ class Chase:
         if abs(bearing) > 0.5 and dist > 0.08:
             vx, _, wz = turn(bearing, cold)
             return vx, wz, dist, bearing
-        return (0.25 if dist < slow_in else p.speed), float(np.clip(p.k_turn * bearing, -1.0, 1.0)), dist, bearing
+        return (0.25 if dist < slow_in else p.speed), clip_wz(p.k_turn * bearing), dist, bearing
 
     def _on_the_line(self, odom, spot, u: float, heading_err: float) -> bool:
         """Is the duck already where stage one is trying to put it — on the
@@ -1274,7 +1280,7 @@ class Chase:
             self.state = "yield"
         elif self.state == "push":
             _, _, _, u, _ = self.spot
-            vx, wz = p.push_speed, float(np.clip(p.k_turn * _wrap(u - odom[2]), -1.0, 1.0))
+            vx, wz = p.push_speed, clip_wz(p.k_turn * _wrap(u - odom[2]))
             if t - self.t_state >= p.push_s:
                 self.spot = None
                 self.state = "search"
@@ -1391,13 +1397,13 @@ class Chase:
                 self.lined = False
                 self.state = "lineup"
                 self.t_state = t
-                vx, wz = p.speed, float(np.clip(p.k_turn * ball.bearing, -1.0, 1.0))
+                vx, wz = p.speed, clip_wz(p.k_turn * ball.bearing)
                 gaze_at = ball.range
             elif abs(ball.bearing) > p.turn_first:
                 vx, _, wz = turn(ball.bearing, cold)
                 self.state = "turn"
             else:
-                vx, wz = p.speed, float(np.clip(p.k_turn * ball.bearing, -1.0, 1.0))
+                vx, wz = p.speed, clip_wz(p.k_turn * ball.bearing)
                 self.state = "chase"
                 if fresh and ball.range < p.head_range:
                     gaze_at = ball.range
@@ -1445,7 +1451,7 @@ class Chase:
             if wz > 0 and left_near < p.side_stop and right_near > left_near:
                 wz = -1.0
             elif wz < 0 and right_near < p.side_stop and left_near > right_near:
-                wz = 1.0
+                wz = max_wz()
         if ahead < p.tof_stop and vx > 0 and self.state != "push":
             # A wall or the other duck right there: no walking, no cold-turn
             # creep (measured: every remaining fall was a line-up walking
@@ -1453,9 +1459,9 @@ class Chase:
             # happens — the left turn that starts from a standstill.
             vx = 0.0
             if self.state in ("lineup", "settle", "support"):
-                wz = 1.0 if wz > 0 else -1.0 if wz < 0 else 0.0
+                wz = max_wz() if wz > 0 else -max_wz() if wz < 0 else 0.0
             else:
-                wz = 1.0
+                wz = max_wz()
                 self.state = "blocked"
         # Not moving while stood against something (avoid, blocked) for
         # `stuck_s`, whatever the state labels say frame to frame: retreat.

@@ -118,7 +118,19 @@ class Tracker:
 
     def _place(self, tr: Track, t: float, pos: tuple[float, float], yaw: float) -> None:
         """A hit: the track's odometry-frame position, and a velocity sample
-        against the previous hit when the two are usefully apart in time."""
+        against the previous hit when the two are usefully apart in time.
+
+        KNOWN BIAS, not yet fixed here. `pos`/`yaw` are the pose the caller
+        has NOW, while `t` is the frame's timestamp - so a hit is anchored
+        where the duck is rather than where it was when the picture was
+        taken, and `xy` carries about (duck speed x detector period) of
+        error in the direction of travel: ~3 cm at 10 Hz, ~6 cm at 5 Hz.
+        `brain/tidy.py`'s `stale_fix` is the same bug in the same shape and
+        is being measured first; if it earns its keep, this is the other
+        half. VELOCITY is less affected - both samples carry a similar
+        error, so it largely cancels in the difference - but the POSITION
+        does not, and `Track.xy` is what a dead-reckoned approach steers by.
+        """
         p = self.p
         a = yaw + tr.bearing
         xy = (pos[0] + tr.range * math.cos(a), pos[1] + tr.range * math.sin(a))

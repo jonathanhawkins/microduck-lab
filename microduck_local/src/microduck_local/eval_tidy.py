@@ -20,6 +20,8 @@ import json
 import os
 import time
 
+from pathlib import Path
+
 import numpy as np
 
 from .brain import REGISTRY, Senses
@@ -29,7 +31,8 @@ from .world import World, make_playroom
 
 
 def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str = "ideal",
-            tether_ms: float = 0.0, loop_closure: bool = True) -> dict:
+            tether_ms: float = 0.0, loop_closure: bool = True,
+            walker: str | None = None) -> dict:
     """`tether_ms` (roadmap 12.10): the brain runs somewhere else — a laptop
     over Wi-Fi, a cloud model — its senses reach it half this late and its
     intent lands on the robot half this later (brain/tether.py). 0 = onboard."""
@@ -37,7 +40,7 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
     sc = make_playroom(seed=seed, n=toys)
     sc.ducks[0].odom = odom
     tether = Tether(tether_ms / 1000.0)
-    w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=seed)
+    w = World(sc, infer_for={"d0": onnx_infer(Path(walker) if walker else POLICIES_DIR / "alpha_walking.onnx")}, seed=seed)
     d = w.ducks["d0"]
     from .brain.tidy import TidyParams
     brain = REGISTRY.make("tidy", p=TidyParams(loop_closure=loop_closure))
@@ -94,6 +97,8 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=1, help="seeds run in this many processes (each is single-threaded)")
     ap.add_argument("--odom", default="ideal", choices=["ideal", "datasheet", "hostile"],
                     help="odometry drift preset the brain has to live with (roadmap 1.7)")
+    ap.add_argument("--walker", default=None, metavar="PATH",
+                    help="run this walk policy instead of the shipped alpha_walking.onnx")
     ap.add_argument("--tether-ms", type=float, default=0.0,
                     help="brain round-trip latency: senses out, intent back (12.10; 0 = onboard)")
     ap.add_argument("--no-loop-closure", action="store_true",
@@ -122,7 +127,7 @@ def main() -> None:
             print(_seed_line(r), flush=True)
 
     args_list = [(sd, args.toys, args.seconds, True, args.odom, args.tether_ms,
-                  not args.no_loop_closure) for sd in todo]
+                  not args.no_loop_closure, args.walker) for sd in todo]
     try:
         if args.jobs > 1 and len(todo) > 1:
             import multiprocessing as mp
@@ -133,7 +138,8 @@ def main() -> None:
                     keep(r)
         else:
             for a in args_list:
-                keep(run_one(*a[:3], quiet=not args.verbose, odom=a[4], tether_ms=a[5], loop_closure=a[6]))
+                keep(run_one(*a[:3], quiet=not args.verbose, odom=a[4], tether_ms=a[5],
+                             loop_closure=a[6], walker=a[7] if len(a) > 7 else None))
     finally:
         if out is not None:
             out.close()
