@@ -408,11 +408,79 @@ behavior survives contact with reality.
       | **16:9 PORTRAIT 48 x 77** | 97% | **69%** | 63% | **72%** | 2.10 s |
       | 16:9 LANDSCAPE 77 x 48 | 93% | 60% | 56% | 65% | 3.30 s |
 
-      → **no setting has to change today**: the real sensor mounted portrait
-      scores at or above the placeholder, so the trained brains are not
-      invalidated. Landscape costs 4 points of found rate, 6 of in-frame and
-      60% more time to the handoff. A floor-searching duck wants a TALL frame.
-      **Confirm the mount, then get the focal length**, in that order.
+      **The focal length arrived (2026-09-04) and it is a fisheye: EFL 2.9 mm,
+      H 116° / V 60° / D 142.2°, max DFOV 165°.** Those are the sensor's own
+      axes; mounted rotated 90° they swap into the robot's frame as **60°
+      across, 116° up** — far wider than the 48 x 62 placeholder, and tall,
+      which is the right shape for a duck hunting a floor ball. The knobs are
+      now these values.
+
+      | config | found | in frame | centred | handoff | falls |
+      |---|---|---|---|---|---|
+      | placeholder 48 x 62 | 97% | 66% | 62% | 68% | 1 |
+      | **real, PORTRAIT 60 x 116** | 98% | **75%** | **66%** | **72%** | 5 |
+      | real, LANDSCAPE 116 x 60 | 97% | 65% | 61% | 67% | 2 |
+
+      Portrait is better at finding across three eval seeds (+6 to +9 points
+      of in-frame share); landscape is worse than the placeholder. **Mount it
+      portrait.**
+
+      The projection needed no rework, which is worth knowing before someone
+      "fixes" it: `_ball_sense` divides an ANGLE by the half-FOV angle, an
+      equidistant f-theta mapping — exactly what a fisheye does. A rectilinear
+      (tan/tan) model would have been badly wrong at 58°.
+
+      **Two consequences that are not about numbers:**
+
+      - **The near-floor nod is obsolete.** A ball at the closest spawn
+        distance (0.3 m) sits 35.6° below a level gaze: outside the old 31°
+        half-VFOV, comfortably inside the real 58°. The whole spawn window is
+        now visible with the head level, so the recipe's nose-down pitch band
+        (`_BALL_PITCH_DOWN`) covers a case the hardware does not have. Locked
+        by `test_find_ball_near_balls_no_longer_need_a_nod` so a narrower lens
+        or a landscape remount fails loudly.
+      - **The aim tolerances are FOV-RELATIVE, not angular — and that is a
+        design bug the wider camera exposed.** `eyes_on_ball`'s stds and the
+        handoff gate are all in normalized-bearing units, so widening the
+        camera silently loosened them:
+
+        | | placeholder 48 x 62 | real 60 x 116 |
+        |---|---|---|
+        | "centred" (tight layer) | ±6.0° across, **±7.8° up** | ±7.5° across, **±14.5° up** |
+        | kick handoff gate | ±6.0°, ±7.8° | ±7.5°, **±14.5°** |
+
+        The vertical tolerance nearly DOUBLED without anyone editing a reward.
+        This matters on hardware too: the daemon runs the same gate, and it
+        will now hand the kick a ball 14.5° off vertically.
+
+- [ ] **Retraining at the real FOV made it WORSE — negative result, and the
+      tolerance rescale above is the leading suspect.** Run
+      `teach-find_ball-c06bbb` (same recipe, 8M steps, only the FOV knobs
+      changed). Against the shipped brain, both evaluated in the real-FOV env
+      at `--events 0.33`, three eval seeds:
+
+      | seed | old brain (trained 48 x 62) | new brain (trained 60 x 116) |
+      |---|---|---|
+      | 123 | 98% found, 75% in frame, **5** falls | 88%, 58%, **12** |
+      | 200 | 100%, 66%, **1** | 93%, 63%, **9** |
+      | 300 | 97%, 64%, **2** | 85%, 58%, **14** |
+
+      Rendered, it is bimodal rather than uniformly bad: two of four episodes
+      hold 7.24 s aim streaks at 98-99% in frame, one falls at 1.26 s, one
+      holds the ball 24% of the time. So the skill is there and something is
+      destabilising it.
+      → **decide on:** re-express the centring stds and the handoff gate in
+      ANGLE (degrees) rather than normalized bearing, so the camera cannot
+      silently rescale the reward, then retrain and compare. If that recovers
+      it, the tolerance rescale was the cause and the fix belongs in the
+      recipe permanently.
+
+      **Left in the tree, deliberately inconsistent:** the knobs are the real
+      camera's, and `policies/find_ball/policy.onnx` is still the brain
+      trained at 48 x 62 — because it is *better in the real-FOV env* than the
+      one trained there. Fidelity beats consistency here: modelling the wrong
+      camera would have hidden all of the above. One training seed per arm, as
+      always.
 
 - [x] **Detector rate is the real compute requirement: ≥ 10 Hz.** The sensor's
       90 fps is ~9x more than this pipeline can consume, so frame rate is not

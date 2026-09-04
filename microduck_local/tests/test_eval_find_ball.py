@@ -126,7 +126,11 @@ def test_env_overrides_reach_the_detector_and_beat_the_flags():
         env.reset(seed=0)
         return math.degrees(env._ball_k["half_h"])
 
-    assert round(half_h(), 1) == 24.0                                # default 48 deg
+    from microduck_local.behaviors import _BALL_KNOBS
+
+    # Against the recipe's own default, not a literal — the camera's real FOV
+    # is documented in ball.py and has already moved once.
+    assert round(half_h(), 1) == round(_BALL_KNOBS["MICRODUCK_BALL_HFOV_DEG"] / 2, 1)
     assert round(half_h(MICRODUCK_BALL_HFOV_DEG="90"), 1) == 45.0    # the knob moves
 
     # An explicit --env wins over the --events shorthand for the same key.

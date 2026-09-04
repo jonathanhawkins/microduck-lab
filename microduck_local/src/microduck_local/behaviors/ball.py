@@ -14,7 +14,7 @@ from .locomotion import *  # noqa: F401,F403 — cascades the full upstream name
 #
 # There is no ball in the physics. The ball is a point the env tracks and
 # projects through the robot's own `head_camera` (the MJCF element, whose +z
-# is the optical axis, -x image-up and -y image-right — the IMX219 sits
+# is the optical axis, -x image-up and -y image-right — the sensor sits
 # rotated 90 degrees, which is also why the daemon rotates its frames). What
 # the policy sees is exactly what a detector on the robot would hand it, and
 # it rides the four HEAD command slots (obs[51:55]) — a task-specific meaning
@@ -68,30 +68,35 @@ from .locomotion import *  # noqa: F401,F403 — cascades the full upstream name
 
 BALL_RADIUS = 0.035           # the 70 mm / 15 g kick ball (microduck_rl ball.xml)
 _BALL_KNOBS = {
-    # Camera field of view as the detector sees it, portrait (the sensor is
-    # mounted rotated 90 deg, which is also why the daemon rotates its frames).
+    # Camera field of view as the detector sees it, in the ROBOT's frame.
     #
-    # These two are PLACEHOLDERS and the pair is internally inconsistent with
-    # the actual sensor: they were written for a 4:3 IMX219, and the camera is
-    # 1920x1080 on 2.75 um pixels (1/2.9 in) — a **16:9** part, 5.28 x 2.97 mm
-    # active, 6.06 mm diagonal. A 16:9 sensor in portrait has a tall/wide
-    # angular ratio of 1.778, so VFOV should be
-    # 2*atan(1.778 * tan(HFOV/2)) — about 77 deg against this 48 deg, not 62.
-    # The absolute values cannot be derived without the LENS FOCAL LENGTH,
-    # which nobody has written down; for reference, portrait f=2.8 mm gives
-    # 56 x 87 deg, f=3.6 mm gives 45 x 73 deg, f=4.0 mm gives 41 x 67 deg.
+    # From the camera's own datasheet (2026-09-04): EFL 2.9 mm giving
+    # H 116 deg, V 60 deg, D 142.2 deg on a 1920x1080 / 2.75 um / 1/2.9 in
+    # sensor. Those are the SENSOR's own axes; the part is mounted rotated
+    # 90 deg (which is why the daemon rotates its frames), so in the robot's
+    # frame they SWAP: 60 deg across the frame, 116 deg up it. Tall and
+    # narrow, which is the right shape for a duck hunting a ball on the floor.
     #
-    # Measured tolerance to being wrong (docs/roadmap.md section 2, 60-episode
-    # batteries at --events 0.33): found rate does not move at all across HFOV
-    # 24-90 deg, because the detector reports bearing NORMALIZED by the FOV and
-    # the geometry cancels. VFOV is the sensitive axis — in-frame share runs
-    # 58% at 40 deg to 71% at 90 deg — and the ORIENTATION matters more than
-    # either: portrait 48x77 scores at or above this placeholder pair, while
-    # landscape 77x48 loses 4 points of found rate and 3 of handoff. A
-    # floor-searching duck wants a TALL frame. Confirm the mount before the
-    # focal length.
-    "MICRODUCK_BALL_HFOV_DEG": 48.0,
-    "MICRODUCK_BALL_VFOV_DEG": 62.0,
+    # The previous values here (48 x 62) were placeholders written for a 4:3
+    # IMX219 that this robot does not carry. They were wrong in both axes and,
+    # worse, wrong in RATIO: 1.29 against the real 1.93.
+    #
+    # A 116 deg lens is a fisheye, so mind the projection — but the model is
+    # already right: `_ball_sense` computes an ANGLE (atan2) and divides by the
+    # half-FOV angle, which is an equidistant f-theta mapping, exactly what a
+    # fisheye does. A rectilinear model (tan/tan) would be badly wrong out at
+    # 58 deg. Nothing to rework; these numbers were the whole gap.
+    #
+    # Measured (docs/roadmap.md section 2, 60-episode batteries at
+    # --events 0.33): found rate is flat across HFOV 24-90 deg, because the
+    # bearing is reported NORMALIZED by the FOV and the geometry cancels.
+    # VFOV is the axis that bites — in-frame share runs 58% at 40 deg to 75%
+    # at 116 — and ORIENTATION matters most: mounted the other way round
+    # (116 across, 60 up) the duck loses 10 points of in-frame share and takes
+    # 40% longer to reach the kick handoff. **If the camera is ever remounted
+    # landscape, swap these back and retrain.**
+    "MICRODUCK_BALL_HFOV_DEG": 60.0,
+    "MICRODUCK_BALL_VFOV_DEG": 116.0,
     "MICRODUCK_BALL_MAX_RANGE": 3.0,     # m — beyond this the detector has no box
     # Spawn: distance window and how far around the duck (yaw, rad) the
     # ball may start. pi = anywhere; 1.2 = in the front 140 deg.

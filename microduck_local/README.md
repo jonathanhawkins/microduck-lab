@@ -320,11 +320,28 @@ daemon fills the slots for this brain:
 | 59, 60 | **scan clock**: sin/cos of a phase running at 1/4 s while the ball is lost, restarting at 0 at every loss, parked at (0, 1) while seen — the imitation recipe's phase trick, because a memoryless policy cannot sweep on its own (a sweep is a limit cycle in head yaw; 2M PPO steps produced a static gaze-vs-belief instead) but can map a phase to a sweep |
 | 54 | the daemon's **belief**: the ball's bearing in the duck's yaw frame ÷ π (+ = left) × confidence. 1.0 while seen; while lost, the last bearing dead-reckoned by the gyro yaw rate with confidence fading as exp(−t/4 s) down to a 0.15 floor. At episode start: a noisy prior at half confidence in 70% of episodes (the ball was in view before this brain took over), else the fixed convention +0.15 — "nothing known, sweep left first" |
 
-Detector realism: reports every 2 control steps (a 15–30 Hz NPU detector
-against the 50 Hz loop), ±0.02 bearing jitter under `obs_noise`, and an
-optional dropout knob. FOV defaults to the IMX219 as the daemon sees it
-(portrait after its 90° rotation: ~48° across, ~62° tall) —
-`MICRODUCK_BALL_HFOV_DEG` / `_VFOV_DEG` if the real intrinsics differ.
+Detector realism: reports every 2 control steps (25 Hz against the 50 Hz
+loop), ±0.02 bearing jitter under `obs_noise`, and an optional dropout knob.
+FOV is the real camera's — a 1920×1080 / 2.75 µm / 1/2.9″ sensor behind a
+2.9 mm lens (116° × 60°), mounted rotated 90°, so in the robot's frame it is
+**60° across and 116° up**: tall and narrow, the right shape for hunting a
+ball on the floor (`MICRODUCK_BALL_HFOV_DEG` / `_VFOV_DEG`).
+
+Two numbers from the sensitivity sweeps in `docs/roadmap.md` are worth
+carrying into any hardware discussion:
+
+- **The detector needs ≥ 10 Hz.** 50 / 25 / 17 / 10 Hz are indistinguishable;
+  between 10 and 6 Hz the behavior falls off a cliff (centred share 60% → 23%,
+  kick handoff 75% → 13%). The sensor's 90 fps is ~9× more than the pipeline
+  can use, so frame rate is not where compute should go.
+- **Mount it portrait.** Rotated the other way (116° across, 60° up) costs
+  ~10 points of in-frame share and 40% more time to the kick handoff.
+
+Absolute HFOV barely matters — found rate is flat from 24° to 90°, because the
+detector reports bearing *normalized by the field of view*, so the geometry
+cancels. VFOV is the axis that bites. And note the projection is already right
+for a fisheye: `_ball_sense` divides an angle by the half-FOV angle, which is
+the equidistant f-θ mapping a 116° lens actually uses.
 
 The recipe pays for the ball being in frame, centred (two-layer Gaussian),
 and for the body facing it; while the ball is lost the only income is a

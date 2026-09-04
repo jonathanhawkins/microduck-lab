@@ -1192,8 +1192,15 @@ def test_find_ball_rides_the_head_slots_and_nothing_else():
     """The ball's detector output lives in obs[51:55] (bx, by, seen, memory)
     and the twist stays a trick's pinned zero. Placing the ball straight
     ahead at 1 m must read as seen, centred horizontally and BELOW centre
-    (the camera is 25 cm up and level at STAND); at 0.3 m it is under the
-    field of view — finding a near ball means nodding down."""
+    (the camera is 25 cm up and level at STAND).
+
+    The NEAR end changed with the real camera and it is worth knowing: this
+    test used to assert that a ball at 0.3 m is under the field of view, which
+    was true of the 62 deg placeholder VFOV (half-angle 31 deg against a
+    35.6 deg depression). The actual lens is 116 deg in this axis, half-angle
+    58 deg, so the whole spawn window is in frame at a LEVEL gaze and nodding
+    down is no longer how you find a near ball. See test_find_ball_near_balls_
+    no_longer_need_a_nod for the consequence."""
     from microduck_local.behaviors import _ball_place, _ball_sense
     env = _ball_env()
     _ball_place(env, 1.0, 0.0)
@@ -1203,10 +1210,38 @@ def test_find_ball_rides_the_head_slots_and_nothing_else():
     assert obs[53] == 1.0
     assert abs(obs[51]) < 0.05 and -1.0 < obs[52] < -0.2
     assert abs(obs[54]) < 0.02          # memory = body bearing / pi = 0
+    # Still below centre, and further down than the 1 m ball.
+    far_by = obs[52]
     _ball_place(env, 0.3, 0.0)
     _ball_sense(env, force=True)
     obs = env._get_obs()
-    assert obs[53] == 0.0 and obs[51] == 0.0 and obs[52] == 0.0
+    assert obs[53] == 1.0 and obs[52] < far_by
+
+
+def test_find_ball_near_balls_no_longer_need_a_nod():
+    """The recipe's near-floor pitch band exists because a ball closer than
+    ~0.5 m used to sit BELOW a level gaze. The real camera (116 deg vertical,
+    half-angle 58) removes that constraint: every distance the spawner can
+    produce is in frame with the head level, so the nod-down band is now
+    covering a case the hardware does not have.
+
+    Locked so that swapping the camera back to a narrow lens — or remounting
+    it landscape, which puts 60 deg on this axis — fails here loudly rather
+    than quietly making the recipe's pitch bands load-bearing again."""
+    from microduck_local.behaviors import _BALL_KNOBS, _ball_place, _ball_sense
+    env = _ball_env()
+    lo, hi = (_BALL_KNOBS["MICRODUCK_BALL_DIST_LO"],
+              _BALL_KNOBS["MICRODUCK_BALL_DIST_HI"])
+    for d in (lo, 0.5, 1.0, hi):
+        _ball_place(env, d, 0.0)
+        _ball_sense(env, force=True)
+        assert env._ball_seen, f"ball at {d} m is out of frame at a level gaze"
+    # ...and it is genuinely the VERTICAL axis doing it: at the old 62 deg
+    # placeholder the closest spawn was not visible.
+    narrow = _ball_env(spawn_overrides={"MICRODUCK_BALL_VFOV_DEG": "62"})
+    _ball_place(narrow, lo, 0.0)
+    _ball_sense(narrow, force=True)
+    assert not narrow._ball_seen
 
 
 def test_find_ball_bearing_signs_match_the_detector():
