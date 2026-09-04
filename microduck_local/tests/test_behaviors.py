@@ -1794,3 +1794,121 @@ def test_stale_fix_carries_the_held_bearing_without_compounding_it():
     steps = [b - a for a, b in zip(seen, seen[1:])]
     assert min(steps) > 0.0 and max(steps) < 1.6 * min(steps), (
         f"correction is compounding, not tracking total rotation: {seen}")
+
+# ---------------------------------------------------------------------------
+# deep_squat — the recipe that lives UNDER the walk env's fall line, and the
+# per-recipe height_termination knob that makes it learnable.
+
+def _quiet_env(behavior_id, **kw):
+    from microduck_local.behaviors import BehaviorEnv
+    env = BehaviorEnv(behavior_id, obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0, **kw)
+    env.reset()
+    return env
+
+
+def _fold_until_fall_line(env, max_steps=60):
+    """Drop into a level, symmetric squat (1.4 rad of knee, the hip eased
+    0.2 rad, the ankle closing the chain so the feet stay flat) over five
+    control steps and return (step, terminated, gz) at the first step the
+    trunk is under FALL_HEIGHT. Measured on the no-randomizer env: crosses at
+    step 10 with projected-gravity z ~ -0.81, far from the tilt rule's
+    -0.342, so the only rule that can fire at the crossing is the height one.
+    (The ground spawn's tipped fold does NOT work here: it topples as it
+    sinks and the tilt rule fires on the crossing step in every env.)"""
+    from microduck_local import contract as C
+    dp = np.asarray(C.DEFAULT_POSE, dtype=np.float64)
+    q = dp.copy()
+    q[3] = dp[3] + 1.4;  q[2] = dp[2] + 0.2;  q[4] = -(q[2] + q[3])
+    q[12] = dp[12] - 1.4; q[11] = dp[11] - 0.2; q[13] = -(q[11] + q[12])
+    full = (q - dp).astype(np.float32)
+    for i in range(max_steps):
+        _, _, terminated, _, _ = env.step(full * min(1.0, (i + 1) / 5))
+        if float(env._trunk_xpos[2]) < env.FALL_HEIGHT:
+            return i, bool(terminated), float(env._projected_gravity()[2])
+        if terminated:
+            break
+    raise AssertionError("the squat never took the trunk under FALL_HEIGHT")
+
+
+def test_height_termination_is_a_recipe_knob():
+    """Behavior.height_termination reaches the env the way terminate_on_fall
+    does: locomotion turns it off (GPU parity), the deep squat turns it off
+    (its target is under the line), standing tricks keep it, and an explicit
+    env kwarg still wins. The lab preview mirrors it like terminate_on_fall."""
+    from microduck_local.behaviors import BEHAVIORS, Behavior
+    from microduck_local import viz_server as V
+    assert Behavior.__dataclass_fields__["height_termination"].default is True
+    assert BEHAVIORS["run"].height_termination is False
+    assert BEHAVIORS["deep_squat"].height_termination is False
+    assert BEHAVIORS["crouch"].height_termination is True
+    for bid, expect in (("deep_squat", False), ("crouch", True)):
+        env = _quiet_env(bid)
+        assert env.height_termination is expect, bid
+        env.close()
+    env = _quiet_env("crouch", height_termination=False)
+    assert env.height_termination is False
+    env.close()
+    assert V.env_kwargs_for_behavior(BEHAVIORS["deep_squat"])["height_termination"] is False
+    assert "height_termination" not in V.env_kwargs_for_behavior(BEHAVIORS["crouch"])
+
+
+def test_deep_squat_target_is_under_the_fall_line_and_distinct_from_crouch():
+    """Why the knob exists: the target sits under FALL_HEIGHT (a z-kill recipe
+    could never reach it), and the height term separates the squat from
+    crouch's depth by ~2x. The first draft's target was 3 mm from crouch's and
+    paid within 1% at both depths."""
+    from microduck_local.behaviors import _squat_target_z, _squat_z
+    env = _quiet_env("deep_squat")
+    target = _squat_target_z(env)
+    assert target < env.FALL_HEIGHT
+    assert target < env.stand_z - 0.035          # deeper than crouch
+    pays = {}
+    for name, z in (("stand", env.stand_z), ("crouch", env.stand_z - 0.035),
+                    ("fall_line", env.FALL_HEIGHT), ("target", target)):
+        env._trunk_xpos[2] = z
+        pays[name] = _squat_z(env)
+    env.close()
+    assert pays["target"] == pytest.approx(1.0)
+    assert pays["crouch"] < 0.6 * pays["target"]
+    assert 0.1 < pays["stand"] < pays["crouch"]
+    assert pays["fall_line"] > pays["crouch"]     # the slope keeps pointing down
+
+
+def test_deep_squat_env_keeps_running_under_the_fall_line():
+    """Same fold, two envs: crouch's env (z-kill on) ends the episode the step
+    the trunk crosses FALL_HEIGHT; the deep squat's env does not, so its goal
+    state can be sampled at all."""
+    crouch = _quiet_env("crouch")
+    step_c, ended_c, gz_c = _fold_until_fall_line(crouch)
+    crouch.close()
+    squat = _quiet_env("deep_squat")
+    step_s, ended_s, gz_s = _fold_until_fall_line(squat)
+    squat.close()
+    assert (step_c, gz_c) == (step_s, gz_s)       # identical physics up to the crossing
+    assert gz_c < -0.6                            # upright: the tilt rule is nowhere near
+    assert ended_c is True
+    assert ended_s is False
+
+
+def test_deep_squat_recipe_contract():
+    from microduck_local.behaviors import match_behavior
+    b = match_behavior("deep squat")
+    assert b.id == "deep_squat"
+    assert match_behavior("深蹲").id == "deep_squat"
+    # crouch keeps the bare words it owns; only the longer phrase reaches the squat
+    assert match_behavior("crouch down").id == "crouch"
+    assert match_behavior("squat").id == "crouch"
+    assert round(b.episode_s * 50) == 600
+    env = _quiet_env("deep_squat")
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        _, reward, terminated, truncated, _ = env.step(
+            rng.uniform(-0.3, 0.3, env.action_space.shape).astype(np.float32))
+        assert np.isfinite(reward)
+        for t in b.terms:
+            if t.is_penalty:
+                assert t.fn(env) <= 0.0, t.key
+        if terminated or truncated:
+            break
+    env.close()
