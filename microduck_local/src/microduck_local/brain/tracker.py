@@ -125,11 +125,26 @@ class Tracker:
         where the duck is rather than where it was when the picture was
         taken, and `xy` carries about (duck speed x detector period) of
         error in the direction of travel: ~3 cm at 10 Hz, ~6 cm at 5 Hz.
-        `brain/tidy.py`'s `stale_fix` is the same bug in the same shape and
-        is being measured first; if it earns its keep, this is the other
-        half. VELOCITY is less affected - both samples carry a similar
-        error, so it largely cancels in the difference - but the POSITION
-        does not, and `Track.xy` is what a dead-reckoned approach steers by.
+        `brain/tidy.py`'s `stale_fix` was the same bug in the same shape and
+        has now been measured. THE RESULT IS NOT "FIX IT HERE TOO".
+        Correcting the placement alone LOST 0.38 toys (p = 0.031) even
+        though it cut the estimate's error from 5.4 cm to 3.7 cm, because
+        the stop distance downstream had been hand-fitted against the
+        biased estimate and absorbed it. Only correcting BOTH won
+        (+0.44 toys, grasp 88% -> 93%). See AGENTS.md rule 7.
+
+        So before fixing this one, find what was fitted around it.
+        `Track.xy` feeds the chase brain's line-up, whose offsets and
+        tolerances were tuned by measurement WITH this bias present - the
+        same trap, one benchmark over. And note the ball is not a toy: it
+        MOVES, at up to 1.4 m/s, which is 14 cm per detector period against
+        this bias's ~3 cm, so `predict()` and not this is the dominant term
+        for a rolling ball. This bias is worth chasing only for a ball that
+        is still while the duck is walking.
+
+        VELOCITY is less affected - both samples carry a similar error, so
+        it largely cancels in the difference - but the POSITION does not,
+        and `Track.xy` is what a dead-reckoned approach steers by.
         """
         p = self.p
         a = yaw + tr.bearing
