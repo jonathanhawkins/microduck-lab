@@ -58,7 +58,8 @@ def t_critical(df: int) -> float:
     return T_95[1]
 
 
-def paired_delta(baseline: list[float], candidate: list[float]) -> dict:
+def paired_delta(baseline: list[float], candidate: list[float],
+                 lower_is_better: bool = False) -> dict:
     """A PAIRED comparison of two arms scored on the same training seeds.
 
     Why paired: run-to-run variance on the follow benchmark is about +-0.02
@@ -69,14 +70,21 @@ def paired_delta(baseline: list[float], candidate: list[float]) -> dict:
     -0.002.
 
     `baseline[i]` and `candidate[i]` must be the same training seed.
+
+    `lower_is_better` flips the VERDICT for metrics like fall rate or
+    tracking error, where a positive delta is a regression. Without it the
+    verdict is a trap: a real comparison reported "candidate is better" for a
+    fall rate that had gone from 0.21 to 0.65. The numbers were right and the
+    label was backwards, which is the worst way to be wrong.
     """
     a, b = np.asarray(baseline, float), np.asarray(candidate, float)
     if a.shape != b.shape or a.size == 0:
         raise ValueError("paired arms must be the same non-empty length")
     d = b - a
     n = d.size
-    out = {"n": int(n), "mean": float(d.mean()),
-           "candidate_ahead": int((d > 0).sum()), "diffs": [float(x) for x in d]}
+    ahead = int((d < 0).sum() if lower_is_better else (d > 0).sum())
+    out = {"n": int(n), "mean": float(d.mean()), "lower_is_better": bool(lower_is_better),
+           "candidate_ahead": ahead, "diffs": [float(x) for x in d]}
     if n < 2:
         out.update(sd=None, lo=None, hi=None,
                    verdict="one pair resolves nothing — run more training seeds")
@@ -86,8 +94,11 @@ def paired_delta(baseline: list[float], candidate: list[float]) -> dict:
     t = t_critical(n - 1)
     lo, hi = d.mean() - t * se, d.mean() + t * se
     out.update(sd=sd, lo=float(lo), hi=float(hi))
-    out["verdict"] = ("includes 0: unresolved" if lo <= 0 <= hi else
-                      "candidate is better" if lo > 0 else "baseline is better")
+    if lo <= 0 <= hi:
+        out["verdict"] = "includes 0: unresolved"
+    else:
+        cand_wins = (hi < 0) if lower_is_better else (lo > 0)
+        out["verdict"] = "candidate is better" if cand_wins else "baseline is better"
     return out
 
 
@@ -112,6 +123,14 @@ def read_progress(run_dir: Path, metric: str = "ep_rew") -> tuple[np.ndarray, np
             r = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # A derived rate: the SUM divided by the episode length it accrued
+        # over. `ep_rew` alone is not comparable across checkpoints whose
+        # episodes differ in length, which on a falling recipe they always do.
+        if metric.endswith("_per_step"):
+            base = metric[: -len("_per_step")]
+            if r.get(base) is None or not r.get("ep_len"):
+                continue
+            r = {**r, metric: float(r[base]) / max(float(r["ep_len"]), 1.0)}
         if metric in r and r.get(metric) is not None and "steps" in r:
             v = float(r[metric])
             if np.isfinite(v):
@@ -181,7 +200,13 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("a", type=Path, help="baseline run dir (runs/<name> or brains/<name>)")
     ap.add_argument("b", type=Path, help="candidate run dir")
-    ap.add_argument("--metric", default="ep_rew")
+    ap.add_argument("--metric", default="ep_rew",
+                    help="progress.jsonl field to compare. Use `ep_rew_per_step` when the "
+                         "arms' episode LENGTHS differ: ep_rew is a per-episode SUM, so on "
+                         "a recipe whose episodes terminate early it tracks survival rather "
+                         "than the rate of anything. Measured: over one run's checkpoints "
+                         "ep_rew rose 397 -> 708 while ep_len rose 58 -> 100 and ground "
+                         "speed went +0.294 -> -0.099 m/s")
     ap.add_argument("--points", type=int, default=200, help="common-grid resolution")
     ap.add_argument("--tail", type=float, default=0.25,
                     help="fraction of the overlap treated as 'settled' (default the last quarter)")

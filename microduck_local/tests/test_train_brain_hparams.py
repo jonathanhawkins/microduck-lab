@@ -202,3 +202,36 @@ def test_the_schedule_is_off_by_default(tmp_path):
     d = _train(tmp_path, "nosched", [])
     meta = json.loads((d / "brain.json").read_text())
     assert meta["decide_every_start"] is None and meta["decide_every"] == 5
+
+
+def test_brain_net_arch_is_a_capacity_knob_not_a_throughput_one(tmp_path):
+    """Recorded here because the reasoning is the point, not the flag.
+
+    On the TRICK trainer the network is 54% of wall time (12% rollout forward
+    + 42% update) and shrinking it is worth ~1.44x. On the BRAIN trainer the
+    update is **5.3%** and collection is 94.7% — the brain env is physics, and
+    a 128-128 MLP over 80 observations costs almost nothing. Measured on the
+    A/B arms themselves: 128-128 and 256-256 ran 113,664 and 112,128 steps in
+    the same 85 s. So this flag exists to ask whether the brain is
+    CAPACITY-limited, and anyone reaching for it to go faster is at the wrong
+    trainer."""
+    small = _train(tmp_path, "n64", ["--net-arch", "64,64"])
+    big = _train(tmp_path, "n256", ["--net-arch", "256,256"])
+    from stable_baselines3 import PPO
+
+    def params(d):
+        return sum(p.numel() for p in PPO.load(str(d / "model"), device="cpu")
+                   .policy.parameters())
+
+    assert json.loads((small / "brain.json").read_text())["net_arch"] == "64,64"
+    assert json.loads((big / "brain.json").read_text())["net_arch"] == "256,256"
+    assert params(small) < params(big) / 4, "256-256 should be far larger than 64-64"
+
+
+def test_brain_net_arch_and_epochs_default_unchanged(tmp_path):
+    """Neither knob may move the shipped recipe until an A/B says so."""
+    d = _train(tmp_path, "dflt", [])
+    meta = json.loads((d / "brain.json").read_text())
+    assert meta["net_arch"] == "128,128" and meta["n_epochs"] == 5
+    from stable_baselines3 import PPO
+    assert PPO.load(str(d / "model"), device="cpu").n_epochs == 5

@@ -165,3 +165,82 @@ def test_paired_arms_must_line_up():
         paired_delta([0.9, 0.9], [0.9])
     with pytest.raises(ValueError):
         paired_delta([], [])
+
+
+def test_ep_rew_is_a_sum_and_per_step_is_the_rate(tmp_path):
+    """The trap, and it is not hypothetical: on one real pair of runs
+    `ep_rew` said "B is better (+8.7%)" and `ep_rew_per_step` said "A is
+    better (-17.1%)" — opposite verdicts from the same two files.
+
+    `ep_rew` is a per-episode SUM. On a recipe whose episodes terminate early
+    (every locally trained `run` policy falls in 100% of episodes) it rises
+    as the policy learns to SURVIVE, whether or not it does the task better.
+    """
+    steps = np.arange(1, 41) * 1000
+    # A: short episodes, high rate. B: episodes twice as long, LOWER rate.
+    a_len, b_len = np.full(40, 50.0), np.linspace(50, 150, 40)
+    a_rate, b_rate = np.full(40, 8.0), np.full(40, 6.0)
+
+    def write(d, lens, rate):
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "progress.jsonl").open("w") as f:
+            for i, (s, ln, r) in enumerate(zip(steps, lens, rate)):
+                f.write(json.dumps({"steps": int(s), "ep_rew": float(ln * r),
+                                    "ep_len": float(ln),
+                                    "elapsed_s": float(i + 1)}) + "\n")
+        return d
+
+    a = write(tmp_path / "a", a_len, a_rate)
+    b = write(tmp_path / "b", b_len, b_rate)
+
+    # By the SUM, B wins — purely because its episodes got longer.
+    by_sum = compare(a, b, metric="ep_rew")
+    assert by_sum["tail_delta"] > 0 and by_sum["verdict"] == "B is better"
+    # By the RATE, A wins, which is the truth about this pair.
+    by_rate = compare(a, b, metric="ep_rew_per_step")
+    assert by_rate["tail_delta"] < 0 and by_rate["verdict"] == "A is better"
+    assert by_rate["a"]["tail_mean"] == pytest.approx(8.0, abs=1e-6)
+    assert by_rate["b"]["tail_mean"] == pytest.approx(6.0, abs=1e-6)
+
+
+def test_per_step_needs_an_episode_length_to_divide_by(tmp_path):
+    """Rows without ep_len are skipped rather than silently treated as sums."""
+    d = tmp_path / "noep"
+    d.mkdir()
+    with (d / "progress.jsonl").open("w") as f:
+        for s in (100, 200, 300):
+            f.write(json.dumps({"steps": s, "ep_rew": 10.0, "elapsed_s": 1.0}) + "\n")
+    with pytest.raises(SystemExit):
+        read_progress(d, metric="ep_rew_per_step")
+
+
+def test_a_lower_is_better_metric_is_not_reported_backwards():
+    """The worst way to be wrong: right numbers, backwards label. A real
+    14-seed comparison reported "candidate is better" for a fall rate that
+    had gone from 0.21 to 0.65, because the delta was positive."""
+    from microduck_local.bench_ab import paired_delta
+
+    clone = [0.25, 0.10, 0.25, 0.07, 0.17, 0.28, 0.08,
+             0.20, 0.18, 0.33, 0.20, 0.35, 0.32, 0.22]
+    tuned = [0.82, 0.35, 1.00, 0.50, 1.00, 0.03, 0.55,
+             0.40, 0.80, 1.00, 0.20, 0.50, 1.00, 1.00]
+
+    naive = paired_delta(clone, tuned)
+    assert naive["verdict"] == "candidate is better", "the trap, reproduced"
+
+    correct = paired_delta(clone, tuned, lower_is_better=True)
+    assert correct["verdict"] == "baseline is better"
+    assert correct["candidate_ahead"] == 1, "one seed of fourteen fell less"
+    # The arithmetic is identical either way — only the reading changes.
+    assert correct["mean"] == pytest.approx(naive["mean"])
+    assert correct["lo"] == pytest.approx(naive["lo"])
+
+
+def test_lower_is_better_still_calls_a_genuine_improvement():
+    from microduck_local.bench_ab import paired_delta
+
+    before = [0.50, 0.55, 0.45, 0.60, 0.52]
+    after = [0.20, 0.25, 0.15, 0.30, 0.22]
+    r = paired_delta(before, after, lower_is_better=True)
+    assert r["verdict"] == "candidate is better" and r["candidate_ahead"] == 5
+    assert r["hi"] < 0

@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -209,8 +211,47 @@ def default_teacher() -> Path:
     return C.MICRODUCK_RL_DIR.parent / "microduck" / "policies" / "alpha_walking.onnx"
 
 
+def cache_is_valid(d: Path) -> bool:
+    """Is this cache entry usable, not merely present?
+
+    Checking `model.zip` EXISTS is not enough: a half-written one is exactly
+    what a lost race leaves behind, and SB3 then fails deep inside training
+    with "wasn't a zip-file" — after the vec-env workers have already forked.
+    Validating on read means a corrupt entry is silently rebuilt instead.
+    """
+    import zipfile
+
+    m, vn = d / "model.zip", d / "vecnormalize.pkl"
+    if not (m.exists() and vn.exists() and vn.stat().st_size > 0):
+        return False
+    try:
+        return zipfile.is_zipfile(m)
+    except OSError:
+        return False
+
+
+# Fitting budget. 120 epochs, not 40, because cloning FIDELITY is what
+# decides whether the clone stays upright — correlation(action MSE, fall
+# rate) = +0.93 over five budgets, measured on the deterministic export:
+#
+#   episodes  epochs   mse rad^2   falls   ep_len   m/s
+#        120      30     0.00030    0.75      289   0.238
+#        250      40     0.00017    0.08      924   0.193   <- the old default
+#        250     120     0.00011    0.00     1000   0.196
+#        600     120     0.00006    0.00     1000   0.194
+#
+# Below ~0.00011 rad^2 the falling stops outright, at the teacher's own
+# 0.196 m/s. The residual is not a diverging one — the clone tracks the
+# teacher to a FLAT 0.021 rad through a whole episode, it does not drift —
+# so this is approximation error costing robustness, not distribution shift,
+# and more fitting is the direct fix. It costs 33 s once (17 s -> 50 s) and
+# the result is cached.
+DISTILL_EPISODES = 250
+DISTILL_EPOCHS = 120
+
+
 def ensure_distilled(teacher: Path | str | None = None, seed: int = 0,
-                     episodes: int = 250, epochs: int = 40,
+                     episodes: int = DISTILL_EPISODES, epochs: int = DISTILL_EPOCHS,
                      cache_dir: Path | None = None, critic: bool = True) -> Path:
     """A distilled warm-start run dir, built once and reused.
 
@@ -235,18 +276,36 @@ def ensure_distilled(teacher: Path | str | None = None, seed: int = 0,
     ).hexdigest()[:16]
     root = cache_dir or (RUNS_DIR / ".distill")
     out = root / key
-    if (out / "model.zip").exists() and (out / "vecnormalize.pkl").exists():
+    if cache_is_valid(out):
         return out
     print(f"[distill] cloning {t.name} -> {out} (once; cached by teacher+seed)", flush=True)
     obs, act, ret = collect(str(t), episodes, 0.15, 0.60, seed=seed)
     print(f"[distill]   {len(obs)} transitions; teacher |action| {np.abs(act).mean():.3f}; "
           f"return {ret.mean():.1f} +- {ret.std():.1f}", flush=True)
-    mse = fit(obs, act, out, epochs=epochs, seed=seed,
+    # Build in a PRIVATE directory, then move it into place with a rename.
+    # Both arms of a paired A/B share a cache key (same teacher, same seed)
+    # and launch together, so without this they both miss, both `fit` into
+    # the same path, and interleave their writes — which produced a
+    # `model.zip` that "wasn't a zip-file" and killed two training runs.
+    tmp = root / f".tmp-{os.getpid()}-{key}"
+    mse = fit(obs, act, tmp, epochs=epochs, seed=seed,
               returns=ret if critic else None)
-    (out / "distill.json").write_text(json.dumps({
+    (tmp / "distill.json").write_text(json.dumps({
         "teacher": str(t), "teacher_size": st.st_size, "seed": seed,
         "episodes": episodes, "epochs": epochs, "mse": mse,
         "critic": critic}, indent=2))
+    try:
+        os.rename(tmp, out)          # atomic while `out` does not exist
+    except OSError:
+        if cache_is_valid(out):
+            # A sibling won the race. Drop our private copy — leaving it
+            # behind would grow a junk directory per lost race — and use theirs.
+            shutil.rmtree(tmp, ignore_errors=True)
+            return out
+        # `out` exists but is unusable (the interleaved-write case). Move it
+        # aside rather than deleting, then land ours.
+        os.rename(out, root / f".stale-{os.getpid()}-{key}")
+        os.rename(tmp, out)
     print(f"[distill]   done, mse {mse:.5f} rad^2", flush=True)
     return out
 
@@ -255,8 +314,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--teacher", required=True, help="path to the ONNX policy to clone")
     ap.add_argument("--run-name", required=True, help="run dir to write the warm start into")
-    ap.add_argument("--episodes", type=int, default=250)
-    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument("--episodes", type=int, default=DISTILL_EPISODES)
+    ap.add_argument("--epochs", type=int, default=DISTILL_EPOCHS,
+                    help="fitting epochs. Fidelity is what keeps the clone upright: "
+                         "correlation(action MSE, fall rate) = +0.93, and falls stop "
+                         "outright below ~0.00011 rad^2")
     ap.add_argument("--cmd-lo", type=float, default=0.15)
     ap.add_argument("--cmd-hi", type=float, default=0.60)
     ap.add_argument("--seed", type=int, default=0)

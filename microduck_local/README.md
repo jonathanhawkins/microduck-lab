@@ -73,6 +73,11 @@ uv run bench-ab brains/baseline brains/candidate   # matched STEPS, not matched 
 uv run select-brain my-run --seeds 100,200,300 --jobs 8   # brains: ship the best checkpoint, deterministically
 uv run select-run runs/my-run --jobs 8                    # locomotion: same, scored on achieved ground speed
 uv run bench-envs --ipc-floor                             # is a slow vec-step the plumbing or the physics?
+
+# the locomotion path that actually works (see "Fixing the falling"):
+uv run distill --teacher ../microduck/policies/alpha_walking.onnx --run-name my-walk
+uv run export-walk runs/my-walk
+uv run select-run runs/my-walk --behavior run --cmd 0.4 --jobs 8
 ```
 
 Measured on an M5 Max: ~26k control-steps/s raw env throughput at 12 workers
@@ -331,6 +336,187 @@ update, 4 envs/worker), saturating ~27k — the parent's serial per-vec-step
 work is the remaining wall. A single worker's `env.step` is down to 0.135 ms
 idle, so physics itself would allow ~130k; closing the gap means replacing
 the SB3 rollout loop wholesale, not tuning it.
+
+### Fixing the falling: it was cloning fidelity
+
+Every locally trained `run` policy fell in 100% of episodes, at 45-130 steps
+of a 1000-step limit — so gait quality was never the binding constraint. The
+diagnosis started from one fact: the TEACHER (`alpha_walking`) survives all
+1000 steps in this exact env, and its clone did not.
+
+It is not compounding distribution shift, which was the obvious suspect.
+Driving the env with the clone and asking the teacher what it would have done
+at each state, the disagreement is FLAT at ~0.021 rad for a whole episode —
+it does not drift. So the clone is a slightly-wrong controller, and the fix
+is to make it less wrong. Five fitting budgets, scored on the deterministic
+export, **correlation(action MSE, fall rate) = +0.93**:
+
+| episodes | epochs | mse rad² | falls | ep_len | m/s |
+|---:|---:|---:|---:|---:|---:|
+| 120 | 30 | 0.00030 | 0.75 | 289 | 0.238 |
+| 250 | 40 *(old default)* | 0.00017 | 0.08 | 924 | 0.193 |
+| 250 | **120** | 0.00011 | **0.00** | **1000** | 0.196 |
+| 600 | 120 | 0.00006 | **0.00** | **1000** | 0.194 |
+
+Below ~0.00011 rad² the falling stops outright. Note the top row: the
+lowest-fidelity clone is the FASTEST, at 0.238 m/s — while falling three
+episodes in four. Speed without survival is the trap `select-run`'s fall
+floor exists to catch.
+
+The default fitting budget is now 250 x 120. It costs 33 s once (17 s → 50 s)
+and the clone is cached. Scored on four **held-out** eval seeds x 10 episodes
+— seeds no checkpoint selection ever touched, which matters because `falls`
+over a handful of episodes takes only a few discrete values and flatters a
+policy:
+
+| policy | m/s | ep_len | falls |
+|---|---:|---:|---:|
+| teacher `alpha_walking` | 0.202 | 1000 | 0.00 |
+| its clone, seed 51 | 0.207 | 932 | 0.08 |
+| its clone, seed 52 | 0.211 | 820 | 0.20 |
+
+On the development seeds the clone read 1000 / 0.00; on held-out seeds it is
+0.08-0.20. Still a transformation of the old budget's 0.75, but only the
+teacher itself is genuinely at zero.
+
+**PPO fine-tuning on top is NOT fixed, and three obvious levers did not fix
+it.** From four identical clones (all mse 0.00009), 400k-step fine-tunes were
+run under the current rate (2e-4 → 3e-5), a 4x cooler one, and rsl_rl's
+adaptive-KL rate. Scored deeply (3 seeds x 12 episodes on the best
+checkpoint):
+
+| arm | mean ep_len | falls | m/s |
+|---|---:|---:|---:|
+| base (current lr) | 640 | 0.40 | 0.205 |
+| 4x cooler lr | 463 | 0.58 | 0.240 |
+| adaptive KL | 607 | 0.43 | 0.206 |
+| base, 1M steps | 528 | 0.55 | 0.186 |
+
+Every pairwise comparison is unresolved at four seeds, and every arm falls
+far more than the clone it started from. Two things were learned. The
+collapse is **progressive erosion over ~130k steps**, not one bad update —
+all four seeds decay, two just decay slower. And **shorter beats longer** as
+a point estimate (400k falls 0.40 against 1M's 0.55), which is what
+`select-run` and a plateau stop are for.
+
+**Fourteen paired seeds resolve it, and it is not instability — it is a
+trade.** Each seed's clone against its OWN fine-tune, 400k steps, scored on
+40 held-out episodes (selection and evaluation on disjoint eval seeds):
+
+| | clone | fine-tuned | delta | 95% interval | |
+|---|---:|---:|---:|---|---|
+| episode length | 806 | 392 | **-414** | -596 … -233 | **clone better** |
+| fall rate | 0.21 | 0.65 | **+0.44** | +0.250 … +0.628 | **clone better** |
+| ground speed (m/s) | 0.213 | 0.254 | **+0.041** | +0.007 … +0.075 | **tuned better** |
+
+All three resolved. PPO is not randomly destabilising the gait — it is
+systematically **trading survival for speed**, and the trade is a bad one at
+these weights. The seed table shows it plainly: the five fastest fine-tunes
+(0.30-0.33 m/s) are the five that collapse to ~50-step episodes. Only seed 66
+went the other way, reaching 977 steps and 0.03 falls by giving up speed
+(0.171 against its clone's 0.218).
+
+That pointed at the scorecard — the `run` recipe has **no explicit fall
+penalty**, so falling only forfeits future reward, weak at gamma 0.99 over
+~100 remaining steps against a per-step speed payoff. So one was added
+(`MICRODUCK_RUN_FALL_PENALTY`, a one-off cost on the terminal step) and
+measured. **It does not work.** Weights 0/10/30/100 screened at four seeds
+put 30 ahead (+121 steps, -0.12 falls); extended to fourteen paired seeds the
+sign reversed to -34 steps and +0.05 falls, both unresolved:
+
+| | clone | w0 | w30 |
+|---|---:|---:|---:|
+| episode length | 930 | 470 | 436 |
+| fall rate | 0.08 | 0.58 | 0.62 |
+| ground speed (m/s) | 0.209 | 0.246 | 0.253 |
+
+The term ships inert (weight 0). Its value is as evidence about the
+diagnosis: pricing the terminal event does not stop the trade, so "no fall
+penalty" is not the explanation either.
+
+**What survives every test is simpler.** Three learning rates, four fall
+weights and two training lengths all failed to make a fine-tuned policy beat
+the clone it started from. At this sample budget, fine-tuning a
+teacher-quality gait is not productive — so for locomotion, **the distilled
+clone is the deliverable**:
+
+```bash
+uv run distill --teacher ../microduck/policies/alpha_walking.onnx --run-name my-walk
+uv run export-walk runs/my-walk
+uv run select-run runs/my-walk --behavior run --cmd 0.4 --seeds 1001,1002 --jobs 8
+```
+
+(`--behavior run` because a distill run has no `behavior.json` to read it
+from.) Verified end to end: **0.203 m/s, 1000-step episodes, zero falls** on
+held-out eval seeds — the teacher's own numbers, in about a minute.
+
+`select-run` refuses the fast fallers, which is exactly the population PPO
+produces here.
+
+### The `run` scorecard: achievement gating, and a correction
+
+**First, the correction.** An earlier note here reported that the `run`
+reward was anti-correlated with walking, correlation **-0.90** against
+`select-run` ground speed. That was largely an **episode-length artifact**.
+`ep_rew` is a per-episode SUM; every locally trained `run` policy falls in
+100% of episodes, so episodes are short (45-130 steps of a 1000 limit) and
+they LENGTHEN as the policy learns to survive — which lifts the sum whether
+or not the duck travels. Per STEP, over six runs' checkpoints:
+
+| run | corr(SUM, m/s) | corr(PER STEP, m/s) |
+|---|---|---|
+| g-off-s41 | -0.15 | **+0.55** |
+| g-on-s41 | -0.29 | **+0.94** |
+| g-off-s42 | -0.61 | -0.38 |
+| g-on-s42 | -0.39 | **+0.24** |
+| c-on-s21 | -0.91 | -0.94 |
+| c-off-s22 | -0.70 | **+0.07** |
+
+Four of six are POSITIVE per step. The failure is real but is not the rule.
+`bench-ab --metric ep_rew_per_step` divides by `ep_len` for exactly this
+reason, and on one real pair it reverses the verdict: `ep_rew` says "B is
+better (+8.7%)", the rate says "A is better (-17.1%)".
+
+**Then the actual defect.** Every POSITIVE shaping term gated on
+`_run_cmd_norm` — the COMMANDED speed — so the whole shaping budget was
+collectable by a duck that ignored the command. `air_time`'s ceiling
+(2.0 x 3.0 = 6.0) sat above `keep_pace`'s entire 1.0 x 4.0, letting the
+gait-shaping term outbid the task it was meant to shape; measured, it rose
++0.26 (x3 = +0.78 weighted) while `keep_pace` fell -0.11 (x4 = -0.46).
+
+`air_time` and `stay_upright` are now scaled by how well the command is
+ACTUALLY tracked — `floor + (1-floor) x _run_speed`, reusing the audited,
+baseline-subtracted term that already pays 0 for standing. Shaping can
+amplify the task; it can no longer substitute for it. Four paired seeds,
+distilled warm start, 1M steps:
+
+| | ON - OFF | seeds ahead | 95% interval | |
+|---|---|---|---|---|
+| per-step corr(reward, speed) | **+0.366** | **4/4** | +0.073 … +0.660 | **resolved** |
+| final ground speed (m/s) | -0.002 | 2/4 | -0.109 … +0.104 | unresolved |
+| mean episode length | +6.0 | 3/4 | -22.2 … +34.2 | unresolved |
+
+**Then the result got taken away again.** That arm gated `stay_upright`
+too — and `test_run_upright_is_gpu_run_std_and_additive` records that
+multiplying upright onto the speed term "is why local speed saturated at
+0.27 m/s". A prior specific measurement beats a weaker current one (these
+arms never reached speeds where a 0.27 cap could show), so upright stays
+additive. Re-measured with `air_time` gated ALONE, which is what ships:
+
+| | ON - OFF | seeds ahead | 95% interval | |
+|---|---|---|---|---|
+| per-step corr(reward, speed) | +0.195 | 2/4 | -1.93 … +2.32 | unresolved |
+| final ground speed (m/s) | -0.009 | 2/4 | -0.143 … +0.126 | unresolved |
+| mean episode length | +27.4 | 1/4 | -89.4 … +144.2 | unresolved |
+
+So the resolved half of the win was the half that cannot ship. `air_time`
+gating is implemented, tested and **off by default** (`MICRODUCK_RUN_GATE=1`
+opts in) until it has seeds behind it.
+
+**And the scorecard is not what is limiting these runs.** Every checkpoint
+of all eight arms fell in 100% of episodes, at 45-130 steps of a 1000-step
+limit. Gait quality was never the binding constraint — falling is — so
+reward surgery is not where the next gain lives.
 
 ### The 2026-09-03 pass: where the time really goes (and what that ruled out)
 
@@ -1013,6 +1199,32 @@ its current intent live.
   | mixed person | 0.920 | **1.3** | 0.794 |
   | paired difference | **−0.010** | **−4.1 (−76%)** | +0.033 |
   | 95% interval | −0.016…−0.005 | −6.7…−1.5 | −0.004…+0.071 |
+
+  **A bigger brain network is not resolvable, and would not have been worth
+  it if it were** (`train-brain --net-arch`). The trick trainer's network is
+  54% of its wall time, so shrinking it is worth ~1.44x there. On the BRAIN
+  trainer the PPO update is **5.3%** and collection is 94.7% — the brain env
+  is physics, and a 128-128 MLP over 80 observations costs almost nothing.
+  Measured on the A/B arms themselves, 128-128 and 256-256 ran 113,664 and
+  112,128 decisions in the same 85 s. So the only question worth asking was
+  whether the brain is CAPACITY-limited. Six paired seeds, 1M decisions,
+  240 benchmark episodes a cell:
+
+  | seed | 31 | 32 | 33 | 34 | 35 | 36 | mean |
+  |---|---|---|---|---|---|---|---|
+  | 256-256 − 128-128 | +0.017 | +0.002 | +0.006 | +0.011 | +0.008 | **−0.011** | **+0.006** |
+
+  Ahead on 5/6 seeds, 95% interval −0.004 … +0.016: **unresolved**. It is
+  worth recording how it got there. At n=4 the mean was +0.009 with sd 0.0066
+  and the interval missed zero by 0.0013; the projection said two more seeds
+  would settle it. Seed 36 came in negative, the sd rose to 0.0095, and the
+  interval got WIDER. A power projection that assumes the observed spread
+  will hold is itself a small-sample estimate.
+
+  At the measured spread, resolving a +0.006 effect needs **14 paired seeds —
+  28 runs, ~8 h**. The effect is 31% of the benchmark's own per-seed spread
+  (±0.013–0.023). Not worth it: `128,128` stays the default and the flag
+  ships for anyone who wants to spend that budget.
 
   **A coarser decision period early buys nothing** (`train-brain
   --decide-every-start 10`). The idea was a shorter credit-assignment horizon

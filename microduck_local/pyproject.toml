@@ -37,6 +37,7 @@ dependencies = [
 [project.scripts]
 train-walk = "microduck_local.train:main"
 export-walk = "microduck_local.export_onnx:main"
+distill = "microduck_local.distill:main"
 eval-walk = "microduck_local.eval_onnx:main"
 eval-run = "microduck_local.eval_onnx:main"
 bench-walk = "microduck_local.bench:main"
@@ -54,6 +55,14 @@ eval-tidy = "microduck_local.eval_tidy:main"
 eval-pitch = "microduck_local.eval_pitch:main"
 trace-tidy = "microduck_local.trace_tidy:main"
 walker-facts = "microduck_local.walker_facts:main"
+
+[tool.pytest.ini_options]
+markers = [
+    # Tests that train or distil for real. They run by default — this repo's
+    # whole discipline is that a claim is measured — but `-m "not slow"`
+    # gives a fast loop while iterating.
+    "slow: runs a real training or distillation pass (tens of seconds)",
+]
 
 [tool.ruff]
 # Keep lint minimal and uncontroversial: pyflakes correctness + import order.

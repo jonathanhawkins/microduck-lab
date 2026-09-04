@@ -52,9 +52,8 @@ from .brain.striker import (
     StrikerTask,
 )
 from .machine import profile, with_phase_callbacks
-from .ppo_hparams import configure_torch_cpu
 from .plateau import PlateauDetector, env_defaults
-from .ppo_hparams import linear_decay, ppo_batch_size
+from .ppo_hparams import configure_torch_cpu, linear_decay, ppo_batch_size
 from .vec_env import as_sb3_vec_env, make_vec_env
 
 # Hard cap on the policy's per-dim action log_std (std <= ~0.6), the same cap
@@ -165,6 +164,13 @@ def main() -> None:
     ap.add_argument("--fixed-preset", default=None, help="train on one sensor preset instead of drawing per episode")
     ap.add_argument("--init-from", default=None, help="warm-start from brains/<name>")
     ap.add_argument("--n-steps", type=int, default=128)
+    ap.add_argument("--net-arch", default="128,128", metavar="H,H,...",
+                    help="hidden sizes for the policy and value MLPs. NOT a throughput "
+                         "knob on this trainer: the PPO update is only 5.3%% of brain "
+                         "wall time (94.7%% is rollout collection, which is physics), so "
+                         "halving the net saves ~3.5%%. It is a CAPACITY knob — whether "
+                         "80 observations and a 3-dim intent need more than 128-128")
+    ap.add_argument("--n-epochs", type=int, default=5)
     ap.add_argument("--lr", type=float, default=LR_START,
                     help="initial learning rate; decays linearly to --lr-end")
     ap.add_argument("--lr-end", type=float, default=LR_END,
@@ -292,6 +298,11 @@ def main() -> None:
     # so half the gradient steps ran at 2/3 the intended batch and the last
     # 512 samples of every rollout carried a noisier gradient than the rest.
     # `ppo_batch_size` is the same rule the walk and trick trainers use.
+    arch = [int(x) for x in args.net_arch.split(",") if x.strip()]
+    if not arch:
+        raise SystemExit("--net-arch needs at least one hidden size")
+    if arch != [128, 128] or args.n_epochs != 5:
+        print(f"[train-brain] net {arch}, n_epochs {args.n_epochs}", flush=True)
     log_std_max = None if LEGACY else float(args.log_std_max)
     batch = (min(1024, args.n_steps * args.envs) if LEGACY
              else ppo_batch_size(args.n_steps, args.envs))
@@ -308,6 +319,7 @@ def main() -> None:
         # start with a different --envs would otherwise reinstate a batch
         # size that no longer divides the new buffer.
         model.batch_size = batch
+        model.n_epochs = args.n_epochs
         model.lr_schedule = (lambda _: lr_sched) if LEGACY else lr_sched
         # Cap the INHERITED action std before a single step is taken: see
         # LOG_STD_MAX above. Without it a warm-start chain ratchets the std
@@ -319,10 +331,11 @@ def main() -> None:
     else:
         venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
         model = PPO("MlpPolicy", venv,
-                    policy_kwargs=dict(net_arch=dict(pi=[128, 128], vf=[128, 128]),
+                    policy_kwargs=dict(net_arch=dict(pi=list(arch), vf=list(arch)),
                                        activation_fn=torch.nn.ELU, log_std_init=-0.5),
                     n_steps=args.n_steps, batch_size=batch,
-                    n_epochs=5, learning_rate=lr_sched, gamma=0.98, gae_lambda=0.95,
+                    n_epochs=args.n_epochs, learning_rate=lr_sched,
+                    gamma=0.98, gae_lambda=0.95,
                     clip_range=0.2, ent_coef=0.003, vf_coef=0.5, max_grad_norm=1.0,
                     device="cpu", seed=args.seed, verbose=0)
 
@@ -486,7 +499,8 @@ def main() -> None:
             "fixed_preset": args.fixed_preset,
             "decide_every_start": args.decide_every_start or None,
             "probe_presets": probe_presets if args.probe_every > 0 else None,
-            "n_steps": args.n_steps, "batch_size": batch, "lr": args.lr, "lr_end": args.lr_end,
+            "net_arch": args.net_arch, "n_epochs": args.n_epochs,
+        "n_steps": args.n_steps, "batch_size": batch, "lr": args.lr, "lr_end": args.lr_end,
             "log_std_max": log_std_max, "legacy_hparams": LEGACY}
     if striker:
         meta |= {"target_cls": "ball", "obs_dim": STRIKER_OBS_DIM, "obs_version": STRIKER_OBS_VERSION,
