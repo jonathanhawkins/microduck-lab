@@ -244,3 +244,61 @@ def test_polite_mix_is_reproducible_from_the_env_seed():
             out.append(env.person.spec.yield_m)
         return out
     assert draws(3) == draws(3)
+
+
+def test_the_yaw_bound_is_1_by_default_and_widenable(monkeypatch):
+    """`ANG_VEL_Z_RANGE` is +-1.0 and the bound was assumed to be the
+    walker's ceiling. Measured 2026-09-04 it is not: warm, 8 headings x 10 s,
+    zero falls in 48 runs, the shipped walker answers wz +2.00 with 1.506
+    rad/s while still walking at 0.176 m/s (against 0.733 at +1.00). The
+    command is then OUT of the walker's training distribution, so the default
+    stays 1.0 until the A/B over it lands."""
+    from microduck_local.brain import brain_env as B
+
+    assert float(B.ACT_HIGH[2]) == 1.0 and float(B.ACT_LOW[2]) == -1.0
+    assert B.ACT_HIGH[2] == -B.ACT_LOW[2], "the bound is symmetric"
+    # The other two intent dims are not touched by the knob.
+    assert list(B.ACT_HIGH[:2]) == [pytest.approx(0.6), pytest.approx(0.3)]
+
+
+def test_a_brain_keeps_the_bound_it_was_trained_with(tmp_path):
+    """The trap this closes: `LearnedBrain` used to clip with the MODULE
+    constants, so a brain trained at wz +-2.0 was silently re-clipped to the
+    current default at inference — halving its turn rate and making an A/B
+    over the bound measure nothing. The bounds are part of the brain's own
+    contract and come from its brain.json."""
+    import json
+
+    from microduck_local.brain import REGISTRY
+    from microduck_local.brain.brain_env import ACT_HIGH
+
+    d = tmp_path / "wide"
+    d.mkdir()
+    # A minimal brain record claiming a wider bound than the module default.
+    (d / "brain.json").write_text(json.dumps({
+        "obs_version": BRAIN_OBS_VERSION, "decide_every": 5, "target_cls": "person",
+        "act_low": [-0.2, -0.3, -2.0], "act_high": [0.6, 0.3, 2.0]}))
+    import shutil
+    shutil.copy(POLICIES / "alpha_walking.onnx", d / "brain.onnx")  # any onnx loads
+
+    brain = REGISTRY.make(f"learned:{d}")
+    assert float(brain.act_high[2]) == 2.0, "must use its OWN recorded bound"
+    assert float(ACT_HIGH[2]) == 1.0, "and not the module default"
+
+
+def test_a_brain_without_recorded_bounds_falls_back_to_the_constants(tmp_path):
+    """Every brain shipped before the keys existed (follow-v1..v5) has to keep
+    loading and keep behaving exactly as it did."""
+    import json
+    import shutil
+
+    from microduck_local.brain import REGISTRY
+    from microduck_local.brain.brain_env import ACT_HIGH, ACT_LOW
+
+    d = tmp_path / "old"
+    d.mkdir()
+    (d / "brain.json").write_text(json.dumps({"obs_version": 2, "decide_every": 5}))
+    shutil.copy(POLICIES / "alpha_walking.onnx", d / "brain.onnx")
+    brain = REGISTRY.make(f"learned:{d}")
+    np.testing.assert_array_equal(brain.act_low, ACT_LOW)
+    np.testing.assert_array_equal(brain.act_high, ACT_HIGH)

@@ -127,13 +127,22 @@ range is the wall and the training run is justified.
 > than 1.0**, because `brain_env.ACT_HIGH` clamps a brain's wz there
 > (`Duck.set_cmd` passes a larger one through untouched).
 >
-> So sections 1-4 below describe a training run that should not be done. The
-> 26.6% of a run this was meant to free is available by widening one action
-> bound. What remains is: raise `ACT_HIGH[2]`, retrain a brain against the
-> wider range, and run sections 5-7 on THAT. It still needs an A/B, because
-> it changes what every brain can ask for, and because the wider command is
-> out of the walker's training distribution even though it handles it here on
-> an empty floor. Sections 5, 5b and 7 apply unchanged.
+> So sections 1-4 below describe a training run that should not be done.
+>
+> **The experiment that replaced it has also been run, and 3.7 is CLOSED.**
+> No retraining was needed: `gait.max_wz()` is the one place every scripted
+> brain's turn cap lives, so `MICRODUCK_MAX_WZ` widens what `chase` asks for.
+> 48 paired seeds x 300 s on `eval-pitch`, cap 1.0 against 1.5 — spin rate
+> +0.333 rad/s, fraction of the run spinning -0.052, possession +1.48 s/min
+> (all **resolved**), and falls +0.583, **resolved WORSE**. `ballProgress`,
+> goals and kicks all unresolved. Cap 2.0 is the same trade harder: kicks
+> +71% resolved, falls 0.667 -> 2.417 resolved worse.
+>
+> The mechanism is real and the prize is smaller than estimated — 12% of the
+> run freed, not ~27%, because the freed time goes into STEERING rather than
+> play. The turn rate was never the binding constraint on the GAME, only on
+> the clock. Both caps stay at 1.0. Goals cannot settle this at any sane
+> cost: ~200 seeds to resolve a +0.3 effect.
 
 **Step 0b (read before budgeting Step 1).** Local PPO cannot currently
 produce a walker by either route, and both failures are measured. This does
