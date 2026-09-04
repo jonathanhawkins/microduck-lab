@@ -540,11 +540,56 @@ behavior survives contact with reality.
       LOST the ball, so the centring pay was quietly buying uprightness; at
       58° the duck can lean hard and keep the ball in frame, and nothing in the
       recipe replaces what the narrow lens used to enforce.
-      → **next lever: `stay_upright` (currently 1.5), which is the term that
-      should have been doing this all along** — a weight, not a new term.
-      Sweep it the way `step_dont_skid` was swept, and read the fall column
-      against the in-frame/centred columns, since the whole point is not to
-      trade the aim gain back.
+      **`stay_upright` swept too, and it does not control the falls either.**
+      Weight overrides through `/teach`, three eval seeds each at
+      `--events 0.33`:
+
+      | `stay_upright` | falls / 60 | in frame | centred | t_first med |
+      |---|---|---|---|---|
+      | **1.5 — the recipe's own value** | 5 / 8 / 11 | **86 / 79 / 79%** | **74 / 69 / 70%** | **0.18 / 0.22 / 0.34 s** |
+      | 2.0 (`teach-find_ball-17d994`) | **21 / 21 / 22** | 71 / 76 / 72% | 62 / 67 / 62% | 0.24 / 0.26 / 0.30 s |
+      | 3.0 (`teach-find_ball-60be16`) | **0 / 0 / 0** | 52 / 52 / 49% | 46 / 47 / 45% | 0.88 / 1.84 / 2.31 s |
+      | 5.0 (`teach-find_ball-02e577`) | 8 / 4 / 6 | 74 / 75 / 69% | 57 / 58 / 53% | 0.36 / 0.66 / 0.74 s |
+
+      Falls go 5-11 -> 21-22 -> 0 -> 4-8 as the weight rises monotonically.
+      That is not a function of the weight in any usable sense, and the one
+      setting that does eliminate falls (3.0) buys it by **abandoning the
+      task**: in-frame share collapses to ~50% and median time to first sight
+      goes from 0.2 s to 0.9-2.3 s. It stops falling by stopping turning.
+
+      **`1.5` stays.** Nothing in the sweep beats it on a single aim column.
+
+      **Training here is bit-for-bit deterministic, which is what makes that
+      table interpretable — and it also kills the obvious excuse.** Re-running
+      the 1.5 configuration from scratch (`teach-find_ball-38d788`) reproduces
+      `teach-find_ball-72af49` EXACTLY: same found rate, in-frame, centred and
+      fall count on all three eval seeds. So none of the swings above are
+      run-to-run noise; they are exact single-sample draws, and the map from
+      this weight to the fall count is simply not smooth. Two consequences:
+
+      - A weight sweep at one training seed cannot find a "good weight" for
+        falls, because neighbouring weights land in qualitatively different
+        basins. More sweeping is not the answer.
+      - Determinism is a *reproducibility* guarantee, not a *generalization*
+        one. Every arm in this file is one draw from seed 0 (the lab pins it);
+        a second seed would need the CLI and a hand-chained curriculum.
+
+- [ ] **The falls want a structural fix, and there is a specific candidate
+      this codebase has already used once.** `_upright` pays
+      `exp(-sin²(tilt)/0.05)` — a std of ~12.9° of tilt, so it is worth 0.55
+      at 10°, 0.10 at 20° and 0.007 at 30°. Past ~25° there is essentially no
+      pay left and therefore **no gradient pulling the duck back**: the term
+      prices being upright but not *recovering*, so once the lean is committed
+      the fall is free. That is exactly the failure `face_the_ball`'s docstring
+      records for its own std-1.5 Gaussian ("paid 0.04 with the ball straight
+      behind and sloped nowhere the policy was"), and the fix there was a
+      raised cosine that slopes all the way round.
+      → **decide on:** widen `_upright`'s falloff (or add a wide layer, the
+      two-layer shape used by `eyes_on_ball` and `head_up`) so there is real
+      gradient out to 40-50° of tilt, then retrain at weight 1.5 and check
+      back-bucket falls against the in-frame/centred columns. This is a
+      catalog term shared with every other behavior, so it needs its own A/B
+      on at least one non-ball recipe before it ships.
 
       **Left in the tree, deliberately inconsistent:** the knobs are the real
       camera's, and `policies/find_ball/policy.onnx` is still the brain
