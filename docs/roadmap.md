@@ -511,10 +511,40 @@ behavior survives contact with reality.
       `--events 0.33`, without losing the in-frame/centred gain above.
       Candidates, cheapest first, and **not by adding a fourth term** (this
       file's own rule — a recipe that needs a new term to survive its last one
-      is mispriced): raise `step_dont_skid`, which already exists to price
-      stepping over skidding and is exactly the behaviour being violated;
-      then `stay_upright`; only then consider capping the turn rate in the
-      world rather than the pay.
+      is mispriced).
+
+      **`step_dont_skid` was the obvious candidate and it is NOT the lever.**
+      Swept as a weight override through `/teach` (no code change), three eval
+      seeds each at `--events 0.33`:
+
+      | `step_dont_skid` | falls / 60 | in frame | centred |
+      |---|---|---|---|
+      | 0.5 (`teach-find_ball-2a07a0`) | 18 / 12 / 18 | 66 / 68 / 70% | 53 / 55 / 56% |
+      | **1.0 — the recipe's own value** | **5 / 8 / 11** | **86 / 79 / 79%** | **74 / 69 / 70%** |
+      | 2.0 (`teach-find_ball-e92868`) | 12 / 18 / 17 | 80 / 73 / 74% | 61 / 53 / 57% |
+
+      Both directions are worse on **every** axis, so 1.0 is at or near a local
+      optimum and the falls come from somewhere else. Raising it was reasoned
+      backwards, and the mistake is worth keeping: the term is a **positive pay
+      for a foot being AIRBORNE while rotating** (0.5 per foot inside a
+      0.06-0.35 s window), so a bigger weight buys *more* one-footed turning —
+      which is precisely the fall mode it was supposed to suppress. It declines
+      to pay a sustained lean only because the lean outlasts the window; it
+      never charges for one.
+
+      **Revised hypothesis, and it survives everything measured so far: the
+      wide camera removed an implicit posture constraint.** Every arm trained
+      at the real 60x116 FOV falls more (5-18 per 60) than the brain trained
+      at the narrow 48x62 placeholder (5 / 1 / 2), regardless of tolerance
+      units or skid weight. With a 31° half-VFOV, tilting far enough to topple
+      LOST the ball, so the centring pay was quietly buying uprightness; at
+      58° the duck can lean hard and keep the ball in frame, and nothing in the
+      recipe replaces what the narrow lens used to enforce.
+      → **next lever: `stay_upright` (currently 1.5), which is the term that
+      should have been doing this all along** — a weight, not a new term.
+      Sweep it the way `step_dont_skid` was swept, and read the fall column
+      against the in-frame/centred columns, since the whole point is not to
+      trade the aim gain back.
 
       **Left in the tree, deliberately inconsistent:** the knobs are the real
       camera's, and `policies/find_ball/policy.onnx` is still the brain
