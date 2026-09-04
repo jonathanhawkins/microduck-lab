@@ -5,6 +5,11 @@
 // against the lab's world mode (/ws/sim, world_server.py). Keys: R restarts
 // the world, P toggles drive mode (WASD / arrows steer every duck), T toggles
 // the ToF overlay, 1–9 select a duck, Esc deselects.
+//
+// WASD/QE are shared between two consumers, split by drive mode: with drive
+// OFF they fly the camera (the lab page's model, same CameraKeys component),
+// with drive ON they steer the ducks. That is why edit is Shift+E — plain E
+// is the camera's vertical truck.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -16,9 +21,15 @@ import { assignDrag, nearestDuck, type AssignTarget } from "@/lib/assign";
 import { getSelectedDuck, setSelectedDuck } from "@/lib/select";
 import { loadJSON, saveJSON } from "@/lib/persist";
 import {
+  cameraKeyDown,
+  cameraKeyUp,
+  cameraKeysClear,
+} from "@/lib/camera";
+import {
   depthColor,
   fetchRing,
   fetchScenarios,
+  deleteScenario,
   fetchWorld,
   frameEvents,
   loadWorld,
@@ -40,6 +51,7 @@ import {
 } from "@/lib/sim";
 import { camAspect, insetHeight, renderInset } from "@/lib/inset";
 import { buildBodyGeometries, Duck } from "./Duck";
+import CameraKeys from "./CameraKeys";
 import { applyFloorClick, emptyDraft, SimEditor, type EditorState } from "./SimEditor";
 import { Dynamics, StageEnvironment, Statics } from "./SimStage";
 
@@ -87,6 +99,17 @@ function twistFromKeys(h: Held): [number, number, number] {
   return [vx, vy, wz];
 }
 const DRIVE_KEYS = new Set(["w", "a", "s", "d", "q", "e", "arrowup", "arrowdown", "arrowleft", "arrowright"]);
+
+// Shift+R flies back here — the Canvas's own opening pose.
+const HOME_CAM = { p: [2.2, 1.6, 2.4] as const, t: [0, 0.12, 0] as const };
+// Must be a stable reference: this component re-renders every 250 ms on the
+// status tick, and a fresh [0, 0.12, 0] literal each time would let r3f
+// re-apply the prop and snap the target back while you are trucking.
+const ORBIT_TARGET: [number, number, number] = [0, 0.12, 0];
+// A room is bigger than the lab floor, so the dolly gets more room than the
+// lab page's 0.25..8 — these match the OrbitControls clamp below.
+const CAM_MIN_DIST = 0.3;
+const CAM_MAX_DIST = 12;
 
 /** Every duck of the frame, rendered by the lab page's Duck component. */
 function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
@@ -803,6 +826,146 @@ function Timeline({ client }: { client: SimClient }) {
   );
 }
 
+/**
+ * Scene picker. A native <select> cannot carry a per-row control, and a
+ * delete parked in the top bar costs a slot there for something you touch
+ * once — so this is a small popup: click a row to pick it, click the ✕ on
+ * one of your own saved scenes to delete it. Built-ins have no ✕.
+ */
+function ScenePicker({
+  scenarios,
+  pick,
+  onPick,
+  onDelete,
+  busy,
+}: {
+  scenarios: ScenarioListing[];
+  pick: string;
+  onPick: (name: string) => void;
+  onDelete: (name: string) => void | Promise<void>;
+  busy: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState<string | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  // Close on an outside click or Escape, like the native menu it replaces.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [open]);
+
+  const current = scenarios.find((s) => s.name === pick);
+  const label = (s: ScenarioListing) => `${s.name} (${s.ducks} ducks, ${s.objects} obj)`;
+  const groups: [string, ScenarioListing[]][] = [
+    ["built in", scenarios.filter((s) => s.builtin)],
+    ["saved by you", scenarios.filter((s) => !s.builtin)],
+  ];
+
+  const row = (s: ScenarioListing) => (
+    <div
+      key={s.name}
+      onMouseEnter={() => setHover(s.name)}
+      onMouseLeave={() => setHover((h) => (h === s.name ? null : h))}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        borderRadius: 4,
+        background: s.name === pick ? "#2a3340" : hover === s.name ? "#1f242c" : "transparent",
+      }}
+    >
+      <button
+        onClick={() => {
+          onPick(s.name);
+          setOpen(false);
+        }}
+        style={{
+          flex: 1,
+          textAlign: "left",
+          background: "transparent",
+          border: "none",
+          color: "#e9edf1",
+          font: "inherit",
+          padding: "3px 6px",
+          cursor: "pointer",
+          whiteSpace: "nowrap",
+        }}
+      >
+        <span style={{ color: s.name === pick ? "#f2b632" : "transparent" }}>✓</span> {label(s)}
+      </button>
+      {!s.builtin && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(s.name);
+          }}
+          disabled={busy}
+          title={`delete "${s.name}" — removes its saved file`}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: hover === s.name ? "#e06c6c" : "#5f6b78",
+            font: "inherit",
+            padding: "3px 7px",
+            cursor: busy ? "not-allowed" : "pointer",
+          }}
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+
+  return (
+    <div ref={boxRef} style={{ position: "relative" }}>
+      <button style={{ ...BTN, padding: "3px 6px" }} onClick={() => setOpen((v) => !v)}>
+        {current ? label(current) : pick || "…"} ▾
+      </button>
+      {open && (
+        <div
+          style={{
+            ...PANEL,
+            top: "calc(100% + 4px)",
+            left: 0,
+            padding: 4,
+            minWidth: "100%",
+            maxHeight: "60vh",
+            overflowY: "auto",
+            zIndex: 40,
+            background: "#171a20",
+            backdropFilter: "none",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.55)",
+          }}
+        >
+          {groups.map(([title, list]) =>
+            list.length === 0 ? null : (
+              <div key={title}>
+                <div style={{ color: "#5f6b78", padding: "4px 6px 2px", letterSpacing: ".06em" }}>{title}</div>
+                {list.map(row)}
+              </div>
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SimViewer() {
   const [scene, setScene] = useState<Scene | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -845,6 +1008,14 @@ export default function SimViewer() {
   const held = useRef<Held>(new Set());
   const drivingRef = useRef(driving);
   drivingRef.current = driving;
+  // WASD/QE change owner when drive mode flips. Whatever was held belongs to
+  // the previous owner, and it never sees the keyup — so hand both sides a
+  // clean slate, or the camera flies on forever / the duck keeps its twist.
+  useEffect(() => {
+    cameraKeysClear();
+    held.current.clear();
+    if (!driving) clientRef.current?.sendCmd([0, 0, 0]);
+  }, [driving]);
 
   useEffect(() => saveJSON("simLessonOpen", lessonOpen), [lessonOpen]);
 
@@ -945,7 +1116,9 @@ export default function SimViewer() {
         if (!e.repeat) setShowCam((v) => !v);
         return;
       }
-      if (k === "e") {
+      // Shift+E, not E: plain E is the camera's vertical truck (lib/camera).
+      if (k === "e" && e.shiftKey) {
+        e.preventDefault();
         if (!e.repeat) setEditor((st) => (st ? null : { draft: emptyDraft(worldRef.current?.scenario ?? null), tool: null, wallStart: null }));
         return;
       }
@@ -958,19 +1131,31 @@ export default function SimViewer() {
         setSelectedDuck(d ? d.id : null);
         return;
       }
-      if (clientRef.current?.scrub) return;   // scrubbing: arrows step frames
+      // While scrubbing the arrows step frames (the scrub bar owns them), but
+      // WASD/QE must keep flying: pausing and then looking around the frozen
+      // room is the whole point of the scrub.
+      if (clientRef.current?.scrub && k.startsWith("arrow")) return;
       if (drivingRef.current && DRIVE_KEYS.has(k)) {
         e.preventDefault();
         held.current.add(k);
         // Send once immediately so a tap registers before the 100 ms tick.
         if (!e.repeat) clientRef.current?.sendCmd(twistFromKeys(held.current));
+        return;
       }
+      // Drive mode OFF: the same keys fly the camera, exactly as on the lab
+      // page. Shift+R is the view reset there, so it must reach the store
+      // even though plain R restarts the world above.
+      if (!drivingRef.current && cameraKeyDown(k, e.shiftKey)) e.preventDefault();
     };
     const onKeyUp = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
+      cameraKeyUp(k);
       if (held.current.delete(k) && held.current.size === 0) clientRef.current?.sendCmd([0, 0, 0]);
     };
-    const onBlur = () => held.current.clear();
+    const onBlur = () => {
+      held.current.clear();
+      cameraKeysClear();   // stuck-key guard: never fly on after focus leaves
+    };
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
     window.addEventListener("blur", onBlur);
@@ -989,6 +1174,29 @@ export default function SimViewer() {
       setWorld(w);
       setPick(name);
       setSelectedDuck(null);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+      setTimeout(() => setError(null), 4000);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Only user scenarios can go — built-ins are generated, and the server
+  // refuses them with a 409 anyway.
+  const doDelete = async (name: string) => {
+    if (!window.confirm(`delete the scene "${name}"? this cannot be undone.`)) return;
+    setLoading(true);
+    try {
+      await deleteScenario(name);
+      const list = await fetchScenarios();
+      setScenarios(list);
+      // The live world keeps running whatever it loaded; only the picker has
+      // to move off a name that no longer exists.
+      if (name === pick) {
+        const live = worldRef.current?.scenario?.name;
+        setPick(list.some((s) => s.name === live) ? live! : (list[0]?.name ?? ""));
+      }
     } catch (e) {
       setError(String((e as Error).message ?? e));
       setTimeout(() => setError(null), 4000);
@@ -1058,12 +1266,13 @@ export default function SimViewer() {
         {client && <SimTargets client={client} />}
         <OrbitControls
           makeDefault
-          target={[0, 0.12, 0]}
+          target={ORBIT_TARGET}
           maxPolarAngle={Math.PI / 2 - 0.02}
-          minDistance={0.3}
-          maxDistance={12}
+          minDistance={CAM_MIN_DIST}
+          maxDistance={CAM_MAX_DIST}
           zoomSpeed={0.4}
         />
+        <CameraKeys home={HOME_CAM} minDist={CAM_MIN_DIST} maxDist={CAM_MAX_DIST} />
       </Canvas>
 
       {/* top bar */}
@@ -1075,14 +1284,20 @@ export default function SimViewer() {
           ← lab
         </Link>
         <b>🌍 /sim</b>
-        <select value={pick} onChange={(e) => setPick(e.target.value)} style={{ ...BTN, padding: "3px 6px" }}>
-          {scenarios.map((s) => (
-            <option key={s.name} value={s.name}>
-              {s.name}
-              {s.builtin ? "" : " ·"} ({s.ducks} ducks, {s.objects} obj)
-            </option>
-          ))}
-        </select>
+        <Link
+          href="/train"
+          style={{ ...BTN, textDecoration: "none", lineHeight: 1.4 }}
+          title="brain training runs — live curves from train-brain"
+        >
+          🎓 train
+        </Link>
+        <ScenePicker
+          scenarios={scenarios}
+          pick={pick}
+          onPick={setPick}
+          onDelete={doDelete}
+          busy={loading}
+        />
         <button style={BTN} disabled={loading} onClick={() => doLoad(pick)}>
           {loading ? "loading…" : "load"}
         </button>
@@ -1126,7 +1341,7 @@ export default function SimViewer() {
         <button
           style={{ ...BTN, borderColor: editor ? "#f2b632" : "#2b313b" }}
           onClick={() => setEditor((st) => (st ? null : { draft: emptyDraft(scenario), tool: null, wallStart: null }))}
-          title="E"
+          title="Shift+E (plain E flies the camera down)"
         >
           ✎ edit
         </button>
@@ -1334,7 +1549,10 @@ export default function SimViewer() {
           found, and nothing else about the picture. In auto mode a tiny wander brain reads the middle columns
           and steers toward the open side; it emits only a twist, the same command the real robot takes.
           <div style={{ marginTop: 6, color: "#9aa5b1" }}>
-            R restart · P drive (WASD/arrows, Q/E strafe) · T ToF · V cam · E edit · 1–9 select · Esc · space scrub
+            WASD/QE fly the camera (A/D slide, W/S zoom, Q/E rise) · arrows orbit · Shift+R view home
+            <br />
+            R restart · P drive (the same WASD/arrows, Q/E steer the ducks instead) · T ToF · V cam ·
+            Shift+E edit · 1–9 select · Esc · space scrub
           </div>
         </div>
       ) : (

@@ -220,7 +220,10 @@ page's picker). One room, many ducks, and what each duck senses:
 - **Editor** (`E`): place walls (two clicks), boxes, balls, ducks, persons,
   toys and the basket on the floor, set each duck's brain, then save-and-load
   under a name (`PUT /scenarios/{name}`; built-ins are read-only, so a draft
-  of one saves as a copy).
+  of one saves as a copy). The top-bar picker splits into `built in` and
+  `saved by you`; `🗑 delete` next to `load` removes the picked saved scene
+  (`DELETE /scenarios/{name}`, after a confirm) and is greyed out on a
+  built-in. The live world keeps running whatever it loaded.
 - **Map** (`M`): the selected duck's occupancy grid, painted on the floor —
   what it believes the room is, from its ToF frames and its own odometry
   (amber occupied, teal free). Switch its `odom` preset in the inspector to
