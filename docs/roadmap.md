@@ -377,6 +377,79 @@ behavior survives contact with reality.
 
 ### 3. Search speed itself — the actual ask
 
+### Time spent LOST — the strongest signal found so far, and it says ship the blind recipe
+
+Chasing the one column that tracked performance in the sweep audit above.
+"Steps spent lost" conflates two failures, so split them: **search** (steps
+before the ball is EVER seen) and **tracking** (steps lost after the first
+sight — dropping a ball you already had). 40 episodes, no prior:
+
+With a STATIC ball, tracking is essentially solved for every arm (0.0-3.7%
+lost after first sight) — so with events off, "time lost" is **search, almost
+entirely**. With the recipe's own events (0.33) the two separate:
+
+| arm | search steps | tracking lost | drops/ep | regain med / p90 | never regained |
+|---|---:|---:|---:|---:|---:|
+| shipped s5 (cloud) | 3689 | 26.0% | 0.82 | 0.76s / 4.80s | 12 |
+| control | 3013 | 18.7% | 0.82 | 0.52s / 2.32s | 9 |
+| fix1 `body_aimed` 2.0 | 1943 | 27.0% | 0.82 | 1.41s / 3.38s | 15 |
+| fix2 (shipped) | 2313 | 17.2% | 0.95 | **0.27s** / 0.71s | 14 |
+| fix3 turn ungated | 2010 | 32.7% | 0.72 | 0.49s / 3.66s | 17 |
+| **blind-trained** | **735** | **8.5%** | 1.07 | 0.45s / 1.11s | **3** |
+
+The blind-trained arm searches 3x faster than the shipped brain and loses the
+ball half as often, and it is the cleanest A/B on this page: it is the fix2
+recipe with **one knob changed**, `MICRODUCK_BALL_PRIOR_PROB` 0.7 -> 0.0,
+same curriculum, same 8M steps, same seed.
+
+**Head to head in the deployment regime** (60 episodes, events 0.33):
+
+| brain | prior at eval | found | in frame | centred | head yaw | handoff | falls | worst t_first |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| fix2 (shipped) | none | 97% | 68% | 63% | 19.4° | 73% | 1 | 6.50 s |
+| fix2 (shipped) | on | 95% | 66% | 62% | 19.1° | 68% | 1 | 7.72 s |
+| blind-trained | none | **100%** | **83%** | **74%** | **15.3°** | **77%** | 1 | 5.78 s |
+| **blind-trained** | **on** | **100%** | **85%** | **78%** | **14.2°** | **78%** | 1 | **1.16 s** |
+
+It dominates every column in both prior conditions, back-bucket found goes
+94% -> 100%, and the side bucket's worst-case time to first sight collapses
+from **6.30 s to 0.58 s** — that is the wrong-side tail this section is about,
+essentially gone.
+
+**This overturns the previous section's recommendation, and the error is worth
+naming: those conclusions were measured with `--events 0`.** At events 0 the
+shipped brain looked like the better aimer (93% handoff vs 68%); with the
+events the recipe actually trains on, the ordering flips (73% vs 77%). That is
+the second time in this file the static-ball battery has pointed the wrong way.
+**Judge find_ball at `--events 0.33`.** Full stop.
+
+Rendered before believing it (`/tmp/rr-blind`): 4/4 episodes upright, in frame
+86-98%. From a ball at **p+173°** — directly behind — it turns ~180° by
+**1.44 s**, holds the bearing within a few degrees for the rest of the episode,
+and re-acquires cleanly after a mid-episode ball event. The shipped fix2 brain
+FELL on that same seed.
+
+**Why, and it is the project's own lesson:** with `PRIOR_PROB=0.7`, 70% of
+training episodes started by handing the duck the answer, so a real
+search-from-nothing was under-practised — the same shape as the headstand
+lesson in `AGENTS.md` ("if rollouts never contain the skill you are paying
+for, change the world, not the pay"), except here the world was too *easy*
+rather than too hard. Removing the prior makes every episode a real search.
+Note what it does NOT do: the blind-trained brain still uses a prior perfectly
+well when handed one — better than without — so this is about what it
+PRACTISED, not what it can read.
+
+- [ ] **Ship it?** The case is strong and one-knob, but it rests on a **single
+      training seed** (the lab pins `--seed 0`), and it would mean replacing
+      `policies/find_ball/` a second time and flipping a default this file
+      currently justifies at 0.7. Effect sizes are far larger than the
+      run-to-run variance seen elsewhere here (in frame 68 -> 83, worst
+      t_first 7.72 s -> 1.16 s), which is the argument for; one seed is the
+      argument for a confirmation run first.
+      → **decide on:** a second blind-trained chain reproducing in-frame ≥ 80%
+      and back-bucket found ≥ 95% at `--events 0.33`.
+
+
 **Why this section now has a mechanism, not just a hunch (measured
 2026-09-03).** "Which way should it look first?" has a fixed answer: with
 nothing known the belief slot is seeded `_BALL_NO_PRIOR_MEM = +pi/2`, "sweep
