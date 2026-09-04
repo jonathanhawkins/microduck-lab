@@ -286,6 +286,7 @@ class Tidy:
         self._head_since = -9.0
         self._cam: tuple[float, float] | None = None
         self._cam_yaw = 0.0
+        self._cam_t: float | None = None
         self._odom_hist: collections.deque = collections.deque(maxlen=60)   # ~1.2 s at 50 Hz
         # Where toys were last seen (odom frame) — the work queue — and the
         # basket once it has been seen at all: it does not move.
@@ -450,8 +451,8 @@ class Tidy:
         horiz_cam = float(np.clip((cam_z - target_z) / math.tan(depression), 0.0, 4.0))
         # The frame was taken up to one detector period ago; place it from
         # the pose of THEN, not of now (see `stale_fix`).
-        x, y, yaw = (self._odom_at(det.t, odom) if (p.stale_fix and getattr(det, "t", None) is not None)
-                     else odom)
+        x, y, yaw = (self._odom_at(self._cam_t, odom)
+                     if (p.stale_fix and getattr(self, "_cam_t", None) is not None) else odom)
         a = yaw + det.bearing + getattr(self, "_cam_yaw", 0.0)      # camera-frame bearing → body → odom
         # Beyond `far_range` the elevation says almost nothing about range
         # (at 2.3 m the map is 34 m per radian: 0.02 rad of head bob is
@@ -561,6 +562,9 @@ class Tidy:
         fr = senses.fresh_det(self.DET_MAX_AGE)
         self._cam = (fr.cam_z, fr.cam_pitch) if (fr is not None and fr.cam_z > 0.0) else None
         self._cam_yaw = getattr(fr, "cam_yaw", 0.0) if fr is not None else 0.0
+        # WHEN the frame was taken. A `Detection` carries no timestamp - only
+        # the frame does - so `stale_fix` reads it from here, not from `det`.
+        self._cam_t = fr.t if fr is not None else None
         self._gait.update(senses)                      # is the gait going? (see _turn)
         if self.state in ("scan", "explore", "approach"):
             self._note_basket(senses, odom, t)

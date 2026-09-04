@@ -418,31 +418,33 @@ def test_the_back_off_arc_curves_back_and_cannot_leave_the_basket():
 def test_a_detection_is_placed_from_the_pose_the_duck_had_when_it_was_taken():
     """`stale_fix`: `_locate` reads the camera's height and pitch off the
     FRAME ("the frame says where the camera was") but took x, y and yaw from
-    the CURRENT odometry — so a frame one detector period old was placed from
-    a pose the duck had already left. At approach speed that is ~3 cm at
-    10 Hz and ~6 cm at 5 Hz, against a 3 cm toy, which is the shape of the
-    measured rate cliff (grasp success 85% → 67%).
+    the CURRENT odometry — so a frame one detector period old was placed
+    from a pose the duck had already left. At approach speed that is ~3 cm
+    at 10 Hz and ~6 cm at 5 Hz, against a 3 cm toy, which is the shape of
+    the measured rate cliff (grasp success 85% → 67%).
 
-    The fix uses nothing the robot lacks: a second of its own odometry,
-    looked up at `det.t`. No ground truth. Ships at False until measured."""
-    from types import SimpleNamespace
-
+    Uses the REAL `Detection`, deliberately. The first version of this test
+    passed against a `SimpleNamespace` stub carrying a `det.t` — which the
+    real type does not have, because the timestamp lives on the FRAME. The
+    stub made a dead code path look alive, and a 32-seed battery came back
+    bit-identical before anyone noticed."""
     from microduck_local.brain.tidy import Tidy, TidyParams
+    from microduck_local.sensors.detector import Detection
 
+    assert not hasattr(Detection("toy", "t0", 0.0, -0.5, 0.02, 0.4, 0.9), "t")
     assert TidyParams().stale_fix is False                     # ships off
 
     def placed(fix: bool):
         b = Tidy(TidyParams(stale_fix=fix))
         b._odom_hist.extend([(9.8, (0.0, 0.0, 0.0)), (9.9, (0.1, 0.0, 0.0))])
         b._head_since = 0.0
-        det = SimpleNamespace(t=9.8, bearing=0.0, elevation=-0.5, cls="toy", name="t0")
-        b._cam = (0.20, 0.65)
-        return b._locate((0.30, 0.0, 0.0), det, 0.015, 10.0)     # duck is at x=0.30 NOW
+        b._cam, b._cam_t = (0.20, 0.65), 9.8                   # the frame, and WHEN it was taken
+        det = Detection("toy", "t0", 0.0, -0.5, 0.02, 0.4, 0.9)
+        return b._locate((0.30, 0.0, 0.0), det, 0.015, 10.0)   # the duck is at x=0.30 NOW
 
     stale, fixed = placed(False), placed(True)
     assert stale is not None and fixed is not None
-    # Same bearing and range; the difference is purely WHERE it is anchored.
-    assert abs(stale[2] - fixed[2]) < 1e-9
-    assert abs(stale[0] - fixed[0]) > 0.25                      # 30 cm of travel = 30 cm of error
-    assert abs(fixed[0] - (0.0 + fixed[2])) < 1e-6              # anchored at the 9.8 s pose (x=0)
-    assert abs(stale[0] - (0.30 + stale[2])) < 1e-6             # ...against the pose of now
+    assert abs(stale[2] - fixed[2]) < 1e-9                     # same bearing and range...
+    assert abs(stale[0] - fixed[0]) > 0.25                     # ...30 cm of travel = 30 cm of error
+    assert abs(fixed[0] - (0.0 + fixed[2])) < 1e-6             # anchored at the 9.8 s pose (x = 0)
+    assert abs(stale[0] - (0.30 + stale[2])) < 1e-6            # against the pose of now

@@ -130,6 +130,7 @@ class Tracker:
         half. VELOCITY is less affected - both samples carry a similar
         error, so it largely cancels in the difference - but the POSITION
         does not, and `Track.xy` is what a dead-reckoned approach steers by.
+        """
         p = self.p
         a = yaw + tr.bearing
         xy = (pos[0] + tr.range * math.cos(a), pos[1] + tr.range * math.sin(a))
