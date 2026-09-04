@@ -86,8 +86,8 @@ export default function TrainPanel() {
   return (
     <main style={S.page}>
       <header style={S.header}>
-        <Link href="/" style={S.back}>
-          ← lab
+        <Link href="/sim" style={S.back}>
+          ← sim
         </Link>
         <span style={S.title}>/train</span>
         <span style={S.sub}>brain training · train-brain</span>
