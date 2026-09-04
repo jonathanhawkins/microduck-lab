@@ -16,9 +16,6 @@ import {
   cameraKeyDown,
   cameraKeyUp,
   cameraKeysClear,
-  heldMotions,
-  takeReset,
-  takeTruckImpulse,
   truckImpulse,
 } from "@/lib/camera";
 import { loadJSON, saveJSON } from "@/lib/persist";
@@ -31,6 +28,7 @@ import {
 import { getSelectedDuck, setSelectedDuck } from "@/lib/select";
 import { modalIsOpen } from "@/lib/ui";
 import { buildBodyGeometries, Duck } from "./Duck";
+import CameraKeys, { type ControlsLike } from "./CameraKeys";
 import { Hud } from "./Hud";
 import { PolicyPanel } from "./PolicyPanel";
 import { TeachPanel } from "./TeachPanel";
@@ -127,100 +125,7 @@ function loadSavedCamera(): SavedCamera | null {
   return raw && isVec3(raw.p) && isVec3(raw.t) ? { p: raw.p, t: raw.t } : null;
 }
 
-// Structural slice of drei/three-stdlib OrbitControls — enough to subscribe to
-// the "end" gesture event without importing its concrete class type.
-interface ControlsLike {
-  enabled: boolean;
-  target: THREE.Vector3;
-  addEventListener: (type: "end", cb: () => void) => void;
-  removeEventListener: (type: "end", cb: () => void) => void;
-  update?: () => void;
-}
-
 const HOME_CAM = { p: [1.2, 0.7, 1.4] as const, t: [0, 0.12, 0] as const };
-
-/** Inside-the-Canvas helper: integrates held camera motions × dt every frame
- *  — smooth game-editor flow (truck/dolly/orbit rates scale with distance so
- *  the feel is constant whether you're nose-close or across the room). */
-function CameraKeys() {
-  const controls = useThree((s) => s.controls) as unknown as ControlsLike | null;
-  const camera = useThree((s) => s.camera);
-  const sph = useMemo(() => new THREE.Spherical(), []);
-  const offset = useMemo(() => new THREE.Vector3(), []);
-  const right = useMemo(() => new THREE.Vector3(), []);
-  useFrame((_, dtRaw) => {
-    // Drain the swipe impulse EVERY frame (even when unused/discarded) so a
-    // burst can never pool up and teleport the view later — idle stays idle.
-    const swipePx = takeTruckImpulse();
-    if (!controls) return;
-    // A live capture owns the camera — drop queued resets and held motions so
-    // nothing yanks the shot (RecordCamera flies it for the duration).
-    const capPhase = getCapture().phase;
-    if (capPhase === "framing" || capPhase === "recording") {
-      takeReset();
-      return;
-    }
-    if (takeReset()) {
-      camera.position.set(...HOME_CAM.p);
-      controls.target.set(...HOME_CAM.t);
-      camera.lookAt(controls.target);
-      controls.update?.();
-      return;
-    }
-    const held = heldMotions();
-    if (!held.size && swipePx === 0) return;
-    const dt = Math.min(dtRaw, 0.05); // tab-stall guard: no teleport frames
-
-    offset.copy(camera.position).sub(controls.target);
-    sph.setFromVector3(offset);
-
-    // Lateral/vertical truck moves camera AND target (the view slides).
-    const truckSpeed = 0.9 * sph.radius * dt;
-    if (held.has("truckLeft") || held.has("truckRight")) {
-      right.set(1, 0, 0).applyQuaternion(camera.quaternion);
-      right.y = 0; // keep trucking parallel to the floor
-      right.normalize().multiplyScalar(
-        held.has("truckRight") ? truckSpeed : -truckSpeed);
-      camera.position.add(right);
-      controls.target.add(right);
-    }
-    // Two-finger trackpad swipe → the same lateral truck, impulse-scaled.
-    // Natural scrolling reports fingers-moving-LEFT as +deltaX, and that
-    // gesture should slide the VIEW left (scene drifts right on screen) —
-    // hence the negation. Distance scaling keeps the feel constant near and
-    // far; the cap stops a momentum fling from delivering a teleport frame.
-    if (swipePx !== 0) {
-      const cap = 0.5 * sph.radius;
-      const step = Math.max(-cap, Math.min(cap, -swipePx * 0.0015 * sph.radius));
-      right.set(1, 0, 0).applyQuaternion(camera.quaternion);
-      right.y = 0; // floor-parallel, like A/D
-      right.normalize().multiplyScalar(step);
-      camera.position.add(right);
-      controls.target.add(right);
-    }
-    if (held.has("up") || held.has("down")) {
-      const dy = (held.has("up") ? 1 : -1) * 0.6 * sph.radius * dt;
-      camera.position.y += dy;
-      controls.target.y = Math.max(0.02, controls.target.y + dy);
-    }
-
-    // Orbit/dolly work on the target-relative spherical frame.
-    offset.copy(camera.position).sub(controls.target);
-    sph.setFromVector3(offset);
-    if (held.has("orbitLeft")) sph.theta += 1.7 * dt;
-    if (held.has("orbitRight")) sph.theta -= 1.7 * dt;
-    if (held.has("dollyIn")) sph.radius *= Math.exp(-1.5 * dt);
-    if (held.has("dollyOut")) sph.radius *= Math.exp(1.5 * dt);
-    sph.radius = Math.min(8, Math.max(0.25, sph.radius));
-    sph.phi = Math.min(1.53, Math.max(0.1, sph.phi));
-    offset.setFromSpherical(sph);
-    camera.position.copy(controls.target).add(offset);
-
-    camera.lookAt(controls.target);
-    controls.update?.();
-  });
-  return null;
-}
 
 /** Inside-the-Canvas helper: persist the camera pose after every orbit/pan/zoom
  *  gesture (OrbitControls "end"). Restore happens via the Canvas/OrbitControls
@@ -251,7 +156,8 @@ const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 /** Inside-the-Canvas helper for the 🎥 record flow: registers the WebGL
  *  canvas for MediaRecorder, and while a capture is framing/recording flies
  *  the camera to a ¾ front view of the target duck and keeps it centered.
- *  OrbitControls is paused for the duration (CameraKeys pauses itself), and
+ *  OrbitControls is paused for the duration (CameraKeys takes a `paused`
+ *  callback and drops held motions while it is true), and
  *  the camera simply stays where the take ended. The azimuth is chosen ONCE
  *  per take — the duck's heading rotated ±SHOT.az toward whichever side the
  *  camera already sits — not tracked per frame: a backflipping duck's heading
@@ -677,7 +583,15 @@ export default function Viewer() {
           zoomSpeed={0.4}
         />
         <CameraPersistence />
-        <CameraKeys />
+        <CameraKeys
+          home={HOME_CAM}
+          minDist={0.25}
+          maxDist={8}
+          paused={() => {
+            const ph = getCapture().phase;
+            return ph === "framing" || ph === "recording";
+          }}
+        />
         <Snapshotter />
       </Canvas>
       <Hud clientRef={clientRef} connected={connected} error={error} />

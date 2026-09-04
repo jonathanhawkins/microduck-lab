@@ -271,6 +271,11 @@ export async function fetchScenarios(): Promise<ScenarioListing[]> {
   if (!r.ok) throw new Error(`GET /scenarios ${r.status}`);
   return (await r.json()).scenarios;
 }
+/** Remove a user scenario. Built-ins are read-only (the server answers 409). */
+export async function deleteScenario(name: string): Promise<void> {
+  const r = await fetch(`${LAB_HTTP}/scenarios/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `delete ${r.status}`);
+}
 export async function fetchWorld(): Promise<WorldInfo> {
   const r = await fetch(`${LAB_HTTP}/world`);
   if (!r.ok) throw new Error(`GET /world ${r.status}`);
