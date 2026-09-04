@@ -1819,8 +1819,11 @@ def _fold_until_fall_line(env, max_steps=60):
     from microduck_local import contract as C
     dp = np.asarray(C.DEFAULT_POSE, dtype=np.float64)
     q = dp.copy()
-    q[3] = dp[3] + 1.4;  q[2] = dp[2] + 0.2;  q[4] = -(q[2] + q[3])
-    q[12] = dp[12] - 1.4; q[11] = dp[11] - 0.2; q[13] = -(q[11] + q[12])
+    # knee, hip, then the ankle closing the chain — left and right mirrored.
+    q[3], q[2] = dp[3] + 1.4, dp[2] + 0.2
+    q[4] = -(q[2] + q[3])
+    q[12], q[11] = dp[12] - 1.4, dp[11] - 0.2
+    q[13] = -(q[11] + q[12])
     full = (q - dp).astype(np.float32)
     for i in range(max_steps):
         _, _, terminated, _, _ = env.step(full * min(1.0, (i + 1) / 5))
@@ -1836,8 +1839,8 @@ def test_height_termination_is_a_recipe_knob():
     does: locomotion turns it off (GPU parity), the deep squat turns it off
     (its target is under the line), standing tricks keep it, and an explicit
     env kwarg still wins. The lab preview mirrors it like terminate_on_fall."""
-    from microduck_local.behaviors import BEHAVIORS, Behavior
     from microduck_local import viz_server as V
+    from microduck_local.behaviors import BEHAVIORS, Behavior
     assert Behavior.__dataclass_fields__["height_termination"].default is True
     assert BEHAVIORS["run"].height_termination is False
     assert BEHAVIORS["deep_squat"].height_termination is False
