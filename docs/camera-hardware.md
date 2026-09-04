@@ -305,16 +305,48 @@ definition** (which took two attempts — see the traps below):
 | mid (0.6–1.5 m) | 1.87° → 2.63 cm | 5.66 cm | 68% |
 | far (> 1.5 m) | 1.96° → 5.70 cm | 15.58 cm | 73% |
 
-**Range dominates, and its share grows with distance.** Range here is
-inferred from apparent width, which is a *pixel* quantity — so range error
-is a resolution story, and that is why the 640 px arm moved the line-up
-number at all (5.6 → 5.4 cm). Bearing error is roughly constant in angle
-(1.9–3.4°) and so grows linearly in metres, which is why it overtakes
-nothing but stays a third of the total.
+**Range dominates, and its share grows with distance.** Bearing error is
+roughly constant in angle (1.9–3.4°) and so grows linearly in metres;
+range error grows faster.
+
+**A mechanism claimed here was then tested and refuted, which matters for
+reading everything above.** The first version of this section argued that
+range comes from apparent width, width is a *pixel* quantity, therefore
+range error is a resolution story — and that this was why the 640 px arm
+moved the line-up number. Measured directly, at 320 px against 640 px on
+the same 3 seeds, in the line-up band:
+
+| | bearing | range |
+|---|---|---|
+| 62 × 48, **320 px** | 3.35° → 2.00 cm | 2.69 cm |
+| 62 × 48, **640 px** | 3.65° → 2.07 cm | 2.62 cm |
+| 116 × 60, 640 px | 3.79° → 2.11 cm | 2.67 cm |
+
+**Doubling the pixels changes neither component.** The reason is in the
+model, not the world: `DetectorNoise` uses a fixed `bearing_sigma_rad`
+(1° on the datasheet preset) and a fixed *relative* `width_sigma_frac`
+(10%), and `range_est = radius / tan(width/2)` — so a 10% width error is a
+~10% range error whatever the frame size. **`px_h` gates whether a target
+is found (`w_none` / `w_full`); it does not affect how precisely a found
+target is located.** That is a real modelling gap, now named.
+
+Two consequences:
+
+- The 5.6 → 5.4 cm line-up improvement in the table above **cannot be
+  attributed to resolution** and should be read as behavioural — the duck
+  with the wider calibrated camera plays differently — or as noise on a
+  median of correlated samples. The mechanism sentence has been withdrawn.
+- **The sim's estimate of what 640 px buys is, if anything, conservative.**
+  On a real camera, doubling the inference input halves the pixel
+  quantisation of both the box centre and the box width, so bearing and
+  range precision genuinely improve. Here that channel is absent, and the
+  640 px arm still recovered its full +1.09 toys through the size gate
+  alone.
 
 Both components are **noise rather than bias** (mean +1.3 cm of range
 against a 2.7 cm median absolute error in the line-up band). That matters
-because it says which levers exist: temporal averaging *does* help, and the
+because it says which lever exists *in this simulation*: not resolution (see
+above), but temporal averaging. The
 tracker currently smooths at α = 0.6 — about 1.7 frames of averaging, which
 is light for a ball that is stationary in half of all sightings. Heavier
 averaging gated on the tracker's own velocity estimate is the obvious
@@ -479,6 +511,12 @@ than the 4× scaling assumed here.
 4. Is the 16:9 frame letterboxed into the square YOLO input (keeps FOV,
    wastes pixels) or centre-cropped (keeps pixels, loses horizontal FOV)?
    The two give different px/rad **and** a different effective HFOV.
+5. **How does YOLO11n's localisation precision scale with input size on
+   this hardware?** §3c found the sim cannot answer it: `px_h` gates
+   detection but not precision, so the simulated bearing and range error
+   are flat in pixels. A few hundred labelled frames at 320 and 640 would
+   give the box-centre and box-width scatter directly, and that is the
+   half of the 640 px benefit this repo currently cannot see.
 
 ## 6. What the sim now models, and what it still does not
 
@@ -495,7 +533,10 @@ exactly what r = f·θ gives and is *not* what a pinhole lens does (a pinhole
 frame resolves more finely toward its edges). So the width thresholds were
 always modelling the wide-lens case; only the bearing needed the new model.
 
-Still not modelled: radial distortion of the *box* (an off-axis target's
-apparent width under a fisheye differs from the on-axis case), rolling
-shutter, and any per-unit calibration. None of these is worth building
+Still not modelled: **localisation precision as a function of input size**
+(§3c — `px_h` gates detection, not accuracy, so both error components are
+flat in pixels and every conclusion about a bigger input is conservative),
+radial distortion of the *box* (an off-axis target's apparent width under a
+fisheye differs from the on-axis case), rolling shutter, and any per-unit
+calibration. None of these is worth building
 before someone answers §5.1 and §5.2.

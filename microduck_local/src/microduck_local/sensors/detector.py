@@ -86,6 +86,20 @@ class DetectorSpec:
     # so a small distant target must be found LESS often, not just as often.
     w_none_rad: float = np.deg2rad(1.0)     # ~5 px of a 320 px frame over 62°
     w_full_rad: float = np.deg2rad(4.0)     # ~21 px: always found (before noise)
+    # MODELLING GAP, measured and named: `px_h` gates WHETHER a target is
+    # found (the two thresholds above, read through `px_per_rad`) and does
+    # NOT affect how precisely a found target is located. `DetectorNoise`
+    # carries a fixed `bearing_sigma_rad` and a fixed RELATIVE
+    # `width_sigma_frac`, and `range_est = radius / tan(width/2)`, so a 10%
+    # width error is a ~10% range error whatever the frame size. Measured
+    # over 3 seeds of 1v1, a floor ball inside 0.6 m: 320 -> 640 px moves
+    # bearing error 3.35 -> 3.65 deg and range error 2.69 -> 2.62 cm, i.e.
+    # nothing. On a real camera doubling the inference input halves the
+    # pixel quantization of both the box centre and its width, so both
+    # would genuinely improve. Anything this repo concludes about a bigger
+    # inference input is therefore CONSERVATIVE: it captures the size-gate
+    # half of the benefit and none of the precision half.
+    # docs/camera-hardware.md 3c.
     # How the lens maps a ray to the frame, and so what a consumer that maps
     # a BOX BACK TO A BEARING gets wrong.
     #
