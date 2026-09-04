@@ -28,9 +28,6 @@ export default function TrainPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [metric, setMetric] = useState<"ep_rew" | "ep_len">("ep_rew");
-  // A run the user explicitly picked stays pinned; otherwise follow whatever
-  // is training right now, so opening the page mid-run shows the live one.
-  const [pinned, setPinned] = useState<string | null>(null);
   const seeded = useRef(false);
 
   useEffect(() => {
@@ -44,12 +41,17 @@ export default function TrainPanel() {
         if (stopped) return;
         setRuns(b);
         setErr(null);
-        // First load: show the active run alone if there is one, else all.
+        // First load: chart ONE run, never the whole of brains/. Forty-odd
+        // curves over the same axes is a solid band you cannot read — and
+        // the palette only holds six colours, so they are not even
+        // separable by eye. Start on the live run, else the first card, and
+        // let the user click in the rest.
         if (!seeded.current && b.length) {
           seeded.current = true;
-          if (b.some((r) => r.active)) {
-            setHidden(new Set(b.filter((r) => !r.active).map((r) => r.name)));
-          }
+          const opening = b.filter((r) => r.active);
+          if (!opening.length) opening.push(b[0]);
+          const on = new Set(opening.map((r) => r.name));
+          setHidden(new Set(b.filter((r) => !on.has(r.name)).map((r) => r.name)));
         }
       } catch (e) {
         if (!stopped && (e as Error).name !== "AbortError") setErr((e as Error).message);
@@ -67,11 +69,6 @@ export default function TrainPanel() {
 
   const shown = useMemo(() => runs.filter((r) => !hidden.has(r.name)), [runs, hidden]);
   const live = useMemo(() => runs.filter((r) => r.active), [runs]);
-  const focus = useMemo(
-    () => runs.find((r) => r.name === pinned) ?? live[0] ?? shown[0] ?? runs[0],
-    [runs, pinned, live, shown]
-  );
-
   const toggle = useCallback((name: string) => {
     setHidden((h) => {
       const n = new Set(h);
@@ -82,6 +79,7 @@ export default function TrainPanel() {
   }, []);
 
   const allOn = shown.length === runs.length;
+  const noneOn = shown.length === 0;
 
   return (
     <main style={S.page}>
@@ -112,13 +110,22 @@ export default function TrainPanel() {
                 runs · {shown.length}/{runs.length} charted
               </span>
               <span style={{ flex: 1 }} />
+              {/* Two buttons, not one flip-flop: a lone button reading
+                  "none" cannot say whether that is the state or the thing
+                  it does. These light up like the chart's metric tabs. */}
               <button
-                style={S.tab}
-                onClick={() =>
-                  setHidden(allOn ? new Set(runs.map((r) => r.name)) : new Set())
-                }
+                style={{ ...S.tab, ...(allOn ? S.tabOn : null) }}
+                title="chart every run"
+                onClick={() => setHidden(new Set())}
               >
-                {allOn ? "none" : "all"}
+                all
+              </button>
+              <button
+                style={{ ...S.tab, ...(noneOn ? S.tabOn : null) }}
+                title="clear the chart — then add runs with their swatches"
+                onClick={() => setHidden(new Set(runs.map((r) => r.name)))}
+              >
+                none
               </button>
             </div>
             {/* The one scrolling region on the page. */}
@@ -129,9 +136,7 @@ export default function TrainPanel() {
                   run={r}
                   color={runColor(r.name, i)}
                   hidden={hidden.has(r.name)}
-                  focused={focus?.name === r.name}
                   onToggle={() => toggle(r.name)}
-                  onFocus={() => setPinned(r.name)}
                 />
               ))}
             </div>
@@ -167,20 +172,23 @@ export default function TrainPanel() {
   );
 }
 
+/**
+ * A card IS the chart toggle — the whole thing, not just the swatch. It used
+ * to carry a second selection ("focused", set by clicking the body) that
+ * drew a border and did nothing else, so clicking a run lit it up without
+ * ever putting it on the chart. One state, one meaning: bordered and bright
+ * means charted.
+ */
 function RunCard({
   run,
   color,
   hidden,
-  focused,
   onToggle,
-  onFocus,
 }: {
   run: BrainRun;
   color: string;
   hidden: boolean;
-  focused: boolean;
   onToggle: () => void;
-  onFocus: () => void;
 }) {
   const pct = run.progress != null ? Math.round(run.progress * 100) : null;
   const tags = [
@@ -193,20 +201,21 @@ function RunCard({
 
   return (
     <div
-      onClick={onFocus}
+      onClick={onToggle}
+      title={hidden ? "add to the chart" : "remove from the chart"}
       style={{
         ...S.card,
-        border: `1px solid ${focused ? color : "#1f2937"}`,
+        border: `1px solid ${hidden ? "#1f2937" : color}`,
         opacity: hidden ? 0.45 : 1,
       }}
     >
       <div style={S.cardTop}>
         <button
           onClick={(e) => {
-            e.stopPropagation();
+            e.stopPropagation();   // the card handles it; don't toggle twice
             onToggle();
           }}
-          title={hidden ? "show on chart" : "hide from chart"}
+          title={hidden ? "add to the chart" : "remove from the chart"}
           style={{
             ...S.swatch,
             background: hidden ? "transparent" : color,

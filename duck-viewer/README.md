@@ -292,8 +292,12 @@ keeps the curve of one that has already finished.
   charted run's value there. A run that had already stopped by that step is
   greyed and labelled with the step it ended at, rather than showing its
   final value as though it were current.
-- Click a card to focus it; click its swatch to add or remove it from the
-  chart. `all` / `none` toggles everything.
+- Click a card — anywhere on it, the swatch included — to add or remove that
+  run from the chart; a bordered, bright card is one that is charted. `all`
+  and `none` are separate buttons — the lit one is the current
+  state. The page opens on ONE run (the live one, else the first card): the
+  palette holds six colours, so forty-odd curves on the same axes come out
+  as an unreadable band.
 
 A brain cloned from the repo shows *no curve* — only `brain.onnx` and
 `brain.json` are committed, `progress.jsonl` stays local — and the card says
