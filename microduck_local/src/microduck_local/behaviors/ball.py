@@ -122,6 +122,19 @@ _BALL_AIM_STEPS = 25          # control steps (0.5 s at 50 Hz)
 # reason). head_yaw's DEFAULT_POSE entry is 0, so raw angle == relative here.
 _BALL_HEAD_YAW_ID = C.JOINT_NAMES.index("head_yaw")
 
+# `face_the_ball`'s tight layer, in rad. Named because docs/roadmap.md item 1
+# A/Bs it (0.4 -> 0.2) as the blunt alternative to `body_aimed`: at 0.4 the
+# term still pays ~2/3 at 19 deg off, so the last 20 deg of the turn has
+# almost no gradient behind it.
+_BALL_FACE_TIGHT_STD = 0.4
+
+# `turn_to_belief` pays only while the ball is OUT of frame. docs/roadmap.md
+# item 1 A/B'd ungating it (fix 3) and it is the worse recipe on every axis —
+# a yaw-rate pay that never switches off makes ARRIVING worth nothing, so the
+# duck turns in to 15 deg and then drifts back out to 28 deg to have something
+# left to turn toward. Kept as a named constant because that is the experiment.
+_BALL_TURN_GATED_TO_LOST = True
+
 _BALL_KEEPOUT = 0.12          # m — a rolling ball stops at the duck's feet
 _BALL_ARENA = 2.0             # m — a rolling ball stops at the arena edge
 # Gaze coverage bins for the sweep pay: 10 deg of camera yaw x two pitch
@@ -430,7 +443,8 @@ def _ball_face(env) -> float:
     if gate < 0.05:
         return 0.0
     psi = env._ball_psi
-    return gate * (0.25 * (1.0 + _math.cos(psi)) + 0.5 * _math.exp(-psi * psi / 0.4 ** 2))
+    return gate * (0.25 * (1.0 + _math.cos(psi))
+                   + 0.5 * _math.exp(-psi * psi / _BALL_FACE_TIGHT_STD ** 2))
 
 
 def _ball_new_ground(env) -> float:
@@ -454,13 +468,39 @@ def _ball_turn_to_belief(env) -> float:
     to the turn — the facing term's slope there is shallow, and this is the
     direct price on the missing motion. Zero while seen: the facing and
     centring terms own that regime."""
-    if env._ball_det[2] > 0.5:
+    if _BALL_TURN_GATED_TO_LOST and env._ball_det[2] > 0.5:
         return 0.0
     conf = env._ball_mem_conf
     if conf < 0.1:
         return 0.0
     d = 1.0 if env._ball_mem > 0.0 else -1.0
     return conf * max(-1.0, min(1.0, d * float(env._gyro[2]) / 2.0))
+
+
+def _ball_body_aimed(env) -> float:
+    """The HANDOFF STATE itself, priced: ball centred in the frame AND the
+    head straight ahead — which together mean the body is what is pointing
+    at the ball.
+
+    `face_the_ball` prices the body bearing and hopes squaring up falls out
+    of it; it does not. Traced over 8 s with the ball 15 deg off, the stage-5
+    export held the camera dead centre using 21 deg of HEAD yaw while the
+    body bearing sat at 18-20 deg and drifted further away — the head does
+    the eyes-on job alone and for free, while turning the body costs steps,
+    smoothness and fall risk. So pay the conjunction directly instead: with
+    the ball centred, the only way to earn this is to bring the body round
+    under the head.
+
+    Both factors are things the ROBOT sees — the detector's bearing (head
+    slots 52/53) and one joint encoder — so this is the same test
+    `_ball_handoff_due` runs, without the privileged truth `face_the_ball`
+    uses. The head-yaw std is 0.3 rad against the gate's 0.25: the pay has
+    to still slope where the gate is not yet satisfied."""
+    if not env._ball_seen:
+        return 0.0
+    e2 = env._ball_bx ** 2 + env._ball_by ** 2
+    hy = float(env._joint_qpos()[_BALL_HEAD_YAW_ID])
+    return _math.exp(-e2 / 0.25 ** 2) * _math.exp(-hy * hy / 0.3 ** 2)
 
 
 def _ball_handoff_due(env) -> bool:
@@ -555,6 +595,14 @@ _register(Behavior(
                    1.0, _ball_in_view),
         RewardTerm("face_the_ball", "Points for squaring the body up to the ball",
                    1.5, _ball_face),
+        # Weight 0 = measured but NOT priced by default. docs/roadmap.md item 1
+        # A/B'd it at 1.0 and 2.0: it is by far the strongest lever on the aim
+        # (head yaw 25 -> 8 deg, handoff 38% -> 83%) and it also triples the
+        # falls, which this project treats as a veto. Shipping that trade is a
+        # call for a human; the term, its test and these numbers are here so
+        # the call can be made in one edit.
+        RewardTerm("body_aimed", "Points for having the ball centred with the head straight — the body doing the aiming",
+                   0.0, _ball_body_aimed),
         RewardTerm("new_ground", "While the ball is lost: points for looking somewhere new",
                    1.0, _ball_new_ground),
         RewardTerm("turn_to_belief", "While the ball is lost: points for turning the body the way it went",

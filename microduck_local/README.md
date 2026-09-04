@@ -351,8 +351,25 @@ MICRODUCK_BALL_BEARING_MAX=1.2 MICRODUCK_BALL_EVENT_RATE=0.15 \
     uv run train-behavior find_ball --steps 1_000_000 --run-name fb-s1
 uv run train-behavior find_ball --steps 2_000_000 --run-name fb-s2 --init-from runs/fb-s1
 uv run render-rollout --policy runs/fb-s2/policy.onnx --out /tmp/rr-fb   # ball + gaze dot drawn in
-uv run eval-find-ball runs/fb-s2/policy.onnx        # time-to-first-sight by bearing bucket
+uv run eval-find-ball runs/fb-s2/policy.onnx        # FINDING + AIMING tables (below)
+uv run eval-find-ball runs/fb-s2/policy.onnx --events 0.33   # ...and judge FALLS here
 ```
+
+`eval-find-ball` prints **two** tables, because the first cannot see this
+behavior's actual failure. **FINDING** is time-to-first-sight, share of steps
+in frame and centred, and falls. **AIMING** is `head_yaw|centred` (mean head
+yaw over the steps the ball was centred — the handoff gate wants < 14°),
+`psi_final` / `psi_turned` (where the body ended up, and how much of the start
+bearing it actually turned out) and the share of episodes where the kick
+**handoff** fired. A gaze policy scores 100% in frame and 98% centred in
+FINDING while never once satisfying the handoff, which is exactly what the
+shipped s5 export does — see below.
+
+`--events` is worth knowing about: it defaults to 0 (a static ball, one search
+per episode, so each episode answers one question), but the recipe *trains* at
+0.33 and `render-rollout` runs at 0.33, and **the two regimes disagree about
+which policy is safest** — one A/B arm measured 0 falls at `--events 0` and 1
+at 0.33, another went 4 → 10. Judge falls at `--events 0.33`.
 
 **Measured (2026-09-03, `uv run eval-find-ball`, 40 static-ball episodes ×
 8 s per export, deterministic ONNX, randomizers off — the battery sweeps
@@ -372,10 +389,19 @@ camera perfectly centred (bearing +0.11, elevation 0.00, in frame 100% of
 steps) using **21° of head yaw**, while the body bearing to the ball stays at
 18–20° and drifts slightly further away. The head does the eyes-on job alone
 and for free; turning the body costs steps, smoothness penalties and fall
-risk. `face_the_ball`'s tight layer (std 0.4 rad) still pays ~2/3 at 19° off
-so the last 20° has little gradient behind it, and `turn_to_belief` only fires
-while the ball is *out* of frame. Candidate fixes and how to A/B them are in
-`docs/roadmap.md`.
+risk. `face_the_ball`'s tight layer (`_BALL_FACE_TIGHT_STD`, 0.4 rad) still pays
+~2/3 at 19° off so the last 20° has little gradient behind it, and
+`turn_to_belief` only fires while the ball is *out* of frame
+(`_BALL_TURN_GATED_TO_LOST`).
+
+All three candidate fixes have now been A/B'd on an M-series Mac, one at a
+time against a seed-matched control — **the tables, the winner and one clear
+negative result are in `docs/roadmap.md` item 1.** Two headlines: most of the
+gap was *under-training* (the same recipe retrained through its own curriculum
+halves the head yaw and removes the falls), and the remaining fix is one
+constant. `body_aimed` — a term that prices the handoff state directly — is in
+the recipe at **weight 0**: it is by far the strongest lever on the aim and it
+also triples the falls, so shipping that trade is a human's call.
 
 The s5 export ships in `policies/find_ball/` (see its README). Balls that
 start directly behind are the same problem seen from further away: the head's ±170° reaches them

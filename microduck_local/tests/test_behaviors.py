@@ -1507,3 +1507,45 @@ def test_find_ball_hands_off_to_a_kick_and_keeps_its_heading():
     for bid in ("backflip", "airflip"):
         assert BEHAVIORS[bid].handoff_fn is None
         assert BEHAVIORS[bid].handoff_recenter is True
+
+
+def test_find_ball_body_aimed_pays_the_body_not_the_neck():
+    """`body_aimed` exists because `face_the_ball` did not buy the turn: the
+    shipped export held the ball dead centre using ~21 deg of head yaw and
+    left the body 18-20 deg off. So the term must be worth nothing to a duck
+    that centres the ball by craning its neck, and near its maximum only when
+    the head is straight — which is what makes the body the thing aiming."""
+    from microduck_local.behaviors import (
+        _BALL_HEAD_YAW_ID,
+        _ball_body_aimed,
+        _ball_place,
+        _ball_sense,
+    )
+
+    env = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    for _ in range(20):    # settle the drop-in: at the spawn pose the head is
+        env.step(np.zeros(14, np.float32))   # still high and a floor ball sits
+    _ball_place(env, 1.2, 0.0)               # low in the frame (by = -0.39)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and abs(env._ball_bx) < 0.25
+
+    straight = _ball_body_aimed(env)
+    assert straight > 0.7, straight
+
+    # Same centred detector report, head cranked to where the export sat
+    # (21 deg = 0.37 rad): the pay has to collapse, or it is another term
+    # that a neck can farm.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.37
+    craned = _ball_body_aimed(env)
+    assert craned < 0.5 * straight, (craned, straight)
+    # ...and it still SLOPES there, or there is no gradient home from 21 deg.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.30
+    assert craned < _ball_body_aimed(env) < straight
+
+    # Nothing is paid while the ball is not in frame: this term is about the
+    # aimed state, and `new_ground` / `turn_to_belief` own the search.
+    _ball_place(env, 1.2, np.pi)
+    _ball_sense(env, force=True)
+    assert not env._ball_seen and _ball_body_aimed(env) == 0.0
