@@ -34,7 +34,7 @@ import numpy as np
 
 from ..world.arena import PICK_REACH_AHEAD, PICK_REACH_LEFT
 from .controllers import WanderParams, _column_clearance, wander_from_tof
-from .gait import TURN_KICK, GaitWatch, turn
+from .gait import TURN_KICK, GaitWatch, back_up, turn
 from .mapping import GridSpec, OccupancyGrid
 from .runtime import REGISTRY, Intent, Senses, age_inputs
 
@@ -119,6 +119,30 @@ class TidyParams:
     backoff_side_vy: float = 0.3
     backoff_turn: float = 2.6
     backoff_walk_s: float = 1.5
+    # ...OR back straight out for this long instead, and skip all three.
+    #
+    # The sequence above was justified by "the walker cannot walk
+    # backwards", and that was a dead-band reading: -0.3 m/s moves 4 mm in
+    # 6 s but -0.40 reverses at 0.228 m/s, steadily, cold or warm, with no
+    # falls in any probe (`walker-facts`, `gait.back_up`). So the whole
+    # ~7.3 s (1.5 sidestep + ~4.3 turning 2.6 rad at 0.6 rad/s + 1.5 walk)
+    # buys a separation a 2 s reverse buys.
+    #
+    # The time is the smaller half of the argument. The sidestep exists
+    # because a TURN IN PLACE at the rim falls (measured standing 0.17 m
+    # from the basket centre: a plain left turn fell 3 of 3, a right turn
+    # 3 of 3 everywhere, the sidestep-first 0 of 3) - and a reverse does
+    # not turn at the rim at all, so it removes the fall mode rather than
+    # dodging it. It leaves the duck FACING the basket, which `scan` is
+    # happy with: it turns in place anyway, and by then the duck is outside
+    # `basket_keepout`.
+    #
+    # UNTRIED against the sequence, so it ships at 0. `eval-tidy` is the
+    # right place to settle it - 16 seeds resolve a shift in `tidied`,
+    # where soccer's falls need ~376 - and it must be read on BOTH the
+    # tidied fraction and the falls, since the sequence is what the fall
+    # and tether rows in the README were measured on.
+    backoff_back_s: float = 0.0
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
     hold_blind_m: float = 0.12         # ToF returns closer than this while holding are the toy in the beak
@@ -709,30 +733,35 @@ class Tidy:
             # spot and a short straight walk. Scanning right at the rim once
             # put a foot on it.
             #
-            # This was justified by "the walker cannot walk backwards", and
-            # THAT WAS WRONG: -0.3 m/s is the dead band's inside, and -0.40
-            # backs up at 0.23 m/s (`walker-facts`, `gait.back_up`). A
-            # straight reverse clears 0.30 m of separation in a median 1.6 s
-            # against this sequence's ~7 s, so `backoff` is the first place
-            # to spend the new fact. Not changed here because the sequence is
-            # what the tidy benchmark's fall and tether rows were measured
-            # on, and swapping it re-opens both: it needs its own A/B.
-            if self._prev_yaw is not None and self.scan_turned < p.backoff_turn:
-                d = odom[2] - self._prev_yaw
-                self.scan_turned += math.atan2(math.sin(d), math.cos(d))
-            if t - self.t_state < p.backoff_side_s:
-                twist = (0.0, p.backoff_side_vy, 0.0)
-                self._backoff_t = t
-                note += " · sidestep"
-            elif self.scan_turned < p.backoff_turn:
-                twist = self._turn(+1.0)
-                self._backoff_t = t
-            elif t - self._backoff_t < p.backoff_walk_s:
-                twist = (p.approach_speed, 0.0, 0.0)
-            else:
+            # ...unless `backoff_back_s` is set, in which case the duck just
+            # backs out (see the parameter: the walker reverses at 0.228 m/s,
+            # and backing out never turns at the rim at all).
+            def _done_backing_off() -> None:
                 self.est = None
                 self.scan_turned = 0.0
                 self._enter("scan", t)
+
+            if p.backoff_back_s > 0:
+                if t - self.t_state < p.backoff_back_s:
+                    twist = back_up()
+                    note += " · reverse"
+                else:
+                    _done_backing_off()
+            else:
+                if self._prev_yaw is not None and self.scan_turned < p.backoff_turn:
+                    d = odom[2] - self._prev_yaw
+                    self.scan_turned += math.atan2(math.sin(d), math.cos(d))
+                if t - self.t_state < p.backoff_side_s:
+                    twist = (0.0, p.backoff_side_vy, 0.0)
+                    self._backoff_t = t
+                    note += " · sidestep"
+                elif self.scan_turned < p.backoff_turn:
+                    twist = self._turn(+1.0)
+                    self._backoff_t = t
+                elif t - self._backoff_t < p.backoff_walk_s:
+                    twist = (p.approach_speed, 0.0, 0.0)
+                else:
+                    _done_backing_off()
 
         elif self.state == "done":
             twist = (0.0, 0.0, 0.0)
