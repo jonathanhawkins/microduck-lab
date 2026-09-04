@@ -1721,3 +1721,50 @@ def test_lean_spawn_is_a_quarter_of_training_and_none_of_the_battery():
     for ep in range(20):
         probe.reset(seed=900 + ep)
         assert abs(float(probe._projected_gravity()[2])) > 0.98, "battery spawned tilted"
+
+
+def test_stale_fix_is_off_and_the_bearing_is_simply_held():
+    """find_ball's held detector report is a MODEL OF LATENCY, not the
+    stale-pose bug the tidy pipeline found in `_locate`. tidy's code mixed an
+    old frame with new odometry — an internal inconsistency it could correct.
+    Here the hold is what a real detector does, the policy learned against it,
+    and compensating for it measured WORSE at every rate (6 Hz handoff
+    35% -> 0%). The knob stays off; docs/roadmap.md has the numbers.
+
+    Locks both halves: the report really is held unchanged between updates,
+    and the compensation really does move it when switched on — so a future
+    training run can use the switch and this test says what it does."""
+
+    import mujoco
+
+    from microduck_local.behaviors import _ball_place, _ball_sense
+
+    def bearing_after_head_turn(stale_fix):
+        env = _ball_env(spawn_overrides={
+            "MICRODUCK_BALL_EVENT_RATE": "0",
+            "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0",
+            "MICRODUCK_BALL_DETECT_EVERY": "10",
+            "MICRODUCK_BALL_STALE_FIX": stale_fix})
+        for _ in range(20):
+            env.step(np.zeros(14, np.float32))
+        _ball_place(env, 1.2, 0.0)
+        _ball_sense(env, force=True)          # capture, head straight
+        captured = float(env.head_cmd[0])
+        # Turn the head WITHOUT letting the detector re-report.
+        env.data.qpos[env.joint_qpos_adr[7]] = 0.30
+        mujoco.mj_forward(env.model, env.data)
+        env.step_count += 1
+        _ball_sense(env)
+        return captured, float(env.head_cmd[0])
+
+    held_from, held_to = bearing_after_head_turn("0")
+    assert held_to == pytest.approx(held_from, abs=1e-6), "report was not held"
+
+    fixed_from, fixed_to = bearing_after_head_turn("1")
+    assert fixed_from == pytest.approx(held_from, abs=1e-6)
+    # +1/half_h per rad of camera yaw, measured — the head turned ~0.30 rad.
+    assert fixed_to > fixed_from + 0.3, (fixed_from, fixed_to)
+
+    # And it is off in the shipped recipe.
+    from microduck_local.behaviors import _BALL_KNOBS
+    assert _BALL_KNOBS["MICRODUCK_BALL_STALE_FIX"] == 0.0

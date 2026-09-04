@@ -124,6 +124,39 @@ _BALL_KNOBS = {
     # 97% at EVERY rate down to 4 Hz, because "ever saw it" is satisfied
     # eventually. Only the AIMING columns see the collapse.
     "MICRODUCK_BALL_DETECT_EVERY": 2.0,
+    # Carry a held detector report through the head's own rotation (0/1).
+    # OFF, and the measurement is the point.
+    #
+    # The tidy pipeline found that its camera's apparent 10 Hz floor was a
+    # stale POSE, not a rate: a frame one period old was being placed from the
+    # pose the duck had already left (`stale_fix`, brain/tidy.py). find_ball
+    # holds det[0]/det[1] — a bearing measured off the camera at capture —
+    # unchanged while the head keeps sweeping, which LOOKS like the same bug,
+    # and the stale error tracks its cliff suspiciously well: 1.1 deg mean /
+    # 5.0 p95 at 10 Hz against an aim tolerance of 7, then 5.5 / 20.9 at 6 Hz
+    # where centring and the handoff collapse.
+    #
+    # It is not the same bug. Compensating (signs MEASURED: d(bx)/d(cam yaw)
+    # = +1/half_h, d(by)/d(cam pitch) = -1/half_v) makes the shipped brain
+    # WORSE at every rate, and catastrophically so where it was supposed to
+    # help: at 6 Hz the kick handoff goes 35% -> 0%, at 4 Hz falls go 16 -> 23
+    # per 60. Two reasons, and both are worth knowing:
+    #
+    #   - tidy's was an INTERNAL INCONSISTENCY — its own code mixed an old
+    #     frame with new odometry. find_ball's hold is not a mistake, it is a
+    #     faithful model of detector latency: a real detector genuinely does
+    #     report a bearing that is one period old, and the daemon reads it.
+    #     There is nothing wrong to fix.
+    #   - the policy LEARNED against the uncompensated signal. Changing what
+    #     the slot means at deployment is out-of-distribution, which is why a
+    #     correct compensation still hurts. tidy could take its fix because
+    #     `_locate` is hand-written; a learned brain cannot.
+    #
+    # So the >= 10 Hz requirement stands: it is detector latency, not an
+    # artifact. Left as a knob because the one question this does NOT settle
+    # is whether a brain TRAINED with the compensation beats the floor — that
+    # needs a training run, and this is the switch it would use.
+    "MICRODUCK_BALL_STALE_FIX": 0.0,
     "MICRODUCK_BALL_JITTER": 0.02,
     "MICRODUCK_BALL_DROPOUT": 0.0,
     "MICRODUCK_BALL_MEM_TAU": 4.0,
@@ -442,6 +475,10 @@ def _ball_sense(env, force: bool = False) -> None:
     fresh_seen = False          # a detector report THIS step, with the ball in it
     if force or env.step_count - env._ball_det_step >= k["detect_every"]:
         env._ball_det_step = env.step_count
+        # Camera attitude AT CAPTURE, so a held report can be carried forward
+        # (see MICRODUCK_BALL_STALE_FIX). `yaw`/`pitch` are the optical axis in
+        # the world frame, already computed above for the coverage bins.
+        env._ball_det_yaw, env._ball_det_pitch = yaw, pitch
         r = env._rng
         seen_det = seen
         if seen and env.obs_noise and k["MICRODUCK_BALL_DROPOUT"] > 0.0 \
@@ -455,6 +492,21 @@ def _ball_sense(env, force: bool = False) -> None:
             fresh_seen = True
         else:
             det[:] = 0.0
+    elif k["MICRODUCK_BALL_STALE_FIX"] > 0.5 and det[2] > 0.5:
+        # Carry the held report forward through the head's own rotation. The
+        # ball has not moved in the world (much); the CAMERA has, so the
+        # bearing it would report now is the old one minus the rotation since.
+        # First-order and decoupled, which is all the daemon could do too, and
+        # enough: the error this removes is tens of degrees at low rates
+        # against an aim tolerance of _BALL_AIM_DEG.
+        dyaw = _math.atan2(_math.sin(yaw - env._ball_det_yaw),
+                           _math.cos(yaw - env._ball_det_yaw))
+        # Signs MEASURED, not reasoned: d(bx)/d(cam yaw) = +1/half_h and
+        # d(by)/d(cam pitch) = -1/half_v. Guessing them made the error ten
+        # times worse, which is its own small lesson about this projection.
+        det[0] = max(-1.0, min(1.0, float(det[0]) + dyaw / k["half_h"]))
+        det[1] = max(-1.0, min(1.0, float(det[1])
+                               - (pitch - env._ball_det_pitch) / k["half_v"]))
 
     # Bookkeeping for the reports, and the memory slot.
     dt = C.CTRL_DT

@@ -735,6 +735,42 @@ lens removed that coupling, and no reward term has replaced it.
       between 10 and 6.** Write ≥ 10 Hz into the daemon's requirements. The
       recipe's 25 Hz default has 2.5x margin and does not need changing.
 
+      **Checked against the tidy pipeline's stale-pose result, and it is NOT
+      the same bug.** `brain/tidy.py`'s `stale_fix` showed that a camera's
+      apparent 10 Hz floor was really a stale POSE — an old frame placed from
+      the pose the duck had already left. find_ball holds `det[0]/det[1]`
+      unchanged between updates while the head keeps sweeping, which looks
+      identical, and the stale bearing tracks the cliff almost too well:
+
+      | detector | 25 Hz | 17 Hz | **10 Hz** | **6 Hz** | 4 Hz |
+      |---|---|---|---|---|---|
+      | stale bearing, mean / p95 | 0.4° / 2.0° | 0.6° / 3.1° | 1.1° / **5.0°** | 5.5° / **20.9°** | 31° / 79° |
+
+      The aim tolerance is 7°, so the cliff sits exactly where the stale error
+      outgrows what "centred" means. Tempting — and wrong. Compensating the
+      held report by the head's own rotation (`MICRODUCK_BALL_STALE_FIX`, signs
+      MEASURED: d(bx)/d(cam yaw) = +1/half_h, d(by)/d(cam pitch) = −1/half_v —
+      guessing them made the error 10× worse first) makes the shipped brain
+      WORSE at every rate, and worst where it should have helped: at 6 Hz the
+      handoff goes 35% → **0%**, at 4 Hz falls go 16 → 23 per 60.
+
+      Two reasons, and the first is the one to carry to other behaviors:
+
+      - **tidy's was an internal inconsistency; this is a faithful model.**
+        tidy's own code mixed an old frame with new odometry — a mistake it
+        could correct. A real detector genuinely does report a bearing one
+        period old, and the daemon genuinely reads it. There is nothing wrong
+        here to fix, so "fix it here too" is the wrong lesson — which is what
+        `a671b9f` on this branch says in its own context.
+      - **The policy learned against the uncompensated signal.** Changing what
+        a slot means at deployment is out-of-distribution, which is why a
+        *correct* compensation still hurts. tidy could take its fix because
+        `_locate` is hand-written; a learned brain cannot.
+
+      Left as a knob, off, because the one thing this does not settle is
+      whether a brain TRAINED with the compensation beats the floor. That
+      needs a training run and this is the switch it would use.
+
       **The trap in this table is worth its own line:** `found` stays 97% at
       EVERY rate, including the 4 Hz column where the handoff never fires and
       the duck falls in 16 of 60 episodes. "Ever saw the ball" is satisfied
