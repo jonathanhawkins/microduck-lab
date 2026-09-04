@@ -1,4 +1,3 @@
-import math
 """The tracker over detection frames (roadmap 1.3) and the gait facts every
 brain shares (brain/gait.py): ids persist across frames, a track coasts
 through misses with its bearing turning with the body, a one-frame ghost

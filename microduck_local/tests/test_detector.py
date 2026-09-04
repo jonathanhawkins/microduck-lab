@@ -153,7 +153,6 @@ def test_a_person_is_seen_by_its_legs_up_close_and_a_point_target_is_not():
     """A person is a vertical extent: the part inside the 48 deg frustum is
     reported (its middle leaves the frustum at about 1.2 m from a 24 cm
     camera). A point-like target of the same height is lost there."""
-    import mujoco
 
     from microduck_local.world import Duck, Person, Scenario, World
     sc = Scenario(name="near", floor=(6, 6), ducks=[Duck("d0", (0.0, 0.0, 0.0), None, None, "ideal")],

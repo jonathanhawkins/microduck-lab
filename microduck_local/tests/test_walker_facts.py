@@ -156,5 +156,5 @@ def test_the_turn_cap_is_one_constant_every_brain_reads():
         else:
             os.environ["MICRODUCK_MAX_WZ"] = old
     assert FollowParams().search_wz == 1.0                     # the dead knob is still declared
-    assert not any("p.search_wz" in l for l in                 # ...and still nobody reads it
+    assert not any("p.search_wz" in line for line in            # ...and still nobody reads it
                    open("src/microduck_local/brain/controllers.py"))

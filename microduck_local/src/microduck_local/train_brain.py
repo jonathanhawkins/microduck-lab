@@ -52,9 +52,8 @@ from .brain.striker import (
     StrikerTask,
 )
 from .machine import profile, with_phase_callbacks
-from .ppo_hparams import configure_torch_cpu
 from .plateau import PlateauDetector, env_defaults
-from .ppo_hparams import linear_decay, ppo_batch_size
+from .ppo_hparams import configure_torch_cpu, linear_decay, ppo_batch_size
 from .vec_env import as_sb3_vec_env, make_vec_env
 
 # Hard cap on the policy's per-dim action log_std (std <= ~0.6), the same cap

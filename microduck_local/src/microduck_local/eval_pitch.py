@@ -57,14 +57,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
-
 from pathlib import Path
 
 import numpy as np
 
-from . import contract as C
 from .brain import REGISTRY, Senses
 from .brain.brain_env import POLICIES_DIR, onnx_infer
 from .world import World, make_pitch
