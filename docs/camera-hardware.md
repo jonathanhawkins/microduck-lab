@@ -360,7 +360,13 @@ by, against truth:
 | 0.15 | 8.89 cm | 14.40 cm |
 
 **The shipped value is already the optimum, and heavier averaging makes
-things worse on a still ball as well as a rolling one.** The mechanism is
+things worse on a still ball as well as a rolling one.** (Same caveat as
+the sighting counts above: how many samples land in each cell is an
+*outcome*, not a property — changing the smoothing changes how the duck
+plays and therefore how often the ball is rolling at all. The rolling-ball
+counts run 270 / 1623 / 1061 / 132 down the table, so read the α = 0.15
+rolling figure as indicative only. The trend across the other three, and
+the whole still-ball column, do not depend on it.) The mechanism is
 the frame: the tracker smooths *bearing and range*, in the body frame, and
 the body is walking and turning. A ball that is stationary **in the world**
 still sweeps quickly in bearing as the duck moves, so averaging it lags —
