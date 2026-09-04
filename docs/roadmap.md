@@ -211,8 +211,9 @@ Three candidate fixes, cheapest first — **A/B them, do not stack them**:
       0.8-1.9 m, exactly as item 4 predicted; it is an argument for the
       approach behavior, not evidence against this term.
 - [x] **Tighten `face_the_ball`'s tight layer** (std 0.4 → 0.2 rad) —
-      **the recommended fix, and it beats `body_aimed` on the trade that
-      matters.** The std is now the named constant `_BALL_FACE_TIGHT_STD`
+      **SHIPPED.** `_BALL_FACE_TIGHT_STD` is 0.2 in the recipe, and
+      `policies/find_ball/policy.onnx` is this arm's export. It beats
+      `body_aimed` on the trade that matters. The std is now the named constant `_BALL_FACE_TIGHT_STD`
       (`behaviors/ball.py`) precisely so this A/B is one edit. Arm
       `teach-find_ball-c60e89`, `body_aimed` pinned to 0 so nothing is
       stacked. The feared failure — a steeper Gaussian producing a policy
@@ -263,8 +264,9 @@ AIMING table, 60 episodes with **ball events on** — the honest regime
 | **fix 2 face std 0.2** | 18.6° | 68% | **1** |
 | fix 3 turn ungated | 20.4° | 53% | 7 |
 
-**Recommendation: ship fix 2.** It nearly doubles the handoff rate over the
-control (38% → 68%) for one extra fall in sixty, and it is a one-constant
+**Fix 2 is shipped** (`_BALL_FACE_TIGHT_STD` 0.2, and the arm's export
+promoted to `policies/find_ball/`). It nearly doubles the handoff rate over
+the control (38% → 68%) for one extra fall in sixty, and it is a one-constant
 change to a term that already exists. `body_aimed` 2.0 is the better *aimer*
 by a distance — it is the only arm that puts head yaw under the gate and the
 only one that holds multi-second aim streaks — but 10 falls / 60 is a 17%
@@ -273,9 +275,14 @@ is therefore left in the recipe **at weight 0**: measured, tested, documented,
 one edit away. The thing that would settle it is whether those falls survive
 more steps or a stability term, which is the item below, not a fourth term.
 
-**Left in the tree:** recipe unchanged (`_BALL_FACE_TIGHT_STD = 0.4`,
-`_BALL_TURN_GATED_TO_LOST = True`, `body_aimed` weight 0) — nothing shipped
-without a human call. All five trained chains are under `runs/`
+**Left in the tree:** fix 2 shipped (`_BALL_FACE_TIGHT_STD = 0.2`); fix 3
+rejected and its gate kept (`_BALL_TURN_GATED_TO_LOST = True`); fix 1 present
+but unpriced (`body_aimed` weight 0). `policies/find_ball/policy.onnx` is the
+fix-2 export — and unlike its cloud-trained predecessor it has a real SB3
+checkpoint behind it, at `runs/teach-find_ball-c60e89-s3/` on the machine that
+trained it (4.6 MB, not in git: `runs/` is gitignored and this repo does not
+ship raw checkpoints). If warm-startability should survive a machine, that is
+the decision to make. All five trained chains are under `runs/`
 (`5f89d9` control, `0ad2b0` / `3fc099` fix 1 at 1.0 / 2.0, `c60e89` fix 2,
 `961dfd` fix 3). The aim probe that produced these numbers is now
 **part of `eval-find-ball`** (an AIMING table beside the existing FINDING one,

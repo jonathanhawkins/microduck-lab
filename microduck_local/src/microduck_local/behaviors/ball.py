@@ -122,11 +122,17 @@ _BALL_AIM_STEPS = 25          # control steps (0.5 s at 50 Hz)
 # reason). head_yaw's DEFAULT_POSE entry is 0, so raw angle == relative here.
 _BALL_HEAD_YAW_ID = C.JOINT_NAMES.index("head_yaw")
 
-# `face_the_ball`'s tight layer, in rad. Named because docs/roadmap.md item 1
-# A/Bs it (0.4 -> 0.2) as the blunt alternative to `body_aimed`: at 0.4 the
-# term still pays ~2/3 at 19 deg off, so the last 20 deg of the turn has
-# almost no gradient behind it.
-_BALL_FACE_TIGHT_STD = 0.4
+# `face_the_ball`'s tight layer, in rad. 0.2, not the 0.4 this recipe shipped
+# with: at 0.4 the term still paid ~2/3 at 19 deg off, so the last 20 deg of
+# the turn had almost no gradient behind it and the duck finished the job with
+# its neck. docs/roadmap.md item 1 A/B'd 0.4 vs 0.2 against a seed-matched
+# control, and tightening it nearly doubles the kick handoff (38% -> 68% of
+# episodes) and takes head yaw from 25 to 19 deg for ONE extra fall in sixty.
+# The feared failure — a steeper Gaussian producing a policy that fights to
+# hold an exact pose — did not appear: 0 reversals, and it renders as a clean
+# square-up. `body_aimed` buys more aim than this and costs ten falls in sixty;
+# the veto on falls is why this is the shipped fix and that one is at weight 0.
+_BALL_FACE_TIGHT_STD = 0.2
 
 # `turn_to_belief` pays only while the ball is OUT of frame. docs/roadmap.md
 # item 1 A/B'd ungating it (fix 3) and it is the worse recipe on every axis —

@@ -1,40 +1,60 @@
 # find_ball — prototype brain (CPU, this harness)
 
-`policy.onnx` is the stage-5 export of the `find_ball` curriculum trained in
-this harness (xml actuator, no DR — a prototype, not a robot policy; see
-"sim2real honesty" in `../../AGENTS.md`). 61-obs / 14-action, normalizer
-baked in, deterministic mean. It expects the head slots and the scan clock
-filled as documented in `../../README.md` ("find_ball").
+`policy.onnx` is the `find_ball` curriculum trained end to end in this harness
+(xml actuator, no DR — a prototype, not a robot policy; see "sim2real honesty"
+in `../../AGENTS.md`). 61-obs / 14-action, normalizer baked in, deterministic
+mean. It expects the head slots and the scan clock filled as documented in
+`../../README.md` ("find_ball").
 
-Lineage: s1 (front 140°, 1M) → s1c (+ belief slot & scan clock, 1M) → s2
-(anywhere, moving, 2M) → s3 (rolling, 1M) → s4 (+ raised-cosine facing, 2M)
-→ s5 (+ turn_to_belief, no up-band coverage, 1M). 8 envs, seeds 1-7.
+Lineage: the declared 3-stage curriculum straight through, 8M steps, 32 envs,
+seed 0, launched through the lab's `/teach` (the only path that chains stages).
+Run `teach-find_ball-c60e89`; ~7 minutes on an M-series Mac. The SB3 checkpoint
+it was exported from is at `runs/teach-find_ball-c60e89-s3/` on the machine
+that trained it and is **not** in git (`runs/` is gitignored) — so a fine-tune
+can warm-start from it there, which the previous cloud-trained export could not
+offer anywhere.
 
-`uv run eval-find-ball policies/find_ball/policy.onnx` (40 static-ball
-episodes × 8 s, deterministic, randomizers off), measured 2026-09-03:
+This export is the **fix 2** arm of `docs/roadmap.md` item 1: identical recipe
+except `_BALL_FACE_TIGHT_STD` 0.4 → 0.2, which is now the shipped default.
 
-| ball starts | found | time to first sight (median / max) | in frame | falls |
-|---|---:|---:|---:|---:|
-| front (< 45°) | 100% | 0.03 s / 0.16 s | 100% | 0 |
-| side (45–135°) | 85% | 0.60 s / 2.46 s | 77% | 0 |
-| back (> 135°) | 60% | 0.94 s / 6.98 s | 34% | 2 |
-| blind (no prior), all | 88% | 0.64 s / 7.06 s | 74% | 1 |
+`uv run eval-find-ball policies/find_ball/policy.onnx --episodes 40`
+(40 static-ball episodes × 8 s, deterministic, randomizers off), 2026-09-03:
 
-Known gap: **it aims with its head, not its body** — it will hold the ball
-dead centre in frame with ~21° of head yaw and never square up, so the kick
-handoff (which requires the head straight ahead, i.e. the body pointing at the
-ball) does not fire on a side start. It also falls on some back starts while
-turning (2/40 in the battery,
-2/4 in a full-circle render) — `turn_to_belief` has had only 1M steps. The
-fall-free choice is the s4 recipe (no turn term), which found 30% of back
-balls; retrain longer before putting either near a real duck.
+| ball starts | found | time to first sight (median / max) | in frame | head yaw \| centred | handoff | falls |
+|---|---:|---:|---:|---:|---:|---:|
+| front (< 45°) | 100% | 0.03 s / 0.06 s | 100% | 7.5° | 100% | 0 |
+| side (45–135°) | 90% | 0.49 s / 7.16 s | 75% | 16.0° | 75% | 0 |
+| back (> 135°) | 100% | 1.92 s / 7.16 s | 66% | 18.4° | 70% | 0 |
+| **all** | **95%** | **0.23 s** | **79%** | **14.4°** | **80%** | **0** |
 
-## `policy_s4_pre_turn_term.onnx` — the A/B baseline
+**Judge falls with ball events on**, which is what the recipe trains and
+`render-rollout` runs at — the static-ball battery and the events-on battery
+disagree about which policy is safest.
+`uv run eval-find-ball policies/find_ball/policy.onnx --episodes 60 --events 0.33`:
+found 97% all / 94% back, in frame 66%, head yaw 18.6°, handoff 68%,
+**1 fall / 60**.
 
-The stage-4 export: identical recipe minus `turn_to_belief`, and with the
-old three-band gaze coverage. It is here because `docs/roadmap.md` queues an
-A/B of that term and this is its "before" arm — the container it was trained
-in is ephemeral, and regenerating it means rerunning the whole chain.
+Against the previous shipped export (the 6-stage cloud chain, `--events 0.33`,
+60 episodes): found 97% vs 85%, handoff **68% vs 15%**, head yaw **18.6° vs
+44.8°**, falls 1 vs 2. Two separate things produced that gap and it is worth
+keeping them apart: most of it was **under-training** — the old export was not
+a converged instance of its own recipe, and retraining the *unchanged* terms
+took head yaw to 25° and handoff to 38% on its own — and the rest is fix 2.
+
+Known gap: it still aims partly with its neck. Head yaw is 14.4° averaged over
+centred steps on a static ball, right at the handoff gate's 14°, and 18.6° with
+events on; the handoff fires on 68–80% of episodes rather than all of them.
+`body_aimed` (in the recipe at weight 0) is the stronger lever — it takes head
+yaw to 8° and the handoff to 83% — and it triples the falls, which is why it is
+not priced. See `docs/roadmap.md` item 1 for the full A/B.
+
+## `policy_s4_pre_turn_term.onnx` — still the turn-term A/B baseline
+
+The stage-4 cloud export: no `turn_to_belief`, and the old three-band gaze
+coverage. **Keep it.** Its A/B ("does the turn term buy the turn, or only the
+falls?") is still open in `docs/roadmap.md` — and the control arm re-scoped the
+question rather than answering it, since with the recipe trained through, the
+falls stage 5 was blamed for go to zero on their own.
 
 | ball starts | found | time to first sight (median) | falls |
 |---|---:|---:|---:|
@@ -42,11 +62,8 @@ in is ephemeral, and regenerating it means rerunning the whole chain.
 | side | 85% | 0.62 s | 0 |
 | back | 30% | 3.16 s | 0 |
 
-Read against `policy.onnx` (s5) it is the whole trade the term bought: back
-found rate 30% → 60% and median 3.16 s → 0.94 s, at the cost of the chain's
-only falls (0 → 2 per 40). Which way that trade should go is the open
-question. Delete this file once the A/B has answered it.
-
-To seat it in the lab as a run: `cp -r policies/find_ball runs/find_ball`
-(the palette lists `run:find_ball`); to look at it:
+To seat this brain in the lab as a run: `cp -r policies/find_ball runs/find_ball`
+and drop `run:find_ball` from the 🧠 palette (**not** as a `duck-lab` CLI
+positional — a run dir passed that way is not recognised as a trick duck and
+gets driven with a walk command). To look at it:
 `uv run render-rollout --policy policies/find_ball/policy.onnx --out /tmp/rr-fb`.

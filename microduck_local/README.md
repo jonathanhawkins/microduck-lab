@@ -381,36 +381,58 @@ bearings round the circle; "found" = ball entered the frame within 8 s):**
 | s2 (anywhere, moving) | 100% / 0.03 s | 55% / 1.22 s | 0% | 0 |
 | s3 (rolling) | 100% / 0.03 s | 80% / 0.84 s | 40% / 2.64 s | 1 |
 | s4 (+ raised-cosine facing) | 100% / 0.03 s | 85% / 0.62 s | 30% / 3.16 s | 0 |
-| **s5** (+ turn_to_belief, no up-band) | 100% / 0.03 s | 85% / 0.60 s | 60% / 0.94 s | 2 |
+| s5 (+ turn_to_belief, no up-band) | 100% / 0.03 s | 85% / 0.60 s | 60% / 0.94 s | 2 |
+| **shipped** (3-stage chain, 8M, tight facing) | 100% / 0.03 s | 90% / 0.49 s | 100% / 1.92 s | 0 |
 
-**It aims its head, not its body — the open problem.** Handing off to a kick
-exposed it: over a full 8 s episode with the ball 15° off, the duck holds the
-camera perfectly centred (bearing +0.11, elevation 0.00, in frame 100% of
-steps) using **21° of head yaw**, while the body bearing to the ball stays at
-18–20° and drifts slightly further away. The head does the eyes-on job alone
-and for free; turning the body costs steps, smoothness penalties and fall
-risk. `face_the_ball`'s tight layer (`_BALL_FACE_TIGHT_STD`, 0.4 rad) still pays
-~2/3 at 19° off so the last 20° has little gradient behind it, and
-`turn_to_belief` only fires while the ball is *out* of frame
-(`_BALL_TURN_GATED_TO_LOST`).
+The last row is the one in `policies/find_ball/` — the same recipe trained
+straight through its own curriculum on an M-series Mac (~7 min) with
+`face_the_ball`'s tight layer at 0.2 rad. The rows above it are the cloud
+lineage, kept because the shape of the progression is the story. Two separate
+things closed the gap and it is worth keeping them apart: most of it was
+**under-training** (the s5 export was not a converged instance of its own
+recipe — retraining the *unchanged* terms takes head yaw from 41° to 21° and
+the falls to zero), and the rest was the tighter facing layer. The AIMING
+columns for the same row: head yaw 14.4°, kick handoff fires on 80% of
+episodes — against 40.8° and 15% for s5.
 
-All three candidate fixes have now been A/B'd on an M-series Mac, one at a
-time against a seed-matched control — **the tables, the winner and one clear
-negative result are in `docs/roadmap.md` item 1.** Two headlines: most of the
-gap was *under-training* (the same recipe retrained through its own curriculum
-halves the head yaw and removes the falls), and the remaining fix is one
-constant. `body_aimed` — a term that prices the handoff state directly — is in
-the recipe at **weight 0**: it is by far the strongest lever on the aim and it
-also triples the falls, so shipping that trade is a human's call.
+**It aimed its head, not its body — mostly fixed, and the best lesson here.**
+Handing off to a kick exposed it: over a full 8 s episode with the ball 15°
+off, the s5 export held the camera perfectly centred (bearing +0.11, elevation
+0.00, in frame 100% of steps) using **21° of head yaw**, while the body bearing
+stayed at 18–20° and drifted slightly further away. Every metric the battery
+had called that a success, which is why `eval-find-ball` now prints an AIMING
+table too. The head does the eyes-on job alone and for free; turning the body
+costs steps, smoothness penalties and fall risk, so the policy took the cheap
+option — and the two terms that were supposed to prevent that could not:
+`face_the_ball`'s tight layer at 0.4 rad still paid ~2/3 at 19° off, leaving
+the last 20° with almost no gradient behind it, and `turn_to_belief` only fires
+while the ball is *out* of frame, so once the head found it nothing paid for
+the body to catch up.
 
-The s5 export ships in `policies/find_ball/` (see its README). Balls that
-start directly behind are the same problem seen from further away: the head's ±170° reaches them
-but the body has to commit to a turn, and the falls are that turn — in a
-4-episode render of s5 on full-circle spawns it fell on two of the back
-starts (0.98 s and 2.48 s in), while s4 (no `turn_to_belief`) never fell
-and found 30% of back balls. `turn_to_belief` has had 1M steps; the turn
-it prices is the skill still missing, so a longer full-circle stage on a
-fast machine is the next experiment, not a new term.
+Head yaw is now 14.4° (static ball) / 18.6° (with events) against 41°, and the
+handoff fires on 68–80% of episodes against 15% — so the body does most of the
+aiming, and the last few degrees are still the neck's.
+
+All three candidate fixes have been A/B'd on an M-series Mac, one at a time
+against a seed-matched control — **the tables and one clear negative result
+are in `docs/roadmap.md` item 1** — and the winner is shipped: the tight layer
+is now 0.2 rad, which nearly doubles the kick handoff (38% → 68% of episodes
+with ball events on) for one extra fall in sixty. `body_aimed` — a term that
+prices the handoff state directly, rather than hoping body-facing falls out of
+a bearing Gaussian — stays in the recipe at **weight 0**: it is by far the
+strongest lever on the aim (head yaw to 8°, handoff to 83%) and it also
+triples the falls, and falls are the veto here. Ungating `turn_to_belief` was
+the negative result: it is worse than the untouched control on every axis,
+because a yaw-rate pay that never switches off makes *arriving* worth nothing.
+
+The export ships in `policies/find_ball/` (see its README). Balls that start
+directly behind are the same problem seen from further away: the head's ±170°
+reaches them but the body has to commit to a turn, and the falls are that
+turn. That used to be the back bucket's whole story — s5 found 60% of back
+balls and fell on two of four in a render — and it mostly is not any more:
+the shipped export finds **100%** of them with **0 falls / 40** static and
+1 / 60 with events on. What is left is slower rather than broken (median
+1.92 s to first sight from behind, against 0.03 s from the front).
 The three things that made the sweep learnable at all are worth knowing
 before touching the recipe (the module header tells the whole story): the
 belief slot (a symmetric obs leaves the mean action with nothing to learn
