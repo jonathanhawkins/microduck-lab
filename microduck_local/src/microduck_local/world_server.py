@@ -67,9 +67,9 @@ from pydantic import BaseModel
 
 from .brain import REGISTRY, Intent, Senses
 from .brain import runtime as brain_runtime
-from .brain.tether import Tether
 from .brain import tidy as _tidy  # noqa: F401  (registers the tidy brain)
 from .brain.mapping import GridSpec, OccupancyGrid
+from .brain.tether import Tether
 from .sensors import DetectorNoise, TofNoise
 from .world import Ball, Duck, Person, Scenario, Wall, World, make_pitch, make_playroom, make_room
 from .world.scenario import NAME_RE, TOF_PRESETS, ScenarioError, validate_scenario

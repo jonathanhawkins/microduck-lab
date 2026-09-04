@@ -124,8 +124,32 @@ and later reversed; several "measured off" verdicts turned out to be noise.
    tag is refused if it disagrees, so two variants can never be stitched
    into one comparison.
 
+## Before you commit: `./scripts/precommit.sh` (1 second)
+
+It runs `ruff` and imports every battery entry point. It exists because
+this repo has twice been broken by a commit nobody ran anything against:
+an unterminated docstring in `brain/tracker.py` broke every import and
+killed three batteries that had been running for an hour, and the log that
+would have said so was not read until much later.
+
+The full suite is ~12 minutes, which is exactly why it gets skipped on
+"just a doc tweak" and why those got through. Run the suite before pushing
+anything that changes behaviour; run this before every commit without
+exception. `ruff` parses but does not execute, so the import step is not
+redundant — a module that parses can still fail on a bad relative import.
+
 ## Verification discipline — the rules that exist because of false reports
 
+0. **A knob that changes NOTHING is broken, not null.** `stale_fix` came
+   back bit-for-bit identical in all four cells of a 32-seed 2x2 — which is
+   not a null result, it is a dead code path. The guard read `det.t`, and a
+   `Detection` has no timestamp (only the FRAME does), so the branch never
+   ran. A real null still moves the seeds it does not help; identical rows
+   mean the knob is not wired. **And the test passed**, because it built a
+   `SimpleNamespace` stub carrying the `det.t` the real type lacks: a stub
+   that does not match the type it stands in for can make a dead path look
+   alive. Prefer the real type in a test; if you must stub, assert the shape
+   you are relying on.
 1. **Training charts measure the noise-crutched stochastic policy.** Claims
    about a run are made from the deterministic exported ONNX, never from
    `ep_rew` curves. Export, then eval, then look.

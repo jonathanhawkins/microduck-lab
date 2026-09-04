@@ -171,8 +171,8 @@ from pydantic import BaseModel
 # stale scorecard missing new terms (bit the user twice: head_up, head_up_pull).
 from . import behaviors as behaviors_mod
 from . import contract as C
-from .brain.learned import brains_dir
 from . import motion as motion_mod
+from .brain.learned import brains_dir
 from .train import RUNS_DIR
 from .walk_env import MicroduckWalkEnv, shared_model_scope
 from .world_server import mount_world

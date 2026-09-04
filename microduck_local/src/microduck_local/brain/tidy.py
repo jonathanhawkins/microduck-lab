@@ -25,10 +25,9 @@ cannot grasp; two clean scans with nothing seen means "done".
 
 from __future__ import annotations
 
-from collections import deque
-
 import collections
 import math
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
