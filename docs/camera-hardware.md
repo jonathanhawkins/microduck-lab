@@ -298,6 +298,31 @@ is 23 cm above the floor and pointing forward — it moves its edge in by
 about a fifth. Anything that depends on the last 20 cm still cannot use the
 camera for it.
 
+**What that does to the ToF floor-ball.** `ChaseParams.tof_ball_m` — read
+the ball out of the ToF's lower rows while the camera cannot see it — was
+measured at 48° and shipped OFF. The wider vertical was the obvious reason
+to re-open it, so it was, counting the blob's own events over 6 seeds ×
+180 s of 1v1 rather than re-running the noisy goal difference:
+
+| V FOV | blob ticks | camera already had the ball | blind-case ticks | of those, the ball |
+|---|---|---|---|---|
+| 48° | 4785 | 87.5% | 599 | **30.1%** |
+| 60° | 5809 | 93.6% | 374 | **36.9%** |
+
+It closes harder than it did at 48°, for two reasons that both move the
+wrong way:
+
+1. The blob is **almost always redundant** — on 88–94% of the ticks it
+   fires, the camera already has the ball.
+2. In the case it exists for, it is **wrong about two times in three**, and
+   that case is the one that ends in a line-up on the other duck's foot.
+
+The wider lens *does* raise blind-case precision (30% → 37%) while cutting
+the opportunity by 38% (599 → 374 ticks), because it reaches 5.5 cm further
+into the blind zone itself. **Better optics shrink this feature's job
+faster than they improve it** — which is the general shape of the answer
+for anything built to paper over a sensor limit.
+
 ## 4. Frame rate is a non-issue
 
 `DetectorSpec.rate_hz` is 10 and the brain decides at 10 Hz, against the
