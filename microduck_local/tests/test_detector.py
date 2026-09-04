@@ -225,3 +225,42 @@ def test_a_wide_lens_on_the_same_320_px_sensor_finds_a_distant_duck_less_often()
     tg = targets(m, ducks=("b",))
     assert found(m, d, tg, shipped) == 400
     assert 0.55 < found(m, d, tg, wide) / 400 < 0.80
+
+
+def test_a_wide_lens_bearing_is_pushed_outward_by_a_pinhole_reader():
+    """`projection`: the detector reports what a consumer INFERS from a box,
+    not what the lens physically saw. Under a pinhole model those are the
+    same. Under an equidistant (fisheye) one — which the replacement module
+    is, since a pinhole focal length solved from its quoted H/V/D disagrees
+    while an equidistant one agrees near the quoted EFL — a pinhole-
+    calibrated reader is right on axis, right at the edge it calibrated on,
+    and wrong in between.
+
+    The magnitude is why this matters: 1.2° worst case at 62° but 9.7° at
+    116°, which is larger than the chase brain's 3.4–6.9° aim tolerance. A
+    wide lens costs bearing accuracy, and the lens sweep never modelled it
+    because at 62° it barely exists."""
+    import numpy as np
+
+    from microduck_local.sensors.detector import DetectorSpec
+
+    assert DetectorSpec().projection == "pinhole"                  # ships unchanged
+    pin = DetectorSpec()
+    for th in (0.0, 10.0, 30.0):                                   # identity, exactly
+        assert pin.seen_angle(np.deg2rad(th), 62.0) == np.deg2rad(th)
+
+    wide = DetectorSpec(projection="equidistant", fov_h_deg=116.0, fov_v_deg=60.0)
+    assert wide.seen_angle(0.0, 116.0) == 0.0                      # right on axis
+    edge = np.deg2rad(58.0)
+    assert abs(wide.seen_angle(edge, 116.0) - edge) < 1e-9         # right at the calibrated edge
+    mid = np.rad2deg(wide.seen_angle(np.deg2rad(28.0), 116.0))
+    assert 37.0 < mid < 38.5                                       # pushed OUTWARD in between
+    assert wide.seen_angle(np.deg2rad(-28.0), 116.0) == -wide.seen_angle(np.deg2rad(28.0), 116.0)
+
+    worst_wide = max(abs(np.rad2deg(wide.seen_angle(np.deg2rad(t), 116.0)) - t)
+                     for t in range(0, 59))
+    narrow = DetectorSpec(projection="equidistant")                # same lens law at 62°
+    worst_narrow = max(abs(np.rad2deg(narrow.seen_angle(np.deg2rad(t), 62.0)) - t)
+                       for t in range(0, 32))
+    assert 9.0 < worst_wide < 10.5 and worst_narrow < 1.5          # 8x worse on the wide lens
+    assert worst_wide > 6.9                                        # ...and past the aim tolerance

@@ -86,6 +86,45 @@ class DetectorSpec:
     # so a small distant target must be found LESS often, not just as often.
     w_none_rad: float = np.deg2rad(1.0)     # ~5 px of a 320 px frame over 62°
     w_full_rad: float = np.deg2rad(4.0)     # ~21 px: always found (before noise)
+    # How the lens maps a ray to the frame, and so what a consumer that maps
+    # a BOX BACK TO A BEARING gets wrong.
+    #
+    # "pinhole" (the default, and what every result in this repo was measured
+    # on): bearings come back exact. "equidistant" models a wide lens whose
+    # r = f*theta - which the replacement module is: a pinhole focal length
+    # solved from its quoted H/V/D disagrees (1.65 / 2.57 / 1.04 mm) while an
+    # equidistant one agrees near the quoted 2.9 mm EFL. See
+    # docs/camera-hardware.md.
+    #
+    # The error modelled is the one a PINHOLE-CALIBRATED reader makes on such
+    # a lens: it fits its focal length to the quoted FOV edge, so on-axis and
+    # edge bearings come back right and everything between is pushed outward.
+    # Systematic, not noise, and it grows fast with width - worst case
+    # 1.2 deg at 62 deg but 9.7 deg at 116 deg, peaking near 28 deg off-axis.
+    # That is larger than the chase brain's 3.4-6.9 deg aim tolerance, and it
+    # is a cost of a wide lens the lens sweep never modelled because at
+    # 62 deg it barely exists.
+    #
+    # NOTE the SIZE GATE is already equidistant-shaped: `px_per_rad` is
+    # uniform across the field, which is exactly what r = f*theta gives and
+    # is NOT what a pinhole lens does (a pinhole frame resolves more finely
+    # toward its edges). So this field changes the BEARING only; the width
+    # thresholds were always modelling the wide-lens case.
+    projection: str = "pinhole"
+
+    def seen_angle(self, true_rad: float, fov_deg: float) -> float:
+        """The angle a pinhole-calibrated reader reports for a true one.
+
+        Identity under "pinhole". Under "equidistant" the reader infers
+        `atan(theta * tan(theta_max) / theta_max)`: right on axis, right at
+        the edge it calibrated on, pushed outward in between."""
+        if self.projection != "equidistant":
+            return float(true_rad)
+        tmax = np.deg2rad(fov_deg) / 2
+        if tmax <= 1e-9:
+            return float(true_rad)
+        t = float(np.clip(true_rad, -tmax, tmax))
+        return float(np.sign(t) * np.arctan(abs(t) * np.tan(tmax) / tmax))
 
     @property
     def px_per_rad(self) -> float:
@@ -270,7 +309,12 @@ class Detector:
             if hit_root != tgt_root and dist < rng - tgt.radius:
                 return None
         width = 2.0 * float(np.arctan(tgt.radius / rng))
-        return bearing, elev, width, rng
+        # The frustum tests above used the TRUE angles - what the lens can
+        # physically see. What the brain receives is what a reader infers
+        # from the box: the same under a pinhole model, pushed outward under
+        # a wide one.
+        return (self.spec.seen_angle(bearing, self.spec.fov_h_deg),
+                self.spec.seen_angle(elev, self.spec.fov_v_deg), width, rng)
 
     # -- measurement -------------------------------------------------------
     def capture(self, data: mujoco.MjData, t: float) -> DetectionFrame:
