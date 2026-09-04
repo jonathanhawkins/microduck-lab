@@ -345,6 +345,22 @@ the tree, and Track 12 has its first working loop:
   60 deg and closing harder — redundant on 88-94% of its firings and wrong
   two times in three in the case it exists for. Full workings in
   `docs/camera-hardware.md`; the tidy numbers in `microduck_local/README.md`.
+  The camera recommendation was then checked on a SECOND benchmark measured
+  a different way — the soccer line-up's placement error, every ball
+  sighting against truth — where it is a small win rather than break-even:
+  **25% more ball sightings** (16,881 -> 21,045) at slightly better
+  precision (5.6 -> 5.4 cm), while the module as it ships sees no more than
+  the baseline and places what it sees 34% less accurately (7.5 cm). That
+  is what 116 deg is FOR, and at 320 px it was entirely eaten by the
+  resolution penalty. What limits the number: at ~5.5 cm the ball's
+  placement error is dominated by the DETECTOR'S OWN bearing and range
+  noise, not the frustum and not either known stale-pose bias (which
+  contributes 1.7 cm) — closing the line-up's 2-3 cm scatter is a
+  detector-quality problem and a separate job. **3.7 also closed this
+  round** (a wider yaw cap: the mechanism is real, the freed time goes into
+  steering rather than play, and falls resolve worse — see its row), and
+  its work found rule 0's shape in SHIPPING code, where a learned brain was
+  silently re-clipped to the module's action bounds instead of its own.
 
 Numbers that shaped the design, all measured in this world: the walker only
 turns in place at a yaw command of 1.0 and stands still below ~0.2 m/s

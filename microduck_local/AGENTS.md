@@ -232,6 +232,18 @@ redundant — a module that parses can still fail on a bad relative import.
    value back off the thing being measured — every sweep harness in
    `scratchpad/` does this now, and the one that did not produced two
    bit-identical arms.
+
+   **And it is not only a harness problem.** The turn-rate work found the
+   same shape in SHIPPING inference code: `LearnedBrain` clipped its
+   actions with the *module's* `ACT_HIGH`, so a brain trained at
+   wz ±2.0 was silently re-clipped to the current default when it ran —
+   halving its turn rate, and making any A/B across that bound measure
+   nothing at all. A trained policy's action bounds are part of its
+   contract, so they now come from its own `brain.json`. The general form:
+   **a limit applied at BOTH training and inference must come from one
+   place, and that place must travel with the artifact.** When a global
+   default and a per-artifact value can disagree, the global one wins
+   silently and the artifact is quietly worse than it was trained to be.
 1. **Training charts measure the noise-crutched stochastic policy.** Claims
    about a run are made from the deterministic exported ONNX, never from
    `ep_rew` curves. Export, then eval, then look.
