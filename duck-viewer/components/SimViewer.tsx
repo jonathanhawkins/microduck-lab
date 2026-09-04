@@ -1278,7 +1278,7 @@ export default function SimViewer() {
       {/* top bar */}
       <div
         ref={topBarRef}
-        style={{ ...PANEL, top: PAD, left: PAD, right: PAD, display: "flex", flexWrap: "wrap", gap: 10, rowGap: 6, alignItems: "center" }}
+        style={{ ...PANEL, top: PAD, left: PAD, right: PAD, display: "flex", flexWrap: "wrap", gap: 10, rowGap: 6, alignItems: "center", zIndex: 30 }}
       >
         <Link href="/" style={{ color: "#9aa5b1", textDecoration: "none" }}>
           ← lab

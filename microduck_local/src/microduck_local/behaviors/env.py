@@ -33,10 +33,10 @@ class BehaviorEnv(MicroduckWalkEnv):
         if self.behavior.scene == "all":
             kwargs.setdefault("scene_xml", str(C.SCENE_ALL_XML))
         kwargs.setdefault("terminate_on_fall", self.behavior.terminate_on_fall)
-        # GPU locomotion has no height termination; a bouncing stride can dip
-        # the trunk through 0.07 m without having fallen.
-        if self.behavior.forward_cmd:
-            kwargs.setdefault("height_termination", False)
+        # Per recipe, like terminate_on_fall: locomotion turns it off (the GPU
+        # stack has no z-kill; a bouncing stride dips through 0.07 m without
+        # falling), and so does any pose whose target sits under the fall line.
+        kwargs.setdefault("height_termination", self.behavior.height_termination)
         self.foot_contact_state = {"left": True, "right": True}
         # Counts resets. Task-state hooks (Behavior.reset_fn / obs_fn) key
         # their per-episode state on it, so an obs built DURING a reset —

@@ -51,7 +51,6 @@ def main() -> None:
                   random_yaw=True, seed=args.seed,
                   max_episode_s=b.episode_s)
         if b.forward_cmd:
-            kw["height_termination"] = False
             kw["actuator"] = args.actuator or "bam"
         elif args.actuator:
             kw["actuator"] = args.actuator
