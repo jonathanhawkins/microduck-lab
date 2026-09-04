@@ -182,10 +182,37 @@ class TidyParams:
     #                          the arc after a render caught the frame
     #                          mistake in reading it.
     #
-    # Both ship at 0. Seeds 0-15 are a SCREEN for them, not a result: four
-    # arms have now been run on those layouts and the multiplicity is real.
-    # Anything that looks good there is confirmed on a fresh block or it is
-    # not claimed.
+    # Both ship at 0, and `backoff_back_s` 4.0 is now MEASURED at 80 seeds:
+    #
+    #                        in the basket            falls a run
+    #   screen   0-15 (16)   5.31 -> 5.56  p=0.43   0.31 -> 0.62  p=0.40
+    #   CONFIRM 16-79 (64)   5.27 -> 5.12  p=0.39   0.41 -> 0.77  p=0.003
+    #   pooled        (80)   5.28 -> 5.21  p=0.69   0.39 -> 0.74  p=0.002
+    #
+    # The screen's +0.25 toys did not replicate - it reversed, and pooled
+    # the tidied fraction is flat (0.879 -> 0.869, 25 seeds better, 25
+    # worse, 30 tied). The FALLS did replicate and sharpened with n, which
+    # is what a real effect does: +90% (31 events against 59), and not
+    # exposure - work done is flat (picks +1%, deliveries +2%) so falls per
+    # pick nearly doubled, 0.067 -> 0.128, p = 0.002.
+    #
+    # Where they come from, traced over 12 seeds: NOT the reverse itself
+    # (1 of 11 falls happened while backing) and NOT the walls (median
+    # clearance 1.25 m in both arms). Back-off falls actually went DOWN
+    # (3 -> 2), so the "no turn at the rim" half was right. They moved to
+    # `approach` (1 -> 4).
+    #
+    # The two arms are DISTANCE-MATCHED by construction (1.04 m against
+    # 1.05 m), so the live variable left is orientation: the sequence ends
+    # facing AWAY from the basket and a reverse ends facing it, and the
+    # next route then sets out across the basket zone, whose 6 cm rim is
+    # below the ToF guard until the last 0.26 m and trips the walker.
+    #
+    # So the 7.3 s buys two things, not one - distance AND heading - and
+    # each variant bought a different half: 2 s gave neither (0.57 m) and
+    # cost tidying; 4 s gives distance without heading, and costs falls.
+    # That is the whole result, and it is why "make the back-off faster" is
+    # the wrong frame.
     backoff_back_s: float = 0.0
     backoff_back_wz: float = 0.0
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)

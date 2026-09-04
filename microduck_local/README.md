@@ -662,13 +662,58 @@ its current intent live.
   basket. The 30 s it costs buys shorter approaches for the rest of the
   cycle and is repaid with interest.
 
-  That is the shape of this whole round in miniature: the dead-band fix was
-  real, the mechanism argument built on it was sound, the manoeuvre it
-  suggested was genuinely 4× faster — **and the thing being optimised was
-  not the thing that mattered.** A faster back-off that skips the
-  repositioning is not faster. The lever, if anyone returns to it, is a
-  reverse that KEEPS the walk-out, not a longer reverse; measure it once on
-  fresh seeds and take the answer.
+  **Then the matched version, at 80 seeds — and the back-off turns out to
+  be doing two jobs.** "A reverse that keeps the walk-out" does not exist:
+  after backing out the duck *faces* the basket, so there is no walking
+  clear without the 2.6 rad turn, which is the expensive part. What the
+  histogram indicts is the distance, so the variants are about reaching
+  1.05 m. Measured open-loop from a post-drop pose:
+
+  | | 2 s | 3 s | 4 s | 5 s | 6 s |
+  |---|---|---|---|---|---|
+  | straight reverse | 0.57 | 0.80 | **1.04** | 1.28 | — |
+  | reverse arc, `wz` 1 | 0.51 | 0.64 | 0.69 | 0.65 | 0.56 |
+
+  The **arc is geometrically dead** — it curves back toward where it began,
+  so distance from the basket peaks at 0.72 m near 4 s and then falls away;
+  the duck circles the basket instead of leaving it. That is the same arc
+  property that had already fooled one reading of `back_up`, this time
+  saving a battery instead of costing a docstring. And the 2 s arm's
+  deficit has a simpler name: it reached 0.57 m, so it was never "reverse
+  vs sequence", it was **half a retreat against a full one**.
+
+  So: `backoff_back_s` 4.0, the same 1.04 m in 4.0 s instead of 7.3 s.
+
+  | | in the basket | | falls a run | |
+  |---|---|---|---|---|
+  | screen, seeds 0–15 (16) | 5.31 → 5.56 | p = 0.43 | 0.31 → 0.62 | p = 0.40 |
+  | **confirm, 16–79 (64)** | 5.27 → 5.12 | p = 0.39 | 0.41 → 0.77 | **p = 0.003** |
+  | **pooled (80)** | 5.28 → 5.21 | p = 0.69 | 0.39 → 0.74 | **p = 0.002** |
+
+  The screen's +0.25 toys **reversed** on fresh layouts and pools to
+  nothing (0.879 → 0.869 tidied; 25 seeds better, 25 worse, 30 tied). The
+  falls did the opposite — they replicated and *sharpened* with n, which is
+  what a real effect does and what none of the soccer effects ever did.
+  +90%, 31 events against 59, and not exposure: work done is flat (picks
+  +1%, deliveries +2%), so falls per pick nearly doubled, 0.067 → 0.128,
+  p = 0.002.
+
+  Traced, the falls are not where the argument put them. **Not the reverse
+  itself** (1 of 11 while backing), **not the walls** (median clearance
+  1.25 m in both arms), and back-off falls actually went *down*, 3 → 2 — so
+  the "no turn at the rim" half was right. They moved to `approach`, 1 → 4.
+  Since the two arms are distance-matched by construction, the variable
+  left is **heading**: the sequence ends facing away from the basket, a
+  reverse ends facing it, and the next route then sets out across the
+  basket zone — whose 6 cm rim sits below the ToF guard until the last
+  0.26 m and trips the walker.
+
+  **The 7.3 s buys two things, not one: distance and heading.** Each
+  variant bought a different half — 2 s gave neither and cost tidying, 4 s
+  gives distance without heading and costs falls. The dead-band fix was
+  real, the mechanism argument on top of it was sound, the manoeuvre was
+  genuinely faster, and "make the back-off faster" was the wrong frame
+  throughout. It ships at 0, with the numbers in the parameter's comment.
 
 - **Odometry drift** (roadmap 1.7): the `(x, y, yaw)` a brain gets is dead
   reckoning — a per-run distance scale, a gyro bias, per-step noise — under
