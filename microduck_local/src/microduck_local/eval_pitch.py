@@ -57,10 +57,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+
+from pathlib import Path
 
 import numpy as np
 
+from . import contract as C
 from .brain import REGISTRY, Senses
 from .brain.brain_env import POLICIES_DIR, onnx_infer
 from .world import World, make_pitch
@@ -72,14 +76,16 @@ from .world.metrics import (  # noqa: F401  (re-exported: tooling imports these 
     METRIC_FIELDS,
     POSSESSION_R,
     POSSESSION_WIDE_R,
+    SPIN_FIELDS,
     PitchMetrics,
+    SpinMetrics,
 )
 
 
-def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
+def run_one(seed: int, seconds: float, per_side: int = 1, walker: str | None = None) -> dict:
     from .brain.team import brain_kwargs, kickoff_brains
     sc = make_pitch(per_side=per_side)
-    infer = onnx_infer(POLICIES_DIR / "alpha_walking.onnx")
+    infer = onnx_infer(Path(walker) if walker else POLICIES_DIR / "alpha_walking.onnx")
     w = World(sc, infer_for={d.id: infer for d in sc.ducks}, seed=seed)
     teams: dict = {}
     brains = {d.id: REGISTRY.make("chase", **brain_kwargs(d, w, teams)) for d in sc.ducks}
@@ -90,6 +96,7 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
     w.data.qpos[q:q + 2] = rng.uniform(-0.2, 0.2, 2)
     metrics = PitchMetrics(w, {d.id: (d.team or d.id) for d in sc.ducks})
     goal_seq = 0
+    spin = SpinMetrics(w)
     while w.t < seconds:
         for d in w.ducks.values():
             tof, det = d.tof.last, d.detector.last
@@ -97,6 +104,7 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
                        det=det, det_age=None if det is None else w.t - det.t,
                        speed=d.heading_speed(w.data), odom=w.odom(d), skill=d.skill, bumped=w.bumped(d))
             intent = brains[d.id].step(s)
+            spin.tick(d, intent.twist)
             w.apply_intent(d, intent)
             if d.skill is None:
                 d.set_cmd(w.data, intent.twist, intent.head)
@@ -110,7 +118,8 @@ def run_one(seed: int, seconds: float, per_side: int = 1) -> dict:
             "kickGoals": score["kicked"], "bumpGoals": score["bumped"],   # attributed by the World (KICK_GOAL_S)
             "kicks": {k: b.kicks for k, b in brains.items()}, "pushes": {k: b.pushes for k, b in brains.items()},
             "falls": {k: d.falls for k, d in w.ducks.items()}, "simSeconds": round(w.t, 1),
-            "seconds": seconds, **metrics.row()}
+            "seconds": seconds,
+            **spin.row(), **metrics.row()}
 
 
 def load_done(path: str | None, tag: str, per_side: int, seconds: float) -> dict[int, dict]:
@@ -187,6 +196,9 @@ def main() -> None:
     ap.add_argument("--seconds", type=float, default=300.0)
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--per-side", type=int, default=1, help="ducks a side: 1 (1v1), 2, 3")
+    ap.add_argument("--walker", default=None, metavar="PATH",
+                    help="run this walk policy instead of the shipped alpha_walking.onnx "
+                         "(roadmap 3.7: comparing two LOCALLY trained walkers, never one against the shipped one)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--out", help="append each seed's result here as a JSON line AND resume from it: "
                                   "seeds already in the file are not re-run")
@@ -214,7 +226,7 @@ def main() -> None:
         if not args.json:
             print(_seed_line(r), flush=True)
 
-    args_list = [(sd, args.seconds, args.per_side) for sd in todo]
+    args_list = [(sd, args.seconds, args.per_side, args.walker) for sd in todo]
     try:
         if args.jobs > 1 and len(todo) > 1:
             import multiprocessing as mp

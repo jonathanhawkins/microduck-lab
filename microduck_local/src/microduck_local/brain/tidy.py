@@ -34,7 +34,7 @@ import numpy as np
 
 from ..world.arena import PICK_REACH_AHEAD, PICK_REACH_LEFT
 from .controllers import WanderParams, _column_clearance, wander_from_tof
-from .gait import TURN_KICK, GaitWatch, back_up, turn
+from .gait import TURN_KICK, GaitWatch, back_up, max_wz, turn
 from .mapping import GridSpec, OccupancyGrid
 from .runtime import REGISTRY, Intent, Senses, age_inputs
 
@@ -555,7 +555,7 @@ class Tidy:
                             self.est = None
                             self._update_estimate(odom, dd, p.toy_z, t)
                             self.est = saved
-                twist = (0.0, 0.0, p.scan_wz)
+                twist = (0.0, 0.0, max(p.scan_wz, max_wz()) if p.scan_wz >= 1.0 else p.scan_wz)
                 if self._prev_yaw is not None:
                     d = odom[2] - self._prev_yaw
                     self.scan_turned += math.atan2(math.sin(d), math.cos(d))   # SIGNED: the gait wobbles ±0.02 rad a step
@@ -695,7 +695,7 @@ class Tidy:
                 self.t_seen = t
                 self._enter("deliver", t)
             else:
-                twist = (0.0, 0.0, p.scan_wz)
+                twist = (0.0, 0.0, max(p.scan_wz, max_wz()) if p.scan_wz >= 1.0 else p.scan_wz)
                 if t - self.t_state > 14.0:              # a full turn and then some: walk somewhere else
                     self._enter("carry_explore", t)
 

@@ -31,6 +31,7 @@ fact is written once.
 from __future__ import annotations
 
 import math
+import os
 
 from .. import contract as C
 from .runtime import Senses
@@ -64,9 +65,43 @@ class GaitWatch:
         return self.cold
 
 
+def max_wz() -> float:
+    """The largest yaw rate any brain will ask for, as a rate in rad/s.
+
+    ONE constant so a faster walker can actually be COMMANDED. Every
+    scripted brain here caps its turn at 1.0 - `turn()` below, five
+    `np.clip(..., -1.0, 1.0)` in `controllers.py`, four literal `wz = 1.0`,
+    plus `TidyParams.scan_wz` (`FollowParams.search_wz` is DEAD -
+    declared and never read; see its comment). Train a walker
+    that does 1.5 rad/s, leave those alone, and every brain still asks for
+    1.0: the battery would compare two walkers that are never commanded
+    differently and conclude a faster turn does not help.
+
+    It reads `MICRODUCK_MAX_WZ` so an experiment can set it per arm beside
+    the walker it is testing, without a code edit that has to be undone.
+    Default 1.0 = `C.ANG_VEL_Z_RANGE`'s edge, which is what the shipped
+    walker delivers, so nothing changes until someone opts in.
+
+    Raising this ALONE does nothing good: the shipped walker saturates at
+    0.6-0.8 rad/s however hard it is asked (`walker-facts`). It is half of
+    a pair - widen the training range too (roadmap 3.7,
+    docs/turn-rate-experiment.md)."""
+    try:
+        v = float(os.environ.get("MICRODUCK_MAX_WZ", "") or C.ANG_VEL_Z_RANGE[1])
+    except ValueError:
+        return float(C.ANG_VEL_Z_RANGE[1])
+    return max(0.0, v)
+
+
+def clip_wz(wz: float) -> float:
+    """A yaw command clipped to `max_wz()` — the one place that cap lives."""
+    m = max_wz()
+    return float(min(m, max(-m, wz)))
+
+
 def turn(sign: float, cold: bool, kick: float = TURN_KICK) -> tuple[float, float, float]:
     """An in-place turn the walker will actually perform."""
-    wz = 1.0 if sign > 0 else -1.0
+    wz = max_wz() if sign > 0 else -max_wz()
     return (kick, 0.0, wz) if cold else (0.0, 0.0, wz)
 
 
@@ -83,4 +118,5 @@ def back_up(wz: float = 0.0, speed: float = BACK_SPEED) -> tuple[float, float, f
     return (max(C.LIN_VEL_X_RANGE[0], min(float(speed), BACK_MIN)), 0.0, float(wz))
 
 
-__all__ = ["BACK_MIN", "BACK_SPEED", "COLD_AFTER_S", "TURN_KICK", "GaitWatch", "back_up", "turn"]
+__all__ = ["BACK_MIN", "BACK_SPEED", "COLD_AFTER_S", "TURN_KICK", "GaitWatch",
+           "back_up", "clip_wz", "max_wz", "turn"]

@@ -36,15 +36,22 @@ a single command is a reading of the dead band, not of the walker.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import mujoco
 import numpy as np
 
 from .brain.brain_env import POLICIES_DIR, onnx_infer
 from .world import World, make_room
 
+# The policy every helper here measures. `--walker` overrides it, so a
+# turn-rate experiment can re-measure ITS walker with the same tool that
+# produced the shipped numbers instead of a hand-rolled probe.
+WALKER = POLICIES_DIR / "alpha_walking.onnx"
+
 
 def _world():
-    w = World(make_room(seed=0), infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=0)
+    w = World(make_room(seed=0), infer_for={"d0": onnx_infer(WALKER)}, seed=0)
     return w, w.ducks["d0"]
 
 
@@ -103,7 +110,7 @@ def _flat_world(yaw: float = 0.0):
     sc = Scenario(name="flat", seed=0, floor=(13.0, 13.0),
                   walls=[Wall(cs[i], cs[(i + 1) % 4], 0.3, 0.02) for i in range(4)],
                   boxes=[], ducks=[Duck("d0", (0.0, 0.0, float(yaw)))])
-    w = World(sc, infer_for={"d0": onnx_infer(POLICIES_DIR / "alpha_walking.onnx")}, seed=0)
+    w = World(sc, infer_for={"d0": onnx_infer(WALKER)}, seed=0)
     return w, w.ducks["d0"]
 
 
@@ -196,6 +203,15 @@ def stop_reverse_turn() -> None:
 
 
 def main() -> None:
+    import argparse
+    global WALKER
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--walker", default=None, metavar="PATH",
+                    help="measure this walk policy instead of the shipped alpha_walking.onnx")
+    args = ap.parse_args()
+    if args.walker:
+        WALKER = Path(args.walker)
+    print(f"walker: {WALKER}")
     print("beak and feet (standing):")
     beak_and_feet()
     print("camera pose (what a detection frame is stamped with):")

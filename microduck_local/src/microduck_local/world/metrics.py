@@ -182,3 +182,53 @@ class PitchMetrics:
                 "ballAdvance": {t: round(v * per_min, 3) for t, v in self.advance.items()},
                 "possession": {t: round(v * per_min, 3) for t, v in self.possession.items()},
                 "possessionWide": {t: round(v * per_min, 3) for t, v in self.possession_wide.items()}}
+
+
+SPIN_FIELDS = ("spinFrac", "steerFrac", "spinYaw", "spinRate")
+
+
+class SpinMetrics:
+    """How much of a run is the robot rotating on the spot?
+
+    A PER-TICK tally, which is the point: it resolves where goals and falls
+    cannot. Measured with it, a 1v1 run is 47% in-place turning at the
+    walker's 0.655 rad/s ceiling, and `ANG_VEL_Z_RANGE`'s +-1.0 is already
+    asking for all of that - the largest measured lever in this repo
+    (roadmap 3.7, docs/turn-rate-experiment.md).
+
+    `spinYaw` integrates the yaw the body ACTUALLY swept while a turn was
+    commanded, so a faster walker shows up as the same yaw demand in fewer
+    ticks rather than as a different number. `spinRate` is the rate it
+    managed, which is how you check a new walker is really delivering.
+
+    Lives here rather than in either benchmark because `eval_pitch` and
+    `eval_striker` run the same loop and their rows must stay identical -
+    a test pins that, and it caught this class being added to only one.
+    """
+
+    def __init__(self, world):
+        self.w = world
+        self.spin = self.steer = self.ticks = 0
+        self.yaw = 0.0
+        self._prev = {d.id: world.odom(d)[2] for d in world.ducks.values()}
+
+    def tick(self, duck, twist) -> None:
+        """Once per DUCK per control step, with the twist the brain commanded."""
+        from ..brain.gait import TURN_KICK
+        vx, _, wz = twist
+        self.ticks += 1
+        y = self.w.odom(duck)[2]
+        if wz != 0.0 and vx <= TURN_KICK:
+            self.spin += 1
+            self.yaw += abs(math.atan2(math.sin(y - self._prev[duck.id]),
+                                       math.cos(y - self._prev[duck.id])))
+        elif wz != 0.0:
+            self.steer += 1
+        self._prev[duck.id] = y
+
+    def row(self) -> dict:
+        n = max(self.ticks, 1)
+        return {"spinFrac": round(self.spin / n, 4),
+                "steerFrac": round(self.steer / n, 4),
+                "spinYaw": round(self.yaw, 1),
+                "spinRate": round(self.yaw / max(self.spin * C.CTRL_DT, 1e-9), 3)}

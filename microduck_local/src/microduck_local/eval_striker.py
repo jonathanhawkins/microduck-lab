@@ -52,7 +52,7 @@ from .brain.brain_env import POLICIES_DIR, onnx_infer
 from .brain.striker import LearnedStriker
 from .eval_pitch import load_done
 from .world import World, make_pitch
-from .world.metrics import PitchMetrics
+from .world.metrics import PitchMetrics, SpinMetrics
 
 
 def pitch_scenario(per_side: int, solo: bool):
@@ -97,6 +97,7 @@ def run_one(seed: int, seconds: float, left: str = "chase", right: str = "chase"
     q = int(w.model.jnt_qposadr[j])
     w.data.qpos[q:q + 2] = rng.uniform(-0.2, 0.2, 2)
     metrics = PitchMetrics(w, {d.id: (d.team or d.id) for d in sc.ducks})
+    spin = SpinMetrics(w)
     goal_seq = 0
     while w.t < seconds:
         for d in w.ducks.values():
@@ -105,6 +106,7 @@ def run_one(seed: int, seconds: float, left: str = "chase", right: str = "chase"
                        det=det, det_age=None if det is None else w.t - det.t,
                        speed=d.heading_speed(w.data), odom=w.odom(d), skill=d.skill, bumped=w.bumped(d))
             intent = brains[d.id].step(s)
+            spin.tick(d, intent.twist)
             w.apply_intent(d, intent)
             if d.skill is None:
                 d.set_cmd(w.data, intent.twist, intent.head)
@@ -120,7 +122,7 @@ def run_one(seed: int, seconds: float, left: str = "chase", right: str = "chase"
             "kicks": {k: b.kicks for k, b in brains.items()}, "pushes": {k: b.pushes for k, b in brains.items()},
             "falls": {k: d.falls for k, d in w.ducks.items()},
             "team": {d.id: (d.team or d.id) for d in sc.ducks},
-            "simSeconds": round(w.t, 1), "seconds": seconds, **metrics.row()}
+            "simSeconds": round(w.t, 1), "seconds": seconds, **spin.row(), **metrics.row()}
 
 
 # --- reading a battery --------------------------------------------------------
