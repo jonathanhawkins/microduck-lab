@@ -44,6 +44,14 @@ class LearnedBrain:
         self.target_cls = meta.get("target_cls", "person")
         self.decide_every = int(decide_every or meta.get("decide_every", 5))
         self.obs_version = int(meta.get("obs_version", 1))      # brains before the version key are version 1
+        # The intent bounds are part of THIS brain's contract, so they come
+        # from its own record — not from the module constants, which a later
+        # run may have widened. Clipping a brain trained at wz +-2.0 back to
+        # the current default would silently halve its turn rate at inference
+        # and make any A/B over the bound measure nothing. Brains written
+        # before the keys existed fall back to the constants they used.
+        self.act_low = np.asarray(meta.get("act_low", ACT_LOW), np.float32)
+        self.act_high = np.asarray(meta.get("act_high", ACT_HIGH), np.float32)
         self.builder = ObsBuilder(self.target_cls, self.obs_version)
         self.infer = onnx_infer(onnx)
         self.state = "learned"
@@ -72,7 +80,7 @@ class LearnedBrain:
         if self._tick % self.decide_every == 0:
             obs = self.builder(senses, self.last_action)
             self.last_seen_t = self.builder.last_seen_t
-            a = np.clip(self.infer(obs.astype(np.float32)), ACT_LOW, ACT_HIGH)
+            a = np.clip(self.infer(obs.astype(np.float32)), self.act_low, self.act_high)
             self.last_action = a.astype(np.float32)
             seen = obs[65] > 0.5
             self.state = "tracking" if seen else "lost"

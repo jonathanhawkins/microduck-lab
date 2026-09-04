@@ -23,6 +23,7 @@ scripted `Follow` controller runs the same scenario as the baseline.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -63,8 +64,30 @@ POLICIES_DIR = C.MICRODUCK_RL_DIR.parent / "microduck" / "policies"
 BRAIN_OBS_DIM = 80
 BRAIN_OBS_VERSION = 2
 BRAIN_ACT_DIM = 3          # vx, vy, wz (vy is emitted but kept small by the walker)
-ACT_LOW = np.array([-0.2, -0.3, -1.0], np.float32)
-ACT_HIGH = np.array([0.6, 0.3, 1.0], np.float32)
+# The yaw bound a brain may ask for. 1.0 is the walker's TRAINED
+# `ANG_VEL_Z_RANGE`, and it was assumed to be its ceiling — measured
+# 2026-09-04, it is not. On an empty floor, warm, 8 headings x 10 s with
+# zero falls in 48 runs, the shipped walker answers a command it was never
+# trained on almost linearly:
+#
+#     vx 0.40, wz +1.00 -> 0.733 rad/s   (forward 0.188 m/s)
+#     vx 0.40, wz +2.00 -> 1.506 rad/s   (forward 0.176 m/s)
+#     vx 0.40, wz -2.00 -> -1.802 rad/s  (forward 0.187 m/s)
+#     in place, wz +3.00 -> 2.011 rad/s
+#
+# A 1v1 run spends 47% of itself rotating at 0.655 rad/s, so doubling the
+# achievable yaw frees ~27% of every run — the prize roadmap 3.7 wanted from
+# a retrain, available from a bound. $MICRODUCK_BRAIN_WZ widens it so both
+# arms of that A/B run from one code path; the default stays 1.0 until the
+# A/B says otherwise. Note the command is then OUT of the walker's training
+# distribution: it holds up on an empty floor, which is not a room.
+_WZ = 1.0
+try:
+    _WZ = max(0.1, float(os.environ.get("MICRODUCK_BRAIN_WZ", "1.0")))
+except ValueError:
+    _WZ = 1.0
+ACT_LOW = np.array([-0.2, -0.3, -_WZ], np.float32)
+ACT_HIGH = np.array([0.6, 0.3, _WZ], np.float32)
 
 
 def senses_to_obs(s: Senses, target_cls: str, last_action: np.ndarray,
