@@ -578,8 +578,43 @@ its current intent live.
   this breaks a test instead of a benchmark six months later. **The general
   rule: a locomotion limit read off a single command value is a reading of
   the dead band, not of the robot.** The brains still use their old
-  workarounds — swapping `tidy`'s backoff re-opens the fall and tether rows
-  it was measured on, so that is its own A/B, not a drive-by.
+  workarounds, and the first one re-measured says why.
+
+  **`tidy`'s back-off, tried with a reverse: worse, and the reason is the
+  interesting part.** Leaving the basket is a 1.5 s left sidestep, a 2.6 rad
+  turn in place and a 1.5 s walk — about 7.3 s, after every delivery — and
+  its comment justified that sequence with "the walker cannot walk
+  backwards". `backoff_back_s` replaces the lot with a straight reverse. On
+  16 paired seeds × 300 s × 6 toys: **in the basket 5.31 → 4.94** (0.885 →
+  0.823 of the toys, −0.38 ± 0.18, p = 0.111, better on 2 of 16 and worse
+  on 8, six ties). Falls 0.31 → 0.44 — 5 events against 7, unresolvable at
+  this size, so the "it removes the turn-at-the-rim fall mode" half is
+  neither shown nor refuted.
+
+  The saving was real. Traced over 3 seeds, seconds a 300 s run:
+
+  | | backoff | scan | explore | approach | deliver |
+  |---|---|---|---|---|---|
+  | sequence | 39.5 | 60.1 | 20.5 | 64.0 | 72.2 |
+  | reverse 2 s | **9.4** | 76.5 | 10.0 | **114.5** | 53.5 |
+
+  The reverse cuts the back-off by 30 s a run exactly as promised — and
+  `approach` grows by 50. A reversing duck ends 0.56 m from the basket
+  centre against 1.05 m after the sequence, right on the `basket_keepout`
+  line, so it scans from beside the basket and then walks the length of the
+  room to whatever it finds. **The turn-and-walk is not overhead.** The
+  comment called it "leaving the rim"; what it actually does is put the
+  duck back in the *room*, where the toys are, pointed away from the
+  basket. The 30 s it costs buys shorter approaches for the rest of the
+  cycle and is repaid with interest.
+
+  That is the shape of this whole round in miniature: the dead-band fix was
+  real, the mechanism argument built on it was sound, the manoeuvre it
+  suggested was genuinely 4× faster — **and the thing being optimised was
+  not the thing that mattered.** A faster back-off that skips the
+  repositioning is not faster. The lever, if anyone returns to it, is a
+  reverse that KEEPS the walk-out, not a longer reverse; measure it once on
+  fresh seeds and take the answer.
 
 - **Odometry drift** (roadmap 1.7): the `(x, y, yaw)` a brain gets is dead
   reckoning — a per-run distance scale, a gyro bias, per-step noise — under

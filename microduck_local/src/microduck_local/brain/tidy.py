@@ -137,11 +137,37 @@ class TidyParams:
     # happy with: it turns in place anyway, and by then the duck is outside
     # `basket_keepout`.
     #
-    # UNTRIED against the sequence, so it ships at 0. `eval-tidy` is the
-    # right place to settle it - 16 seeds resolve a shift in `tidied`,
-    # where soccer's falls need ~376 - and it must be read on BOTH the
-    # tidied fraction and the falls, since the sequence is what the fall
-    # and tether rows in the README were measured on.
+    # MEASURED, and it is WORSE. 16 paired seeds x 300 s x 6 toys:
+    # in the basket 5.31 -> 4.94 (0.885 -> 0.823 of the toys, -0.38 +/-
+    # 0.18, p = 0.111, better on 2 of 16 and worse on 8, six ties), falls
+    # 0.31 -> 0.44 (5 events against 7 - unresolvable either way at this
+    # size, so the "it removes the fall mode" half is neither shown nor
+    # refuted). Ships at 0.
+    #
+    # The saving was real and the diagnosis is the useful part. Traced over
+    # 3 seeds, seconds a 300 s run:
+    #
+    #                backoff   scan   explore   approach   deliver
+    #   sequence       39.5    60.1     20.5       64.0      72.2
+    #   reverse 2 s     9.4    76.5     10.0      114.5      53.5
+    #
+    # The reverse does cut the back-off by 30 s a run, exactly as promised
+    # - and `approach` grows by 50. The duck ends a reverse 0.56 m from the
+    # basket centre (against 1.05 m after the sequence), which is on the
+    # `basket_keepout` line, so it scans from beside the basket and then
+    # walks the length of the room to whatever it finds.
+    #
+    # So the turn-and-walk is NOT overhead. "Leaving the rim" is what the
+    # comment above called it; what it actually does is put the duck back
+    # in the ROOM, where the toys are, pointed away from the basket. The
+    # 30 s it costs buys shorter approaches for the rest of the cycle and
+    # is paid back with interest. A faster back-off that skips the
+    # repositioning is not faster.
+    #
+    # If anyone returns to this: the lever is a reverse that KEEPS the
+    # walk-out (drop the sidestep and the 2.6 rad turn, back out, then walk
+    # clear), not a longer reverse. Do not tune until it wins - measure the
+    # variant once on fresh seeds and take the answer.
     backoff_back_s: float = 0.0
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
