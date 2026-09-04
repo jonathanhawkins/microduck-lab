@@ -455,12 +455,55 @@ two sides symmetric, not swap them. Worth understanding before tuning either.
         ones pull much harder. That was the unexplained reversal noted above;
         this is the explanation.
 
-      Nothing in the reward asks for "turn harder to the right". The recipe is
-      deliberately one-sided (`symmetric=False`, no mirror loss) so that a
-      fixed convention can break the tie — but the tie-break is supposed to be
-      a *direction*, not a 2.6× gain difference. That asymmetry is an
-      artifact of leaving a one-sided policy unconstrained, and it is the
-      single best explanation on the table for the search's remaining cost.
+      **RETRACTED — that 2.6× is an artifact of the probe, not a property of
+      the policy.** `vecnormalize` says slot 54 has **std 0.11** against a
+      nominal range of ±1, so sweeping the slot to ±1 probes the network at
+      **±8 sigma**: inputs it has effectively never seen. Three checks, all
+      negative:
+
+      - The baked normalizer is symmetric — `mean[54]` is -0.004..+0.011
+        across all five arms, and ±1 maps to ±8.2..8.8 sigma with a
+        |left|/|right| ratio of 0.95-1.02. The normalizer is not doing it.
+      - Within ±2 sigma the head-yaw response is monotonic with a **correctly
+        signed positive slope in every arm** (+0.31 to +0.71 per sigma). What
+        looked like asymmetry at the extremes is a large constant offset,
+        and that offset is just *where the scan clock happens to be pointing*
+        — the probe had frozen obs[59]/obs[60] at one phase.
+      - Swept across a full clock cycle instead, the belief slot shifts the
+        sweep's **centre** while leaving its **span** roughly unchanged, which
+        is exactly what a belief is supposed to do.
+
+      Measured behaviourally instead — head yaw over 40 blind episodes on
+      every step the ball is not seen — the arms DO sweep lopsidedly, and it
+      turns out not to matter:
+
+      | arm | steps lost | span | L/R balance | found |
+      |---|---:|---:|---:|---:|
+      | shipped s5 (cloud) | 4737 | 192° | 0.87 | 82% |
+      | control | 2749 | 177° | **0.99** | 95% |
+      | fix1 `body_aimed` 2.0 | 2255 | 90° | 0.44 | 98% |
+      | **fix2 (shipped)** | 2173 | 181° | 0.66 | **100%** |
+      | fix3 turn ungated | 2974 | 153° | 2.43 | 75% |
+      | blind-trained | **769** | 159° | 0.62 | **100%** |
+
+      Balance ranges 0.44-2.43 and predicts nothing: the control has the most
+      symmetric sweep of any arm (0.99) and is not the best finder, while fix2
+      is lopsided (0.66) and finds everything. **The column that tracks
+      performance is steps spent LOST** — 4.8% of steps for the blind-trained
+      arm against 30% for the old cloud export — which is re-acquisition and
+      tracking, not search symmetry. Sweep span does not explain it either
+      (blind-trained sweeps NARROWER than fix2 and finds better).
+
+      So: the belief slot is read correctly, the sweep asymmetry is real but
+      inert, and the only left/right effect with a measured cost is the plain
+      one in section 3 — the convention decides which way it looks FIRST, so
+      left balls come in at 0.18 s and right balls wait for the sweep.
+
+      Method note worth keeping, since this cost two wrong hypotheses: before
+      reading anything off a slot sweep, check that slot's std in
+      `vecnormalize.pkl` and stay inside ±2 sigma, and vary the scan clock
+      rather than freezing it — a frozen clock turns "what phase am I at" into
+      a fake constant bias.
 
       Caveat on method: sweeping slot 54 while holding bx and head yaw fixed
       leaves the manifold for the SEEN case (while the ball is visible the
