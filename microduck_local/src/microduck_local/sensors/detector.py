@@ -55,10 +55,48 @@ _SHIPPED_PX_PER_RAD = SHIPPED_PX_H / np.deg2rad(SHIPPED_FOV_H_DEG)
 #    10 Hz; the sensor offers 90. Nine times the headroom, so the "not sure
 #    we have the compute for the full potential" caveat does not bite this
 #    workload - frames can be dropped freely.
-# 3. THE FOV IS STILL UNKNOWN, and it is the assumption that matters.
-#    Sensor size does not give field of view without the lens's focal
-#    length. On this active area: 62 deg needs f = 4.4 mm, 90 deg 2.6 mm,
-#    120 deg 1.5 mm.
+# 3. THE FOV IS STILL UNKNOWN for the new part, and it is the assumption
+#    that matters. Sensor size does not give field of view without the
+#    lens's focal length. On this active area: 62 deg needs f = 4.4 mm,
+#    90 deg 2.6 mm, 120 deg 1.5 mm.
+#
+# AND THE CAMERA THE ROBOT HAS TODAY IS A DIFFERENT SENSOR, WITH A FOV
+# THIS SPEC IS PROBABLY WRONG ABOUT. Upstream identifies it on hardware:
+# `imx219 2-0010: Model ID 0x0219` (microduck/docs/project/media-bringup.md),
+# i.e. a Raspberry Pi Camera v2 - 1/4", 1.12 um, 3280 x 2464, whose quoted
+# 62.2 x 48.8 deg is where the 62/48 below came from. But `mediad`'s
+# `pin_sensor_mode` pins the SENSOR to 1920x1080 (pipeline.rs), and on the
+# IMX219 that mode is a CROP - libcamera reports it as
+# "1920x1080 [47.57 fps - (680, 692)/1920x1080 crop]", a centred window of
+# the array, no binning and no scaling. It keeps 59% of the columns and
+# 44% of the rows. With the stock f = 3.04 mm lens (confirmed by geometry:
+# the full array gives 62.3 x 48.8, matching the published spec):
+#
+#     full array 3280x2464   62.3 x 48.8 deg   <- what this spec assumes
+#     PINNED MODE 1920x1080  39.0 x 22.5 deg   <- what the robot may see
+#
+# So the frustum here may be ~23 deg too wide and ~25 deg TOO TALL. The
+# vertical error is the one that bites: 22.5 deg of vertical view is half
+# what the near-field reasoning assumes (a floor ball leaving the camera in
+# the last 0.3 m, a person's middle leaving the frustum at 1.2 m).
+#
+# The same crop cuts the other way on resolution: 320 px over 39 deg is
+# 471 px/rad against the 296 assumed here, because a narrow view
+# concentrates pixels. Both errors push the same conclusion - the lens
+# sweep's "the shipped camera is adequate" was measured on a baseline
+# WIDER and BLURRIER than the robot's, so a wider lens is probably worth
+# more than that battery said, not less.
+#
+# UNCONFIRMED, and it is one question: is the module the stock Pi Camera
+# v2 (f = 3.04 mm), or a third-party IMX219 board? Those ship M12 lenses
+# from 88 to 160 deg and would change every number above. The repo names
+# the driver overlay, not the lens. Do not re-baseline the sim on 39 x
+# 22.5 until someone confirms the lens - the point here is that 62 x 48 is
+# the FULL-ARRAY figure and the robot does not run the full array.
+#
+# The new sensor's headline advantage falls out of this: 1920 x 1080 is
+# its NATIVE array, so there is no crop to lose, and whatever the lens
+# gives is what the robot sees.
 #
 # And it raises one: the frustum below is 62 x 48 deg, whose shape
 # (tan24/tan31 = 0.74) is 4:3. THIS SENSOR IS 16:9 (0.56). At 62 deg
