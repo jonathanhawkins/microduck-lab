@@ -300,6 +300,21 @@ keeps the curve of one that has already finished.
   state. The page opens on ONE run (the live one, else the first card): the
   palette holds six colours, so forty-odd curves on the same axes come out
   as an unreadable band.
+- **What is different.** The first charted run is the *baseline* and its
+  card shows the whole recipe from `brain.json` (batch, lr → lr_end, epochs,
+  arch, legacy hparams, polite, the git sha it trained at, …). Every other
+  card shows **only the knobs it changed**, as `lr_end 3e-5 ← 3e-4`, or
+  `= <baseline>` when the recipe is identical — so `ab-batch` against
+  `ab-batch-lr` reads as one chip, not two identical tag rows. A flag the
+  viewer has never heard of still diffs, under its raw key
+  (`lib/train.ts`: `recipeDiff`).
+- **Where the shipped brain came from.** `select-brain` probes every
+  checkpoint on the follow benchmark and ships the best one, which is
+  routinely not the end of the run (`ab-batch` ships step 751k of 2M). The
+  card says `◆ shipped from 751.1k · in_band 0.938 (final 0.923)` and the
+  chart puts a diamond at that step, labelled with the score. The curve
+  is training reward; the score is the benchmark — they are different
+  numbers, and the diamond is the one that decided what went on the robot.
 
 A brain cloned from the repo shows *no curve* — only `brain.onnx` and
 `brain.json` are committed, `progress.jsonl` stays local — and the card says

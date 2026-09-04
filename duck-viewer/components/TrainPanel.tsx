@@ -15,9 +15,13 @@ import {
   BrainRun,
   CurvePoint,
   fetchBrains,
+  fmtKnob,
   humanDuration,
   humanSteps,
+  KNOBS,
+  recipeDiff,
   runColor,
+  shippedStep,
   smooth,
 } from "@/lib/train";
 
@@ -69,6 +73,9 @@ export default function TrainPanel() {
 
   const shown = useMemo(() => runs.filter((r) => !hidden.has(r.name)), [runs, hidden]);
   const live = useMemo(() => runs.filter((r) => r.active), [runs]);
+  // The first charted run is the baseline every other card diffs against:
+  // it shows its whole recipe, the rest show only the knobs they changed.
+  const baseline = shown[0] ?? null;
   const toggle = useCallback((name: string) => {
     setHidden((h) => {
       const n = new Set(h);
@@ -136,6 +143,7 @@ export default function TrainPanel() {
                   run={r}
                   color={runColor(r.name, i)}
                   hidden={hidden.has(r.name)}
+                  baseline={baseline}
                   onToggle={() => toggle(r.name)}
                 />
               ))}
@@ -183,21 +191,29 @@ function RunCard({
   run,
   color,
   hidden,
+  baseline,
   onToggle,
 }: {
   run: BrainRun;
   color: string;
   hidden: boolean;
+  baseline: BrainRun | null;
   onToggle: () => void;
 }) {
   const pct = run.progress != null ? Math.round(run.progress * 100) : null;
-  const tags = [
-    run.variety ? "variety" : null,
-    run.obs_version ? `obs v${run.obs_version}` : null,
-    run.envs ? `${run.envs} envs` : null,
-    run.seed != null ? `seed ${run.seed}` : null,
-    run.fixed_preset ? run.fixed_preset : null,
-  ].filter(Boolean) as string[];
+  const isBase = baseline?.name === run.name;
+  // What the chips say depends on the card's role. The baseline (and every
+  // card while nothing is charted) shows its recipe; any other card shows
+  // ONLY what it changed against the baseline — the answer to "what is
+  // different about this one", which brain.json has always held and the
+  // five fixed tags here used to hide (ab-batch vs ab-batch-lr is lr_end).
+  const diffs = baseline && !isBase ? recipeDiff(run, baseline) : null;
+  const recipe = KNOBS.flatMap(([key, label]) => {
+    const v = run[key];
+    if (v === undefined || v === null || v === false || (Array.isArray(v) && !v.length)) return [];
+    return [{ key, text: v === true ? label : `${label} ${fmtKnob(v)}` }];
+  });
+  const shippedAt = shippedStep(run);
 
   return (
     <div
@@ -259,15 +275,43 @@ function RunCard({
         <Stat k="steps/s" v={run.steps_per_s != null ? String(run.steps_per_s) : "—"} />
       </div>
 
-      {tags.length > 0 && (
-        <div style={S.tags}>
-          {tags.map((t) => (
-            <span key={t} style={S.tag}>
-              {t}
-            </span>
-          ))}
+      {run.selected && (
+        <div style={S.shipped} title="select-brain probed every checkpoint on the follow benchmark and shipped the best one as brain.onnx — the number is that probe's score, not the curve's">
+          <span style={{ color }}>◆</span> shipped from {shippedAt != null ? humanSteps(shippedAt) : run.selected.tag} ·{" "}
+          {run.selected.metric} {run.selected.score.toFixed(3)}
+          {run.selected.final_score !== run.selected.score && (
+            <span style={S.dim}> (final {run.selected.final_score.toFixed(3)})</span>
+          )}
         </div>
       )}
+
+      <div style={S.tags}>
+        {diffs === null ? (
+          <>
+            {isBase && (
+              <span style={{ ...S.tag, ...S.tagBase, borderColor: color, color }} title="the first charted run — every other card shows what it changed against this one">
+                baseline
+              </span>
+            )}
+            {recipe.map((c) => (
+              <span key={c.key} style={S.tag}>
+                {c.text}
+              </span>
+            ))}
+          </>
+        ) : diffs.length === 0 ? (
+          <span style={{ ...S.tag, ...S.dim }} title={`the same recipe as ${baseline!.name}`}>
+            = {baseline!.name}
+          </span>
+        ) : (
+          diffs.map((d) => (
+            <span key={d.key} style={{ ...S.tag, ...S.tagDiff }} title={`${baseline!.name} has ${d.label} ${d.from}`}>
+              {d.label} {d.value}
+              <span style={S.dim}> ← {d.from}</span>
+            </span>
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -456,6 +500,8 @@ function Chart({
           const c = runColor(r.name, i < 0 ? 0 : i);
           const sm = smooth(r.curve);
           const last = sm[sm.length - 1];
+          const shipAt = shippedStep(r);
+          const ship = shipAt == null ? null : nearest(sm, shipAt);
           const path = (pts: CurvePoint[]) =>
             pts
               .map((p, j) => `${j ? "L" : "M"}${x(p.steps).toFixed(1)},${y(val(p)).toFixed(1)}`)
@@ -482,6 +528,26 @@ function Chart({
                     repeatCount="indefinite"
                   />
                 </circle>
+              )}
+              {/* Where brain.onnx actually came from. select-brain picks a
+                  checkpoint by benchmark score, and it is routinely NOT the
+                  end of the line — ab-batch ships step 751k of 2M — which
+                  the curve alone never says. */}
+              {ship && (
+                <g>
+                  <title>
+                    {`${r.name}: shipped from ${humanSteps(ship.steps)} · ${r.selected!.metric} ${r.selected!.score.toFixed(3)}`}
+                  </title>
+                  <path
+                    d={`M${x(ship.steps)},${y(val(ship)) - 6} l5,6 l-5,6 l-5,-6 z`}
+                    fill="#0b0f14"
+                    stroke={c}
+                    strokeWidth={1.5}
+                  />
+                  <text x={x(ship.steps)} y={y(val(ship)) - 10} textAnchor="middle" style={{ ...S.axis, fill: c }}>
+                    {r.selected!.score.toFixed(3)}
+                  </text>
+                </g>
               )}
             </g>
           );
@@ -613,6 +679,11 @@ const S: Record<string, React.CSSProperties> = {
     borderRadius: 4,
     padding: "1px 5px",
   },
+  // Full shorthand again (see tabOn): these are spread OVER S.tag.
+  tagDiff: { color: "#e5e7eb", border: "1px solid #374151" },
+  tagBase: { background: "transparent", fontWeight: 700 },
+  dim: { color: "#6b7280" },
+  shipped: { fontSize: 10, color: "#d1d5db", marginTop: 8 },
   chartCol: { flex: 1, minWidth: 420, display: "flex", flexDirection: "column", minHeight: 0 },
   chartHead: { display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexShrink: 0 },
   tab: {
