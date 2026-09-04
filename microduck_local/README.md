@@ -2419,10 +2419,14 @@ ball on the floor (`MICRODUCK_BALL_HFOV_DEG` / `_VFOV_DEG`).
 Two numbers from the sensitivity sweeps in `docs/roadmap.md` are worth
 carrying into any hardware discussion:
 
-- **The detector needs ≥ 10 Hz.** 50 / 25 / 17 / 10 Hz are indistinguishable;
-  between 10 and 6 Hz the behavior falls off a cliff (centred share 60% → 23%,
-  kick handoff 75% → 13%). The sensor's 90 fps is ~9× more than the pipeline
-  can use, so frame rate is not where compute should go.
+- **The detector needs ~4 Hz** — 10 Hz if the daemon does not carry a held
+  detection through the head's own rotation. Uncompensated, the behavior falls
+  off a cliff between 10 and 6 Hz (kick handoff 35% → 2% by 4 Hz); that cliff
+  is the held bearing going stale against a sweeping head, not the rate, and
+  correcting it with head encoders and the gyro takes 4 Hz back to an 80%
+  handoff on the same unretrained brain (`MICRODUCK_BALL_STALE_FIX`). Either
+  way the sensor's 90 fps is far more than the pipeline can use, so frame rate
+  is not where compute should go.
 - **Mount it portrait.** Rotated the other way (116° across, 60° up) costs
   ~10 points of in-frame share and 40% more time to the kick handoff.
 

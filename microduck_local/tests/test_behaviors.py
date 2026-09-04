@@ -1723,17 +1723,19 @@ def test_lean_spawn_is_a_quarter_of_training_and_none_of_the_battery():
         assert abs(float(probe._projected_gravity()[2])) > 0.98, "battery spawned tilted"
 
 
-def test_stale_fix_is_off_and_the_bearing_is_simply_held():
-    """find_ball's held detector report is a MODEL OF LATENCY, not the
-    stale-pose bug the tidy pipeline found in `_locate`. tidy's code mixed an
-    old frame with new odometry — an internal inconsistency it could correct.
-    Here the hold is what a real detector does, the policy learned against it,
-    and compensating for it measured WORSE at every rate (6 Hz handoff
-    35% -> 0%). The knob stays off; docs/roadmap.md has the numbers.
+def test_stale_fix_carries_the_held_bearing_without_compounding_it():
+    """find_ball had the same stale-pose bug tidy's `_locate` did: a bearing
+    measured off the camera at capture, held while the head kept sweeping, so
+    the policy acted on a pose the duck had already left. Compensating removes
+    the detector-rate cliff outright (4 Hz kick handoff 2% -> 80%, falls
+    16 -> 4 per 60).
 
-    Locks both halves: the report really is held unchanged between updates,
-    and the compensation really does move it when switched on — so a future
-    training run can use the switch and this test says what it does."""
+    The trap locked here is the one that briefly hid that result: the
+    correction must be computed from the CAPTURED bearing, never from `det`
+    itself. `det` is mutated in place, so re-adding the whole
+    rotation-since-capture compounds it — about 2.5x over-correction at 10 Hz
+    and worse below, which reads convincingly as "compensation does not
+    work"."""
 
     import mujoco
 
@@ -1765,6 +1767,30 @@ def test_stale_fix_is_off_and_the_bearing_is_simply_held():
     # +1/half_h per rad of camera yaw, measured — the head turned ~0.30 rad.
     assert fixed_to > fixed_from + 0.3, (fixed_from, fixed_to)
 
-    # And it is off in the shipped recipe.
+    # On in the shipped recipe: ~2 points of handoff at the nominal 25 Hz,
+    # and it buys the entire cliff below it.
     from microduck_local.behaviors import _BALL_KNOBS
-    assert _BALL_KNOBS["MICRODUCK_BALL_STALE_FIX"] == 0.0
+    assert _BALL_KNOBS["MICRODUCK_BALL_STALE_FIX"] == 1.0
+
+    # THE COMPOUNDING GUARD. Hold one report while the head turns steadily and
+    # the correction must track the TOTAL rotation since capture, growing
+    # linearly. A version that sums its own output accelerates instead.
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                     "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0",
+                                     "MICRODUCK_BALL_DETECT_EVERY": "50",
+                                     "MICRODUCK_BALL_STALE_FIX": "1"})
+    for _ in range(20):
+        env.step(np.zeros(14, np.float32))
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    base = float(env.head_cmd[0])
+    seen = []
+    for i in range(1, 5):
+        env.data.qpos[env.joint_qpos_adr[7]] = 0.05 * i
+        mujoco.mj_forward(env.model, env.data)
+        env.step_count += 1
+        _ball_sense(env)
+        seen.append(float(env.head_cmd[0]) - base)
+    steps = [b - a for a, b in zip(seen, seen[1:])]
+    assert min(steps) > 0.0 and max(steps) < 1.6 * min(steps), (
+        f"correction is compounding, not tracking total rotation: {seen}")

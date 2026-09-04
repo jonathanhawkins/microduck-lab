@@ -732,44 +732,58 @@ lens removed that coupling, and no reward term has replaced it.
       | falls | 1 | 1 | 1 | 1 | 4 | 16 |
 
       → **50 / 25 / 17 / 10 Hz are indistinguishable, and it falls off a cliff
-      between 10 and 6.** Write ≥ 10 Hz into the daemon's requirements. The
-      recipe's 25 Hz default has 2.5x margin and does not need changing.
+      between 10 and 6** — *as measured then, before the stale-pose fix below.
+      The cliff turned out to be an artifact and the requirement is now ~4 Hz;
+      this table is what an uncompensated detector costs.*
 
-      **Checked against the tidy pipeline's stale-pose result, and it is NOT
-      the same bug.** `brain/tidy.py`'s `stale_fix` showed that a camera's
-      apparent 10 Hz floor was really a stale POSE — an old frame placed from
-      the pose the duck had already left. find_ball holds `det[0]/det[1]`
-      unchanged between updates while the head keeps sweeping, which looks
-      identical, and the stale bearing tracks the cliff almost too well:
+      **CORRECTED — it IS the tidy pipeline's stale-pose bug, and the same
+      cure works.** An earlier revision of this item concluded the opposite.
+      That conclusion came from a bug in the compensation, not from the data.
+
+      find_ball holds `det[0]/det[1]` — a bearing measured off the camera at
+      capture — unchanged while the head keeps sweeping, so the policy acts on
+      a pose the duck has already left. The error tracks the cliff exactly:
 
       | detector | 25 Hz | 17 Hz | **10 Hz** | **6 Hz** | 4 Hz |
       |---|---|---|---|---|---|
       | stale bearing, mean / p95 | 0.4° / 2.0° | 0.6° / 3.1° | 1.1° / **5.0°** | 5.5° / **20.9°** | 31° / 79° |
 
-      The aim tolerance is 7°, so the cliff sits exactly where the stale error
-      outgrows what "centred" means. Tempting — and wrong. Compensating the
-      held report by the head's own rotation (`MICRODUCK_BALL_STALE_FIX`, signs
-      MEASURED: d(bx)/d(cam yaw) = +1/half_h, d(by)/d(cam pitch) = −1/half_v —
-      guessing them made the error 10× worse first) makes the shipped brain
-      WORSE at every rate, and worst where it should have helped: at 6 Hz the
-      handoff goes 35% → **0%**, at 4 Hz falls go 16 → 23 per 60.
+      against an aim tolerance of 7°. Rotating the held report by the head's
+      own rotation since capture — head encoders and the gyro, no new sensor,
+      the same ingredients `brain/tidy.py`'s `stale_fix` used — **removes the
+      cliff outright.** Shipped brain, unretrained, 60 episodes at
+      `--events 0.33`:
 
-      Two reasons, and the first is the one to carry to other behaviors:
+      | rate | handoff / falls, fix OFF | fix ON |
+      |---|---|---|
+      | 25 Hz | 92% / 2 | 90% / 2 |
+      | 10 Hz | 88% / 2 | 88% / 3 |
+      | **6 Hz** | **35%** / 3 | **83%** / 5 |
+      | **4 Hz** | **2%** / **16** | **80%** / **4** |
 
-      - **tidy's was an internal inconsistency; this is a faithful model.**
-        tidy's own code mixed an old frame with new odometry — a mistake it
-        could correct. A real detector genuinely does report a bearing one
-        period old, and the daemon genuinely reads it. There is nothing wrong
-        here to fix, so "fix it here too" is the wrong lesson — which is what
-        `a671b9f` on this branch says in its own context.
-      - **The policy learned against the uncompensated signal.** Changing what
-        a slot means at deployment is out-of-distribution, which is why a
-        *correct* compensation still hurts. tidy could take its fix because
-        `_locate` is hand-written; a learned brain cannot.
+      → **the requirement drops from ≥ 10 Hz to ~4 Hz**, for about two points
+      of handoff at the nominal rate. Worth taking: the NPU's real throughput
+      is the least certain number in the pipeline. `MICRODUCK_BALL_STALE_FIX`
+      is ON by default.
 
-      Left as a knob, off, because the one thing this does not settle is
-      whether a brain TRAINED with the compensation beats the floor. That
-      needs a training run and this is the switch it would use.
+      **Two mistakes made getting here, both worth keeping.** The signs were
+      guessed first, which made the error ten times worse; they are measured
+      now (d(bx)/d(cam yaw) = +1/half_h, d(by)/d(cam pitch) = −1/half_v). Then
+      the correction was written onto `det` in place while measuring rotation
+      from capture, so every held step re-added the whole accumulated rotation
+      — ~2.5× over-correction at 10 Hz and worse below. That version degraded
+      every rate and read convincingly as "the compensation does not work",
+      which is exactly what produced the wrong conclusion. It corrects from
+      the captured bearing now, and a test locks the linear-growth property.
+
+      **Training with it on is NOT needed, and is worse.** Two arms
+      (`teach-find_ball-ce44a0` against the buggy version, `38ffd2` against the
+      corrected one): the correctly-trained arm scores 77% handoff and **25
+      falls / 60** at 25 Hz, against the shipped brain's 90% and 2. It buys
+      tracking and spends it on falls — the same frontier every other lever in
+      this file lands on. The win is the DEPLOYMENT-side fix applied to a brain
+      that never saw it, which is precisely tidy's story: a hand-written daemon
+      can do this, and a learned policy need not be retrained for it.
 
       **The trap in this table is worth its own line:** `found` stays 97% at
       EVERY rate, including the 4 Hz column where the handoff never fires and

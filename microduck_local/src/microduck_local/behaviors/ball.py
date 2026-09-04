@@ -116,47 +116,53 @@ _BALL_KNOBS = {
     # 2 steps = 25 Hz against the 50 Hz control loop. The bottleneck this
     # models is the NPU, NOT the camera: the sensor does 1920x1080 at up to
     # 90 fps, which is ~9x more than this pipeline can consume, so frame rate
-    # is not where compute should go. **The real requirement is >= 10 Hz
-    # detection**, measured (docs/roadmap.md section 2): 50/25/17/10 Hz are
-    # indistinguishable, and between 10 and 6 Hz the behavior falls off a
-    # cliff — centred share 60% -> 23%, kick handoff 75% -> 13%, falls 1 -> 4,
-    # and at 4 Hz the handoff never fires at all. Note the trap: `found` stays
-    # 97% at EVERY rate down to 4 Hz, because "ever saw it" is satisfied
-    # eventually. Only the AIMING columns see the collapse.
+    # is not where compute should go. The requirement is **~4 Hz** with
+    # MICRODUCK_BALL_STALE_FIX on, and 10 Hz without it (docs/roadmap.md
+    # section 2): uncompensated, 50/25/17/10 Hz are indistinguishable and the
+    # behavior falls off a cliff between 10 and 6 — but that cliff was the
+    # held bearing going stale, not the rate, and compensating for it takes
+    # 4 Hz from a 2% kick handoff to 80%. Note the trap in either case:
+    # `found` stays 97% at EVERY rate down to 4 Hz, because "ever saw it" is
+    # satisfied eventually. Only the AIMING columns see the collapse.
     "MICRODUCK_BALL_DETECT_EVERY": 2.0,
-    # Carry a held detector report through the head's own rotation (0/1).
-    # OFF, and the measurement is the point.
+    # Carry a held detector report through the head's own rotation (0/1). ON.
     #
-    # The tidy pipeline found that its camera's apparent 10 Hz floor was a
-    # stale POSE, not a rate: a frame one period old was being placed from the
-    # pose the duck had already left (`stale_fix`, brain/tidy.py). find_ball
-    # holds det[0]/det[1] — a bearing measured off the camera at capture —
-    # unchanged while the head keeps sweeping, which LOOKS like the same bug,
-    # and the stale error tracks its cliff suspiciously well: 1.1 deg mean /
-    # 5.0 p95 at 10 Hz against an aim tolerance of 7, then 5.5 / 20.9 at 6 Hz
-    # where centring and the handoff collapse.
+    # This is the same bug brain/tidy.py's `stale_fix` found, and the same
+    # cure. find_ball holds det[0]/det[1] — a bearing measured off the camera
+    # at capture — unchanged while the head keeps sweeping, so the policy acts
+    # on a bearing describing a pose the duck has already left. The error runs
+    # 1.1 deg mean / 5.0 p95 at 10 Hz against an aim tolerance of 7 deg, then
+    # 5.5 / 20.9 at 6 Hz, which is exactly where centring and the kick handoff
+    # used to collapse.
     #
-    # It is not the same bug. Compensating (signs MEASURED: d(bx)/d(cam yaw)
-    # = +1/half_h, d(by)/d(cam pitch) = -1/half_v) makes the shipped brain
-    # WORSE at every rate, and catastrophically so where it was supposed to
-    # help: at 6 Hz the kick handoff goes 35% -> 0%, at 4 Hz falls go 16 -> 23
-    # per 60. Two reasons, and both are worth knowing:
+    # Rotating the held report by the head's own rotation since capture costs
+    # no sensor — head encoders and the gyro, the same ingredients tidy used —
+    # and it removes the cliff outright. Shipped brain, 60 episodes,
+    # --events 0.33, handoff / falls:
     #
-    #   - tidy's was an INTERNAL INCONSISTENCY — its own code mixed an old
-    #     frame with new odometry. find_ball's hold is not a mistake, it is a
-    #     faithful model of detector latency: a real detector genuinely does
-    #     report a bearing that is one period old, and the daemon reads it.
-    #     There is nothing wrong to fix.
-    #   - the policy LEARNED against the uncompensated signal. Changing what
-    #     the slot means at deployment is out-of-distribution, which is why a
-    #     correct compensation still hurts. tidy could take its fix because
-    #     `_locate` is hand-written; a learned brain cannot.
+    #     25 Hz   92% / 2   ->   90% / 2
+    #     10 Hz   88% / 2   ->   88% / 3
+    #      6 Hz   35% / 3   ->   83% / 5
+    #      4 Hz    2% / 16  ->   80% / 4
     #
-    # So the >= 10 Hz requirement stands: it is detector latency, not an
-    # artifact. Left as a knob because the one question this does NOT settle
-    # is whether a brain TRAINED with the compensation beats the floor — that
-    # needs a training run, and this is the switch it would use.
-    "MICRODUCK_BALL_STALE_FIX": 0.0,
+    # So the daemon's detector requirement is ~4 Hz WITH this and 10 Hz
+    # without, for about two points of handoff at the nominal rate. Worth it:
+    # the NPU's real throughput is the least certain number in the pipeline.
+    #
+    # Signs MEASURED, not reasoned (d(bx)/d(cam yaw) = +1/half_h,
+    # d(by)/d(cam pitch) = -1/half_v) — guessing them made the error ten times
+    # worse. And it corrects from the CAPTURED bearing, never from det itself:
+    # det is mutated in place, so re-adding the whole rotation-since-capture
+    # compounds it. That bug over-corrected ~2.5x at 10 Hz and worse below,
+    # which read convincingly as "compensation does not work" and cost a wrong
+    # conclusion in docs/roadmap.md before it was caught.
+    #
+    # Applied at DEPLOYMENT to a brain trained without it, which is the whole
+    # point — a hand-written daemon can do this and a learned policy need not
+    # be retrained for it. Training WITH it on was measured and is worse
+    # (77% handoff, 25 falls / 60 against 90% and 2): it buys tracking and
+    # spends it on falls, the same frontier every other lever here lands on.
+    "MICRODUCK_BALL_STALE_FIX": 1.0,
     "MICRODUCK_BALL_JITTER": 0.02,
     "MICRODUCK_BALL_DROPOUT": 0.0,
     "MICRODUCK_BALL_MEM_TAU": 4.0,
@@ -367,6 +373,12 @@ def _ball_reset(env) -> None:
     # Detector output as the policy sees it (held between updates).
     env._ball_det = np.zeros(3, np.float32)      # bx, by, seen
     env._ball_det_step = -10 ** 9
+    # Capture-time state the stale-fix carries forward (see
+    # MICRODUCK_BALL_STALE_FIX). Reset per episode like everything else
+    # here — a leaked capture pose is one spurious correction on the
+    # first step of the next episode.
+    env._ball_det_bx = env._ball_det_by = 0.0
+    env._ball_det_yaw = env._ball_det_pitch = 0.0
     # Truth for the rewards.
     env._ball_seen = False
     env._ball_bx = env._ball_by = 0.0
@@ -489,6 +501,9 @@ def _ball_sense(env, force: bool = False) -> None:
             det[0] = bx + (float(r.uniform(-jit, jit)) if jit else 0.0)
             det[1] = by + (float(r.uniform(-jit, jit)) if jit else 0.0)
             det[2] = 1.0
+            # The report AS CAPTURED, kept so the stale-fix can carry it
+            # forward without compounding its own output.
+            env._ball_det_bx, env._ball_det_by = float(det[0]), float(det[1])
             fresh_seen = True
         else:
             det[:] = 0.0
@@ -501,11 +516,15 @@ def _ball_sense(env, force: bool = False) -> None:
         # against an aim tolerance of _BALL_AIM_DEG.
         dyaw = _math.atan2(_math.sin(yaw - env._ball_det_yaw),
                            _math.cos(yaw - env._ball_det_yaw))
+        # From the CAPTURED bearing every step, never from det itself: det is
+        # mutated in place, and re-adding the whole rotation-since-capture to
+        # an already-corrected value compounds it (4 held steps at 10 Hz
+        # over-corrected ~2.5x, and it got worse the lower the rate — which
+        # looked exactly like "the compensation does not work").
         # Signs MEASURED, not reasoned: d(bx)/d(cam yaw) = +1/half_h and
-        # d(by)/d(cam pitch) = -1/half_v. Guessing them made the error ten
-        # times worse, which is its own small lesson about this projection.
-        det[0] = max(-1.0, min(1.0, float(det[0]) + dyaw / k["half_h"]))
-        det[1] = max(-1.0, min(1.0, float(det[1])
+        # d(by)/d(cam pitch) = -1/half_v.
+        det[0] = max(-1.0, min(1.0, env._ball_det_bx + dyaw / k["half_h"]))
+        det[1] = max(-1.0, min(1.0, env._ball_det_by
                                - (pitch - env._ball_det_pitch) / k["half_v"]))
 
     # Bookkeeping for the reports, and the memory slot.
