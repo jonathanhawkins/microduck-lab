@@ -100,6 +100,27 @@ resolve and finding it is the constraint.
 view is what the near-field blindness lives on, so this should help the last
 0.3 m onto a ball and the close-in follow case.
 
+## 3b. What the frustum costs in the near field, and what rescues it
+
+A floor object leaves the camera when it is nearer than where the bottom of
+the frame meets the floor. Derived from the measured camera pose
+(`walker-facts`: standing height 0.235 m at 0.193 rad depression; head down
+0.202 m at 0.654 rad):
+
+| vertical FOV | head level | head down |
+|---|---|---|
+| 48° — what the sim assumes | 0.33 m | 0.11 m |
+| **22.5° — the IMX219 1080p crop** | **0.57 m** | 0.18 m |
+| 60° — the replacement module | 0.27 m | 0.08 m |
+
+So the crop pushes the head-level blind radius from 0.33 m out to 0.57 m —
+a 73% increase, and worse than any lens in the sweep. **But the head dip
+rescues most of it**: `tidy` already sets `head_down` for the close
+approach, and at 0.654 rad the blind radius is 0.18 m against the sim's
+0.11 m. That is a real degradation and a much smaller one than the
+head-level figure suggests, which is worth knowing before anyone panics
+about the crop. The replacement module improves on the sim on both rows.
+
 ## 4. Frame rate is a non-issue
 
 `DetectorSpec.rate_hz` is 10 and the brain decides at 10 Hz, against the
@@ -123,3 +144,23 @@ that matters.
 4. Is the 16:9 frame letterboxed into the square YOLO input (keeps FOV,
    wastes pixels) or centre-cropped (keeps pixels, loses horizontal FOV)?
    The two give different px/rad **and** a different effective HFOV.
+
+## 6. What the sim now models, and what it still does not
+
+`DetectorSpec.projection` (added 2026-09) models the bearing error a
+pinhole-calibrated reader makes on an equidistant lens — the error is
+systematic, zero on axis, zero at the calibrated edge, and worst in
+between: **9.7° at 116° against 1.2° at 62°**, which is past the chase
+brain's 3.4–6.9° aim tolerance. It defaults to `pinhole`, so nothing
+measured before it shifted.
+
+One thing that came out of building it: **the size gate was already
+equidistant-shaped.** `px_per_rad` is uniform across the field, which is
+exactly what r = f·θ gives and is *not* what a pinhole lens does (a pinhole
+frame resolves more finely toward its edges). So the width thresholds were
+always modelling the wide-lens case; only the bearing needed the new model.
+
+Still not modelled: radial distortion of the *box* (an off-axis target's
+apparent width under a fisheye differs from the on-axis case), rolling
+shutter, and any per-unit calibration. None of these is worth building
+before someone answers §5.1 and §5.2.
