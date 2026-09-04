@@ -684,6 +684,9 @@ _register(Behavior(
                    1.0, _ball_new_ground),
         RewardTerm("turn_to_belief", "While the ball is lost: points for turning the body the way it went",
                    1.0, _ball_turn_to_belief),
+        # Narrow, deliberately. The two-layer `wide=True` shape was built and
+        # A/B'd for this recipe's remaining falls and is Pareto-DOMINATED —
+        # docs/roadmap.md has the frontier.
         _upright_term(1.5),
         RewardTerm("step_dont_skid", "Points for lifting the feet to turn (no skid-steering)",
                    1.0, _step_dont_skid),

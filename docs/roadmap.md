@@ -584,12 +584,62 @@ behavior survives contact with reality.
       records for its own std-1.5 Gaussian ("paid 0.04 with the ball straight
       behind and sloped nowhere the policy was"), and the fix there was a
       raised cosine that slopes all the way round.
-      → **decide on:** widen `_upright`'s falloff (or add a wide layer, the
-      two-layer shape used by `eyes_on_ball` and `head_up`) so there is real
-      gradient out to 40-50° of tilt, then retrain at weight 1.5 and check
-      back-bucket falls against the in-frame/centred columns. This is a
-      catalog term shared with every other behavior, so it needs its own A/B
-      on at least one non-ball recipe before it ships.
+      → **tried, and it is Pareto-DOMINATED.** `_upright_wide` (in the catalog,
+      `_upright_term(w, wide=True)`) is the two-layer shape `eyes_on_ball` and
+      `head_up` use: `0.5*exp(-s/0.5) + 0.5*exp(-s/0.05)`, worth 0.44 at 20°
+      of tilt, 0.31 at 30 and 0.21 at 41 where the narrow term pays 0.10,
+      0.007 and 0.0002. It is **opt-in**, because `_upright` gates `one_leg`'s
+      hold and SCALES backflip's brake and two of imitate's terms — widening
+      it globally would silently re-price four other behaviors.
+
+      A/B on find_ball (`teach-find_ball-fe8c25`) did cut the falls and did
+      cost the aim: 5/4/5 against 5/8/11, in-frame 66/61/54% against
+      86/79/79%. Rendered, 4/4 upright with no falls — but the aim streak is
+      **zero in three of four episodes**: it keeps the ball and stops squaring
+      up. Nothing adopts it; `test_no_recipe_has_adopted_the_wide_upright`
+      locks that and points here.
+
+### The falls/aim frontier — why three sweeps in a row "failed"
+
+Every arm trained at the real FOV, mean over three eval seeds at
+`--events 0.33`:
+
+| arm | falls / 60 | in frame | centred | on the frontier |
+|---|---:|---:|---:|---|
+| `stay_upright` 3.0 | **0.0** | 51.0% | 46.0% | yes |
+| **old brain (trained at the NARROW 48x62)** | **2.7** | 68.3% | 54.7% | **yes** |
+| wide `_upright` | 4.7 | 60.3% | 50.0% | no — dominated |
+| `stay_upright` 5.0 | 6.0 | 72.7% | 56.0% | yes |
+| **angular tolerances, recipe as it stands** | 8.0 | **81.3%** | **71.0%** | **yes** |
+| `step_dont_skid` 2.0 | 15.7 | 75.7% | 57.0% | no |
+| `step_dont_skid` 0.5 | 16.0 | 68.0% | 54.7% | no |
+| `stay_upright` 2.0 | 21.3 | 73.0% | 63.7% | no |
+
+The three sweeps did not fail to find a good weight. They found that **falls
+and aim are in direct tension in this recipe, and every reward lever tried
+moves ALONG that frontier rather than pushing it out**: 0 falls at 51%
+in-frame, 2.7 at 68%, 6.0 at 73%, 8.0 at 81%. Pick a point; there is no
+setting that gets both.
+
+The most informative row is the second. The brain trained at the WRONG,
+narrow camera sits on the frontier and beats every wide-FOV-trained arm at
+its fall count — because at a 31° half-VFOV, leaning far enough to topple
+LOST THE BALL, so the centring pay was buying uprightness for free. The real
+lens removed that coupling, and no reward term has replaced it.
+
+- [ ] **Push the frontier out by changing the WORLD, not the pay.** Three
+      reward sweeps is enough evidence that this is not a pricing problem, and
+      it is this file's own lesson: "if rollouts never contain the skill you
+      are paying for, ladder the physics, not the reward" (`AGENTS.md`). The
+      skill missing here is **recovering from a committed lean**, and no
+      episode ever starts in one — the duck only ever reaches 30-40° of tilt
+      on its way to the floor, where the value function has nothing to learn
+      from. Give it a spawn family that starts already leaning 20-40°, the
+      reverse-curriculum pattern `backflip` and `headstand` use, so recovery
+      is practised rather than hoped for.
+      → **decide on:** back-bucket falls at or under the old brain's ~2.7/60
+      while in-frame share stays at or above 79% — i.e. a point OUTSIDE the
+      frontier above, not another point on it.
 
       **Left in the tree, deliberately inconsistent:** the knobs are the real
       camera's, and `policies/find_ball/policy.onnx` is still the brain

@@ -1587,3 +1587,65 @@ def test_find_ball_body_aimed_pays_the_body_not_the_neck():
     _ball_place(env, 1.2, np.pi)
     _ball_sense(env, force=True)
     assert not env._ball_seen and _ball_body_aimed(env) == 0.0
+
+
+def test_wide_upright_slopes_where_the_narrow_one_is_flat():
+    """`_upright`'s single Gaussian is worth ~0.007 at 30 deg of tilt and
+    ~0.0002 at 41 — past ~25 deg it prices being upright but not RECOVERING,
+    so a committed lean is free and the duck rides it to the floor. The wide
+    two-layer version has to still SLOPE out there, which is the whole point;
+    a term that is merely nonzero would not pull anything back."""
+    import math
+
+    from microduck_local.behaviors import _upright, _upright_wide
+
+    env = _ball_env()
+
+    def at(tilt_deg):
+        """Roll the trunk to a known tilt and read both terms."""
+        import mujoco
+        half = math.radians(tilt_deg) / 2
+        env.data.qpos[3:7] = [math.cos(half), math.sin(half), 0.0, 0.0]
+        mujoco.mj_forward(env.model, env.data)
+        return _upright(env), _upright_wide(env)
+
+    # Upright: both peak, and the wide one must not inflate the ceiling.
+    n0, w0 = at(0.0)
+    assert n0 == pytest.approx(1.0, abs=1e-6)
+    assert w0 == pytest.approx(1.0, abs=1e-6)
+
+    # The dead zone the falls live in: narrow has collapsed, wide has not.
+    n30, w30 = at(30.0)
+    assert n30 < 0.02 and w30 > 0.25, (n30, w30)
+    n41, w41 = at(41.0)
+    assert n41 < 0.01 and w41 > 0.15, (n41, w41)
+
+    # ...and it SLOPES there — recovering from 41 to 30 deg has to pay, or it
+    # is a floor, not a gradient. The narrow term's own slope is ~zero.
+    assert w30 - w41 > 0.05
+    assert n30 - n41 < 0.02
+
+    # Monotone: leaning further is never worth more.
+    vals = [at(t)[1] for t in (0, 10, 20, 30, 45, 60, 90)]
+    assert all(a > b for a, b in zip(vals, vals[1:])), vals
+
+
+def test_no_recipe_has_adopted_the_wide_upright():
+    """`_upright` is shared — it is a catalog term, it gates one_leg's hold,
+    and it SCALES backflip's brake penalty and two of imitate's terms, so the
+    wide shape is opt-in and NOTHING opts in today: A/B'd on find_ball, it was
+    Pareto-dominated (docs/roadmap.md). Kept because the shape and its measured
+    failure are worth more than the two lines they cost, and because the next
+    person to have this idea should find the result before the experiment.
+
+    If a recipe ever adopts it, this test is the reminder that it re-prices a
+    term four other behaviors read."""
+    from microduck_local.behaviors import _upright, _upright_wide
+
+    wide = {bid for bid, b in BEHAVIORS.items()
+            for t in b.terms if t.fn is _upright_wide}
+    assert wide == set(), wide
+    # ...and the recipes that name the term all still use the narrow one.
+    narrow = {bid for bid, b in BEHAVIORS.items()
+              for t in b.terms if t.fn is _upright}
+    assert "find_ball" in narrow, narrow

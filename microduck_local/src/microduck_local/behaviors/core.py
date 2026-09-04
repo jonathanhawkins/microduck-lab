@@ -232,6 +232,30 @@ def _upright(env) -> float:
     return float(np.exp(-(g[0] ** 2 + g[1] ** 2) / 0.05))
 
 
+def _upright_wide(env) -> float:
+    """Two-layer upright: a wide pull that still slopes at big lean angles,
+    plus the original tight polish. Same 0..1 range, same value at 0.
+
+    `_upright`'s single Gaussian has a std of ~12.9 deg of tilt, so it is worth
+    0.55 at 10 deg, 0.10 at 20 and 0.007 at 30 — past ~25 deg there is no pay
+    left and therefore NO GRADIENT PULLING THE DUCK BACK. It prices being
+    upright but not RECOVERING, so once a lean is committed the fall is free.
+    That is the failure `_ball_face`'s docstring records for its own wide
+    Gaussian ("paid 0.04 with the ball straight behind and sloped nowhere the
+    policy was"), and this is the same fix: keep a layer alive out where the
+    policy actually is. Worth 0.44 at 20 deg, 0.31 at 30 and 0.21 at 41 — the
+    tilt at which find_ball's back-start falls become unrecoverable.
+
+    OPT-IN (`_upright_term(w, wide=True)`), because `_upright` is shared: it is
+    a catalog term, it gates `one_leg`'s hold, and it SCALES backflip's brake
+    penalty and two of imitate's terms. Widening it globally would silently
+    re-price all of those. See docs/roadmap.md — it needs an A/B on a non-ball
+    recipe before any of them adopt it."""
+    g = env._projected_gravity()
+    s = float(g[0] ** 2 + g[1] ** 2)
+    return 0.5 * float(np.exp(-s / 0.5)) + 0.5 * float(np.exp(-s / 0.05))
+
+
 def _still_penalty(env) -> float:
     """Discourage drifting away: penalize horizontal base speed (<= 0)."""
     fwd, lat, _ = _base_vel(env)
@@ -466,9 +490,12 @@ _BASE_REGULARIZERS = (
 )
 
 
-def _upright_term(w=1.5):
+def _upright_term(w=1.5, wide=False):
+    """The shared upright pay. `wide` swaps the single Gaussian for the
+    two-layer shape (see `_upright_wide`) while keeping the term KEY, so a
+    recipe's weight sliders and its behavior.json stay compatible."""
     return RewardTerm("stay_upright", "Points for keeping the body level", w,
-                      _upright)
+                      _upright_wide if wide else _upright)
 
 
 _lift_up_L, _stance_L, _hold_L = _one_leg("right", "left")
