@@ -776,14 +776,30 @@ lens removed that coupling, and no reward term has replaced it.
       which is exactly what produced the wrong conclusion. It corrects from
       the captured bearing now, and a test locks the linear-growth property.
 
-      **Training with it on is NOT needed, and is worse.** Two arms
-      (`teach-find_ball-ce44a0` against the buggy version, `38ffd2` against the
-      corrected one): the correctly-trained arm scores 77% handoff and **25
-      falls / 60** at 25 Hz, against the shipped brain's 90% and 2. It buys
-      tracking and spends it on falls — the same frontier every other lever in
-      this file lands on. The win is the DEPLOYMENT-side fix applied to a brain
-      that never saw it, which is precisely tidy's story: a hand-written daemon
-      can do this, and a learned policy need not be retrained for it.
+      **A FRESH chain trained with it on is worse; a WARM START from the
+      shipped brain is the best result in this file.** Both were run, and the
+      difference between them is the finding:
+
+      | | fresh chain (`38ffd2`) | shipped + fix, no retrain | **warm start (`f31a4f`)** |
+      |---|---:|---:|---:|
+      | found | 90% | 95% | **100%** |
+      | in frame | 72% | 63% | **74%** |
+      | handoff | 77% | 90% | **93%** |
+      | falls / 60 | **25** | 2 | **1** |
+
+      A fresh chain rediscovers the whole behavior against the corrected signal
+      and lands where every aim-heavy arm lands — more tracking, far more falls.
+      Warm-starting keeps the low-fall policy the leaning-spawn curriculum
+      bought and only adapts it to the new observation, which is why it gains
+      tracking **without** paying for it. It also holds up as the detector
+      slows: handoff 97% at 10 Hz, 92% at 6, 90% at 4.
+
+      That makes it the **first change in this file to move off the falls/aim
+      frontier rather than along it** — and the second is worth naming too: the
+      other one was also not a reward (the leaning spawns). Both were changes
+      to the world or to what the policy is told, not to what it is paid.
+
+      Shipped: `policies/find_ball/` is `teach-find_ball-f31a4f`.
 
       **The trap in this table is worth its own line:** `found` stays 97% at
       EVERY rate, including the 4 Hz column where the handoff never fires and

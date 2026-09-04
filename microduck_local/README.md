@@ -2507,8 +2507,9 @@ units and the `centred` metric have all since changed.
 
 **The shipped export** (`policies/find_ball/`, see its README) is measured the
 way this behavior should be — real camera, ball events on, 60 episodes:
-95% found, **92% of episodes reach the kick handoff**, head yaw 9.5° against
-the gate's 14°, 2 falls / 60.
+**100% found in every bearing bucket**, **93% of episodes reach the kick
+handoff**, head yaw 9.6° against the gate's 14°, **1 fall / 60** — and it holds
+up as the detector slows (90% handoff at 4 Hz).
 
 Three separate things got it there, and conflating them would credit the wrong
 one. Most of the original gap was **under-training** — the shipped cloud export
