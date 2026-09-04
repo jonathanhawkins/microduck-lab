@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections import deque
 
+import collections
 import math
 from dataclasses import dataclass
 
@@ -215,6 +216,27 @@ class TidyParams:
     # the wrong frame.
     backoff_back_s: float = 0.0
     backoff_back_wz: float = 0.0
+    # Place a detection with the odometry the duck had WHEN THE FRAME WAS
+    # TAKEN, not the odometry it has now.
+    #
+    # `_locate` reads the camera's height and pitch off the frame ("the frame
+    # says where the camera was") but takes x, y and yaw from the CURRENT
+    # odometry - so a frame that is one detector period old is placed from a
+    # pose the duck has already left. At `approach` speed that is 3 cm of
+    # error at 10 Hz and 6 cm at 5 Hz, against a 3 cm toy.
+    #
+    # That is the shape of the measured detector-rate cliff: 10 -> 5 Hz costs
+    # 0.55 of 6 toys (64 paired seeds, p = 0.0003), and it is the GRASP that
+    # breaks - success 85% -> 67%, attempts per pick 1.19 -> 1.50 - while
+    # picks barely move. The duck finds toys fine and fumbles them.
+    #
+    # The fix uses nothing the robot lacks: it keeps a second of its own
+    # odometry and looks up the pose at `det.t`. No ground truth, no new
+    # sensor. UNTRIED against the current behaviour, so it ships at False;
+    # if it lifts the 5 Hz arm it converts directly into NPU headroom,
+    # because a bigger inference input is bought with frame rate
+    # (docs/camera-hardware.md).
+    stale_fix: bool = False
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
     hold_blind_m: float = 0.12         # ToF returns closer than this while holding are the toy in the beak
@@ -264,6 +286,7 @@ class Tidy:
         self._head_since = -9.0
         self._cam: tuple[float, float] | None = None
         self._cam_yaw = 0.0
+        self._odom_hist: collections.deque = collections.deque(maxlen=60)   # ~1.2 s at 50 Hz
         # Where toys were last seen (odom frame) — the work queue — and the
         # basket once it has been seen at all: it does not move.
         self.memory: dict[str, tuple[float, float, float]] = {}
@@ -425,7 +448,10 @@ class Tidy:
             cam_z, cam_pitch = (p.cam_z_down, p.cam_pitch_down) if self._head_down else (p.cam_z_level, p.cam_pitch_level)
         depression = max(cam_pitch - det.elevation, 0.05)     # rad below horizontal
         horiz_cam = float(np.clip((cam_z - target_z) / math.tan(depression), 0.0, 4.0))
-        x, y, yaw = odom
+        # The frame was taken up to one detector period ago; place it from
+        # the pose of THEN, not of now (see `stale_fix`).
+        x, y, yaw = (self._odom_at(det.t, odom) if (p.stale_fix and getattr(det, "t", None) is not None)
+                     else odom)
         a = yaw + det.bearing + getattr(self, "_cam_yaw", 0.0)      # camera-frame bearing → body → odom
         # Beyond `far_range` the elevation says almost nothing about range
         # (at 2.3 m the map is 34 m per radian: 0.02 rad of head bob is
@@ -434,6 +460,18 @@ class Tidy:
         # good, so a far sighting means "walk that way, at least this far".
         rng = min(p.cam_ahead + horiz_cam, p.far_range)
         return x + rng * math.cos(a), y + rng * math.sin(a), rng
+
+    def _odom_at(self, t: float, now):
+        """The odometry the duck had at time `t` - the pose a frame stamped
+        `t` should be placed from. Nearest sample within half a control step
+        either side; `now` if the history cannot cover it (a fresh brain, or
+        a frame older than the ring)."""
+        best, best_dt = None, 1e9
+        for ts, pose in self._odom_hist:
+            dt = abs(ts - t)
+            if dt < best_dt:
+                best, best_dt = pose, dt
+        return best if (best is not None and best_dt <= 0.5) else now
 
     def _set_head(self, down: bool, t: float) -> None:
         if down != self._head_down:
@@ -519,6 +557,7 @@ class Tidy:
         self.latency = min(p.latency_max_s, 2.0 * min((a for _, a in self._ages), default=0.0))
         self.stop_margin = p.latency_gain * max(0.0, float(senses.speed)) * self.latency
         odom = self._pose(senses)
+        self._odom_hist.append((t, odom))              # for `stale_fix`: where the duck WAS
         fr = senses.fresh_det(self.DET_MAX_AGE)
         self._cam = (fr.cam_z, fr.cam_pitch) if (fr is not None and fr.cam_z > 0.0) else None
         self._cam_yaw = getattr(fr, "cam_yaw", 0.0) if fr is not None else 0.0
