@@ -158,6 +158,14 @@ def test_ipc_floor_measures_the_plumbing_and_nothing_else():
     # effect that is ~40% (locally k=2 measures 0.57-0.69x of k=1 on six
     # trials out of six). The mechanism was never in doubt; the estimator
     # was. AGENTS.md: one sample resolves nothing.
+    #
+    # Best-of-N is also what this repo's own recorded sweep used - see
+    # `test_the_measured_curve_still_picks_the_shipped_default`, whose data
+    # is "best of 3 interleaved repeats on a quiet machine". This is the
+    # only test in the file that takes a LIVE measurement (every other one
+    # asserts on recorded constants or synthetic Points), which is why it
+    # was the only one that could flake, and it now uses the same estimator
+    # the recorded data did.
     best: dict = {}
     for _ in range(3):
         rows = ipc_floor(counts=(4, 8), per_worker=(1, 2), steps=200)
