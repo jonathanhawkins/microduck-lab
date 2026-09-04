@@ -133,14 +133,26 @@ class Tracker:
         biased estimate and absorbed it. Only correcting BOTH won
         (+0.44 toys, grasp 88% -> 93%). See AGENTS.md rule 7.
 
-        So before fixing this one, find what was fitted around it.
-        `Track.xy` feeds the chase brain's line-up, whose offsets and
-        tolerances were tuned by measurement WITH this bias present - the
-        same trap, one benchmark over. And note the ball is not a toy: it
-        MOVES, at up to 1.4 m/s, which is 14 cm per detector period against
-        this bias's ~3 cm, so `predict()` and not this is the dominant term
-        for a rolling ball. This bias is worth chasing only for a ball that
-        is still while the duck is walking.
+        MEASURED HERE, and the answer is DON'T. 12 348 ball sightings over
+        2 seeds x 180 s of 1v1, each placement checked against truth and
+        split into what moved between the frame and now:
+
+            frame age          100 ms (median)
+            placement error    7.7 cm   <- what the brain acts on
+            duck moved since   1.8 cm   <- THIS bias
+            ball moved since   0.7 cm   <- what predict() is for
+
+        and in the line-up case that actually scores (ball inside 0.6 m and
+        nearly still, 6 253 of those sightings): 5.5 cm of error, 1.7 cm of
+        it from the stale pose. **The error is dominated by neither term -
+        it is the detector's own bearing and range noise.** Fixing the pose
+        removes at most a third of it, and by rule 7 it would ALSO move the
+        line-up off the constants fitted around it. Bad trade; not done.
+
+        (An earlier version of this note said the ball moves 1.4 m/s and so
+        `predict()` dominates. That is the peak right after a kick, not the
+        operating point: at the median the ball has moved 0.7 cm since the
+        frame. Most sightings are of a nearly stationary ball.)
 
         VELOCITY is less affected - both samples carry a similar error, so
         it largely cancels in the difference - but the POSITION does not,
