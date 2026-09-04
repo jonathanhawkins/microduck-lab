@@ -1,1 +1,1 @@
-{"behavior": "find_ball", "steps": 2000000, "weights": {"body_aimed": 0.0}, "symmetry_coef": 0.0, "desired_kl": null}
+{"behavior": "find_ball", "steps": 2000000, "weights": {"body_aimed": 0.0, "stay_upright": 1.5}, "symmetry_coef": 0.0, "desired_kl": null}

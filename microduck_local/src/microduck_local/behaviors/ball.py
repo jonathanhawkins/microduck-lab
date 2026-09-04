@@ -756,14 +756,15 @@ _register(Behavior(
     # cannot choose a side to look first. The exported deterministic mean
     # would sit and stare. Locked by tests/test_behaviors.py.
     symmetric=False,
-    # OFF by default, and the measurement is why. At 0.25 this teaches real
-    # lean recovery — survival from a 20-25 deg lean goes 20% -> 47%, and from
-    # 30-35 deg 0% -> 17% — and in the standard battery it takes falls from
-    # 8.0 to 2.7 per 60. It also costs 13 points of in-frame share, landing on
-    # the SAME falls/aim frontier as everything else (docs/roadmap.md). So it
-    # is a different point, not a better one, and which point to want is a
-    # human's call: `MICRODUCK_SPAWN_FAMILY_PROBS=0.25`, or a curriculum stage.
-    spawn_families=((0.0, _ball_spawn_leaning),),
+    # A quarter of episodes start already tipping. This teaches real lean
+    # recovery — survival from a 20-25 deg lean goes 20% -> 47%, from 30-35 deg
+    # 0% -> 17% — and it is what makes the recipe land its kick handoff: 92% of
+    # episodes against 85% without, with head yaw 9.5 deg against 15.9, and a
+    # third of the falls (2.7 vs 8.0 per 60). It costs in-frame SHARE (68% vs
+    # 81%), which is the trade docs/roadmap.md calls the falls/aim frontier —
+    # taken deliberately, because the handoff is the deliverable and holding a
+    # ball in frame while never squaring up is what this brain used to do.
+    spawn_families=((0.25, _ball_spawn_leaning),),
     reset_fn=_ball_reset,
     obs_fn=_ball_obs,
     handoff_fn=_ball_handoff_due,

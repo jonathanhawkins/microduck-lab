@@ -8,62 +8,65 @@ mean. It expects the head slots and the scan clock filled as documented in
 
 Lineage: the declared 3-stage curriculum straight through, 8M steps, 32 envs,
 seed 0, launched through the lab's `/teach` (the only path that chains stages).
-Run `teach-find_ball-c60e89`; ~7 minutes on an M-series Mac. The SB3 checkpoint
-it was exported from is at `runs/teach-find_ball-c60e89-s3/` on the machine
-that trained it and is **not** in git (`runs/` is gitignored) — so a fine-tune
-can warm-start from it there, which the previous cloud-trained export could not
-offer anywhere.
+Run `teach-find_ball-3c1b2e`; ~8 minutes on an M-series Mac. Trained under the
+**real camera** (60° × 116° portrait, from the 2.9 mm lens datasheet), with the
+aim tolerances in **degrees**, and with **25% leaning spawns** — the three
+things `docs/roadmap.md` changed after the placeholder-camera era. The SB3
+checkpoint is at `runs/teach-find_ball-3c1b2e-s3/` on the machine that trained
+it and is not in git (`runs/` is gitignored).
 
-This export is the **fix 2** arm of `docs/roadmap.md` item 1: identical recipe
-except `_BALL_FACE_TIGHT_STD` 0.4 → 0.2, which is now the shipped default.
+`uv run eval-find-ball policies/find_ball/policy.onnx --episodes 60 --events 0.33`
+— **judge this behavior with ball events on**, which is what the recipe trains
+and `render-rollout` runs at; the static-ball battery has twice pointed the
+wrong way. Measured 2026-09-04:
 
-`uv run eval-find-ball policies/find_ball/policy.onnx --episodes 40`
-(40 static-ball episodes × 8 s, deterministic, randomizers off), 2026-09-03:
-
-| ball starts | found | time to first sight (median / max) | in frame | head yaw \| centred | handoff | falls |
+| ball starts | found | t_first med | in frame | head yaw \| centred | **handoff** | falls |
 |---|---:|---:|---:|---:|---:|---:|
-| front (< 45°) | 100% | 0.03 s / 0.06 s | 100% | 7.5° | 100% | 0 |
-| side (45–135°) | 90% | 0.49 s / 7.16 s | 75% | 16.0° | 75% | 0 |
-| back (> 135°) | 100% | 1.92 s / 7.16 s | 66% | 18.4° | 70% | 0 |
-| **all** | **95%** | **0.23 s** | **79%** | **14.4°** | **80%** | **0** |
+| front (< 45°) | 94% | 0.02 s | 63% | 7.6° | 88% | 0 |
+| side (45–135°) | 100% | 0.68 s | 68% | 9.2° | **100%** | 0 |
+| back (> 135°) | 88% | 0.56 s | 56% | 12.3° | 81% | 2 |
+| **all** | **95%** | **0.44 s** | **63%** | **9.5°** | **92%** | **2** |
 
-**Judge falls with ball events on**, which is what the recipe trains and
-`render-rollout` runs at — the static-ball battery and the events-on battery
-disagree about which policy is safest.
-`uv run eval-find-ball policies/find_ball/policy.onnx --episodes 60 --events 0.33`:
-found 97% all / 94% back, in frame 66%, head yaw 18.6°, handoff 68%,
-**1 fall / 60**.
+`handoff` is the deliverable: the share of episodes that reach the state a
+ball-blind kick wants handed to it (ball centred **and** head straight, held
+0.5 s). 92%, with head yaw 9.5° against the gate's 14°.
 
-Against the previous shipped export (the 6-stage cloud chain, `--events 0.33`,
-60 episodes): found 97% vs 85%, handoff **68% vs 15%**, head yaw **18.6° vs
-44.8°**, falls 1 vs 2. Two separate things produced that gap and it is worth
-keeping them apart: most of it was **under-training** — the old export was not
-a converged instance of its own recipe, and retraining the *unchanged* terms
-took head yaw to 25° and handoff to 38% on its own — and the rest is fix 2.
+## Why this export and not the aim-heavy one
 
-Known gap: it still aims partly with its neck. Head yaw is 14.4° averaged over
-centred steps on a static ball, right at the handoff gate's 14°, and 18.6° with
-events on; the handoff fires on 68–80% of episodes rather than all of them.
-`body_aimed` (in the recipe at weight 0) is the stronger lever — it takes head
-yaw to 8° and the handoff to 83% — and it triples the falls, which is why it is
-not priced. See `docs/roadmap.md` item 1 for the full A/B.
+`docs/roadmap.md` establishes a **falls/aim frontier** for this recipe: every
+reward lever tried trades one against the other, because the duck's effective
+fall line is ~20–25° of tilt and a big body turn that produces a 30° lean is
+already a fall. Two points were worth shipping, and this is the one chosen:
+
+| | aim-heavy (`teach-find_ball-72af49`) | **shipped** (`3c1b2e`) |
+|---|---:|---:|
+| in frame | **86 / 79 / 79%** | 63 / 70 / 71% |
+| **handoff fired** | 85 / 77 / 82% | **92 / 87 / 93%** |
+| head yaw \| centred | 15.9 / 14.2 / 11.9° | **9.5 / 11.5 / 9.5°** |
+| **falls / 60** | 5 / 8 / 11 | **2 / 3 / 3** |
+
+(three eval seeds each, `--events 0.33`)
+
+The aim-heavy arm holds the ball in frame more of the time. This one **aims
+better when it matters and falls a third as often** — and holding a ball in
+frame while never squaring up is exactly the failure this behavior was built
+to fix. In-frame share is a means; the handoff is the end.
+
+Known gaps: the back bucket is still the weak one (88% found, 81% handoff, and
+both falls), and the leaning-spawn curriculum that bought the stability teaches
+recovery only up to ~25° of tilt — past that the robot is lost whatever it has
+practised. Moving the frontier rather than sliding along it needs a change to
+*how the duck turns* (stepping round rather than pivoting into a lean), which
+is a locomotion problem, not this recipe's reward.
 
 ## `policy_s4_pre_turn_term.onnx` — still the turn-term A/B baseline
 
 The stage-4 cloud export: no `turn_to_belief`, and the old three-band gaze
 coverage. **Keep it.** Its A/B ("does the turn term buy the turn, or only the
-falls?") is still open in `docs/roadmap.md` — and the control arm re-scoped the
-question rather than answering it, since with the recipe trained through, the
-falls stage 5 was blamed for go to zero on their own.
-
-| ball starts | found | time to first sight (median) | falls |
-|---|---:|---:|---:|
-| front | 100% | 0.03 s | 0 |
-| side | 85% | 0.62 s | 0 |
-| back | 30% | 3.16 s | 0 |
+falls?") is still open in `docs/roadmap.md`, and the control arm re-scoped that
+question rather than answering it. Its numbers were taken under the placeholder
+camera and normalized tolerances, so they are not comparable to the table above.
 
 To seat this brain in the lab as a run: `cp -r policies/find_ball runs/find_ball`
-and drop `run:find_ball` from the 🧠 palette (**not** as a `duck-lab` CLI
-positional — a run dir passed that way is not recognised as a trick duck and
-gets driven with a walk command). To look at it:
+and drop `run:find_ball` from the 🧠 palette. To look at it:
 `uv run render-rollout --policy policies/find_ball/policy.onnx --out /tmp/rr-fb`.

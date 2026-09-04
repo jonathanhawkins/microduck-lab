@@ -66,7 +66,14 @@ def run_battery(onnx_path: str, episodes: int, seconds: float, seed: int,
     # The behavior owns the handoff test (one implementation, so this battery,
     # render-rollout --handoff and the lab's showcase duck cannot drift apart).
     handoff_fn = BEHAVIORS["find_ball"].handoff_fn
-    overrides = {"MICRODUCK_BALL_EVENT_RATE": str(events)}
+    # Spawn families OFF unless asked. The recipe trains with 25% leaning
+    # starts, but this battery's job is a COMPARABLE measurement: firing them
+    # here would silently change the test, and every number recorded in
+    # docs/roadmap.md and the policy READMEs was taken on plain standing
+    # starts. Pass --env MICRODUCK_SPAWN_FAMILY_PROBS=0.25 to measure the
+    # training distribution instead.
+    overrides = {"MICRODUCK_BALL_EVENT_RATE": str(events),
+                 "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0"}
     if prior is not None:
         overrides["MICRODUCK_BALL_PRIOR_PROB"] = str(prior)
     # --env last: an explicit knob wins over the flags above, so a sweep can

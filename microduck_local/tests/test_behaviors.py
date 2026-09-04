@@ -1686,19 +1686,38 @@ def test_lean_spawn_is_tipped_but_recoverable():
     assert min(rolls) < -0.05 and max(rolls) > 0.05, rolls
 
 
-def test_lean_spawn_is_off_by_default():
-    """It buys a different point on the falls/aim frontier, not a better one
-    (docs/roadmap.md), so it must not fire unless someone asks. This is also
-    what keeps `eval-find-ball` comparable to every number recorded before it
-    existed — the battery builds a plain BehaviorEnv, and a family firing at
-    25% there would silently change the test."""
+def test_lean_spawn_is_a_quarter_of_training_and_none_of_the_battery():
+    """The recipe trains with 25% leaning starts — that is what buys the kick
+    handoff (92% vs 85%) and cuts the falls to a third. But `eval-find-ball`
+    must NOT fire them: its job is a comparable measurement, and every number
+    in docs/roadmap.md and the policy READMEs was taken on plain standing
+    starts. A family firing inside the battery would change the test without
+    saying so, which is the same trap as measuring `centred` in normalized
+    bearing across two cameras."""
     from microduck_local.behaviors import _ball_spawn_leaning
+    from microduck_local.eval_find_ball import run_battery
 
     fams = BEHAVIORS["find_ball"].spawn_families
     assert [fn for _, fn in fams] == [_ball_spawn_leaning]
-    assert [p for p, _ in fams] == [0.0], fams
+    assert [p for p, _ in fams] == [0.25], fams
 
+    # Training env: leaning starts really do fire.
     env = _ball_env()
-    for ep in range(20):
+    tilted = 0
+    for ep in range(60):
         env.reset(seed=900 + ep)
-        assert abs(float(env._projected_gravity()[2])) > 0.98, "spawned tilted"
+        tilted += abs(float(env._projected_gravity()[2])) < 0.98
+    assert 5 <= tilted <= 30, tilted
+
+    # Battery env: they do not, without being asked.
+    res = run_battery("policies/find_ball/policy.onnx", episodes=2, seconds=0.2,
+                      seed=3)
+    assert res["rows"], res
+    from microduck_local.behaviors import BehaviorEnv
+    probe = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                        action_delay=False, random_yaw=False, seed=3,
+                        spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                         "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0"})
+    for ep in range(20):
+        probe.reset(seed=900 + ep)
+        assert abs(float(probe._projected_gravity()[2])) > 0.98, "battery spawned tilted"

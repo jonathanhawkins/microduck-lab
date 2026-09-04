@@ -679,12 +679,37 @@ lens removed that coupling, and no reward term has replaced it.
 
       Consequence for what to try next: stop looking for a reward or a spawn
       that buys both. The remaining honest options are (a) **pick a point** —
-      the frontier is a product decision, aim-heavy (8.0 falls, 81% in-frame)
-      or safe (2.7, 68%) — or (b) **change how the duck turns**, so a big turn
-      does not produce a 30° lean in the first place. (b) is a gait/technique
-      problem — stepping round versus pivoting — and belongs to locomotion,
-      not to this recipe's reward. It is also the one thing here that could
-      move the frontier rather than slide along it.
+      or (b) **change how the duck turns**, so a big turn does not produce a
+      30° lean in the first place. (b) is a gait/technique problem — stepping
+      round versus pivoting — and belongs to locomotion, not to this recipe's
+      reward. It is also the one thing here that could move the frontier
+      rather than slide along it.
+
+- [x] **Point picked and SHIPPED: the lean-trained arm** (`teach-find_ball-3c1b2e`
+      → `policies/find_ball/`), with the spawn family on at 0.25.
+
+      Calling it "the safe point" undersold it. It loses in-frame share and
+      **wins the deliverable**, on all three eval seeds:
+
+      | | aim-heavy (`72af49`) | **shipped** (`3c1b2e`) |
+      |---|---:|---:|
+      | in frame | **86 / 79 / 79%** | 63 / 70 / 71% |
+      | **handoff fired** | 85 / 77 / 82% | **92 / 87 / 93%** |
+      | head yaw \| centred | 15.9 / 14.2 / 11.9° | **9.5 / 11.5 / 9.5°** |
+      | falls / 60 | 5 / 8 / 11 | **2 / 3 / 3** |
+
+      In-frame share is a means; the kick handoff is the end, and a brain that
+      holds a ball in frame while never squaring up is precisely the failure
+      item 1 opened with. 92% handoff at 9.5° of head yaw, under the gate,
+      with a third of the falls. Rendered before shipping: 3 of 4 episodes hold
+      7.5 s / 2.6 s / 7.4 s aim streaks, the fourth falls on a +173° back start.
+
+      **`eval-find-ball` now pins `MICRODUCK_SPAWN_FAMILY_PROBS=0.0`.** The
+      recipe trains with leaning starts; the battery must not fire them, or it
+      silently stops being the test every number in this file was taken with.
+      Pass `--env MICRODUCK_SPAWN_FAMILY_PROBS=0.25` to measure the training
+      distribution on purpose. Locked by a test — this is the same class of
+      trap as measuring `centred` in normalized bearing across two cameras.
 
       **Left in the tree, deliberately inconsistent:** the knobs are the real
       camera's, and `policies/find_ball/policy.onnx` is still the brain

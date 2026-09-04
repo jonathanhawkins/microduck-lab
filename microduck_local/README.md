@@ -404,18 +404,28 @@ bearings round the circle; "found" = ball entered the frame within 8 s):**
 | s3 (rolling) | 100% / 0.03 s | 80% / 0.84 s | 40% / 2.64 s | 1 |
 | s4 (+ raised-cosine facing) | 100% / 0.03 s | 85% / 0.62 s | 30% / 3.16 s | 0 |
 | s5 (+ turn_to_belief, no up-band) | 100% / 0.03 s | 85% / 0.60 s | 60% / 0.94 s | 2 |
-| **shipped** (3-stage chain, 8M, tight facing) | 100% / 0.03 s | 90% / 0.49 s | 100% / 1.92 s | 0 |
+| tight facing, placeholder camera | 100% / 0.03 s | 90% / 0.49 s | 100% / 1.92 s | 0 |
 
-The last row is the one in `policies/find_ball/` — the same recipe trained
-straight through its own curriculum on an M-series Mac (~7 min) with
-`face_the_ball`'s tight layer at 0.2 rad. The rows above it are the cloud
-lineage, kept because the shape of the progression is the story. Two separate
-things closed the gap and it is worth keeping them apart: most of it was
-**under-training** (the s5 export was not a converged instance of its own
-recipe — retraining the *unchanged* terms takes head yaw from 41° to 21° and
-the falls to zero), and the rest was the tighter facing layer. The AIMING
-columns for the same row: head yaw 14.4°, kick handoff fires on 80% of
-episodes — against 40.8° and 15% for s5.
+Those rows are the cloud lineage plus the first Mac retrain, all measured on a
+static ball under the **placeholder** 48°×62° camera and normalized-bearing
+tolerances. They are kept because the shape of the progression is the story,
+but they are not comparable to the shipped brain: the camera, the tolerance
+units and the `centred` metric have all since changed.
+
+**The shipped export** (`policies/find_ball/`, see its README) is measured the
+way this behavior should be — real camera, ball events on, 60 episodes:
+95% found, **92% of episodes reach the kick handoff**, head yaw 9.5° against
+the gate's 14°, 2 falls / 60.
+
+Three separate things got it there, and conflating them would credit the wrong
+one. Most of the original gap was **under-training** — the shipped cloud export
+was not a converged instance of its own recipe, and retraining the *unchanged*
+terms halved the head yaw and removed the falls on its own. Then the tighter
+facing layer. Then, once the real camera turned out to be a 116° fisheye, two
+corrections that had nothing to do with any policy: aim tolerances expressed in
+**degrees** instead of normalized bearing (a lens swap was silently rescaling
+the reward), and a **leaning-spawn curriculum** that teaches the duck to
+recover from a tip instead of only ever meeting one on the way down.
 
 **It aimed its head, not its body — mostly fixed, and the best lesson here.**
 Handing off to a kick exposed it: over a full 8 s episode with the ball 15°
@@ -431,9 +441,19 @@ the last 20° with almost no gradient behind it, and `turn_to_belief` only fires
 while the ball is *out* of frame, so once the head found it nothing paid for
 the body to catch up.
 
-Head yaw is now 14.4° (static ball) / 18.6° (with events) against 41°, and the
-handoff fires on 68–80% of episodes against 15% — so the body does most of the
-aiming, and the last few degrees are still the neck's.
+Head yaw is now **9.5°** against 41°, under the handoff gate's 14°, and the
+handoff fires on **92%** of episodes against 15%. The body does the aiming.
+
+What is left is a genuine trade rather than a bug, and `docs/roadmap.md` has
+the evidence: falls and in-frame share sit on a **frontier** for this recipe,
+because the duck's effective fall line is ~20–25° of tilt — a body turn that
+produces a 30° lean is already a fall, so the only way to fall less is to turn
+less. Three reward sweeps and a spawn curriculum all slid along that line
+rather than moving it. The shipped brain picks the point that maximises the
+handoff (the deliverable) and keeps falls at 2/60, paying in-frame share for
+it. Moving the frontier needs a change to *how the duck turns* — stepping round
+instead of pivoting into a lean — which is a locomotion problem, not this
+recipe's reward.
 
 All three candidate fixes have been A/B'd on an M-series Mac, one at a time
 against a seed-matched control — **the tables and one clear negative result
