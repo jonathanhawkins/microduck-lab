@@ -38,10 +38,45 @@ SHIPPED_FOV_H_DEG = 62.0
 _SHIPPED_PX_PER_RAD = SHIPPED_PX_H / np.deg2rad(SHIPPED_FOV_H_DEG)
 
 
+# WHAT THE SENSOR ACTUALLY IS (2026-09, from the developer + its datasheet):
+# 1/2.9", 2.75 um BSI pixels, 1920 x 1080 active, up to 90 fps. Derived:
+# 5.28 x 2.97 mm active area, 6.06 mm diagonal, 16:9.
+#
+# Three things follow, and only the first two are answers.
+#
+# 1. THE SENSOR IS NOT THE PIXEL BUDGET. `px_h` below is the NPU's YOLO11n
+#    INT8 input, and the sensor carries 1920 px across it - SIX TIMES what
+#    the detector consumes. So "a wide lens is worth buying only with the
+#    sensor to pay for it" (README) is loosely worded: what has to pay is
+#    the INFERENCE INPUT, and this sensor can already feed a bigger one.
+#    The 640 px arm measured in that sweep is an NPU question ("can it run
+#    YOLO11n at 640, and at what rate"), not a new-hardware question.
+# 2. FRAME RATE IS A NON-ISSUE. `rate_hz` is 10 and the brain decides at
+#    10 Hz; the sensor offers 90. Nine times the headroom, so the "not sure
+#    we have the compute for the full potential" caveat does not bite this
+#    workload - frames can be dropped freely.
+# 3. THE FOV IS STILL UNKNOWN, and it is the assumption that matters.
+#    Sensor size does not give field of view without the lens's focal
+#    length. On this active area: 62 deg needs f = 4.4 mm, 90 deg 2.6 mm,
+#    120 deg 1.5 mm.
+#
+# And it raises one: the frustum below is 62 x 48 deg, whose shape
+# (tan24/tan31 = 0.74) is 4:3. THIS SENSOR IS 16:9 (0.56). At 62 deg
+# horizontal a 16:9 frame gives 37 deg vertical, not 48 - so this spec may
+# be ~11 deg too generous VERTICALLY, which is the axis the near-field
+# blindness lives on (a floor ball leaves the camera in the last 0.3 m; a
+# person's middle leaves the frustum at 1.2 m). If so the sim is optimistic
+# about close-range vision. Unresolved: ask for the lens focal length or
+# quoted FOV, and whether the 16:9 frame is letterboxed into the 320x320
+# YOLO input (keeps the FOV, wastes pixels) or centre-cropped (keeps the
+# pixels, loses horizontal FOV) - the two give different px/rad AND a
+# different effective HFOV.
+
+
 @dataclass(frozen=True)
 class DetectorSpec:
-    fov_h_deg: float = 62.0      # ASSUMPTION: a Pi-camera-class module; not in upstream docs
-    fov_v_deg: float = 48.0
+    fov_h_deg: float = 62.0      # ASSUMPTION: a Pi-camera-class module; the lens is still not specified
+    fov_v_deg: float = 48.0      # ASSUMPTION, and 4:3-shaped: the sensor is 16:9 (see above)
     max_range_m: float = 4.0
     rate_hz: float = 10.0
     site: str = "head_camera"
