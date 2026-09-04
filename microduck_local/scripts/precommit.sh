@@ -18,7 +18,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-uv run ruff check src/ tests/
+# `--with ruff`, not a bare `uv run ruff`: ruff is configured in
+# pyproject.toml ([tool.ruff]) but is not a declared dependency, so a bare
+# invocation only works if it happens to be installed globally and fails on
+# a clean checkout with "Failed to spawn: `ruff`". Same idiom AGENTS.md uses
+# for the test suite (`uv run --with pytest pytest tests/`).
+uv run --with ruff ruff check src/ tests/
 
 # ruff parses; it does not EXECUTE. A module that parses can still fail at
 # import (a bad relative import, a missing name in an `from x import y`), so
