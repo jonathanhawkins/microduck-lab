@@ -637,9 +637,54 @@ lens removed that coupling, and no reward term has replaced it.
       from. Give it a spawn family that starts already leaning 20-40°, the
       reverse-curriculum pattern `backflip` and `headstand` use, so recovery
       is practised rather than hoped for.
-      → **decide on:** back-bucket falls at or under the old brain's ~2.7/60
-      while in-frame share stays at or above 79% — i.e. a point OUTSIDE the
-      frontier above, not another point on it.
+      → **built and A/B'd. It teaches real recovery, it does NOT move the
+      frontier, and it turned up the physical reason why.**
+      `_ball_spawn_leaning` starts 20-40° tipped about a random horizontal
+      axis and still tipping (`MICRODUCK_BALL_LEAN_LO_DEG` / `_HI_DEG` /
+      `_RATE`), using the backflip spawn's attitude-aware clearance so nothing
+      wedges. Validated before training: 22.5% of resets, tilt 20.1-39.9°,
+      **zero** terminating on step 1 — and the shipped brain survives only
+      **1/30** of them, which is the gap stated as a number.
+
+      Trained at a 0.25 mix (`teach-find_ball-3c1b2e`) and evaluated on the
+      STANDARD spawn distribution (`--env MICRODUCK_SPAWN_FAMILY_PROBS=0.0`,
+      or the battery silently tests a different thing):
+      **falls 8.0 → 2.7 per 60, in-frame 81.3% → 68.0%.** That is
+      (2.7, 68.0) — the old brain's point, reached for the first time by a
+      policy trained on the RIGHT camera, and still on the frontier rather
+      than outside it. Decide-on not met.
+
+      **The recovery skill is real, and only visible when split by angle.** A
+      first pass over the whole 20-40° band read 18% vs 15% and looked like
+      nothing; the band is wide enough to average a real effect away:
+
+      | spawned tilt | 5-10° | 10-15° | 15-20° | 20-25° | 30-35° |
+      |---|---|---|---|---|---|
+      | baseline survival | **87%** | 80% | 50% | 20% | **0%** |
+      | lean-trained | 77% | 77% | **67%** | **47%** | **17%** |
+
+      It roughly doubles survival at 20-25° and takes 30-35° from zero, paying
+      a little near-upright robustness for it.
+
+- [x] **Why the frontier is real: the fall line is ~20-25° of tilt, not 70°.**
+      `FALL_GRAVITY_Z` terminates at 70°, which is nowhere near where this
+      robot is actually lost — even the lean-trained brain only saves 17% of
+      30-35° leans, and neither arm saves anything past ~40°. So a big body
+      turn that produces a 30° lean is already a fall; the policy cannot
+      "recover better", it can only not get there. **That is the frontier's
+      physical root**, and it explains why three reward sweeps and a spawn
+      curriculum all slid along the same line: every one of them was trading
+      turn commitment for tilt, because tilt past the fall line is
+      unrecoverable by construction.
+
+      Consequence for what to try next: stop looking for a reward or a spawn
+      that buys both. The remaining honest options are (a) **pick a point** —
+      the frontier is a product decision, aim-heavy (8.0 falls, 81% in-frame)
+      or safe (2.7, 68%) — or (b) **change how the duck turns**, so a big turn
+      does not produce a 30° lean in the first place. (b) is a gait/technique
+      problem — stepping round versus pivoting — and belongs to locomotion,
+      not to this recipe's reward. It is also the one thing here that could
+      move the frontier rather than slide along it.
 
       **Left in the tree, deliberately inconsistent:** the knobs are the real
       camera's, and `policies/find_ball/policy.onnx` is still the brain

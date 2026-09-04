@@ -1649,3 +1649,56 @@ def test_no_recipe_has_adopted_the_wide_upright():
     narrow = {bid for bid, b in BEHAVIORS.items()
               for t in b.terms if t.fn is _upright}
     assert "find_ball" in narrow, narrow
+
+
+def test_lean_spawn_is_tipped_but_recoverable():
+    """The lean spawn exists to put the duck in states it otherwise only ever
+    visits on its way to the floor. Two ways that goes quietly wrong, both of
+    which this repo has hit before: the spawn lands past the fall threshold and
+    every episode is a zero-length no-op, or a foot is wedged in the floor and
+    the solver ejects it (the backflip "invisible wall"), spending the state on
+    a launch nobody asked for."""
+    import math
+
+    import numpy as np
+
+    env = _ball_env(spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "1.0"})
+    tilts = []
+    for ep in range(12):
+        env.reset(seed=500 + ep)
+        g = env._projected_gravity()
+        tilts.append(math.degrees(math.acos(max(-1.0, min(1.0, -float(g[2]))))))
+        # Recoverable, not pre-lost: nothing terminates on the first step.
+        _, _, term, _, _ = env.step(np.zeros(14, np.float32))
+        assert not term, f"lean spawn terminated immediately at {tilts[-1]:.0f} deg"
+        # ...and it is standing on the floor, not wedged in it or dropped from
+        # a height (the attitude-aware clearance).
+        assert 0.10 < float(env._trunk_xpos[2]) < 0.22
+
+    assert 20.0 <= min(tilts) and max(tilts) <= 40.0, (min(tilts), max(tilts))
+    # Tipping BOTH ways across episodes — recovery must not be a one-sided
+    # trick, and a fixed axis would let the policy memorise one save.
+    env2 = _ball_env(spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "1.0"})
+    rolls = []
+    for ep in range(12):
+        env2.reset(seed=700 + ep)
+        rolls.append(float(env2._projected_gravity()[1]))
+    assert min(rolls) < -0.05 and max(rolls) > 0.05, rolls
+
+
+def test_lean_spawn_is_off_by_default():
+    """It buys a different point on the falls/aim frontier, not a better one
+    (docs/roadmap.md), so it must not fire unless someone asks. This is also
+    what keeps `eval-find-ball` comparable to every number recorded before it
+    existed — the battery builds a plain BehaviorEnv, and a family firing at
+    25% there would silently change the test."""
+    from microduck_local.behaviors import _ball_spawn_leaning
+
+    fams = BEHAVIORS["find_ball"].spawn_families
+    assert [fn for _, fn in fams] == [_ball_spawn_leaning]
+    assert [p for p, _ in fams] == [0.0], fams
+
+    env = _ball_env()
+    for ep in range(20):
+        env.reset(seed=900 + ep)
+        assert abs(float(env._projected_gravity()[2])) > 0.98, "spawned tilted"

@@ -268,6 +268,56 @@ def _ball_spawn(env) -> tuple[float, float]:
     return dist, bearing
 
 
+def _ball_spawn_leaning(env):
+    """Reverse-curriculum spawn: already tipped 20-40 deg and still tipping.
+
+    docs/roadmap.md's falls/aim frontier: every reward lever tried trades the
+    aim away to buy stability, because the skill actually missing is RECOVERING
+    from a committed lean and no episode ever starts in one. The duck only
+    reaches 30-40 deg of tilt on its way to the floor — states the value
+    function sees once, terminally, and can learn nothing from. This is the
+    backflip/headstand pattern applied to that gap: change the world, not the
+    pay (AGENTS.md).
+
+    Tilt about a random horizontal axis so recovery is not a one-sided trick,
+    and carry a little angular velocity, because the real failure arrives
+    rotating — the backflip spawn learned that the hard way ("static spawns
+    taught a dead-stop kip that never worked"). Well inside FALL_GRAVITY_Z's
+    70 deg, so the episode is always recoverable rather than pre-lost.
+    """
+    r = env._rng
+    d, m = env.data, env.model
+    lo = _math.radians(float(_spawn_knob(env, "MICRODUCK_BALL_LEAN_LO_DEG", "20")))
+    hi = _math.radians(float(_spawn_knob(env, "MICRODUCK_BALL_LEAN_HI_DEG", "40")))
+    rate = float(_spawn_knob(env, "MICRODUCK_BALL_LEAN_RATE", "0.8"))
+    tilt = r.uniform(lo, hi)
+    axis = r.uniform(-_math.pi, _math.pi)      # which way it is falling
+    ax, ay = _math.cos(axis), _math.sin(axis)
+    d.qpos[:] = 0.0
+    half = tilt / 2
+    d.qpos[3:7] = [_math.cos(half), ax * _math.sin(half), ay * _math.sin(half), 0.0]
+    q = d.qpos
+    for i, adr in enumerate(env.joint_qpos_adr):
+        q[adr] = C.DEFAULT_POSE[i] + r.uniform(-0.05, 0.05)
+    # Attitude-aware drop height, the backflip spawn's trick: pose high, find
+    # the lowest geom bound, settle to true clearance. A fixed z wedges a
+    # tilted duck's foot into the floor and the solver ejects it, spending the
+    # spawn state on a launch nobody asked for.
+    d.qpos[2] = 0.6
+    d.qvel[:] = 0.0
+    mujoco.mj_forward(m, d)
+    lows = [float(d.geom_xpos[g][2]) - float(m.geom_rbound[g])
+            for g in range(m.ngeom) if g != env.floor_geom]
+    d.qpos[2] = 0.6 - min(lows) + 0.005
+    # Still tipping the way it is already leaning, plus a little yaw: the duck
+    # falls while TURNING toward a ball behind it, so practise that state.
+    d.qvel[3] = -ay * rate * r.uniform(0.5, 1.0)
+    d.qvel[4] = ax * rate * r.uniform(0.5, 1.0)
+    d.qvel[5] = r.uniform(-1.0, 1.0) * rate
+    mujoco.mj_forward(m, d)
+    return env._get_obs()
+
+
 def _ball_reset(env) -> None:
     """Behavior.reset_fn: a fresh ball, fresh detector/memory/coverage state."""
     if not hasattr(env, "ball_pos"):
@@ -706,6 +756,14 @@ _register(Behavior(
     # cannot choose a side to look first. The exported deterministic mean
     # would sit and stare. Locked by tests/test_behaviors.py.
     symmetric=False,
+    # OFF by default, and the measurement is why. At 0.25 this teaches real
+    # lean recovery — survival from a 20-25 deg lean goes 20% -> 47%, and from
+    # 30-35 deg 0% -> 17% — and in the standard battery it takes falls from
+    # 8.0 to 2.7 per 60. It also costs 13 points of in-frame share, landing on
+    # the SAME falls/aim frontier as everything else (docs/roadmap.md). So it
+    # is a different point, not a better one, and which point to want is a
+    # human's call: `MICRODUCK_SPAWN_FAMILY_PROBS=0.25`, or a curriculum stage.
+    spawn_families=((0.0, _ball_spawn_leaning),),
     reset_fn=_ball_reset,
     obs_fn=_ball_obs,
     handoff_fn=_ball_handoff_due,
