@@ -281,6 +281,23 @@ venv for a CPU trainer — CI installs from the CPU index first, and a
   order preserved — held to the golden float64 rollouts in
   `test_bam_perf_parity.py`. numba is optional; without it the numpy path
   remains.
+- **One kernel for the whole BAM substep** (2026-09-04, `_bam_substep_kernel`):
+  the three kernels above still crossed the Python boundary ~8 times and
+  allocated ~5 arrays of 14 floats per substep. Profiled *in situ* — timed
+  between real `mj_step` calls, so the constraint set is honest — no piece
+  dominated: motor torque 6.0 µs, the efc scan 6.7, the friction budget 7.0,
+  writes and clamp 6.3. It was dispatch and allocation spread thin, which is
+  what a single call fixes. **+10.4% per `env.step`** (median of 8 interleaved
+  measurements) and **+4.0% end-to-end** at 32 envs (median of 6 interleaved
+  pairs, individual pairs −5.5% to +17.2% — the training loop is much noisier
+  than one env). The dilution is the arithmetic working out: `env.step` is
+  ~45% of a vec-step here, and 0.45 × 10.4% ≈ 4.7%. Bit-identical: the golden
+  rollout still passes, and a new live pair test asserts fused == unfused to
+  the bit on qpos, qvel, every torque and the model fields.
+  The kernel writes *through* cached slice views
+  into MuJoCo's own arrays, so it is gated on the DOF selection being a
+  contiguous slice (a fancy-index selection would hand it a copy and the
+  writes would vanish). `MICRODUCK_BAM_FUSED=0` restores the previous path.
 - **`FastActorCriticPolicy`** (`symmetry.py`): hand-rolled diag-Gaussian
   rollout forward, 234 → 215 us at batch 32. Small and exact (log-probs match
   `evaluate_actions` to float tolerance — `test_fast_policy.py`).

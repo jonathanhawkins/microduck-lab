@@ -27,7 +27,11 @@ import numpy as np
 import pytest
 
 from microduck_local import contract as C
-from microduck_local.bam_actuator import BamXL330Actuator, DelayBuffer
+from microduck_local.bam_actuator import (
+    BamXL330Actuator,
+    DelayBuffer,
+    _bam_substep_kernel,
+)
 from microduck_local.walk_env import MicroduckWalkEnv
 
 
@@ -282,3 +286,85 @@ def test_full_bam_rollout_torque_sum_matches_golden():
         assert total == want, gs.check_provenance(golden)
     else:
         np.testing.assert_allclose(total, want, rtol=gs.RTOL, atol=gs.ATOL, err_msg=gs.check_provenance(golden))
+
+
+# ------------------------------------------------- the fused substep kernel
+
+def _fused_vs_unfused_rollout(fused: bool, steps: int = 60):
+    """One BAM rollout with the fused substep kernel on or off.
+
+    Same env, same seed, same action stream — the ONLY difference is which
+    code path `before_step` takes, so any divergence is the kernel's.
+    """
+    env = MicroduckWalkEnv(actuator="bam", obs_noise=True, domain_rand=True,
+                           action_delay=True, seed=17, terminate_on_fall=False)
+    env.reset(seed=17)
+    if not fused:
+        env.bam._fused = None
+    rng = np.random.default_rng(17)
+    taus, fls = [], []
+    for _ in range(steps):
+        env.step(rng.uniform(-1.0, 1.0, C.NUM_JOINTS).astype(np.float32))
+        taus.append(env.bam.applied_torque.copy())
+        fls.append(env.bam.last_frictionloss.copy())
+    return env, np.array(taus), np.array(fls)
+
+
+@pytest.mark.skipif(_bam_substep_kernel is None,
+                    reason="numba not installed; the fused path is off")
+def test_fused_substep_kernel_matches_the_unfused_path_bitwise():
+    """The whole point of the fusion: same bits, fewer dispatches.
+
+    Covers what the golden rollout covers (delay states, battery sag, the efc
+    scan, friction, the model writes) but as a LIVE pair, so it still bites
+    if the golden is ever recaptured or skipped on a platform.
+    """
+    fused_env, fused_tau, fused_fl = _fused_vs_unfused_rollout(True)
+    plain_env, plain_tau, plain_fl = _fused_vs_unfused_rollout(False)
+    assert fused_env.bam._fused is not None, "fused path was not active"
+    assert plain_env.bam._fused is None
+    np.testing.assert_array_equal(fused_tau, plain_tau)
+    np.testing.assert_array_equal(fused_fl, plain_fl)
+    np.testing.assert_array_equal(fused_env.data.qpos, plain_env.data.qpos)
+    np.testing.assert_array_equal(fused_env.data.qvel, plain_env.data.qvel)
+    assert fused_env.bam.last_vin == plain_env.bam.last_vin
+    # The model fields the kernel writes THROUGH its cached views.
+    np.testing.assert_array_equal(fused_env.model.dof_frictionloss,
+                                  plain_env.model.dof_frictionloss)
+    np.testing.assert_array_equal(fused_env.model.dof_damping,
+                                  plain_env.model.dof_damping)
+
+
+@pytest.mark.skipif(_bam_substep_kernel is None,
+                    reason="numba not installed; the fused path is off")
+def test_fused_path_writes_through_to_mujocos_own_arrays():
+    """The kernel's cached views must alias MuJoCo's arrays, not copies — a
+    fancy-index selection would give it a private copy and every write would
+    vanish. This is why `_fused` is gated on the DOF selection being a slice."""
+    env = MicroduckWalkEnv(actuator="bam", seed=5, terminate_on_fall=False)
+    env.reset(seed=5)
+    bam = env.bam
+    assert bam._fused is not None
+    for view, owner in ((bam._qfrc_applied_v, env.data.qfrc_applied),
+                        (bam._frictionloss_v, env.model.dof_frictionloss),
+                        (bam._damping_v, env.model.dof_damping),
+                        (bam._qfrc_constraint_v, env.data.qfrc_constraint),
+                        (bam._qfrc_bias_v, env.data.qfrc_bias)):
+        assert view.base is owner or view.base is owner.base, "view is a copy"
+    env.step(np.zeros(C.NUM_JOINTS, dtype=np.float32))
+    dix = bam._dof_ix
+    np.testing.assert_array_equal(env.data.qfrc_applied[dix],
+                                  bam.applied_torque)
+    np.testing.assert_array_equal(env.model.dof_frictionloss[dix],
+                                  bam.last_frictionloss)
+
+
+@pytest.mark.skipif(_bam_substep_kernel is None,
+                    reason="numba not installed; the fused path is off")
+def test_fused_path_can_be_switched_off_by_env_var(monkeypatch):
+    """MICRODUCK_BAM_FUSED=0 is the escape hatch if a platform disagrees."""
+    monkeypatch.setenv("MICRODUCK_BAM_FUSED", "0")
+    env = MicroduckWalkEnv(actuator="bam", seed=1, terminate_on_fall=False)
+    assert env.bam._fused is None
+    env.reset(seed=1)
+    env.step(np.zeros(C.NUM_JOINTS, dtype=np.float32))   # still runs
