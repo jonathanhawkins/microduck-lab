@@ -283,6 +283,52 @@ contributes 1.7 cm of it; ball motion 0.6 cm — `brain/tracker.py`). A
 better lens moves it a little. Closing the line-up's 2–3 cm scatter is a
 detector-quality problem, and that is a different piece of work.
 
+### What that noise is made of
+
+"Detector noise" is not actionable, so it was split. 16 881 sightings, each
+detection compared against truth **in the detector's own frame and
+definition** (which took two attempts — see the traps below):
+
+| band | bearing error → lateral | range error | range's share |
+|---|---|---|---|
+| the line-up band (< 0.6 m) | 3.35° → **2.00 cm** | **2.69 cm** | 57% |
+| mid (0.6–1.5 m) | 1.87° → 2.63 cm | 5.66 cm | 68% |
+| far (> 1.5 m) | 1.96° → 5.70 cm | 15.58 cm | 73% |
+
+**Range dominates, and its share grows with distance.** Range here is
+inferred from apparent width, which is a *pixel* quantity — so range error
+is a resolution story, and that is why the 640 px arm moved the line-up
+number at all (5.6 → 5.4 cm). Bearing error is roughly constant in angle
+(1.9–3.4°) and so grows linearly in metres, which is why it overtakes
+nothing but stays a third of the total.
+
+Both components are **noise rather than bias** (mean +1.3 cm of range
+against a 2.7 cm median absolute error in the line-up band). That matters
+because it says which levers exist: temporal averaging *does* help, and the
+tracker currently smooths at α = 0.6 — about 1.7 frames of averaging, which
+is light for a ball that is stationary in half of all sightings. Heavier
+averaging gated on the tracker's own velocity estimate is the obvious
+cheap lever, and it is deliberately **not** taken here: AGENTS.md rule 7
+applies (the line-up's offsets and tolerances were fitted with this noise
+present), the soccer benchmark needs ~200 seeds to resolve a +0.3 goal
+effect, and two previous line-up-precision changes measured *worse*. It is
+written down as a lead with its numbers, not shipped on a hunch.
+
+**Two traps, both the same mistake**, recorded because the first version of
+this table was wrong in a way that looked like a discovery:
+
+1. `range_est` is the **3-D slant range** from the camera *site* to the
+   ball's centre, and the camera sits ~21 cm above a ball on the floor.
+   Compared against a 2-D ground distance it shows a "+5.7 cm systematic
+   bias" that is entirely the measurer's: at 0.35 m,
+   `hypot(0.35, 0.21) − 0.35 = 5.8 cm`.
+2. `bearing` is in the **camera's** frame, and the chase brain yaws the head
+   to track the ball. Compared against a body-frame bearing it charges the
+   detector for the head's rotation — inflating the line-up band's bearing
+   error from 3.35° to 5.65° and inventing a −1.5° bias.
+   `frame.cam_yaw` is what `Tracker._associate` adds for exactly this
+   reason.
+
 *Caveat that remains.* The crop arm assumes the stock Pi lens (§1). Nothing
 above is affected if that assumption is wrong — the 39 × 22.5 arm would
 simply be describing a camera the robot does not have, and the question of
