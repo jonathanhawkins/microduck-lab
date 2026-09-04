@@ -387,3 +387,29 @@ def test_tidy_can_back_straight_out_of_the_rim_instead():
     assert b.state == "backoff"
     b.step(Senses(t=12.1, speed=0.0, odom=(-0.45, 0.0, 0.0)))
     assert b.state == "scan" and b.est is None                     # then straight to the scan
+
+
+def test_the_back_off_arc_curves_back_and_cannot_leave_the_basket():
+    """`backoff_back_wz`: reversing while turning looked like the way to do
+    the retreat and the turn-around at once — the walker reverses at
+    −0.209 m/s along its body axis under a full turn command against −0.219
+    straight, so the motion is there. It cannot work anyway, and the reason
+    is geometry rather than the walker: an arc curves back toward where it
+    began, so distance from the basket peaks at 0.72 m near 4 s and then
+    falls away (0.69 / 0.65 / 0.56 at 4 / 5 / 6 s) — the duck circles the
+    basket instead of leaving it, and never reaches the 1.05 m the shipped
+    sequence ends at. This pins the wiring and the record."""
+    from microduck_local.brain import Senses
+    from microduck_local.brain.gait import BACK_SPEED
+    from microduck_local.brain.tidy import Tidy, TidyParams
+
+    assert TidyParams().backoff_back_wz == 0.0                     # ships off
+    b = Tidy(TidyParams(backoff_back_s=4.0, backoff_back_wz=1.0))
+    b.state, b.t_state, b.scan_turned = "backoff", 10.0, 0.0
+    b._prev_yaw = 0.0
+    it = b.step(Senses(t=10.02, speed=0.0, odom=(0.0, 0.0, 0.0)))
+    assert it.twist == (BACK_SPEED, 0.0, 1.0) and "arc" in it.note  # reverse AND turn together
+    straight = Tidy(TidyParams(backoff_back_s=4.0))
+    straight.state, straight.t_state, straight.scan_turned = "backoff", 10.0, 0.0
+    straight._prev_yaw = 0.0
+    assert straight.step(Senses(t=10.02, speed=0.0, odom=(0.0, 0.0, 0.0))).twist[2] == 0.0

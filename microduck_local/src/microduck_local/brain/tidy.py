@@ -164,11 +164,30 @@ class TidyParams:
     # is paid back with interest. A faster back-off that skips the
     # repositioning is not faster.
     #
-    # If anyone returns to this: the lever is a reverse that KEEPS the
-    # walk-out (drop the sidestep and the 2.6 rad turn, back out, then walk
-    # clear), not a longer reverse. Do not tune until it wins - measure the
-    # variant once on fresh seeds and take the answer.
+    # "A reverse that keeps the walk-out" was the first idea and it does
+    # not exist: after backing out the duck FACES the basket, so there is
+    # no walking clear without the 2.6 rad turn, which is the expensive
+    # part. What the histogram actually indicts is the DISTANCE the duck
+    # ends at, so the two coherent variants are both about reaching 1.05 m:
+    #
+    #   `backoff_back_s` 4-5   a longer straight reverse. Same distance,
+    #                          about half the time. Ends facing the basket,
+    #                          which `scan` turns out of anyway.
+    #   `backoff_back_wz` != 0 reverse WHILE turning. The walker reverses at
+    #                          -0.209 m/s along its own body axis with wz at
+    #                          1.0 (against -0.219 straight) while turning at
+    #                          0.30-0.40 rad/s, so the retreat and the
+    #                          turn-around happen at once instead of in
+    #                          series - see `gait.back_up`, which measured
+    #                          the arc after a render caught the frame
+    #                          mistake in reading it.
+    #
+    # Both ship at 0. Seeds 0-15 are a SCREEN for them, not a result: four
+    # arms have now been run on those layouts and the multiplicity is real.
+    # Anything that looks good there is confirmed on a fresh block or it is
+    # not claimed.
     backoff_back_s: float = 0.0
+    backoff_back_wz: float = 0.0
     turn_kick: float = TURN_KICK       # forward command that starts the gait for a cold turn (brain/gait.py)
     detour_s: float = 1.0              # after the ToF guard clears: walk straight this long before re-aiming
     hold_blind_m: float = 0.12         # ToF returns closer than this while holding are the toy in the beak
@@ -769,8 +788,8 @@ class Tidy:
 
             if p.backoff_back_s > 0:
                 if t - self.t_state < p.backoff_back_s:
-                    twist = back_up()
-                    note += " · reverse"
+                    twist = back_up(p.backoff_back_wz)
+                    note += " · reverse" + ("" if not p.backoff_back_wz else " (arc)")
                 else:
                     _done_backing_off()
             else:
