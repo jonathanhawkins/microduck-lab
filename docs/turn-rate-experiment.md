@@ -167,6 +167,38 @@ ninety minutes. Two batteries were lost before this existed.
 
 ---
 
+## 5b. The trap that would make this measure nothing
+
+**Both sides of the loop cap the turn at ±1.0, and if you widen only one
+the experiment silently measures nothing.**
+
+*Training side.* `ANG_VEL_Z_RANGE` lives in `contract.py:65`, which is the
+shared 61-obs contract. **Do not edit it.** Grep says it is read in exactly
+two places that matter — `walk_env.py:410` and `:419`, both command
+sampling — so add a `WalkEnv` parameter for the training range (in the shape
+of `turn_in_place_prob` at `walk_env.py:184`) defaulting to
+`C.ANG_VEL_Z_RANGE`, plus a `train-walk --wz-max` flag. Nothing on the
+deploy side reads the constant, so a wider training range needs no contract
+change at all.
+
+*Brain side — the easy one to miss.* Ten call sites hardcode ±1.0 as the
+turn magnitude or the clip:
+
+```
+brain/gait.py:69                 wz = 1.0 if sign > 0 else -1.0     ← turn(), used by every scripted brain
+brain/controllers.py:426, 1118, 1277, 1394, 1400   np.clip(..., -1.0, 1.0)
+brain/controllers.py:457, 1448, 1456, 1458         wz = 1.0
+ChaseParams.search_wz = 1.0 · TidyParams.scan_wz = 1.0
+```
+
+Train a walker that does 1.5 rad/s at `wz = 1.5`, leave these alone, and
+every brain still asks for 1.0 — you would benchmark two walkers that are
+never commanded differently and conclude a faster turn does not help. Put
+the cap behind one constant (`gait.MAX_WZ`, defaulting to 1.0) that the
+clips and the `turn()` helper read, and set it per arm alongside the
+walker. **Verify before the battery**: log the commanded `|wz|` in a short
+run and confirm arm B actually issues more than 1.0.
+
 ## 6. Code you will have to add
 
 `eval-pitch`, `eval-tidy`, `walker-facts` and `trace-tidy` all hardcode
