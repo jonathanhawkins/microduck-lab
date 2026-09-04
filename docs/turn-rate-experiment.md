@@ -110,6 +110,31 @@ the shipped policy, the ceiling is not the training range and this whole
 experiment changes shape — say so and stop. If it saturates at ~0.65–0.78, the
 range is the wall and the training run is justified.
 
+> **This was run on 2026-09-04, and it says STOP.** The walker does not
+> saturate. Warm, 8 headings x 10 s, **zero falls in 48 runs**:
+>
+> | vx | wz asked | yaw achieved | forward |
+> |---|---|---|---|
+> | 0.40 | +1.00 *(trained edge)* | 0.733 rad/s | 0.188 m/s |
+> | 0.40 | **+2.00** | **1.506 rad/s** | 0.176 m/s |
+> | 0.40 | **-2.00** | **-1.802 rad/s** | 0.187 m/s |
+> | 0.00 | +3.00 | 2.011 rad/s | - |
+>
+> The response is close to linear in the command (achieved/asked holds at
+> 0.61-0.68 one way and 0.76-0.78 the other) out to 3x the trained
+> `ANG_VEL_Z_RANGE` of +-1.0, and costs 6% of forward speed at twice the yaw.
+> The ceiling is neither the policy nor the robot: **nothing asks for more
+> than 1.0**, because `brain_env.ACT_HIGH` clamps a brain's wz there
+> (`Duck.set_cmd` passes a larger one through untouched).
+>
+> So sections 1-4 below describe a training run that should not be done. The
+> 26.6% of a run this was meant to free is available by widening one action
+> bound. What remains is: raise `ACT_HIGH[2]`, retrain a brain against the
+> wider range, and run sections 5-7 on THAT. It still needs an A/B, because
+> it changes what every brain can ask for, and because the wider command is
+> out of the walker's training distribution even though it handles it here on
+> an empty floor. Sections 5, 5b and 7 apply unchanged.
+
 **Step 0b (read before budgeting Step 1).** Local PPO cannot currently
 produce a walker by either route, and both failures are measured. This does
 not sink the experiment, but it decides what A and B can even be.
