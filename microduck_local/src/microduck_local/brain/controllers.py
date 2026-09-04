@@ -798,6 +798,28 @@ class ChaseParams:
     # 0.5 m (8 seeds x 300 s of 1v1): 1.62 goals, 8.1 kicks, 0.75 falls a
     # run against 2.38 / 7.4 / 0.38 - a blob at the feet is as often the
     # other duck's foot as the ball, and a line-up on a foot is a fall.
+    #
+    # RE-OPENED at the replacement module's real 60 deg vertical FOV (the
+    # original was measured at 48) and it closes harder. 1v1 goals are a
+    # weak instrument, so this counted the blob's own EVENTS instead - 6
+    # seeds x 180 s, every tick the blob fired, against the ball's true
+    # position:
+    #
+    #   V FOV   blob ticks   camera already had the ball   blind-case ticks   of those, the ball
+    #    48 deg      4785                   87.5%                  599              30.1%
+    #    60 deg      5809                   93.6%                  374              36.9%
+    #
+    # Two independent reasons it stays off, both worse at 60 than at 48:
+    #  1. It is almost always REDUNDANT - the camera already has the ball on
+    #     88-94% of the ticks the blob fires.
+    #  2. In the case it exists for (camera blind) it is WRONG about two
+    #     times in three, and that is the case that ends in a line-up on a
+    #     foot.
+    # The wider lens does raise blind-case precision (30 -> 37%) but cuts
+    # the opportunity by 38% (599 -> 374 ticks), because it reaches 5.5 cm
+    # further into the blind zone itself (blind radius 28.5 -> 23.0 cm,
+    # docs/camera-hardware.md 3d). Better optics shrink this feature's job
+    # faster than they improve it.
     tof_ball_m: float = 0.0
     # A bump (Senses.bumped: the body is touching another body - contacts in
     # the sim, the IMU / servo loads on the robot): no turn in place for

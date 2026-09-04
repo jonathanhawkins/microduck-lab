@@ -113,6 +113,42 @@ and later reversed; several "measured off" verdicts turned out to be noise.
    13.6 +/- 3.0. Before quoting a per-X figure, test the numerator on its
    own; if it does not move, you are reporting 1/X with extra steps, and it
    will point whichever way costs you the most to believe.
+7. **A downstream constant may have absorbed the bias you are about to
+   fix. Fix them together or the fix measures as a regression.**
+   `brain/tidy.py`'s `stale_fix` places a detection from the pose the duck
+   HAD when the frame was taken instead of the pose it has now. It is
+   unambiguously correct and it works: the toy's placement error drops from
+   5.4 cm to 3.7 cm (medians, 4 seeds). It also lost **0.38 toys
+   (p = 0.031)**, with grasp success falling 88% -> 76%.
+
+   The diagnostic that explained it measured the TRUE duck-to-toy distance
+   at `settle`, where the beak has to reach: 8.7 cm with the bias, 10.5 cm
+   without it. The bias put the toy slightly AHEAD along the direction of
+   travel, so the duck walked past its own estimate and arrived at 8.7 cm —
+   which is `reach_ahead + reach_pad` = 8.8 cm, exactly where the grasp
+   wants it. The stop pad had been fitted, by hand, against the biased
+   estimate. Remove the bias and the duck stops honestly, 1.7 cm short, and
+   fumbles.
+
+   Correcting the pad by the 1.8 cm the bias was worth recovers it —
+   **+0.44 toys (p = 0.026)** with grasp at 93% and attempts per pick
+   1.15 -> 1.08. So the fix was right, the measurement was right, and the
+   conclusion "the fix hurts" would have been wrong.
+
+   The general shape: **any hand-fitted constant downstream of a biased
+   estimate has absorbed some of that bias**, because it was tuned to make
+   the system work WITH the bias present. Fixing the estimate alone moves
+   the system off the operating point the constant encodes. So when you
+   correct a systematic error, find the constants fitted against it and
+   sweep them in the same battery — a 2x2, not two separate arms. And run
+   the control cell (the corrected constant WITHOUT the fix): if that also
+   improves, the constant was simply mistuned and the fix is not what
+   earned it.
+
+   Corollary for reading results: a correct change that measures as a
+   regression is evidence about the SYSTEM, not only about the change. Ask
+   what was tuned around the thing you just fixed before you file it as a
+   null.
 7. **"Measured off" usually means "not shown to help".** Say which one you
    mean. Several knobs in `ChaseParams` ship off on differences that never
    cleared the noise; re-screening them with `possession` is cheap and at
@@ -150,6 +186,27 @@ redundant — a module that parses can still fail on a bad relative import.
    that does not match the type it stands in for can make a dead path look
    alive. Prefer the real type in a test; if you must stub, assert the shape
    you are relying on.
+
+   The same shape has now bitten three times, and the third has its own
+   mechanism worth knowing. **A default argument object is bound once, at
+   `def` time.** `Detector.__init__(self, ..., spec=DetectorSpec())` holds
+   ONE `DetectorSpec` made at import; `World` constructs detectors without
+   a `spec=`, so patching `DetectorSpec.__init__.__defaults__` — the usual
+   trick for sweeping a frozen dataclass through a battery — changes what
+   `DetectorSpec()` returns from then on and changes NOTHING about the
+   detector that actually runs. A frustum sweep built that way returns
+   identical arms and looks like a null. (`TidyParams` is safe from this
+   only because `eval_tidy` builds a fresh `TidyParams(...)` per run; the
+   difference is invisible from the call site, so do not reason about it —
+   check.)
+
+   **So: assert on the object that is running, not on a fresh one.**
+   `assert DetectorSpec().fov_h_deg == 116` passes while the live detector
+   is at 62. `assert duck.detector.spec.fov_h_deg == 116` is the check that
+   would have caught it. Reach into the constructed world and read the
+   value back off the thing being measured — every sweep harness in
+   `scratchpad/` does this now, and the one that did not produced two
+   bit-identical arms.
 1. **Training charts measure the noise-crutched stochastic policy.** Claims
    about a run are made from the deterministic exported ONNX, never from
    `ep_rew` curves. Export, then eval, then look.

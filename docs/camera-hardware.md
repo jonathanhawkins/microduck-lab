@@ -298,7 +298,32 @@ is 23 cm above the floor and pointing forward — it moves its edge in by
 about a fifth. Anything that depends on the last 20 cm still cannot use the
 camera for it.
 
-## 4. Frame rate is a non-issue
+**What that does to the ToF floor-ball.** `ChaseParams.tof_ball_m` — read
+the ball out of the ToF's lower rows while the camera cannot see it — was
+measured at 48° and shipped OFF. The wider vertical was the obvious reason
+to re-open it, so it was, counting the blob's own events over 6 seeds ×
+180 s of 1v1 rather than re-running the noisy goal difference:
+
+| V FOV | blob ticks | camera already had the ball | blind-case ticks | of those, the ball |
+|---|---|---|---|---|
+| 48° | 4785 | 87.5% | 599 | **30.1%** |
+| 60° | 5809 | 93.6% | 374 | **36.9%** |
+
+It closes harder than it did at 48°, for two reasons that both move the
+wrong way:
+
+1. The blob is **almost always redundant** — on 88–94% of the ticks it
+   fires, the camera already has the ball.
+2. In the case it exists for, it is **wrong about two times in three**, and
+   that case is the one that ends in a line-up on the other duck's foot.
+
+The wider lens *does* raise blind-case precision (30% → 37%) while cutting
+the opportunity by 38% (599 → 374 ticks), because it reaches 5.5 cm further
+into the blind zone itself. **Better optics shrink this feature's job
+faster than they improve it** — which is the general shape of the answer
+for anything built to paper over a sensor limit.
+
+## 4. Frame rate is a non-issue — and the detector rate is now a lever
 
 `DetectorSpec.rate_hz` is 10 and the brain decides at 10 Hz, against the
 sensor's 90 — nine times the headroom. The developer's "not sure we have
@@ -307,12 +332,53 @@ workload: frames can be dropped freely. What the compute budget must cover is
 the **inference input size** in §3, which is a different question and the one
 that matters.
 
+### The two halves meet here
+
+§3 says the replacement module needs a **640 px** inference input to break
+even. The NPU's measured budget for the shipped 320 px YOLO11n is p50
+25.7 ms / p95 58.4 ms per frame (upstream `npu-bringup.md`). 640 × 640 is
+four times the pixels, so expect roughly **p50 ~100 ms / p95 ~230 ms**.
+
+Put that against a frame budget:
+
+| input | rate | period | p50 duty | p95 duty |
+|---|---|---|---|---|
+| 320 px | 10 Hz | 100 ms | 26% | 58% |
+| 640 px | 10 Hz | 100 ms | ~100% | **over budget** |
+| **640 px** | **5 Hz** | **200 ms** | **~50%** | **~115%, marginal** |
+
+**640 px at 10 Hz does not fit. At 5 Hz it plausibly does.** So the camera
+recommendation is only implementable if the detector can run at 5 Hz — and
+until recently it could not: halving the rate cost **−0.55 toys** on the
+tidy benchmark (64 paired layouts, p = 0.0003), breaking the grasp
+specifically (85% → 67%).
+
+That cost has since been removed in software, and for a reason unrelated to
+the camera: a detection was being placed from the pose the duck had *now*
+rather than the pose it had when the frame was taken, which at 5 Hz is ~6 cm
+of error against a 3 cm toy. Fixing that — together with the stop distance
+that had been hand-fitted around the bias — makes **5 Hz statistically
+indistinguishable from 10 Hz** (−0.14, p = 0.32) with the grasp at 94%.
+`TidyParams.stale_fix` / `reach_pad`; the measurement is in
+`microduck_local/README.md` and the trap is AGENTS.md rule 7.
+
+**So the chain closes:** the wide module needs 640 px → 640 px needs 5 Hz →
+5 Hz needed a stale-pose fix, which is now in and costs nothing at 10 Hz.
+The remaining hardware question is only whether the NPU's p95 at 640 px
+really lands near 230 ms, which §5.1 should answer with a measurement rather
+than the 4× scaling assumed here.
+
 ## 5. Open questions, in priority order
 
 1. **What YOLO input size can the NPU sustain, and at what rate?** 320 or
    640? §3 says this decides whether the new camera helps or hurts tidying.
    Note the sensor is not the constraint — 1920 px across is six times the
-   320 the detector consumes.
+   320 the detector consumes. **The specific number to measure: p50 and p95
+   for a 640 px input.** §4 assumes 4× the 320 px figures (~100 / ~230 ms),
+   which puts 640 px at 5 Hz just inside budget and 640 px at 10 Hz outside
+   it. If the real p95 is better than 230 ms, 640 px at 10 Hz opens up and
+   nothing else has to change; if it is worse, 5 Hz is the only way to get
+   the resolution and that path is now clear.
 2. **Which IMX219 module and lens is on the robot today?** Stock Pi Camera v2
    (f = 3.04 mm) or a third-party wide M12 board? §1 depends on it entirely.
 3. **Lens distortion coefficients / calibration for the new module.** §2: the
