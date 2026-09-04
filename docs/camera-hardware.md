@@ -268,10 +268,20 @@ sightings within a run are correlated, so read the sizes, not a p-value.)
 Two things the tidy benchmark could not show:
 
 1. **The wide lens's actual benefit appears once the resolution is
-   restored** — 25% more ball sightings (16 881 → 21 045) for the same
-   play. That is what 116° is *for*, and at 320 px it was entirely eaten by
-   the resolution penalty (the as-ships module sees no more than the
-   baseline and places what it sees 34% less accurately).
+   restored** — 25% more ball sightings (16 881 → 21 045). That is what
+   116° is *for*, and at 320 px it does not appear at all: the as-ships
+   module logs *fewer* sightings than the baseline (16 374) while placing
+   what it sees 34% less accurately.
+
+   Read that second number carefully. **Sighting count is an outcome, not a
+   frustum property.** A wider frustum cannot show a target *less* often
+   for a fixed trajectory — `projection` changes the reported bearing, not
+   whether a target is in frame or passes the size gate. What it changes is
+   the *brain*: a duck fed bearings that are wrong by up to 9.7° drives
+   somewhere else, and ends up with the ball in frame no more often than
+   the narrow camera did. So the honest statement is that the extra field
+   of view buys nothing **as played** at 320 px, not that the sensor sees
+   less.
 2. **The recommendation is slightly better than the baseline here**, not
    merely level: 5.4 cm against 5.6. So "costs nothing on tidy" understates
    it — on the perception measure the wide lens is a small net win.
