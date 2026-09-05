@@ -103,13 +103,37 @@ def payload(brain: Brain | None, intent: Intent | None, mode: str) -> dict:
         return {"kind": "manual" if mode == "manual" else "script", "state": mode,
                 "cmd": [round(float(v), 3) for v in (intent.twist if intent else (0, 0, 0))],
                 "inputs": {}}
-    return {"kind": brain.kind, "state": brain.state,
+    out = {"kind": brain.kind, "state": brain.state,
             "cmd": [round(float(v), 3) for v in (intent.twist if intent else (0, 0, 0))],
             "head": [round(float(v), 3) for v in (intent.head if intent else (0, 0, 0, 0))],
             "note": intent.note if intent else "",
             "beak": intent.beak if intent else None,
             "skill": intent.skill if intent else None,
             "inputs": brain.inputs()}
+    # A learned brain can also say what its network SAW and SAID at the last
+    # decision — the /sim inspector draws it. Rule brains have no such thing.
+    view = brain.view() if hasattr(brain, "view") else None
+    if view is not None:
+        out["view"] = view
+    return out
+
+
+def brain_view(obs, raw, clipped, low, high, obs_version: int, decide_every: int) -> dict | None:
+    """The wire shape of one decision: the observation vector the network
+    read, the action as the network returned it, the action after the
+    intent clip, and the bounds. For a brain exported by train_brain the
+    two actions are equal — the graph clamps to its own bounds — so the
+    saturated-mean tell (the log_std trap) is an action PINNED on a bound,
+    which the viewer marks; `raw` is kept for a brain whose graph does not
+    clamp. None before the first decision — there is nothing to show yet."""
+    if obs is None or raw is None:
+        return None
+
+    def r(xs) -> list[float]:
+        return [round(float(v), 3) for v in np.asarray(xs, np.float32).reshape(-1)]
+
+    return {"obs": r(obs), "obs_version": int(obs_version), "decide_every": int(decide_every),
+            "act": {"raw": r(raw), "clipped": r(clipped), "low": r(low), "high": r(high)}}
 
 
 def _round(v) -> float | None:
@@ -124,4 +148,4 @@ def age_inputs(senses: Senses, tof_max: float, det_max: float) -> dict:
     }
 
 
-__all__ = ["Brain", "BrainRegistry", "Intent", "REGISTRY", "Senses", "age_inputs", "payload", "np"]
+__all__ = ["Brain", "BrainRegistry", "Intent", "REGISTRY", "Senses", "age_inputs", "brain_view", "payload", "np"]

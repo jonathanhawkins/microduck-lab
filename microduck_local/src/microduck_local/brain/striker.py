@@ -97,7 +97,7 @@ from ..world import Ball, Duck, Scenario, Wall, World
 from ..world.scenario import TOF_PRESETS
 from .brain_env import BRAIN_OBS_DIM, POLICIES_DIR, ObsBuilder, onnx_infer
 from .controllers import tof_clearance_bearings
-from .runtime import Intent, Senses
+from .runtime import Intent, Senses, brain_view
 
 # --- the striker observation -------------------------------------------------
 # [0:80]   the brain contract, version 2 (brain_env.senses_to_obs), target
@@ -562,6 +562,9 @@ class LearnedStriker:
         self.sense.reset()
         self.last_twist = np.zeros(3, np.float32)
         self.last_action = np.zeros(STRIKER_ACT_DIM, np.float32)
+        # What the network saw and said at the last decision (view()).
+        self.last_obs: np.ndarray | None = None
+        self.last_raw: np.ndarray | None = None
         self.kicks = 0
         self.pushes = 0
         self.state = "striker"
@@ -575,6 +578,8 @@ class LearnedStriker:
         self.sense.reset()
         self.last_twist[:] = 0.0
         self.last_action[:] = 0.0
+        self.last_obs = None
+        self.last_raw = None
         self._tick = 0
         self.state = "striker"
 
@@ -593,8 +598,11 @@ class LearnedStriker:
         self._senses = senses
         if self._tick % self.decide_every == 0:
             obs = self.sense.observe(senses, self.last_twist)
-            a = np.clip(self.infer(obs.astype(np.float32)), S_ACT_LOW, S_ACT_HIGH).astype(np.float32)
+            raw = np.asarray(self.infer(obs.astype(np.float32)), np.float32)
+            a = np.clip(raw, S_ACT_LOW, S_ACT_HIGH).astype(np.float32)
             self.last_action = a
+            self.last_obs = obs.astype(np.float32)
+            self.last_raw = raw
             self.state = "ball" if obs[65] > 0.5 else "lost"
         self._tick += 1
         twist, skill = self.sense.act(self.last_action, senses)
@@ -603,6 +611,11 @@ class LearnedStriker:
             self.kicks += 1
         return Intent(twist=tuple(float(v) for v in twist), head=self.sense.head,
                       note=("kick" if self.sense.pending else self.state), skill=skill)
+
+    def view(self) -> dict | None:
+        """The last decision, for the frame's `brain.view` (runtime.brain_view)."""
+        return brain_view(self.last_obs, self.last_raw, self.last_action, S_ACT_LOW, S_ACT_HIGH,
+                          STRIKER_OBS_VERSION, self.decide_every)
 
 
 __all__ = ["KICK_AHEAD", "KICK_ON", "KICK_SIDE", "LearnedStriker", "STRIKER_ACT_DIM",

@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from .brain_env import ACT_HIGH, ACT_LOW, BRAIN_OBS_DIM, ObsBuilder, onnx_infer
-from .runtime import Intent, Senses, age_inputs
+from .runtime import Intent, Senses, age_inputs, brain_view
 
 
 def brains_dir() -> Path:
@@ -57,12 +57,17 @@ class LearnedBrain:
         self.state = "learned"
         self.last_action = np.zeros(3, np.float32)
         self.last_seen_t: float | None = None
+        # What the network saw and said at the last decision (view()).
+        self.last_obs: np.ndarray | None = None
+        self.last_raw: np.ndarray | None = None
         self._tick = 0
         self._senses: Senses | None = None
 
     def reset(self) -> None:
         self.last_action[:] = 0.0
         self.last_seen_t = None
+        self.last_obs = None
+        self.last_raw = None
         self.builder.reset()
         self._tick = 0
         self._senses = None
@@ -80,12 +85,20 @@ class LearnedBrain:
         if self._tick % self.decide_every == 0:
             obs = self.builder(senses, self.last_action)
             self.last_seen_t = self.builder.last_seen_t
-            a = np.clip(self.infer(obs.astype(np.float32)), self.act_low, self.act_high)
+            raw = np.asarray(self.infer(obs.astype(np.float32)), np.float32)
+            a = np.clip(raw, self.act_low, self.act_high)
             self.last_action = a.astype(np.float32)
+            self.last_obs = obs.astype(np.float32)
+            self.last_raw = raw
             seen = obs[65] > 0.5
             self.state = "tracking" if seen else "lost"
         self._tick += 1
         return Intent(twist=tuple(float(v) for v in self.last_action), note=self.state)
+
+    def view(self) -> dict | None:
+        """The last decision, for the frame's `brain.view` (runtime.brain_view)."""
+        return brain_view(self.last_obs, self.last_raw, self.last_action, self.act_low, self.act_high,
+                          self.obs_version, self.decide_every)
 
 
 __all__ = ["BRAIN_OBS_DIM", "LearnedBrain", "brains_dir"]
