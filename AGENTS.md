@@ -88,6 +88,9 @@ uv run --with pytest pytest tests/            # contract tests — run before tr
 uv run train-walk --envs 32 --steps 3_000_000 --run-name my-run
 uv run export-walk runs/my-run && uv run eval-walk runs/my-run/policy.onnx
 uv run train-behavior one_leg                 # teachable tricks (behaviors/)
+uv run train-brain --run-name follow-v6 --steps 2_000_000 --variety \
+    --title "Follower v6" --description "what it tests, and later what it found" --group shipped-followers
+uv run describe-brain p-n256-s31 --title ... --description ... --group capacity   # name a run after the fact
 uv run render-rollout --policy runs/my-run/policy.onnx --behavior stand --out /tmp/rr
 uv run machine-facts                          # cores + thread profile for THIS machine
 uv run bench-envs                             # the right --envs for THIS machine
@@ -118,6 +121,12 @@ uv run scripts/infer_policy.py --walking ../microduck_local/runs/my-run/policy.o
 - Prototype here → port the env design to an mjlab cfg → retrain on GPU with
   the official stack. The local harness is for minutes-long iteration loops,
   not for the policy you put on hardware.
+- Every trained run carries a `title`, `description` and `group` in its
+  `brain.json` (`train-brain --title/--description/--group`, or
+  `describe-brain` later). The run name is an identifier and never changes;
+  the title is what the `/train` page and the `/sim` brain menu show. Write
+  the finding into the description when the experiment resolves — see
+  "Every run is a record" in `microduck_local/AGENTS.md`.
 - Before claiming anything about a trained policy, **render it and look**
   (`render-rollout`) — reward curves and eval sums have repeatedly lied here.
 - If rollouts never contain the skill you're paying for, **fix the physics

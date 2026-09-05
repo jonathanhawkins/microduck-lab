@@ -40,3 +40,23 @@ def test_none_leaves_a_field_alone(tmp_path):
 def test_refuses_to_invent_a_brain(tmp_path):
     with pytest.raises(FileNotFoundError):
         describe(tmp_path / "not-a-run", "x", "y")
+
+
+def test_group_is_filed_and_validated(tmp_path):
+    d = _brain(tmp_path)
+    describe(d, None, None, "capacity")
+    assert json.loads((d / "brain.json").read_text())["group"] == "capacity"
+    with pytest.raises(ValueError):
+        describe(d, None, None, "not-a-group")
+
+
+def test_learned_index_reads_what_people_read(tmp_path, monkeypatch):
+    """The /world payload files the inspector's brain menu by group and shows
+    the title; the name stays the value it sends back."""
+    from microduck_local.brain import learned
+    d = _brain(tmp_path, title="Capacity sweep: 256-256", group="capacity", description="256 vs 128.")
+    (d / "brain.onnx").write_bytes(b"")
+    (tmp_path / "half-done").mkdir()          # no brain.onnx: not exported, not listed
+    monkeypatch.setattr(learned, "brains_dir", lambda: tmp_path)
+    assert learned.learned_index() == [{"name": "p-n256-s31", "title": "Capacity sweep: 256-256",
+                                        "group": "capacity", "description": "256 vs 128."}]

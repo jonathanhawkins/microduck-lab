@@ -15,8 +15,8 @@ Write the FINDING into the description once the experiment resolves ("+0.000
 paired, ±0.012 — neutral, shipped on"): the description is where the next
 person learns what a run was for and whether it was worth running.
 
-Only `title` and `description` are touched; the recipe and `selected` are
-preserved as they are.
+Only `title`, `description` and `group` are touched; the recipe and
+`selected` are preserved as they are.
 """
 
 from __future__ import annotations
@@ -28,10 +28,23 @@ from pathlib import Path
 
 from .brain.learned import brains_dir
 
-FIELDS = ("title", "description")
+FIELDS = ("title", "description", "group")
+
+# Use-case groups, in the order the /train page and the /sim brain menu list
+# them. A group is the QUESTION a set of runs was made to answer, not the
+# knob they turned — lineage (init_from) is recorded too rarely to group by.
+GROUPS = {
+    "shipped-followers": "Followers (shipped)",
+    "trainer-ab": "Trainer defect A/B (seed 7)",
+    "early-stop": "Early stop",
+    "paired-sweeps": "Paired-seed sweeps (seeds 11-14)",
+    "capacity": "Network capacity (seeds 31-36)",
+    "null-pair": "Null pair (seeds 81-84)",
+    "other": "Other",
+}
 
 
-def describe(run_dir: Path, title: str | None, description: str | None) -> dict:
+def describe(run_dir: Path, title: str | None, description: str | None, group: str | None = None) -> dict:
     """Write the given fields (None = leave alone) into run_dir/brain.json and
     return the resulting metadata. Missing brain.json is an error: a run
     with no contract is not a brain, and this must not create one."""
@@ -39,7 +52,9 @@ def describe(run_dir: Path, title: str | None, description: str | None) -> dict:
     if not path.is_file():
         raise FileNotFoundError(f"{path} — not a trained brain (no brain.json)")
     meta = json.loads(path.read_text())
-    for key, value in (("title", title), ("description", description)):
+    if group is not None and group not in GROUPS:
+        raise ValueError(f"group must be one of {', '.join(GROUPS)} (got {group!r})")
+    for key, value in (("title", title), ("description", description), ("group", group)):
         if value is not None:
             meta[key] = value.strip()
     path.write_text(json.dumps(meta, indent=2))
@@ -52,16 +67,18 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--title", default=None, metavar="TEXT", help="the human name shown in place of the run name")
     ap.add_argument("--description", default=None, metavar="TEXT",
                     help="one or two sentences: what it tests, against what, and what it found")
+    ap.add_argument("--group", default=None, choices=sorted(GROUPS),
+                    help="the use case this run belongs to — how the /train page and the /sim brain menu file it")
     ap.add_argument("--show", action="store_true", help="print the current title and description and exit")
     args = ap.parse_args(argv)
 
     run_dir = brains_dir() / args.run
-    if args.show or (args.title is None and args.description is None):
+    if args.show or (args.title is None and args.description is None and args.group is None):
         meta = json.loads((run_dir / "brain.json").read_text())
         for key in FIELDS:
             print(f"{key}: {meta.get(key) or '—'}")
         if not args.show:
             print("(pass --title and/or --description to set them)", file=sys.stderr)
         return
-    meta = describe(run_dir, args.title, args.description)
+    meta = describe(run_dir, args.title, args.description, args.group)
     print(f"{args.run}: {meta.get('title') or '—'}")

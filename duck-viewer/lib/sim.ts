@@ -213,6 +213,39 @@ export interface WorldInfo {
   ducks: Omit<SimDuck, "bodies" | "sensors" | "brain" | "headApplied">[];
   presets: TofPreset[];
   brains: string[];
+  /** The learned brains again, with what people read: the inspector's menu
+   *  files them by group and shows the title; `learned:<name>` stays the value. */
+  learned?: LearnedInfo[];
+}
+
+export interface LearnedInfo {
+  name: string;
+  title: string | null;
+  group: string | null;
+  description: string | null;
+}
+
+/** Group keys in menu order, with their headings — mirrors describe_brain.GROUPS. */
+export const LEARNED_GROUPS: [key: string, label: string][] = [
+  ["shipped-followers", "Followers (shipped)"],
+  ["trainer-ab", "Trainer defect A/B (seed 7)"],
+  ["early-stop", "Early stop"],
+  ["paired-sweeps", "Paired-seed sweeps (seeds 11–14)"],
+  ["capacity", "Network capacity (seeds 31–36)"],
+  ["null-pair", "Null pair (seeds 81–84)"],
+  ["other", "Other"],
+];
+
+/** Learned brains filed under their group heading, in LEARNED_GROUPS order;
+ *  an unknown or missing group files under "Other". */
+export function groupLearned(learned: LearnedInfo[]): [label: string, brains: LearnedInfo[]][] {
+  const known = new Map(LEARNED_GROUPS);
+  const by = new Map<string, LearnedInfo[]>();
+  for (const b of learned) {
+    const k = b.group && known.has(b.group) ? b.group : "other";
+    by.set(k, [...(by.get(k) ?? []), b]);
+  }
+  return LEARNED_GROUPS.flatMap(([k, label]) => (by.has(k) ? [[label, by.get(k)!] as [string, LearnedInfo[]]] : []));
 }
 
 // The head camera: the MJCF `head_camera` site, x-forward, on jaw_soft.

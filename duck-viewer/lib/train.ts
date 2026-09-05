@@ -59,6 +59,8 @@ export interface BrainRun {
    *  Written by train-brain --title/--description, or describe-brain later. */
   title?: string;
   description?: string;
+  /** The use case it files under (describe_brain.GROUPS); the cards list by it. */
+  group?: string;
   /** Written by select-brain: which checkpoint was shipped as brain.onnx, and why. */
   selected?: {
     /** "000751104" (a checkpoint's step, zero-padded) or "final". */
@@ -112,7 +114,7 @@ const NOT_KNOBS = new Set<string>([
   "name", "curve", "last", "progress", "rollouts", "active", "shipped",
   "steps_per_s", "eta_s", "selected", "act_low", "act_high", "obs_dim",
   "decide_every", "probe_presets", "target_cls", "git_dirty", "note",
-  "title", "description",
+  "title", "description", "group",
 ]);
 
 /** The name a run is shown under: its title, else the run name itself. */

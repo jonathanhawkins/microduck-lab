@@ -96,6 +96,35 @@ does; this file covers how not to fool yourself.
   so a stage tuning that works has to earn its way back as a term or a
   physics knob before it can ship.
 
+## Every run is a record: name it, describe it, file it
+
+A board of 49 runs called `p-batch-s14`, `p-de-s11`, `z1` and `mix` could
+not be read a day after it was made. A name that encodes the knob still
+says nothing about the question or the answer, and `z1`/`z2` had no note
+anywhere — identical recipes on the same seeds was all their `brain.json`
+could say. So three fields ride in `brain.json` beside the recipe:
+
+* **`title`** — the human name the `/train` page shows in place of the run
+  name: `"Capacity sweep: 256-256"`, `"Follower v4 — the pick"`. The run
+  NAME is an identifier (`--init-from`, `learned:<name>`, `select-brain`,
+  the directory) and never changes; the title is what people read.
+* **`description`** — one or two sentences: what it tests, against what,
+  and — once known — **what it found, with the interval**: `"+0.000 paired,
+  95% −0.012…+0.012 — neutral, shipped on"`. Write the finding back in when
+  the experiment resolves; this is where the next person learns whether a
+  run was worth making.
+* **`group`** — the use case it files under, one of `describe-brain --help`'s
+  keys (`shipped-followers`, `trainer-ab`, `paired-sweeps`, `capacity`, …).
+  The `/train` cards and the `/sim` brain menu list by it. A group is the
+  QUESTION a set of runs answers, not the knob they turned.
+
+Set them at launch — `train-brain --title ... --description ... --group ...`
+warns when the title is missing — or after, with
+`describe-brain <run> --title ... --description ... --group ...`. A family's
+seeds share a title (`p-n256-s31..36` are one experiment); the seed is
+already in the name. Never launch a sweep with bare codes: ten seconds per
+launch against an hour of forensic annotation after the fact.
+
 ## How much can the benchmark actually resolve? (read before any A/B)
 
 Every rule below exists because it was broken on 2026-09-03 and cost a day

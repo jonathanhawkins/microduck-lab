@@ -21,5 +21,6 @@
   "fixed_preset": null,
   "variety": true,
   "title": "Follower v3 \u2014 reflex tier + variety",
-  "description": "Trained WITH the reflex tier and --variety (furniture and a wandering duck), 600k decisions on 8 envs. 0.74 / 0.63 in band \u2014 still climbing when it stopped, which v4 settles by running the recipe to 2M."
+  "description": "Trained WITH the reflex tier and --variety (furniture and a wandering duck), 600k decisions on 8 envs. 0.74 / 0.63 in band \u2014 still climbing when it stopped, which v4 settles by running the recipe to 2M.",
+  "group": "shipped-followers"
 }

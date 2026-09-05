@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { groupLearned } from "@/lib/sim";
 import {
   BrainRun,
   CurvePoint,
@@ -157,16 +158,28 @@ export default function TrainPanel() {
             </div>
             {/* The one scrolling region on the page. */}
             <div style={S.list}>
-              {runs.map((r) => (
-                <RunCard
-                  key={r.name}
-                  run={r}
-                  color={colors.get(r.name)!}
-                  hidden={hidden.has(r.name)}
-                  baseline={baseline}
-                  onToggle={() => toggle(r.name)}
-                />
-              ))}
+              {/* Filed under the use case each run answers (brain.json `group`),
+                  the same headings the /sim brain menu uses. */}
+              {groupLearned(runs.map((r) => ({ name: r.name, title: r.title ?? null, group: r.group ?? null, description: null }))).map(
+                ([label, members]) => (
+                  <div key={label}>
+                    <div style={S.groupHead}>{label}</div>
+                    {members.map(({ name }) => {
+                      const r = runs.find((x) => x.name === name)!;
+                      return (
+                        <RunCard
+                          key={r.name}
+                          run={r}
+                          color={colors.get(r.name)!}
+                          hidden={hidden.has(r.name)}
+                          baseline={baseline}
+                          onToggle={() => toggle(r.name)}
+                        />
+                      );
+                    })}
+                  </div>
+                ),
+              )}
             </div>
           </section>
 
@@ -864,6 +877,7 @@ const S: Record<string, React.CSSProperties> = {
   cardTop: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
   swatch: { width: 11, height: 11, borderRadius: 3, cursor: "pointer", padding: 0 },
   name: { fontSize: 12.5, fontWeight: 700 },
+  groupHead: { fontSize: 9.5, color: "#9ca3af", letterSpacing: ".08em", textTransform: "uppercase", padding: "10px 2px 4px" },
   runId: { fontSize: 10, color: "#6b7280", fontFamily: "ui-monospace, Menlo, monospace", marginLeft: 6 },
   desc: { fontSize: 10.5, color: "#9ca3af", lineHeight: 1.4, margin: "0 0 8px" },
   live: { fontSize: 9.5, color: "#6ee7b7", letterSpacing: 0.4 },

@@ -20,6 +20,26 @@ from .brain_env import ACT_HIGH, ACT_LOW, BRAIN_OBS_DIM, ObsBuilder, onnx_infer
 from .runtime import Intent, Senses, age_inputs, brain_view
 
 
+def learned_index() -> list[dict]:
+    """One entry per exported learned brain, with what people READ about it:
+    {name, title, group, description}. The /sim brain menu files the entries
+    under their group and shows the title; the name stays the value it
+    sends back, because learned:<name> is the identifier."""
+    out = []
+    d = brains_dir()
+    if not d.exists():
+        return out
+    for onnx in sorted(d.glob("*/brain.onnx")):
+        meta = {}
+        try:
+            meta = json.loads((onnx.parent / "brain.json").read_text())
+        except (OSError, ValueError):
+            pass
+        out.append({"name": onnx.parent.name, "title": meta.get("title"),
+                    "group": meta.get("group"), "description": meta.get("description")})
+    return out
+
+
 def brains_dir() -> Path:
     return Path(os.environ.get("MICRODUCK_BRAINS_DIR",
                                Path(__file__).resolve().parents[3] / "brains"))

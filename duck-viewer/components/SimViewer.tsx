@@ -29,6 +29,7 @@ import {
   depthColor,
   fetchRing,
   fetchScenarios,
+  groupLearned,
   deleteScenario,
   fetchWorld,
   frameEvents,
@@ -1543,11 +1544,29 @@ export default function SimViewer() {
                     onChange={(e) => client?.sendBrain(selDuck.id, e.target.value)}
                     style={{ ...BTN, padding: "1px 4px" }}
                   >
-                    {(world?.brains ?? ["wander", "follow", "script"]).map((k) => (
+                    {/* Rule brains flat, then the learned ones filed under their
+                        use case and shown by title — 49 runs called p-batch-s1x
+                        in one flat list was the menu nobody could use. */}
+                    {(world?.brains ?? ["wander", "follow", "script"]).filter((k) => !k.startsWith("learned:")).map((k) => (
                       <option key={k} value={k}>
                         {k}
                       </option>
                     ))}
+                    {world?.learned?.length
+                      ? groupLearned(world.learned).map(([label, brains]) => (
+                          <optgroup key={label} label={label}>
+                            {brains.map((b) => (
+                              <option key={b.name} value={`learned:${b.name}`} title={b.description ?? undefined}>
+                                {b.title ? `${b.title} · ${b.name}` : b.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))
+                      : (world?.brains ?? []).filter((k) => k.startsWith("learned:")).map((k) => (
+                          <option key={k} value={k}>
+                            {k}
+                          </option>
+                        ))}
                     {selDuck.brain.kind === "manual" && <option value="">manual</option>}
                   </select>
                   <label title="apply the brain's gaze intent to the walker's head command (the shipped walker never trained with one)">

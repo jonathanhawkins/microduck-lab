@@ -19,5 +19,6 @@
   "seed": 0,
   "fixed_preset": null,
   "title": "Follower v1 \u2014 obs v1 baseline",
-  "description": "The first learned follower: version-1 observation, no reflex tier, 400k decisions on 12 envs. The baseline every later follower is scored against \u2014 0.72 / 0.57 in band (datasheet / hostile)."
+  "description": "The first learned follower: version-1 observation, no reflex tier, 400k decisions on 12 envs. The baseline every later follower is scored against \u2014 0.72 / 0.57 in band (datasheet / hostile).",
+  "group": "shipped-followers"
 }

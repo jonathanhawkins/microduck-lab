@@ -21,5 +21,6 @@
   "fixed_preset": null,
   "variety": true,
   "title": "Follower v4 \u2014 the pick",
-  "description": "v3's recipe run to 2M decisions with --variety, retrained on the legs detector. 0.81 / 0.76 in band, the widest lead on the table; ships as the default learned brain (learned:follow-v4)."
+  "description": "v3's recipe run to 2M decisions with --variety, retrained on the legs detector. 0.81 / 0.76 in band, the widest lead on the table; ships as the default learned brain (learned:follow-v4).",
+  "group": "shipped-followers"
 }

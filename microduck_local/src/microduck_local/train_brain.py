@@ -184,6 +184,9 @@ def main() -> None:
                     help="a human name for this run, shown in place of --run-name on the "
                          "/train page. The run name is an identifier (what --init-from, "
                          "learned:<name> and select-brain address); this is what people read")
+    ap.add_argument("--group", default=None, metavar="KEY",
+                    help="the use case this run files under on the /train page and in the /sim brain "
+                         "menu (see `describe-brain --help` for the keys)")
     ap.add_argument("--description", default=None, metavar="TEXT",
                     help="one or two sentences: what this run tests, against what, and — once "
                          "known — what it found. `describe-brain` edits it later")
@@ -531,7 +534,7 @@ def main() -> None:
             "net_arch": args.net_arch, "n_epochs": args.n_epochs,
         "n_steps": args.n_steps, "batch_size": batch, "lr": args.lr, "lr_end": args.lr_end,
             "log_std_max": log_std_max, "legacy_hparams": LEGACY, **git_state(),
-            "title": args.title, "description": args.description}
+            "title": args.title, "description": args.description, "group": args.group}
     if not args.title:
         # Not fatal — sweep scripts launch dozens of runs — but loud: a board of
         # runs called p-batch-s14 and z1 turned out to be unreadable a day later.

@@ -66,6 +66,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .brain import REGISTRY, Intent, Senses
+from .brain.learned import learned_index
 from .brain import runtime as brain_runtime
 from .brain import tidy as _tidy  # noqa: F401  (registers the tidy brain)
 from .brain.mapping import GridSpec, OccupancyGrid
@@ -299,6 +300,10 @@ class WorldState:
             "ducks": [duck_info(w, d, self.brains) for d in w.ducks.values()] if w else [],
             "presets": list(TOF_PRESETS),
             "brains": REGISTRY.available(),
+            # The same learned brains with their titles and groups, so the
+            # inspector's menu can file 49 runs under six headings instead of
+            # listing p-batch-s14 next to p-batch-s13.
+            "learned": learned_index(),
         }
 
     def senses_for(self, d) -> Senses:
