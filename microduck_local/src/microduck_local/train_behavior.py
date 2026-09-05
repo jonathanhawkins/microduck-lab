@@ -43,7 +43,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .behaviors import BEHAVIORS, Behavior, BehaviorEnv, is_symmetric
+from .behaviors import (BEHAVIORS, Behavior, BehaviorEnv, is_symmetric,
+                        resolve_clip_name)
 from .ppo_hparams import (
     DEFAULT_DESIRED_KL,
     DEFAULT_SYMMETRY_COEF,
@@ -343,9 +344,13 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     # Weights go in behavior.json so a restarted/inspected run can't silently
     # train under a different scorecard than the one on record.
+    # The clip too: an imitation run is about ONE authored motion, and the
+    # lab re-seats finished runs from this file (TrainingJob.adopt) — without
+    # it a ✨ fine-tune silently practiced the recipe's default clip.
     (out / "behavior.json").write_text(json.dumps(
         {"behavior": b.id, "steps": steps, "weights": weights,
-         "symmetry_coef": symmetry_coef, "desired_kl": args.desired_kl}))
+         "symmetry_coef": symmetry_coef, "desired_kl": args.desired_kl,
+         "clip": resolve_clip_name(b)}))
 
     # Fork workers BEFORE importing torch. A torch-initialized parent has
     # OpenMP/Accelerate thread pools; forking them deadlocks on macOS.

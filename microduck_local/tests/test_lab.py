@@ -1358,6 +1358,111 @@ def test_teach_endpoint_makes_the_budget_sticky(fake_popen, monkeypatch):
     assert V.load_teach_weights()["backflip"]["stageSteps"] == {"1": 400_000}
 
 
+# ------------------------------------------------- imitation runs keep their clip
+
+
+def _seed_clip(monkeypatch, tmp_path, name):
+    clips = tmp_path / "clips"
+    clips.mkdir(exist_ok=True)
+    monkeypatch.setenv("MICRODUCK_CLIPS_DIR", str(clips))
+    (clips / f"{name}.json").write_text(json.dumps(
+        {"version": 1, "name": name, "duration": 1.0, "loop": False,
+         "keys": [{"t": 0.0, "joints": [float(j) for j in C.DEFAULT_POSE], "rootPitch": 0.0}]}))
+
+
+def _launch_env(proc):
+    return proc.kwargs.get("env") or {}
+
+
+def test_teach_text_is_the_behavior_id(fake_popen, monkeypatch, tmp_path):
+    """The panel's retrain/fine-tune buttons send the card's id. Before, they
+    echoed its TITLE — and an imitation card is titled after its clip, so
+    `Perform “backflip”` retrained the floor-roll recipe, `Perform
+    “sprint-cycle”` the runner, and a clip named after nothing matched
+    nothing at all."""
+    import importlib
+    monkeypatch.setattr(importlib, "reload", lambda m: m)
+    _seed_clip(monkeypatch, tmp_path, "backflip")
+    app = V.make_app([])
+    teach = _endpoint(app, "/teach", "POST")
+    stop = _endpoint(app, "/teach/stop", "POST")
+
+    out = asyncio.run(teach(V.TeachReq(text="imitate", clip="backflip")))
+    assert out["matched"]
+    assert out["job"]["behavior"]["id"] == "imitate"
+    assert out["job"]["behavior"]["clip"] == "backflip"
+    assert out["job"]["behavior"]["title"] == "Perform “backflip”"
+    assert _launch_env(fake_popen[-1])["MICRODUCK_CLIP"] == "backflip"
+    asyncio.run(stop())
+
+    # The lab's own display title still reaches the imitation recipe with
+    # that clip (an older panel echoes it back verbatim) — it must never
+    # pick the recipe that owns a keyword inside the clip's name.
+    out = asyncio.run(teach(V.TeachReq(text="Perform “backflip”")))
+    assert out["matched"], out
+    assert out["job"]["behavior"]["id"] == "imitate"
+    assert _launch_env(fake_popen[-1])["MICRODUCK_CLIP"] == "backflip"
+    asyncio.run(stop())
+
+    # ...and a title naming a clip that was never saved is refused, not
+    # silently trained against the recipe's default clip.
+    out = asyncio.run(teach(V.TeachReq(text="Perform “nope”")))
+    assert not out["matched"] and "nope" in out["message"]
+
+    # Every other card id round-trips too — the panel special-cases nothing.
+    for b in B.BEHAVIORS.values():
+        out = asyncio.run(teach(V.TeachReq(text=b.id)))
+        assert out["matched"] and out["job"]["behavior"]["id"] == b.id, b.id
+        asyncio.run(stop())
+
+
+def test_adopted_imitation_run_keeps_its_clip(fake_popen, monkeypatch, tmp_path):
+    """Seating a finished imitation run (POST /teach/load — what clicking its
+    duck does) must bring its clip back: the card is titled after it, and a
+    ✨ fine-tune practices the SAME motion. train_behavior records the clip in
+    behavior.json for exactly this; a fine-tune request that omits the clip
+    inherits the run's, rather than the recipe's default."""
+    import importlib
+    monkeypatch.setattr(importlib, "reload", lambda m: m)
+    _seed_clip(monkeypatch, tmp_path, "hop")
+    _seed_clip(monkeypatch, tmp_path, "backflip")
+    run = _seed_finished_run("teach-imitate-hop-abc123", behavior="imitate")
+    json_meta = json.loads((run / "behavior.json").read_text())
+    (run / "behavior.json").write_text(json.dumps({**json_meta, "clip": "hop"}))
+    for f in ("model.zip", "vecnormalize.pkl"):
+        (run / f).write_bytes(b"x")
+    app = V.make_app([])
+    load = _endpoint(app, "/teach/load", "POST")
+    teach = _endpoint(app, "/teach", "POST")
+
+    seated = asyncio.run(load(V.LoadRunReq(policy="run:teach-imitate-hop-abc123")))
+    assert seated["ok"], seated
+    assert seated["job"]["behavior"]["clip"] == "hop"
+    assert seated["job"]["behavior"]["title"] == "Perform “hop”"
+
+    # Fine-tune the way the panel does now: id + the card's clip.
+    out = asyncio.run(teach(V.TeachReq(text="imitate", clip="hop",
+                                       initFrom="teach-imitate-hop-abc123")))
+    assert out["matched"], out
+    assert _launch_env(fake_popen[-1])["MICRODUCK_CLIP"] == "hop"
+    assert _flag(fake_popen[-1].cmd, "--init-from") == str(run)
+    asyncio.run(_endpoint(app, "/teach/stop", "POST")())
+
+    # An older panel sends no clip at all: the run's own clip still wins over
+    # the recipe default ("backflip").
+    out = asyncio.run(teach(V.TeachReq(text="imitate",
+                                       initFrom="teach-imitate-hop-abc123")))
+    assert out["matched"], out
+    assert _launch_env(fake_popen[-1])["MICRODUCK_CLIP"] == "hop"
+    asyncio.run(_endpoint(app, "/teach/stop", "POST")())
+
+    # A run that predates the record seats clip-less, like before.
+    old = _seed_finished_run("teach-imitate-old111", behavior="imitate")
+    seated = asyncio.run(load(V.LoadRunReq(policy="run:teach-imitate-old111")))
+    assert seated["ok"] and "clip" not in seated["job"]["behavior"]
+    assert V.run_clip(old) is None
+
+
 def test_teach_steps_override_does_not_poison_the_sticky_budget(fake_popen,
                                                                 monkeypatch):
     import importlib

@@ -78,6 +78,29 @@ def test_init_from_continues_step_count(tmp_path):
     assert last.get("done") is True and last["total"] == 40000
 
 
+def test_behavior_json_records_the_clip(tmp_path, monkeypatch):
+    """An imitation run writes the clip it trained against into behavior.json
+    (the lab re-seats finished runs from that file, and a fine-tune must
+    practice the same motion); recipes without a clip record none."""
+    clips = tmp_path / "clips"
+    clips.mkdir()
+    (clips / "hop.json").write_text(json.dumps(
+        {"version": 1, "name": "hop", "duration": 0.5, "loop": False,
+         "keys": [{"t": 0.0, "joints": [0.0] * 14, "rootPitch": 0.0},
+                  {"t": 0.4, "joints": [0.0] * 14, "rootPitch": -0.3}]}))
+    monkeypatch.setenv("MICRODUCK_CLIPS_DIR", str(clips))
+    monkeypatch.setenv("MICRODUCK_CLIP", "hop")
+    _run(["imitate", "--envs", "2", "--steps", "2000", "--run-name", "cliprec",
+          "--snap-steps", "1000"], tmp_path)
+    meta = json.loads((tmp_path / "cliprec" / "behavior.json").read_text())
+    assert meta["behavior"] == "imitate" and meta["clip"] == "hop"
+
+    monkeypatch.delenv("MICRODUCK_CLIP")
+    _run(["stand", "--envs", "2", "--steps", "2000", "--run-name", "noclip",
+          "--snap-steps", "1000"], tmp_path)
+    assert json.loads((tmp_path / "noclip" / "behavior.json").read_text())["clip"] is None
+
+
 def test_export_ships_the_final_policy(tmp_path):
     """A run deploys its FINAL policy.
 

@@ -557,7 +557,10 @@ function RecipeEditor({
                 byPolarity(pickable).map((a) => (
                   <button
                     key={a.key}
-                    onClick={() => setAdded((w) => ({ ...w, [a.key]: a.weight }))}
+                    onClick={() => {
+                      setAdded((w) => ({ ...w, [a.key]: a.weight }));
+                      setPickerOpen(false);
+                    }}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -1219,6 +1222,7 @@ export function TeachPanel({
    *  the server's per-behavior memory the fallback. */
   async function postTeach(body: {
     text: string;
+    clip?: string;
     weights?: Record<string, number>;
     stageWeights?: Record<string, Record<string, number>>;
     stageSteps?: Record<string, number>;
@@ -1288,6 +1292,7 @@ export function TeachPanel({
     stageWeights: Record<string, Record<string, number>> | null
   ) {
     if (!training) return;
+    const clip = training.behavior.clip;
     const n = Object.keys(weights).length;
     const tweak = n ? ` with ${n} adjusted weight${n > 1 ? "s" : ""}` : "";
     setMsgs((m) => [
@@ -1300,7 +1305,13 @@ export function TeachPanel({
       },
     ]);
     await postTeach({
-      text: training.behavior.title,
+      // The stable id, never the card's title: the server matches an id
+      // exactly, while a title is display text — an imitation card is
+      // titled `Perform “<clip>”`, and scored as prose that reached
+      // whichever recipe owned a keyword inside the clip's name. The clip
+      // rides along explicitly so a retrain/fine-tune trains the same motion.
+      text: training.behavior.id,
+      ...(clip ? { clip } : {}),
       ...(n ? { weights } : {}),
       ...(fineTune ? { initFrom: training.runName } : {}),
       ...(!fineTune && stageWeights ? { stageWeights } : {}),
