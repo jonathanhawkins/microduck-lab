@@ -1305,11 +1305,12 @@ export function TeachPanel({
       },
     ]);
     await postTeach({
-      // Imitation cards replace the matchable title "Copy the animation"
-      // with a clip-specific display title such as `Perform “…”`.
-      // Keep matching on the behavior id and carry the clip explicitly so a
-      // retrain/fine-tune cannot fail matching or silently use another clip.
-      text: training.behavior.id === "imitate" ? "imitate" : training.behavior.title,
+      // The stable id, never the card's title: the server matches an id
+      // exactly, while a title is display text — an imitation card is
+      // titled `Perform “<clip>”`, and scored as prose that reached
+      // whichever recipe owned a keyword inside the clip's name. The clip
+      // rides along explicitly so a retrain/fine-tune trains the same motion.
+      text: training.behavior.id,
       ...(clip ? { clip } : {}),
       ...(n ? { weights } : {}),
       ...(fineTune ? { initFrom: training.runName } : {}),
