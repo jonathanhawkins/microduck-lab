@@ -287,7 +287,12 @@ function MStepsInput({
 // --- the "edit the recipe" section -----------------------------------------
 // While training runs the sliders are the read-only truth of the live
 // scorecard; once the run ends they unlock, and the two buttons resubmit the
-// behavior with only the weights the user actually moved.
+// behavior with the run's FULL effective recipe — every term at the weight
+// the run actually trained under, the moved sliders and added terms folded
+// in. The server treats an explicit weights dict as the complete override
+// set, so sending only the touched keys silently reset every other term to
+// its recipe default (a seated imitate run's rotation_match 6.05 fell back to
+// 4.00 the moment one catalog term was added).
 
 function RecipeEditor({
   t,
@@ -296,7 +301,10 @@ function RecipeEditor({
 }: {
   t: TrainingPayload;
   wide: boolean;
-  onSubmit: (weights: Record<string, number>, fineTune: boolean) => void;
+  /** `weights` is the full effective set to train under; `changed` counts
+   *  the edits the user actually made — moved sliders plus added terms —
+   *  for the chat note. */
+  onSubmit: (weights: Record<string, number>, fineTune: boolean, changed: number) => void;
 }) {
   // Only touched sliders live here; everything else displays the effective
   // weight straight from the stream. Keyed by run so a new run resets dirt.
@@ -328,13 +336,18 @@ function RecipeEditor({
 
   const live = t.status === "training";
   const effective = (key: string, fallback: number) => t.weights[key] ?? fallback;
-  const moved: Record<string, number> = {};
+  // What the next run trains under: every recipe term at its effective
+  // weight (the stream's t.weights is what the seated run actually used),
+  // with touched sliders laid over. `movedN` is the count of real moves.
+  const submitted: Record<string, number> = {};
+  let movedN = 0;
   for (const term of t.behavior.terms) {
+    const base = effective(term.key, term.weight);
     const v = edited[term.key];
-    if (v != null && Math.abs(v - effective(term.key, term.weight)) > 1e-9)
-      moved[term.key] = v;
+    const moved = v != null && Math.abs(v - base) > 1e-9;
+    if (moved) movedN += 1;
+    submitted[term.key] = moved ? v : base;
   }
-  const movedN = Object.keys(moved).length;
 
   // Catalog terms: already-pulled ones render as regular slider rows and fold
   // into the submitted weights (adding at the default weight is itself the
@@ -345,7 +358,7 @@ function RecipeEditor({
   const addedTerms = catalog.filter((a) => !inRecipe.has(a.key) && added[a.key] != null);
   const pickable = catalog.filter((a) => !inRecipe.has(a.key) && added[a.key] == null);
   const addedN = addedTerms.length;
-  for (const a of addedTerms) moved[a.key] = added[a.key];
+  for (const a of addedTerms) submitted[a.key] = added[a.key];
 
   const btn: React.CSSProperties = {
     background: "#1c2230",
@@ -598,12 +611,12 @@ function RecipeEditor({
       {!live && (
         <div style={{ marginTop: 6 }}>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <button style={btn} onClick={() => onSubmit(moved, false)}>
+            <button style={btn} onClick={() => onSubmit(submitted, false, movedN + addedN)}>
               ↻ retrain with edited recipe
             </button>
             <button
               style={{ ...btn, color: "#d8c97d", borderColor: "#5a5233" }}
-              onClick={() => onSubmit(moved, true)}
+              onClick={() => onSubmit(submitted, true, movedN + addedN)}
             >
               ✨ fine-tune the result
             </button>
@@ -652,7 +665,8 @@ function LiveTraining({
   onRecipeSubmit: (
     weights: Record<string, number>,
     fineTune: boolean,
-    stageWeights: StageWeightsMap | null
+    stageWeights: StageWeightsMap | null,
+    changed: number
   ) => void;
   onStageWeights: (stageWeights: StageWeightsMap) => void;
   onStartStage: (idx: number, stageWeights: StageWeightsMap | null) => void;
@@ -1085,7 +1099,7 @@ function LiveTraining({
         wide={wide}
         // Pending stage edits ride the retrain (the fine-tune path is a
         // single run — the server drops them there).
-        onSubmit={(w, ft) => onRecipeSubmit(w, ft, stageWeightsOrNull())}
+        onSubmit={(w, ft, changed) => onRecipeSubmit(w, ft, stageWeightsOrNull(), changed)}
       />
     </div>
   );
@@ -1282,19 +1296,22 @@ export function TeachPanel({
     await postTeach({ text: trimmed });
   }
 
-  /** Recipe buttons: resubmit the current behavior with the moved sliders,
-   *  fresh (retrain) or warm-started from the finished run (fine-tune).
-   *  Pending per-stage edits ride the retrain path (fine-tunes are single
-   *  runs — the server ignores stage weights there, so don't send them). */
+  /** Recipe buttons: resubmit the current behavior under its full effective
+   *  recipe (the run's own weights with the moved sliders and added terms
+   *  folded in — see RecipeEditor), fresh (retrain) or warm-started from the
+   *  finished run (fine-tune). Pending per-stage edits ride the retrain path
+   *  (fine-tunes are single runs — the server ignores stage weights there,
+   *  so don't send them). `changed` is how many sliders actually moved. */
   async function submitRecipe(
     weights: Record<string, number>,
     fineTune: boolean,
-    stageWeights: Record<string, Record<string, number>> | null
+    stageWeights: Record<string, Record<string, number>> | null,
+    changed: number
   ) {
     if (!training) return;
     const clip = training.behavior.clip;
     const n = Object.keys(weights).length;
-    const tweak = n ? ` with ${n} adjusted weight${n > 1 ? "s" : ""}` : "";
+    const tweak = changed ? ` with ${changed} adjusted weight${changed > 1 ? "s" : ""}` : "";
     setMsgs((m) => [
       ...m,
       {

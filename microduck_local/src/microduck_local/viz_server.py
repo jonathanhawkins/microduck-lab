@@ -33,7 +33,9 @@ HTTP (default 127.0.0.1:8788):
                     none exists), "initFrom": "<run name>" to fine-tune an
                     existing run's policy under the (possibly edited) recipe
                     — that stays a SINGLE run, using the final stage's env
-                    knobs, "steps": N the TOTAL practice budget for the whole
+                    knobs, and its weights MERGE over what that run trained
+                    under (its behavior.json), so a one-slider edit can't
+                    silently reset the rest of the recipe, "steps": N the TOTAL practice budget for the whole
                     job (the panel's "how long should it practice?" control) —
                     a staged chain splits it across its stages in PROPORTION
                     to their declared steps (split_step_budget), so the
@@ -1804,6 +1806,20 @@ def resolve_stage_init(behavior_id: str, start_stage: int) -> Path:
     return max(candidates, key=lambda d: (d / "model.zip").stat().st_mtime)
 
 
+def run_trained_weights(run: Path) -> dict[str, float]:
+    """The reward weights a finished run ACTUALLY trained under — its
+    behavior.json (written by train_behavior before the first step, and the
+    same record TrainingJob.adopt seats in the panel). {} for a run that
+    predates the file or whose record is unreadable: a fine-tune of such a
+    run falls back to the recipe defaults, which is all anyone knows."""
+    try:
+        meta = json.loads((run / "behavior.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    weights = meta.get("weights") if isinstance(meta, dict) else None
+    return dict(weights) if isinstance(weights, dict) else {}
+
+
 def resolve_init_from(name: str) -> Path:
     """Validate a /teach initFrom run name into a warm-startable run dir.
     Raises ValueError with a client-facing message."""
@@ -3026,12 +3042,23 @@ def make_app(ducks: list[Duck]):
         # Sticky sliders: no weights in the request means "same as I had it",
         # not "back to defaults" — inherit this behavior's last-used settings
         # (both layers: behavior-level and per-stage). Explicit values
-        # (retrain/fine-tune, or a scripted call) win and become the new
-        # sticky set.
+        # (retrain, or a scripted call) win and become the new sticky set —
+        # except for a fine-tune, whose base is the run it continues.
         sticky = load_teach_weights()
         prev_sticky = sticky.get(b.id, empty_sticky())
-        weights = (req.weights if req.weights is not None
-                   else prev_sticky["weights"] or None)
+        if init_from is not None:
+            # A fine-tune continues THAT run's brain, so its recipe is the
+            # base and the request's weights layer over it (per key) — not
+            # the sticky set, and not a replacement. Before this the panel's
+            # "touched sliders only" dict replaced everything: a run seated
+            # from /teach/load with rotation_match at 6.05 was fine-tuned
+            # after adding one catalog term, and rotation_match silently
+            # dropped back to the recipe's 4.00 with no message.
+            weights = {**run_trained_weights(init_from),
+                       **(req.weights or {})} or None
+        else:
+            weights = (req.weights if req.weights is not None
+                       else prev_sticky["weights"] or None)
         stage_weights = (req.stageWeights if req.stageWeights is not None
                          else prev_sticky["stageWeights"] or None)
         # Same "same as I had it" rule for the practice budget.
