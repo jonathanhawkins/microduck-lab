@@ -1419,6 +1419,76 @@ def test_teach_load_seats_finished_run(fake_popen, monkeypatch):
     asyncio.run(stop())
 
 
+def test_fine_tune_merges_over_the_seated_runs_weights(fake_popen, monkeypatch):
+    """Retrain/fine-tune of a seated run must carry the weights that run
+    ACTUALLY trained under. Observed 2026-09-04: an imitate run seated via
+    /teach/load with rotation_match at 6.05 was fine-tuned after adding one
+    catalog term; the panel sent only the touched keys, the server took that
+    dict as the complete override set, and rotation_match fell back to the
+    recipe's 4.00 with no message. With initFrom the server now layers the
+    request over the run's behavior.json — a delta can't reset the rest."""
+    import importlib
+    monkeypatch.setattr(importlib, "reload", lambda m: m)
+    run = _seed_finished_run("teach-spin-seat7", weights={"spin_fast": 6.05})
+    (run / "model.zip").touch()
+    (run / "vecnormalize.pkl").touch()
+    # A stale sticky crank must NOT be the fine-tune's base either — the
+    # brain being continued is the base.
+    V.save_teach_weights({"spin": {**V.empty_sticky(),
+                                   "weights": {"spin_fast": 9.0}}})
+    app = V.make_app([])
+    load = _endpoint(app, "/teach/load", "POST")
+    teach = _endpoint(app, "/teach", "POST")
+    stop = _endpoint(app, "/teach/stop", "POST")
+
+    seated = asyncio.run(load(V.LoadRunReq(policy="run:teach-spin-seat7")))
+    assert seated["ok"] and seated["job"]["weights"]["spin_fast"] == 6.05
+
+    # The panel's old shape: only the added catalog term in `weights`.
+    out = asyncio.run(teach(V.TeachReq(text="spin in place",
+                                       initFrom="teach-spin-seat7",
+                                       weights={"head_up": 1.0})))
+    assert out["matched"]
+    argv = fake_popen[0].cmd
+    assert _flag(argv, "--init-from") == str(run)
+    assert json.loads(_flag(argv, "--weights-json")) == {"spin_fast": 6.05,
+                                                         "head_up": 1.0}
+    assert out["job"]["weights"]["spin_fast"] == 6.05
+    assert out["job"]["weights"]["head_up"] == 1.0
+    # …and the merged set is what sticks for this behavior.
+    assert V.load_teach_weights()["spin"]["weights"] == {"spin_fast": 6.05,
+                                                         "head_up": 1.0}
+    asyncio.run(stop())
+
+    # An explicit value for a key the run trained under still wins (that is
+    # the user dragging the slider), and no weights at all means "exactly
+    # what the run had", not the sticky set or the recipe defaults.
+    out = asyncio.run(teach(V.TeachReq(text="spin in place",
+                                       initFrom="teach-spin-seat7",
+                                       weights={"spin_fast": 3.0})))
+    assert json.loads(_flag(fake_popen[1].cmd, "--weights-json")) == {
+        "spin_fast": 3.0}
+    asyncio.run(stop())
+    out = asyncio.run(teach(V.TeachReq(text="spin in place",
+                                       initFrom="teach-spin-seat7")))
+    assert json.loads(_flag(fake_popen[2].cmd, "--weights-json")) == {
+        "spin_fast": 6.05}
+    asyncio.run(stop())
+
+    # A run predating behavior.json fine-tunes under the request alone.
+    bare = V.RUNS_DIR / "teach-spin-bare7"
+    bare.mkdir(parents=True)
+    (bare / "model.zip").touch()
+    (bare / "vecnormalize.pkl").touch()
+    out = asyncio.run(teach(V.TeachReq(text="spin in place",
+                                       initFrom="teach-spin-bare7",
+                                       weights={"head_up": 1.0})))
+    assert out["matched"]
+    assert json.loads(_flag(fake_popen[3].cmd, "--weights-json")) == {
+        "head_up": 1.0}
+    asyncio.run(stop())
+
+
 def test_adopted_job_survives_the_lab_poll_cycle(fake_popen):
     """The adopted job has no subprocess: the lab loop's poll()/stop()/
     stats.sample() must all be safe with proc=None, and poll() replays the
