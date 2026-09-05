@@ -17,6 +17,7 @@ import {
   fetchBrains,
   humanDuration,
   humanSteps,
+  displayName,
   matrixRows,
   type MatrixRow,
   recipeChips,
@@ -271,10 +272,18 @@ function RunCard({
             border: `1.5px solid ${color}`,
           }}
         />
-        <span style={S.name}>{run.name}</span>
+        <span style={S.name}>{displayName(run)}</span>
+        {run.title && <span style={S.runId} title="the run's name on disk — what --init-from and learned:<name> address">{run.name}</span>}
         {run.active && <span style={S.live}>● live</span>}
         {!run.active && run.shipped && <span style={S.ship}>shipped</span>}
       </div>
+      {run.description ? (
+        <p style={S.desc}>{run.description}</p>
+      ) : (
+        <p style={{ ...S.desc, ...S.dim }} title={`uv run describe-brain ${run.name} --title ... --description ...`}>
+          no description — describe-brain {run.name}
+        </p>
+      )}
 
       {pct != null && (
         <div style={S.barTrack}>
@@ -451,7 +460,7 @@ function Matrix({
                 <tr
                   key={r.key}
                   onClick={() => onToggle(names)}
-                  title={on === names.length ? "remove from the chart" : "add to the chart"}
+                  title={`${r.description ? r.description + "\n\n" : ""}${on === names.length ? "click: remove from the chart" : "click: add to the chart"}`}
                   style={{ ...S.tr, opacity: on ? 1 : 0.5 }}
                 >
                   <td style={S.td}>
@@ -465,7 +474,8 @@ function Matrix({
                         border: `1.5px solid ${c}`,
                       }}
                     />
-                    {r.key}
+                    {r.label}
+                    {r.label !== r.key && <span style={S.runId}>{r.key}</span>}
                     {byFamily && names.length > 1 && <span style={S.dim}> ×{names.length}</span>}
                   </td>
                   <td style={{ ...S.td, ...S.num, color: isBest ? "#6ee7b7" : "#e5e7eb", fontWeight: isBest ? 700 : 400 }}>
@@ -854,6 +864,8 @@ const S: Record<string, React.CSSProperties> = {
   cardTop: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
   swatch: { width: 11, height: 11, borderRadius: 3, cursor: "pointer", padding: 0 },
   name: { fontSize: 12.5, fontWeight: 700 },
+  runId: { fontSize: 10, color: "#6b7280", fontFamily: "ui-monospace, Menlo, monospace", marginLeft: 6 },
+  desc: { fontSize: 10.5, color: "#9ca3af", lineHeight: 1.4, margin: "0 0 8px" },
   live: { fontSize: 9.5, color: "#6ee7b7", letterSpacing: 0.4 },
   ship: { fontSize: 9.5, color: "#6b7280", letterSpacing: 0.4 },
   barTrack: { height: 3, background: "#1f2937", borderRadius: 3, overflow: "hidden", marginBottom: 9 },

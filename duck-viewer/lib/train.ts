@@ -53,6 +53,12 @@ export interface BrainRun {
   /** The commit the trainer ran from (short sha), and whether the tree was dirty. */
   git_sha?: string;
   git_dirty?: boolean;
+  /** What people READ. The name is an identifier (--init-from, learned:<name>,
+   *  select-brain) and never changes; the title is shown in its place, the
+   *  description says what the run tests and — once known — what it found.
+   *  Written by train-brain --title/--description, or describe-brain later. */
+  title?: string;
+  description?: string;
   /** Written by select-brain: which checkpoint was shipped as brain.onnx, and why. */
   selected?: {
     /** "000751104" (a checkpoint's step, zero-padded) or "final". */
@@ -106,7 +112,23 @@ const NOT_KNOBS = new Set<string>([
   "name", "curve", "last", "progress", "rollouts", "active", "shipped",
   "steps_per_s", "eta_s", "selected", "act_low", "act_high", "obs_dim",
   "decide_every", "probe_presets", "target_cls", "git_dirty", "note",
+  "title", "description",
 ]);
+
+/** The name a run is shown under: its title, else the run name itself. */
+export function displayName(r: BrainRun): string {
+  return r.title?.trim() || r.name;
+}
+
+/**
+ * The name a group of runs is shown under: the one title they all share
+ * (seeds of a sweep are described as a family), else the first title, else
+ * the group key. A family called "p-n256" reads "Capacity sweep: 256-256".
+ */
+export function groupTitle(runs: BrainRun[], key: string): string {
+  const titles = [...new Set(runs.map((r) => r.title?.trim()).filter((t): t is string => !!t))];
+  return titles[0] ?? key;
+}
 
 /** brain.json read as the open record it is; the typed interface is a subset. */
 export const knob = (r: BrainRun, key: string): unknown => (r as unknown as Record<string, unknown>)[key];
@@ -297,6 +319,10 @@ export function sharedKnobs(runs: BrainRun[]): string[] {
 export interface MatrixRow {
   /** Run name, or family name when grouped — "p-de (2)" for a second recipe under one name. */
   key: string;
+  /** What the row is shown as: the members' shared title, else the key. */
+  label: string;
+  /** The members' description (the first that has one) — the row's tooltip. */
+  description: string | null;
   runs: BrainRun[];
   /** Formatted knob per column. */
   knobs: Record<string, string>;
@@ -386,7 +412,9 @@ export function matrixRows(runs: BrainRun[], knobs: Knob[], byFamily: boolean): 
     const [final] = meanSd(pick((r) => r.selected?.final_score));
     const [reward] = meanSd(pick((r) => r.last?.ep_rew));
     const [shippedAt] = meanSd(pick(shippedStep));
-    return { key, runs: members, knobs: cells, raw, score, scoreSd, final, reward, shippedAt };
+    const label = groupTitle(members, key);
+    const description = members.map((r) => r.description?.trim()).find((t) => !!t) ?? null;
+    return { key, label, description, runs: members, knobs: cells, raw, score, scoreSd, final, reward, shippedAt };
   });
   scaleColumns(rows, knobs, byFamily);
   return rows;

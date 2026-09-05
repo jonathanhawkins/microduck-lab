@@ -3,7 +3,7 @@
 // train-brain and select-brain actually write (brains/ab-batch/brain.json).
 
 import { describe, expect, it } from "vitest";
-import { type BrainRun, familyOf, fmtKnob, knobChip, matrixRows, recipeChips, recipeDiff, recipeKeys, sharedKnobs, shippedStep, varyingKnobs } from "./train";
+import { type BrainRun, displayName, familyOf, fmtKnob, groupTitle, knobChip, matrixRows, recipeChips, recipeDiff, recipeKeys, sharedKnobs, shippedStep, varyingKnobs } from "./train";
 
 const base: BrainRun = {
   name: "ab-batch",
@@ -256,6 +256,39 @@ describe("sweep matrix", () => {
     const rows = matrixRows(runs, varyingKnobs(runs), true);
     expect(rows.find((r) => r.key === "b")!.knobs.envs).toBe("32");
     expect(rows.find((r) => r.key === "a")!.knobs.seed).toBe("×2");
+  });
+});
+
+describe("title and description", () => {
+  const titled = (name: string, seed: number, title?: string, description?: string): BrainRun =>
+    ({ ...base, name, seed, title, description } as BrainRun);
+
+  it("are prose, never recipe knobs", () => {
+    const a = titled("p-n256-s31", 31, "Capacity sweep: 256-256", "256-256 against p-n128.");
+    const b = titled("p-n256-s32", 32, "Capacity sweep: 256-256", "256-256 against p-n128.");
+    expect(recipeKeys([a, b]).map(([k]) => k)).not.toContain("title");
+    expect(recipeKeys([a, b]).map(([k]) => k)).not.toContain("description");
+    expect(recipeDiff(a, { ...b, title: "something else" }).map((d) => d.key)).not.toContain("title");
+  });
+
+  it("show the title in place of the run name, and fall back to the name", () => {
+    expect(displayName(titled("z1-s81", 81, "Null pair A"))).toBe("Null pair A");
+    expect(displayName(titled("z1-s81", 81, "   "))).toBe("z1-s81");
+    expect(displayName(titled("z1-s81", 81))).toBe("z1-s81");
+  });
+
+  it("label a family by the title its seeds share", () => {
+    const runs = [
+      titled("p-n256-s31", 31, "Capacity sweep: 256-256", "256-256 against p-n128. (seed 31)"),
+      titled("p-n256-s32", 32, "Capacity sweep: 256-256", "256-256 against p-n128. (seed 32)"),
+      titled("z1-s81", 81),
+    ];
+    const rows = matrixRows(runs, varyingKnobs(runs), true);
+    const fam = rows.find((r) => r.key === "p-n256")!;
+    expect(fam.label).toBe("Capacity sweep: 256-256");
+    expect(fam.description).toBe("256-256 against p-n128. (seed 31)");
+    expect(rows.find((r) => r.key === "z1")!.label).toBe("z1");
+    expect(groupTitle([], "ab-batch")).toBe("ab-batch");
   });
 });
 
