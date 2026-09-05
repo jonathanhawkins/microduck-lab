@@ -97,11 +97,15 @@ export const KNOBS: Knob[] = [
   ["git_sha", "git"],
 ];
 
-/** Fields that describe the run's STATE or contract, not its recipe. */
+/** Fields that describe the run's STATE or contract, not its recipe.
+ *  `note` belongs here for a second reason: it is free prose, and as a knob
+ *  it claimed one run's sentence as something all 49 shared, then would have
+ *  split a sweep's seeds into separate families the moment two of them were
+ *  annotated differently (sameRecipe compares every recipe key). */
 const NOT_KNOBS = new Set<string>([
   "name", "curve", "last", "progress", "rollouts", "active", "shipped",
   "steps_per_s", "eta_s", "selected", "act_low", "act_high", "obs_dim",
-  "decide_every", "probe_presets", "target_cls", "git_dirty",
+  "decide_every", "probe_presets", "target_cls", "git_dirty", "note",
 ]);
 
 /** brain.json read as the open record it is; the typed interface is a subset. */
@@ -362,7 +366,7 @@ export function matrixRows(runs: BrainRun[], knobs: Knob[], byFamily: boolean): 
   } else {
     for (const r of runs) groups.push([r.name, [r]]);
   }
-  return groups.map(([key, members]) => {
+  const rows = groups.map(([key, members]) => {
     const cells: Record<string, string> = {};
     const raw: Record<string, unknown> = {};
     for (const [k] of knobs) {
@@ -384,4 +388,26 @@ export function matrixRows(runs: BrainRun[], knobs: Knob[], byFamily: boolean): 
     const [shippedAt] = meanSd(pick(shippedStep));
     return { key, runs: members, knobs: cells, raw, score, scoreSd, final, reward, shippedAt };
   });
+  scaleColumns(rows, knobs, byFamily);
+  return rows;
+}
+
+/**
+ * A column is read DOWN, so it may not mix units: fmtKnob abbreviates an
+ * integer only from 1e6, which left the budget column reading 400000, 600000,
+ * 800000, 1.00M, 2.00M — five rows the eye cannot rank without converting.
+ * When a whole-number column reaches that far, every cell in it takes the
+ * same scale (the shipped@ column has always read this way).
+ */
+function scaleColumns(rows: MatrixRow[], knobs: Knob[], byFamily: boolean): void {
+  for (const [k] of knobs) {
+    const present = rows.map((r) => r.raw[k]).filter((v) => v != null);
+    const whole = present.every((v) => typeof v === "number" && Number.isInteger(v));
+    if (!whole || !present.some((v) => (v as number) >= 1e6)) continue;
+    for (const r of rows) {
+      // The family seed cell is a member count ("×6"), not a quantity.
+      if (byFamily && k === "seed" && r.runs.length > 1) continue;
+      r.knobs[k] = r.raw[k] == null ? "—" : humanSteps(r.raw[k] as number);
+    }
+  }
 }

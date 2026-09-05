@@ -231,4 +231,47 @@ describe("sweep matrix", () => {
     const fam = matrixRows(runs, knobs, true).find((r) => r.key === "old")!;
     expect(fam.knobs.variety).toBe("—");
   });
+
+  it("scales a whole column to one unit", () => {
+    // budget read 400000 / 600000 / 800000 / 2.00M down one column: fmtKnob
+    // abbreviates from 1e6 only, which is right for a lone chip and wrong for
+    // a column you rank by eye.
+    const runs = [
+      { ...sweep[0], name: "short-s1", steps: 400_000 },
+      { ...sweep[1], name: "short-s2", steps: 800_000 },
+      { ...sweep[2], name: "long-s1", steps: 2_000_000 },
+    ];
+    const rows = matrixRows(runs, varyingKnobs(runs), false);
+    expect(rows.map((r) => r.knobs.steps)).toEqual(["400.0k", "800.0k", "2.00M"]);
+    // The raw value is untouched — that is what the column sorts on.
+    expect(rows[0].raw.steps).toBe(400_000);
+  });
+
+  it("leaves a small whole column alone, and the family seed count", () => {
+    const runs = [
+      { ...sweep[0], name: "a-s1", envs: 12 },
+      { ...sweep[1], name: "a-s2", envs: 12 },
+      { ...sweep[2], name: "b-s1", envs: 32 },
+    ];
+    const rows = matrixRows(runs, varyingKnobs(runs), true);
+    expect(rows.find((r) => r.key === "b")!.knobs.envs).toBe("32");
+    expect(rows.find((r) => r.key === "a")!.knobs.seed).toBe("×2");
+  });
+});
+
+describe("note is prose, not a recipe knob", () => {
+  const withNote = { ...base, name: "follow-v2", note: "400k decisions, then 400k more warm-started" } as BrainRun;
+  const plain = { ...base, name: "follow-v3" } as BrainRun;
+
+  it("never becomes a column, a chip or a diff", () => {
+    expect(recipeKeys([withNote]).map(([k]) => k)).not.toContain("note");
+    expect(varyingKnobs([withNote, plain]).map(([k]) => k)).not.toContain("note");
+    expect(recipeChips(withNote).map((c) => c.key)).not.toContain("note");
+    expect(recipeDiff(withNote, plain).map((d) => d.key)).not.toContain("note");
+  });
+
+  it("is not claimed as something every run shares", () => {
+    // One run's sentence was rendered into "every run ... shares ... note ...".
+    expect(sharedKnobs([withNote, plain]).join(" ")).not.toContain("400k decisions");
+  });
 });
