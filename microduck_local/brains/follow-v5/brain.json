@@ -20,5 +20,7 @@
   "seed": 0,
   "fixed_preset": null,
   "variety": true,
-  "polite": 0.55
+  "polite": 0.55,
+  "title": "Follower v5 \u2014 polite person (not the pick)",
+  "description": "v4's recipe against a person who always stops (polite 0.55). It learned that the person stops: bump signal 2.6\u00d7/episode against v4's 0.3, and no wider lead on the benchmark. v4 stays the pick."
 }

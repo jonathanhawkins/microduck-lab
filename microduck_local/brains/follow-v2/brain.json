@@ -20,5 +20,6 @@
   "seed": 1,
   "fixed_preset": null,
   "init_from": null,
-  "note": "400k decisions, then 400k more warm-started (train-brain --init-from), on the pinned 2026-09 model; obs_version 2"
+  "title": "Follower v2 \u2014 warm-started, obs v2",
+  "description": "Follower on the pinned 2026-09 model at observation version 2: 400k decisions, then 400k more warm-started with --init-from. 0.77 / 0.67 in band; the reflex tier took it from 0.69 to 0.80 on datasheet."
 }

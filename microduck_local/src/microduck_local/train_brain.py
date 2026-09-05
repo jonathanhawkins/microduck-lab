@@ -180,6 +180,13 @@ def export_brain(run_dir: Path, obs_dim: int = BRAIN_OBS_DIM,
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-name", required=True)
+    ap.add_argument("--title", default=None, metavar="TEXT",
+                    help="a human name for this run, shown in place of --run-name on the "
+                         "/train page. The run name is an identifier (what --init-from, "
+                         "learned:<name> and select-brain address); this is what people read")
+    ap.add_argument("--description", default=None, metavar="TEXT",
+                    help="one or two sentences: what this run tests, against what, and — once "
+                         "known — what it found. `describe-brain` edits it later")
     ap.add_argument("--envs", type=int, default=12)
     ap.add_argument("--steps", type=int, default=400_000, help="PPO steps = brain decisions")
     ap.add_argument("--seed", type=int, default=0)
@@ -523,7 +530,13 @@ def main() -> None:
             "probe_presets": probe_presets if args.probe_every > 0 else None,
             "net_arch": args.net_arch, "n_epochs": args.n_epochs,
         "n_steps": args.n_steps, "batch_size": batch, "lr": args.lr, "lr_end": args.lr_end,
-            "log_std_max": log_std_max, "legacy_hparams": LEGACY, **git_state()}
+            "log_std_max": log_std_max, "legacy_hparams": LEGACY, **git_state(),
+            "title": args.title, "description": args.description}
+    if not args.title:
+        # Not fatal — sweep scripts launch dozens of runs — but loud: a board of
+        # runs called p-batch-s14 and z1 turned out to be unreadable a day later.
+        print(f"[train-brain] {args.run_name}: no --title; give it one now or later with "
+              f"`describe-brain {args.run_name} --title ... --description ...`", flush=True)
     if striker:
         meta |= {"target_cls": "ball", "obs_dim": STRIKER_OBS_DIM, "obs_version": STRIKER_OBS_VERSION,
                  "act_low": S_ACT_LOW.tolist(), "act_high": S_ACT_HIGH.tolist(),
