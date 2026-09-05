@@ -446,3 +446,26 @@ def test_clearance_is_selected_by_bearing_so_a_turned_head_cannot_report_a_wall_
     syn = TofFrame(t=0.0, depth_mm=depth, valid=np.ones((8, 8), bool))
     a2, l2, r2 = tof_clearance_bearings(syn)
     assert abs(l2 - 0.15) < 1e-9 and abs(a2 - 2.0) < 1e-9 and abs(r2 - 2.0) < 1e-9
+
+
+def test_a_scene_can_name_a_learned_brain():
+    """The inspector could always switch a duck to `learned:follow-v4` live,
+    but saving that scene failed validation: the brain field was gated by
+    the duck-id pattern, which has no room for the colon or the dashes a
+    run name carries. Built-ins never hit it (they are built in Python),
+    so the only scenes that could hold a learned brain were the ones you
+    could not save."""
+    from microduck_local.world.scenario import ScenarioError, validate_scenario
+    from microduck_local.world_server import builtin_scenarios
+    base = builtin_scenarios()["follow-me"].to_dict()
+    assert base["ducks"][0]["brain"] == "learned:follow-v4"      # the built-in itself
+    sc = validate_scenario(base)
+    assert sc.ducks[0].brain == "learned:follow-v4"
+    assert validate_scenario(sc.to_dict()) == sc
+    for ok in ("follow", "learned:p-n256-s31", "learned:ab-batch-lr", "learned:x.y_z"):
+        base["ducks"][0]["brain"] = ok
+        assert validate_scenario(base).ducks[0].brain == ok
+    for bad in ("Learned:x", "learned:", "follow me", "learned:../etc", 7):
+        base["ducks"][0]["brain"] = bad
+        with pytest.raises(ScenarioError):
+            validate_scenario(base)

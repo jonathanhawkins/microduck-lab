@@ -927,10 +927,12 @@ its current intent live.
   the *senses* only) and `train-brain` / `eval-brain` train and score one:
 
   ```bash
-  uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety   # ~15 min
+  uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety \
+      --title "Follower v4" --description "v3 recipe to 2M with variety"   # ~15 min; the /train page shows the title, not the name
+  uv run describe-brain p-n256-s31 --title ... --description ...   # name a run after the fact; write the FINDING in once it resolves
   uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24   # vs `--brain follow`
   uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24 --jobs 0   # …on every core
-  uv run duck-lab --world follow-me         # inspector: pick brain "learned:follow-v4"
+  uv run duck-lab --world follow-me         # the duck starts on learned:follow-v4; swap to "follow" (the rule brain) in the inspector to compare
   # …and watch the run live at http://localhost:63317/train (duck-viewer)
   ```
 

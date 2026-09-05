@@ -125,7 +125,12 @@ def builtin_scenarios() -> dict[str, Scenario]:
         name="follow-me", floor=(6.5, 5.5),
         walls=[Wall((-fx, -fy), (fx, -fy)), Wall((fx, -fy), (fx, fy)),
                Wall((fx, fy), (-fx, fy)), Wall((-fx, fy), (-fx, -fy))],
-        ducks=[Duck("d0", (0.0, 0.0, 0.0), DEFAULT_POLICY, "datasheet", "datasheet", "follow")],
+        # The shipped follower, not the rule brain: the scene exists to watch
+        # a brain follow a person, and this is the brain that goes on the
+        # robot (README "the follow pick"; swap to "follow" in the inspector
+        # to compare). If this clone lacks brains/follow-v4, load_world's
+        # fallback below runs the duck on "script" and says so in events.
+        ducks=[Duck("d0", (0.0, 0.0, 0.0), DEFAULT_POLICY, "datasheet", "datasheet", "learned:follow-v4")],
         persons=[Person("p0", (1.2, 0.0), 1.57,
                         path=[(1.2, 1.2), (-1.2, 1.2), (-1.2, -1.2), (1.2, -1.2)], speed=0.25)])
     playroom = make_playroom(seed=0, n=6, name="playroom")

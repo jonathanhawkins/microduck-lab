@@ -33,6 +33,12 @@ from pathlib import Path
 SCENARIO_VERSION = 1
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 DUCK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
+# A brain is a registry kind ("follow", "chase") or a shipped brain,
+# "learned:<run>" — run names carry dashes ("follow-v4", "p-n256-s31"), so
+# the duck-id pattern that used to gate this field rejected every learned
+# brain, and a scene could not be SAVED on one even though the inspector
+# could switch a duck to it live.
+BRAIN_RE = re.compile(r"^[a-z][a-z0-9_]*(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?$")
 MAX_DUCKS = 12
 MAX_PERSONS = 4
 MAX_OBJECTS = 200
@@ -250,8 +256,8 @@ def validate_scenario(raw: dict) -> Scenario:
         if det is not None and det not in TOF_PRESETS:
             raise ScenarioError(f"ducks[{i}].detector must be one of {TOF_PRESETS} or null")
         brain = d.get("brain")
-        if brain is not None and (not isinstance(brain, str) or not DUCK_ID_RE.match(brain)):
-            raise ScenarioError(f"ducks[{i}].brain must be a brain kind name or null")
+        if brain is not None and (not isinstance(brain, str) or not BRAIN_RE.match(brain)):
+            raise ScenarioError(f"ducks[{i}].brain must be a brain kind name (or learned:<run>) or null")
         odom = d.get("odom", "ideal") or "ideal"
         if odom not in TOF_PRESETS:
             raise ScenarioError(f"ducks[{i}].odom must be one of {TOF_PRESETS}")

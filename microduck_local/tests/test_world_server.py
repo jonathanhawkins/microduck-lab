@@ -143,12 +143,15 @@ def test_follow_me_scenario_persons_brains_and_possess(app):
     with TestClient(app) as c:
         info = c.post("/world/load", json={"scenario": "follow-me"}).json()
         assert info["ducks"][0]["detector"] == "datasheet" and "follow" in info["brains"]
+        # The scene starts on the SHIPPED follower, so the page's "what the
+        # brain sees" panel has something to draw the moment it loads.
         with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
             frame = None
             for _ in range(8):
                 frame = ws.receive_json()
             d = frame["ducks"][0]
-            assert d["brain"]["kind"] == "follow" and "inputs" in d["brain"]
+            assert d["brain"]["kind"] == "learned:follow-v4" and "inputs" in d["brain"]
+            assert len(d["brain"]["view"]["obs"]) == 80 and len(d["brain"]["view"]["act"]["clipped"]) == 3
             assert d["brain"]["inputs"]["det"]["max"] > 0 and d["headApplied"] is False
             # The frame carries the detector's output for the page's rays and
             # camera inset: the frustum and each detection's three numbers.
@@ -164,7 +167,7 @@ def test_follow_me_scenario_persons_brains_and_possess(app):
             for _ in range(6):
                 frame = ws.receive_json()
             assert frame["possessed"] == "p0" and frame["mode"] == "manual"
-            assert frame["ducks"][0]["brain"]["kind"] == "follow"
+            assert frame["ducks"][0]["brain"]["kind"] == "learned:follow-v4"
             ws.send_text(json.dumps({"brain": {"duck": "d0", "kind": "wander"}}))
             ws.send_text(json.dumps({"possess": None}))
             ws.send_text(json.dumps({"noise": {"duck": "d0", "preset": "hostile", "sensor": "det"}}))
