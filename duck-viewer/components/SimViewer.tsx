@@ -107,6 +107,32 @@ const BTN: React.CSSProperties = {
 
 type Held = Set<string>;
 
+/** A number in a fixed-width slot (ch units; the panel font is monospace),
+ *  right-aligned so the digits line up as the value changes width. */
+function Slot({ w, left, children }: { w: number; left?: boolean; children: React.ReactNode }) {
+  return <span style={{ display: "inline-block", minWidth: `${w}ch`, textAlign: left ? "left" : "right" }}>{children}</span>;
+}
+/** Milliseconds to two places in a 5-char field ("0.65" → " 0.65"), so the
+ *  perf triple keeps its shape when one term crosses 10 ms. The line is
+ *  rendered with whiteSpace: nowrap, which collapses runs of spaces but keeps
+ *  a single leading one. */
+const ms = (v: number) => v.toFixed(2).padStart(5, "\u00a0");
+
+/**
+ * A sensor's age as a reading, not a number. The raw age is quantised to the
+ * 40 ms frame tick and the ToF runs at 15 Hz, so "age 0 / 20 / 40 ms" cycled
+ * every frame — flicker carrying no information. Inside the fresh window the
+ * word is enough; beyond it the age matters, shown in 50 ms steps so it
+ * changes when the situation does. The exact figure stays in the title.
+ */
+function freshness(ageS: number, freshMs: number): { text: string; color: string; title: string } {
+  const ms = Math.round(ageS * 1000);
+  if (ms <= freshMs) return { text: "fresh", color: "#9aa5b1", title: `last frame ${ms} ms ago` };
+  return { text: `stale · ${Math.round(ms / 50) * 50} ms`, color: "#f2b632", title: `last frame ${ms} ms ago` };
+}
+const TOF_FRESH_MS = 150;    // two ToF periods at 15 Hz, with a frame of slack
+const DET_FRESH_MS = 250;    // two detector periods at 10 Hz, likewise
+
 /** Held drive keys → one twist command [vx, vy, wz]. */
 function twistFromKeys(h: Held): [number, number, number] {
   const vx = (h.has("w") || h.has("arrowup") ? 0.3 : 0) + (h.has("s") || h.has("arrowdown") ? -0.2 : 0);
@@ -307,9 +333,11 @@ function CamInset({ client, duckId, top, belowRef, hidden, enabled, open, onTogg
         if (!d) meta.current.textContent = "";
         else if (!det) meta.current.textContent = `${d.id} · head camera · no detector`;
         else {
-          const ageMs = Math.round(det.age * 1000);
-          meta.current.textContent = `${d.id} · head camera ${fov[0]}°×${fov[1]}° · ${det.items.length} det · frame ${ageMs} ms old`;
-          meta.current.style.color = ageMs > 250 ? "#f2b632" : "#9aa5b1";
+          const fresh = freshness(det.age, DET_FRESH_MS);
+          const text = `${d.id} · head camera ${fov[0]}°×${fov[1]}° · ${det.items.length} det · ${fresh.text}`;
+          if (meta.current.textContent !== text) meta.current.textContent = text;
+          meta.current.title = fresh.title;
+          meta.current.style.color = fresh.color;
         }
       }
     };
@@ -733,14 +761,16 @@ function Heatmap({ client, duckId }: { client: SimClient; duckId: string | null 
         if (!tof || !d) {
           meta.current.textContent = d ? "no ToF frame yet" : "select a duck with a ToF";
         } else {
-          const ageMs = Math.round(tof.age * 1000);
+          const fresh = freshness(tof.age, TOF_FRESH_MS);
           const z = hover !== null ? tof.mm[hover] : null;
           const zoneTxt =
             hover !== null && z !== null
               ? ` · zone ${Math.floor(hover / 8)},${hover % 8}: ${z ? (z / 1000).toFixed(2) + " m" : "no target"}`
               : "";
-          meta.current.textContent = `${d.id} · ${d.tof ?? "?"} · age ${ageMs} ms${zoneTxt}`;
-          meta.current.style.color = ageMs > 150 ? "#f2b632" : "#9aa5b1";
+          const text = `${d.id} · ${d.tof ?? "?"} · ${fresh.text}${zoneTxt}`;
+          if (meta.current.textContent !== text) meta.current.textContent = text;   // no DOM churn on a steady reading
+          meta.current.title = fresh.title;
+          meta.current.style.color = fresh.color;
         }
       }
     };
@@ -1172,7 +1202,7 @@ export default function SimViewer() {
         tidy: f?.tidy ?? null,
         soccer: f?.soccer ?? null,
         // Where the lab's 20 ms tick goes: physics+policies / sensors / frame encode.
-        perf: f?.perf ? `${f.perf.stepMs.toFixed(2)}+${f.perf.sensorMs.toFixed(2)}+${(f.perf.encodeMs ?? 0).toFixed(2)} ms` : "",
+        perf: f?.perf ? `${ms(f.perf.stepMs)}+${ms(f.perf.sensorMs)}+${ms(f.perf.encodeMs ?? 0)} ms` : "",
       }));
       setSelected(getSelectedDuck());
       setPossessed(f?.possessed ?? null);
@@ -1477,9 +1507,14 @@ export default function SimViewer() {
           ✎ edit
         </button>
         <span style={{ flex: "1 1 0", minWidth: 0 }} />
+        {/* Every number sits in a slot as wide as its widest value, so the
+            line does not shuffle as t grows a digit, kB/s crosses 100, or
+            "auto" becomes "manual" — a status line that moves is one you
+            cannot read at a glance. The panel font is monospace, so ch is
+            exact. */}
         <span style={{ color: "#9aa5b1", minWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          {scenario ? scenario.name : "no world loaded"} · t {status.t.toFixed(1)} s · RTF {status.rtf.toFixed(2)} · {status.mode} ·{" "}
-          {status.kbps.toFixed(0)} kB/s
+          {scenario ? scenario.name : "no world loaded"} · t <Slot w={6}>{status.t.toFixed(1)}</Slot> s · RTF{" "}
+          <Slot w={4}>{status.rtf.toFixed(2)}</Slot> · <Slot w={6} left>{status.mode}</Slot> · <Slot w={3}>{status.kbps.toFixed(0)}</Slot> kB/s
           {status.perf && (
             <span title="lab cost per 20 ms tick: physics+policies + sensors + frame encode"> · {status.perf}</span>
           )}
