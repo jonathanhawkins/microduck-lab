@@ -49,10 +49,11 @@ import {
   type TofPreset,
   type WorldInfo,
 } from "@/lib/sim";
-import { camAspect, insetHeight, renderInset } from "@/lib/inset";
+import { camAspect, renderInset } from "@/lib/inset";
 import { buildBodyGeometries, Duck } from "./Duck";
 import CameraKeys from "./CameraKeys";
 import { BrainPanel } from "./SimBrain";
+import { consumeDragged, HANDLE, useDrag } from "./useDrag";
 import { applyFloorClick, emptyDraft, SimEditor, type EditorState } from "./SimEditor";
 import { Dynamics, StageEnvironment, Statics } from "./SimStage";
 
@@ -77,9 +78,11 @@ const INSPECTOR_W = 242;   // border box: the old 220 content width + PANEL padd
 const TOP_BAR_MIN_BOTTOM = 46;
 // The head-camera inset is as wide as the inspector (border-box), at the
 // camera's aspect; the inspector reserves that much room so the pair fits.
-const CAM_INSET_H = insetHeight(INSPECTOR_W, CAM_FOV_DEG) + GAP;
+// The head-camera inset lives top-left, under the top bar, where nothing
+// else sits over it — bottom-right it was under the event log and the
+// scrub bar. Wider than the inspector: it is the thing you look AT.
+const CAM_W = 280;
 // ...and when that inset is minimized, only its bar hangs off the edge.
-const CAM_BAR_H = 26 + GAP;
 
 const BTN_BORDER = "#2b313b";
 // The border is spelled out rather than using the `border` shorthand: half a
@@ -218,23 +221,36 @@ function InsetRender({ scene, client, enabled }: { scene: Scene; client: SimClie
 
 const MAX_BOXES = 12;
 
-/** The head-camera inset: a bordered box under the inspector that the
+/** The head-camera inset: a bordered box top-left, under the top bar, that the
  *  canvas renders the camera view into (InsetRender), with the detector's
  *  boxes drawn over it from bearing, elevation and apparent width - the
  *  three numbers a brain gets per detection, and nothing more. */
-function CamInset({ client, duckId, panelRef, enabled, open, onToggle }: { client: SimClient; duckId: string | null; panelRef: React.RefObject<HTMLDivElement | null>; enabled: boolean; open: boolean; onToggle: () => void }) {
+function CamInset({ client, duckId, top, belowRef, hidden, enabled, open, onToggle }: {
+  client: SimClient;
+  duckId: string | null;
+  /** Where the box goes when nothing else holds the corner: under the top bar — until the user drags it. */
+  top: number;
+  /** A panel that already holds the top-left corner (the pitch scoreboard); the inset docks under it. */
+  belowRef: React.RefObject<HTMLDivElement | null>;
+  /** The editor owns the corner while it is open. */
+  hidden: boolean;
+  enabled: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const boxes = useRef<(HTMLDivElement | null)[]>([]);
   const meta = useRef<HTMLDivElement>(null);
+  const drag = useDrag("simCamPos", box, top, PAD);
   useEffect(() => {
     // Minimized: the box is a bar, not a viewport — take it off the render
     // pass so InsetRender does not scissor a camera view into a 26 px strip.
-    camInset.el = enabled && open ? box.current : null;
+    camInset.el = enabled && open && !hidden ? box.current : null;
     camInset.duckId = duckId;
     return () => {
       camInset.el = null;
     };
-  }, [enabled, open, duckId]);
+  }, [enabled, open, hidden, duckId]);
   useEffect(() => {
     if (!enabled) return;
     let raf = 0;
@@ -242,20 +258,22 @@ function CamInset({ client, duckId, panelRef, enabled, open, onToggle }: { clien
     const paint = () => {
       raf = requestAnimationFrame(paint);
       const el = box.current;
-      const panel = panelRef.current;
-      if (!el || !panel) return;
-      const pr = panel.getBoundingClientRect();
-      el.style.top = `${Math.round(pr.bottom + 6)}px`;
-      el.style.right = `${Math.round(window.innerWidth - pr.right)}px`;
-      const width = Math.round(pr.width);
-      el.style.width = `${width}px`;
-      el.style.height = open ? `${Math.round(width / aspect)}px` : "";
+      if (!el) return;
+      // Where the user put it, else the dock: under the scoreboard if there
+      // is one, else under the top bar.
+      const custom = drag.posRef.current;
+      const under = custom ? null : belowRef.current?.getBoundingClientRect();
+      el.style.top = `${Math.round(custom ? custom.y : under ? under.bottom + GAP : top)}px`;
+      el.style.left = `${custom ? custom.x : PAD}px`;
+      el.style.width = `${CAM_W}px`;
+      el.style.height = open ? `${Math.round(CAM_W / aspect)}px` : "";
       const f = client.frame;
       const d = sensedDuck(f, duckId);
       const det = d?.sensors?.det;
       // A minimized bar stays put even with nothing selected — it is the only
-      // way back to the view. The full inset still hides when there is no duck.
-      el.style.display = d || !open ? "block" : "none";
+      // way back to the view. The full inset still hides when there is no duck,
+      // and both give the corner to the editor while it is open.
+      el.style.display = hidden ? "none" : d || !open ? "block" : "none";
       if (!open) return;
       const fov = det?.fov ?? CAM_FOV_DEG;
       let n = 0;
@@ -296,7 +314,7 @@ function CamInset({ client, duckId, panelRef, enabled, open, onToggle }: { clien
     };
     raf = requestAnimationFrame(paint);
     return () => cancelAnimationFrame(raf);
-  }, [client, duckId, panelRef, enabled, open]);
+  }, [client, duckId, top, belowRef, hidden, enabled, open, drag.posRef]);
   if (!enabled) return null;
   // Minimized: the same docked box, collapsed to a clickable bar — the head
   // camera's answer to the inspector's title bar.
@@ -304,13 +322,17 @@ function CamInset({ client, duckId, panelRef, enabled, open, onToggle }: { clien
     return (
       <div
         ref={box}
-        style={{ position: "absolute", top: 0, right: 10, width: 220, border: "1px solid #2b313b", borderRadius: 6, boxSizing: "border-box", zIndex: 20, overflow: "hidden", display: "none", background: "rgba(16,18,22,0.86)" }}
+        style={{ position: "absolute", top: 0, left: PAD, width: CAM_W, border: "1px solid #2b313b", borderRadius: 6, boxSizing: "border-box", zIndex: 20, overflow: "hidden", display: "none", background: "rgba(16,18,22,0.86)" }}
       >
         <button
-          onClick={onToggle}
-          title="expand the head camera"
+          onPointerDown={drag.onPointerDown}
+          onDoubleClick={drag.reset}
+          onClick={(e) => {
+            if (!consumeDragged(e.currentTarget)) onToggle();
+          }}
+          title="expand the head camera · drag to move · double-click to re-dock"
           aria-label="expand the head camera"
-          style={{ display: "flex", alignItems: "center", width: "100%", background: "none", border: "none", color: "#9aa5b1", cursor: "pointer", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 10, padding: "4px 6px", pointerEvents: "auto" }}
+          style={{ ...HANDLE, display: "flex", alignItems: "center", width: "100%", background: "none", border: "none", color: "#9aa5b1", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 10, padding: "4px 6px", pointerEvents: "auto" }}
         >
           <span style={{ flex: 1, textAlign: "left" }}>head camera</span>
           <span style={{ fontSize: 12, lineHeight: 1 }}>+</span>
@@ -321,16 +343,26 @@ function CamInset({ client, duckId, panelRef, enabled, open, onToggle }: { clien
     <div
       ref={box}
       title="what the head camera sees, at the detector's field of view; boxes are the detections (bearing, elevation, apparent width) - all a brain gets"
-      style={{ position: "absolute", top: 0, right: 10, width: 220, height: 170, border: "1px solid #2b313b", borderRadius: 6, boxSizing: "border-box", zIndex: 20, overflow: "hidden", pointerEvents: "none", display: "none" }}
+      style={{ position: "absolute", top: 0, left: PAD, width: CAM_W, height: Math.round(CAM_W / camAspect(CAM_FOV_DEG)), border: "1px solid #2b313b", borderRadius: 6, boxSizing: "border-box", zIndex: 20, overflow: "hidden", pointerEvents: "none", display: "none" }}
     >
-      <button
-        onClick={onToggle}
-        title="minimize the head camera"
-        aria-label="minimize the head camera"
-        style={{ position: "absolute", top: 2, right: 2, zIndex: 1, background: "rgba(16,18,22,0.7)", border: "none", borderRadius: 3, color: "#9aa5b1", cursor: "pointer", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, lineHeight: 1, padding: "2px 5px", pointerEvents: "auto" }}
+      {/* The grab strip: the whole top edge drags (the view underneath is
+          pointer-transparent so the room stays clickable through the box). */}
+      <div
+        onPointerDown={drag.onPointerDown}
+        onDoubleClick={drag.reset}
+        title="drag to move · double-click to re-dock"
+        style={{ ...HANDLE, position: "absolute", top: 0, left: 0, right: 0, height: 18, zIndex: 1, pointerEvents: "auto", background: "linear-gradient(rgba(16,18,22,0.75), rgba(16,18,22,0))" }}
       >
-        —
-      </button>
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={onToggle}
+          title="minimize the head camera"
+          aria-label="minimize the head camera"
+          style={{ position: "absolute", top: 2, right: 2, background: "rgba(16,18,22,0.7)", border: "none", borderRadius: 3, color: "#9aa5b1", cursor: "pointer", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, lineHeight: 1, padding: "2px 5px" }}
+        >
+          —
+        </button>
+      </div>
       <div style={{ position: "absolute", left: "50%", top: "50%", width: 10, height: 10, marginLeft: -5, marginTop: -5, border: "1px solid rgba(233,237,241,0.5)", borderRadius: "50%" }} />
       {Array.from({ length: MAX_BOXES }, (_, i) => (
         <div key={i} ref={(el) => { boxes.current[i] = el; }} style={{ position: "absolute", display: "none", border: "1.5px solid #fff", borderRadius: 2, boxSizing: "border-box" }}>
@@ -1024,6 +1056,9 @@ export default function SimViewer() {
   const [showCam, setShowCam] = useState(() => loadJSON("simCam", true));
   const inspectorRef = useRef<HTMLDivElement>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
+  // The pitch scoreboard shares the top-left corner with the head-camera
+  // inset; the inset docks under it when it is there.
+  const pitchRef = useRef<HTMLDivElement>(null);
   // The top bar wraps to two or three rows on a narrow window; the
   // inspector is parked under whatever height it actually ends up with,
   // never at a guessed offset that lets it slide behind the header.
@@ -1313,8 +1348,10 @@ export default function SimViewer() {
   // objects keep streaming from the loaded world underneath.
   const shown = editor ? editor.draft : scenario;
   const inspectorTop = frameBox.barBottom + GAP;
+  const inspectorDrag = useDrag("simInspectorPos", inspectorRef, inspectorTop, PAD);
+  const inspectorY = inspectorDrag.pos?.y ?? inspectorTop;
   const inspectorMax = frameBox.height
-    ? Math.max(120, frameBox.height - inspectorTop - PAD - (showCam ? (camOpen ? CAM_INSET_H : CAM_BAR_H) : 0))
+    ? Math.max(120, frameBox.height - inspectorY - PAD)
     : undefined;
 
   return (
@@ -1449,22 +1486,28 @@ export default function SimViewer() {
         ref={inspectorRef}
         style={{
           ...PANEL,
-          top: inspectorTop,
-          right: PAD,
+          // Docked top-right until the user drags it somewhere (persisted).
+          top: inspectorY,
+          ...(inspectorDrag.pos ? { left: inspectorDrag.pos.x } : { right: PAD }),
           width: INSPECTOR_W,
           boxSizing: "border-box",
-          // never taller than the room left under the header, minus the head-
-          // camera inset that hangs off its bottom edge when the cam is on
+          // never taller than the room left under wherever it sits
           maxHeight: inspectorMax,
           overflowY: "auto",
           overscrollBehavior: "contain",
         }}
       >
-        <div style={{ display: "flex", alignItems: "flex-start", marginBottom: inspectorOpen ? 6 : 0 }}>
+        <div
+          onPointerDown={inspectorDrag.onPointerDown}
+          onDoubleClick={inspectorDrag.reset}
+          title="drag to move · double-click to re-dock"
+          style={{ ...HANDLE, display: "flex", alignItems: "flex-start", marginBottom: inspectorOpen ? 6 : 0 }}
+        >
           <div style={{ flex: 1, color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>
             Inspector · sensors
           </div>
           <button
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={() => setInspectorOpen((v) => !v)}
             title={inspectorOpen ? "minimize (I)" : "expand (I)"}
             aria-label={inspectorOpen ? "minimize the inspector" : "expand the inspector"}
@@ -1631,7 +1674,7 @@ export default function SimViewer() {
           </>
         )}
       </div>
-      {client && <CamInset client={client} duckId={selected} panelRef={inspectorRef} enabled={showCam} open={camOpen} onToggle={() => setCamOpen((v) => !v)} />}
+      {client && <CamInset client={client} duckId={selected} top={inspectorTop} belowRef={pitchRef} hidden={!!editor} enabled={showCam} open={camOpen} onToggle={() => setCamOpen((v) => !v)} />}
 
       {/* keys — collapsible: reference text sitting over the room */}
       {lessonOpen ? (
@@ -1680,7 +1723,7 @@ export default function SimViewer() {
         />
       )}
       {status.soccer && (
-        <div style={{ position: "absolute", top: inspectorTop, left: PAD, maxWidth: `calc(100vw - ${INSPECTOR_W + PAD * 3}px)`, boxSizing: "border-box", background: "rgba(16,18,22,0.9)", border: "1px solid #2b313b", borderRadius: 6, color: "#e9edf1", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, padding: "8px 10px", zIndex: 20 }}>
+        <div ref={pitchRef} style={{ position: "absolute", top: inspectorTop, left: PAD, maxWidth: `calc(100vw - ${INSPECTOR_W + PAD * 3}px)`, boxSizing: "border-box", background: "rgba(16,18,22,0.9)", border: "1px solid #2b313b", borderRadius: 6, color: "#e9edf1", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, padding: "8px 10px", zIndex: 20 }}>
           <div style={{ color: "#9aa5b1", letterSpacing: ".08em", textTransform: "uppercase", fontSize: 10 }}>Pitch</div>
           <div style={{ fontSize: 22, fontWeight: 600 }}>
             {status.soccer.left} <span style={{ fontSize: 12, color: "#9aa5b1" }}>left</span> · {status.soccer.right} <span style={{ fontSize: 12, color: "#9aa5b1" }}>right</span>

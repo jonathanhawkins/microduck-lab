@@ -188,7 +188,12 @@ each duck senses:
 - **Inspector** (right): the selected duck's heatmap painted straight off the
   stream, frame age (amber when stale), a noise preset select (`ideal` /
   `datasheet` / `hostile`, applied live), and which brain is steering it.
-- **Cam** (`V`): under the inspector, what the selected duck's head camera
+- **Panels go where you put them.** The inspector and the head-camera
+  inset drag by their title strip and remember where they were left
+  (localStorage, clamped back into view on resize); double-click the strip
+  to re-dock. Untouched, they sit at their designed spots below.
+- **Cam** (`V`): top-left, under the top bar (under the pitch scoreboard on
+  a pitch; hidden while the editor holds that corner), what the selected duck's head camera
   sees, rendered from the `head_camera` site at the detector's field of view
   (62°×48°), with the detector's output drawn over it as boxes — a bearing,
   an elevation and an apparent width per thing it found, and nothing else
