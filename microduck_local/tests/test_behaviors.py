@@ -96,6 +96,19 @@ def test_matcher():
     assert match_behavior("wave hello") is None
 
 
+def test_matcher_takes_a_bare_behavior_id():
+    """The teach panel resubmits a run's recipe by id. Ids are stable; card
+    titles are display text, and an imitation card's title is the clip's
+    name dressed up (`Perform “backflip”`) — scored as prose, that used to
+    land on the floor-roll recipe, so a retrain trained the wrong trick."""
+    for b in BEHAVIORS.values():
+        assert match_behavior(b.id) is b
+        assert match_behavior(f"  {b.id.upper()} ") is b
+    assert match_behavior("imitate").id == "imitate"
+    # Only the exact id short-circuits; prose still scores as prose.
+    assert match_behavior("spin please").id == "spin"
+
+
 def test_cards_are_json_friendly():
     import json
     for b in BEHAVIORS.values():

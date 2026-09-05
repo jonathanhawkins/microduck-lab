@@ -1108,7 +1108,11 @@ class TrainingJob:
         # Seated, not launched: created no preview ducks (redundant with the
         # class default, stated here so the contract is visible at the site).
         self.owns_preview_ducks = False
-        self.extra_env = {}
+        # The run's clip comes back with it (train_behavior records it), so
+        # the card says `Perform “<clip>”` and a fine-tune trains the SAME
+        # motion. Older runs predate the record: they seat clip-less.
+        clip = meta.get("clip")
+        self.extra_env = {"MICRODUCK_CLIP": clip} if clip else {}
         self.stages = ()
         self._start_idx = 0
         self.stage_idx = 0
@@ -1871,6 +1875,31 @@ def resolve_init_from(name: str) -> Path:
         raise ValueError(f"initFrom run {name!r} has no {' / '.join(missing)} "
                          "yet — it can't be warm-started")
     return run
+
+
+def run_clip(run: Path) -> str | None:
+    """The clip a run trained against, from its behavior.json — None for
+    runs without one (non-imitation recipes, or records that predate it)."""
+    try:
+        clip = json.loads((run / "behavior.json").read_text()).get("clip")
+    except (OSError, ValueError):
+        return None
+    return clip if isinstance(clip, str) and clip else None
+
+
+# The lab's OWN display title for an imitation job (TrainingJob.display_title).
+# A client that echoes it back as the /teach text — the panel did, before it
+# learned to send the behavior id — must reach the imitation recipe with that
+# clip, never a recipe that happens to own a keyword inside the clip's name.
+_DISPLAY_TITLE_RE = re.compile(r"\s*perform\s+[“\"](.+?)[”\"]\s*$", re.IGNORECASE)
+
+
+def match_teach_text(text: str) -> tuple["behaviors_mod.Behavior | None", str | None]:
+    """(behavior, clip-implied-by-the-text) for a /teach message."""
+    m = _DISPLAY_TITLE_RE.match(text)
+    if m and "imitate" in behaviors_mod.BEHAVIORS:
+        return behaviors_mod.BEHAVIORS["imitate"], m.group(1)
+    return behaviors_mod.match_behavior(text), None
 
 
 class LabState:
@@ -3058,7 +3087,7 @@ def make_app(ducks: list[Duck]):
             return {"matched": False,
                     "message": f"behaviors.py didn't load: {e}"}
         _TRICK_DUCK_CACHE.clear()   # verdicts derive from the reloaded recipes
-        b = behaviors_mod.match_behavior(req.text)
+        b, title_clip = match_teach_text(req.text)
         if b is None:
             return {"matched": False,
                     "message": "I don't know that trick yet. I can teach these — "
@@ -3072,18 +3101,23 @@ def make_app(ducks: list[Duck]):
         # endpoint uses, and must actually exist. Unchecked, "../x" read JSON
         # outside clips/, and a typo'd name reported a healthy job whose
         # workers all died at env construction with FileNotFoundError.
-        if req.clip:
-            try:
-                if not clip_path(req.clip).exists():
-                    return {"matched": False,
-                            "message": f"I don't have a clip named “{req.clip}” — "
-                                       "save it in the 🎬 animate panel first."}
-            except ValueError as e:
-                return {"matched": False, "message": str(e)}
         init_from = None
         if req.initFrom:
             try:
                 init_from = resolve_init_from(req.initFrom)
+            except ValueError as e:
+                return {"matched": False, "message": str(e)}
+        # Which clip: the request's, else the one its title names, else — for
+        # a fine-tune — the one the run being refined actually trained on.
+        # The recipe's default clip is the last resort, never a silent swap
+        # away from the motion a finished run was built around.
+        clip = req.clip or title_clip or (run_clip(init_from) if init_from else None)
+        if clip:
+            try:
+                if not clip_path(clip).exists():
+                    return {"matched": False,
+                            "message": f"I don't have a clip named “{clip}” — "
+                                       "save it in the 🎬 animate panel first."}
             except ValueError as e:
                 return {"matched": False, "message": str(e)}
         # startStage: begin the chain partway, warm-started from the newest
@@ -3147,7 +3181,7 @@ def make_app(ducks: list[Duck]):
             stage_weights=stage_weights,
             start_stage=start_stage,
             stage_init_from=stage_init,
-            extra_env=({"MICRODUCK_CLIP": req.clip} if req.clip else None),
+            extra_env=({"MICRODUCK_CLIP": clip} if clip else None),
             budget=budget,
             stage_budgets=stage_budgets,
         )

@@ -665,7 +665,16 @@ def _register(b: Behavior) -> None:
 
 
 def match_behavior(text: str) -> Behavior | None:
-    """Cheap keyword matcher from a chat message to a behavior."""
+    """Cheap keyword matcher from a chat message to a behavior.
+
+    A bare behavior id ("imitate", "one_leg") matches exactly, before any
+    keyword scoring: that is how the teach panel resubmits a run's recipe.
+    Its cards may carry a DISPLAY title the keywords never see — an
+    imitation run is titled after its clip, `Perform “backflip”`, and
+    scored as prose that text reaches the floor-roll recipe instead."""
+    key = text.strip().lower()
+    if key in BEHAVIORS:
+        return BEHAVIORS[key]
     t = " " + text.lower().replace("1", "one").strip() + " "
     best, best_score = None, 0.0
     for b in BEHAVIORS.values():
