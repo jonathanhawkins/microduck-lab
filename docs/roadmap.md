@@ -1219,7 +1219,7 @@ reopen this item.
       a `TidyParams` carry-speed cap is a one-line A/B on the same
       `eval-tidy` seeds and needs no training. Run it before step 2.
 
-## Track 12 — the basket rim: where the tidy loop's falls are — MEASURED, no knob found (2026-09-04)
+## Track 12 — the basket rim: where the tidy loop's falls are — MECHANISM FOUND, fix measured, ships off (2026-09-04)
 
 Follow-on to the carry item above, which put 75% of the tidy loop's falls
 within a metre of the basket. Traced six of them (`trace-tidy --history 2.5`)
@@ -1275,23 +1275,56 @@ MuJoCo contacts between duck and basket, peak forward gravity, landing.
       before any of this runs), the reverse costs landings, and a short
       stand plus a short reverse nearly doubles the falls. Both parameters
       stay at their defaults; the numbers are in `tidy.py` next to them.
-- [ ] **What is left: the stop stride, not the stop distance.** The topple
-      is set by where the toes land in the LAST step — a centimetre of stop
-      spread (p10–p90 of the true stop is 0.227–0.247) is the whole
-      difference between 0% and 30%. Three candidates, none tried:
-      (a) tighten the stop spread — the `aim` look's estimate error is what
-      spreads it; more standing fixes or a closer `aim_range`, measured as
-      the p10 of the true stop distance at the same median; (b) a stop
-      *stride* the walker will actually do — a `walker-facts` probe of how
-      far the toes land past the trunk when the command goes 0.25 → 0 mid
-      stride, and whether a 2-step ramp (0.25 → 0.15 → 0) lands them
-      shorter without stalling in the dead band; (c) accept the falls — at
-      0.39 a run they cost ~8 s of 300, about 0.15 toys, which is inside
-      the benchmark's run-to-run band, so a fix has to be free to be worth
-      shipping. The per-drop instrumentation (stop distance, duck–basket
-      contacts, landing) was a scratch script; `eval-tidy` now carries the
-      per-state fall split, and a per-drop record there would make (a) and
-      (b) measurable with the benchmark alone.
+- [x] **The stop stride — DONE, and it was not the stride: it is the
+      approach ANGLE against a square basket.** Probed the walker on a flat
+      floor (30 gait phases, four stop commands): from the blind-leg speed
+      the toes reach **0.045 m** past the trunk at the stop (p10–p90
+      0.040–0.048), the trunk coasts 4 mm, and there is no creep — a 0.22
+      stop puts the near wall 0.064 m ahead, 1.5 cm clear, every time. A
+      reverse pulse or a dead-band −0.3 at the stop changes nothing useful;
+      a 0.15 taper lands the toes 7 mm further. So the loop's toes-on-the-
+      wall came from somewhere else, and the 716 instrumented drops said
+      where: the basket is square and the brain stops on the distance to
+      its CENTRE. **No drop within 15° of a wall's normal toppled (0 of
+      291); 34 of 35 topples came in at 20° or more.** The perpendicular
+      distance to the wall plane splits them cleanly — 26 falls in 165
+      drops under 0.20 m, 2 in 366 at 0.22 m or more — while landings stay
+      at 93–97% out to 0.24 m.
+- [x] **Two fixes from that, both measured, both shipping OFF.** Same 64
+      paired seeds, datasheet and ideal odometry (`TidyParams`
+      `basket_square`, `basket_normal`, `basket_normal_out`,
+      `basket_normal_skip_deg`; the numbers sit next to them in `tidy.py`):
+
+      | arm | topple % (ds / ideal) | landed % | Δtoys ds [95% CI] | Δtoys ideal [95% CI] | Δfalls ideal |
+      |---|---:|---:|---|---|---|
+      | stop on the wall plane | 1.3 / 0.5 | 62 / 59 | −1.69 [−2.00, −1.38] | −1.66 [−2.02, −1.30] | −0.31 |
+      | stage on the normal, out 0.15 | 1.2 / 0.0 | 94 / 93 | −0.47 [−0.69, −0.27] | −0.31 [−0.53, −0.09] | −0.23 |
+      | stage on the normal, out 0 | 1.5 / 0.0 | 95 / 95 | −0.22 [−0.42, +0.00] | −0.33 [−0.55, −0.12] | −0.27 |
+      | … skip the detour under 15° | 1.5 / 0.6 | 95 / 93 | −0.22 [−0.41, −0.03] | −0.17 [−0.41, +0.06] | −0.30 |
+      | … skip the detour under 25° | 3.7 / 0.6 | 96 / 95 | −0.06 [−0.23, +0.11] | −0.11 [−0.30, +0.08] | −0.28 |
+
+      Stopping on the wall plane proves the coupling: toes off the wall
+      means the beak (0.08 m out, 0.045 m of toe, 3.5 cm of geometry that
+      cos θ eats) is no longer inside it — landings crater. Staging on the
+      wall's normal removes the topple as predicted and cuts falls by 0.3
+      a run on ideal odometry, and **never pays on toys**. Where the time
+      goes was measured too: not the detour (deliver seconds per drop
+      14.1 → 14.5) but the NEXT approach, +6 s a run — a duck that
+      delivered along a normal backs off into a different place and
+      heading, and its next route is longer, the same heading effect the
+      `backoff_back_s` study found. The benchmark is time-bound (1 of 64
+      runs finishes early) and 0.39 falls a run cost ~0.15 toys, so the
+      fix would have to be free, and it is not; under drift the 25° arm's
+      other falls also rise (0.39 → 0.52).
+- [ ] **If the rim topple ever has to go** (a real basket, where a fall
+      costs more than 20 s): `basket_normal=1, basket_normal_skip_deg=25`
+      is the arm, and the thing to fix on top of it is the back-off's
+      end-heading after a normal-axis delivery, so the next approach does
+      not pay for it — measure `approach` seconds a run, which is where the
+      +6 s went. (A first version that entered `aim` at the staging point
+      lost 7 points of landings because the standing look was no longer
+      taken at 0.42 m; the hand-back to the ordinary servo-and-aim fixed
+      it. Worth knowing before touching the deliver leg again.)
 
 ## Later / parked
 

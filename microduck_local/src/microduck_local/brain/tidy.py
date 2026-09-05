@@ -263,17 +263,51 @@ class TidyParams:
     # the toes land in the last step, a centimetre either way.
     drop_s: float = 0.6
     backoff_clear_s: float = 0.0
-    # Stop on the distance to the near WALL'S PLANE, not to the basket's
-    # centre. The basket is square (ASSUMPTION: axis-aligned in the odometry
-    # frame, as the scenario builds it), so a duck coming in 30 degrees off
-    # a wall's normal has that wall 0.03 m nearer than the centre distance
-    # says, and its toes (0.045 m past the trunk at a stop) meet it.
-    # Experimental: see the roadmap's "stop stride" item.
+    # WHY the rim topples: the approach ANGLE. On a flat floor the stop
+    # stride is tight (toes 0.045 m past the trunk at any gait phase, 4 mm
+    # of coast, no creep), which clears a wall 0.064 m ahead. But the
+    # basket is square, and a duck coming in 30 degrees off a wall's
+    # normal has that wall 0.03 m nearer than the centre distance says.
+    # Measured over 716 drops: no drop within 15 degrees of a normal ever
+    # toppled (0 of 291), 34 of 35 topples came in at 20 degrees or more,
+    # and the perpendicular distance to the wall plane separates them
+    # (26 falls in 165 drops under 0.20 m, 2 in 366 at 0.22 m or more,
+    # landings flat at 93-97% out to 0.24 m). Two ways to use that, both
+    # measured on the same 64 paired seeds, both shipping OFF:
+    #
+    # `basket_square`: stop on the distance to the near wall's PLANE
+    # (max(|dx|, |dy|) to the estimate; ASSUMPTION: the basket is axis-
+    # aligned in the odometry frame, as the scenario builds it). Topples
+    # 5.2 -> 1.3% - and landed 94 -> 62%, -1.69 toys: an angled approach
+    # cannot keep its toes off the wall AND its beak (0.08 m out, 0.045 m
+    # of toe) inside it. The two are coupled through the angle.
     basket_square: float = 0.0
-    # …or take the angle away instead: walk to a staging point on the near
-    # wall's NORMAL through the basket centre, `aim_range` out, and run the
-    # aim and the blind leg from there, head-on. Experimental (roadmap).
+    # `basket_normal`: take the angle away - walk to a staging point on
+    # the near wall's normal through the centre (`aim_range` +
+    # `basket_normal_out` out, the axis latched at the first step, a
+    # via-point round the basket when needed), then hand back to the
+    # ordinary servo-and-aim along the normal; `basket_normal_skip_deg`
+    # skips the detour when the approach is near enough head-on already.
+    # It does what the mechanism says: topples 5.2 -> 1.5% (datasheet
+    # drift) and 4.5 -> 0.0% (ideal), falls -0.27 a run on ideal (CI
+    # [-0.45, -0.09]). And it never pays on toys - datasheet / ideal:
+    #   out 0.15, skip 0   -0.47 [-0.69, -0.27]  /  -0.31 [-0.53, -0.09]
+    #   out 0,    skip 0   -0.22 [-0.42, +0.00]  /  -0.33 [-0.55, -0.12]
+    #   out 0,    skip 15  -0.22 [-0.41, -0.03]  /  -0.17 [-0.41, +0.06]
+    #   out 0,    skip 25  -0.06 [-0.23, +0.11]  /  -0.11 [-0.30, +0.08]
+    # The time is not the detour (deliver seconds a drop 14.1 -> 14.5):
+    # it is the NEXT approach, +6 s a run, because a duck that delivered
+    # along a normal backs off into a different place and heading, and
+    # its next route is longer - the same heading effect `backoff_back_s`
+    # found. The benchmark is time-bound, and 0.39 falls a run cost only
+    # ~0.15 toys, so a fix has to be free, and this one is not. Under
+    # drift the skip-25 arm's falls also come back (0.39 -> 0.52). A
+    # first version that entered `aim` AT the staging point lost 7 points
+    # of landings (the look was no longer taken at 0.42 m); the hand-back
+    # to servo-and-aim fixed that.
     basket_normal: float = 0.0
+    basket_normal_out: float = 0.0
+    basket_normal_skip_deg: float = 15.0
     # Place a detection with the odometry the duck had WHEN THE FRAME WAS
     # TAKEN, not the odometry it has now.
     #
@@ -373,6 +407,7 @@ class Tidy:
         self.basket_confirmed = False    # seen from close enough that the estimate is trustworthy
         self.aimed = False               # this trip's standing re-measure of the basket is done
         self._deliver_axis = None
+        self._on_normal = False
         self._aim_rounds = 0
         self._aim_turning = False
         self._backoff_t = 0.0
@@ -797,6 +832,7 @@ class Tidy:
         elif self.state == "carry":
             self.aimed = False
             self._deliver_axis = None
+            self._on_normal = False
             self._aim_rounds = 0
             # The basket does not move and odometry is the truth here, so a
             # basket seen up close on an earlier trip beats a fresh sighting
@@ -846,16 +882,23 @@ class Tidy:
                 basket = self._nearest(senses, "basket")
                 if basket is not None and self._update_estimate(odom, basket, p.basket_z, t) is not None:
                     self.t_seen = t
-                if p.basket_normal:
-                    # Head for the near wall's normal, not the centre: the
-                    # axis is latched on the first step so a 45-degree
-                    # approach does not flip between two staging points.
+                if p.basket_normal and not self._on_normal:
+                    # Head for the near wall's normal first, not the centre:
+                    # a staging point on the axis through the basket centre,
+                    # `aim_range + basket_normal_out` out. The axis is latched
+                    # on the first step so a 45-degree approach does not flip
+                    # between two staging points. From there the ordinary
+                    # servo-and-aim below runs, along the normal.
                     if self._deliver_axis is None:
                         ddx, ddy = odom[0] - self.est[0], odom[1] - self.est[1]
                         self._deliver_axis = ((math.copysign(1.0, ddx), 0.0) if abs(ddx) >= abs(ddy)
                                               else (0.0, math.copysign(1.0, ddy)))
+                        off = math.degrees(math.atan2(min(abs(ddx), abs(ddy)), max(abs(ddx), abs(ddy), 1e-6)))
+                        if off <= p.basket_normal_skip_deg:
+                            self._on_normal = True           # near enough to head-on already: no detour
                     ax, ay = self._deliver_axis
-                    stage = (self.est[0] + ax * p.aim_range, self.est[1] + ay * p.aim_range)
+                    out = p.aim_range + p.basket_normal_out
+                    stage = (self.est[0] + ax * out, self.est[1] + ay * out)
                     via = self._via_point((odom[0], odom[1]), stage)
                     saved = self.est
                     self.est = via if via is not None else stage
@@ -865,9 +908,7 @@ class Tidy:
                     dist = math.hypot(self.est[0] - odom[0], self.est[1] - odom[1])
                     note += " · to the normal" + (" (via)" if via is not None else "")
                     if via is None and sdist <= p.route_stop:
-                        twist = (0.0, 0.0, 0.0)
-                        self._aim_fixes = []
-                        self._enter("aim", t)
+                        self._on_normal = True
                 else:
                     twist, dist, bearing = self._servo(odom, p.basket_reach)
                     if dist <= p.aim_range:
