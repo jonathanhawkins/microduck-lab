@@ -52,6 +52,7 @@ import {
 import { camAspect, insetHeight, renderInset } from "@/lib/inset";
 import { buildBodyGeometries, Duck } from "./Duck";
 import CameraKeys from "./CameraKeys";
+import { BrainPanel } from "./SimBrain";
 import { applyFloorClick, emptyDraft, SimEditor, type EditorState } from "./SimEditor";
 import { Dynamics, StageEnvironment, Statics } from "./SimStage";
 
@@ -1624,6 +1625,8 @@ export default function SimViewer() {
             ) : (
               <div style={{ color: "#9aa5b1", marginBottom: 8 }}>click a duck (or press 1–9)</div>
             )}
+            {/* A learned brain's own view of the world — nothing for rule brains. */}
+            {client && <BrainPanel client={client} duckId={selected} />}
             {client && <Heatmap client={client} duckId={selected} />}
           </>
         )}

@@ -1,6 +1,7 @@
 // Types + client for the lab's WORLD mode (microduck_local/world_server.py):
 // the /sim page's backend. Same lab host as lib/lab.ts, second socket.
 
+import type { BrainView } from "./brainview";
 import { LAB_HTTP } from "@/lib/lab";
 
 export const SIM_WS = LAB_HTTP.replace(/^http/, "ws") + "/ws/sim";
@@ -151,7 +152,12 @@ export interface SimDuck {
   beak: "open" | "closed";
   /** Who is steering this duck this tick: a brain from the lab's registry
    *  (auto mode), the demo script (blind ducks), or you (manual). */
-  brain: { kind: string; state: string; cmd: [number, number, number]; head?: number[]; note?: string; beak?: string | null; skill?: string | null; inputs: BrainInputs & { tidy?: { picked: number; delivered: number; givenUp: string[] } } };
+  brain: {
+    kind: string; state: string; cmd: [number, number, number]; head?: number[]; note?: string; beak?: string | null; skill?: string | null;
+    inputs: BrainInputs & { tidy?: { picked: number; delivered: number; givenUp: string[] } };
+    /** A learned brain's last decision — what the network saw and said (runtime.brain_view). */
+    view?: BrainView;
+  };
   headApplied: boolean;
   bodies: number[][];
   sensors: { tof?: TofPayload; det?: DetPayload } | null;

@@ -226,6 +226,19 @@ each duck senses:
   `built in` and `saved by you`; each of your saved scenes carries a `✕`
   that deletes it in place (`DELETE /scenarios/{name}`, after a confirm) —
   built-ins have none, and the live world keeps running whatever it loaded.
+- **What the brain sees** (in the inspector, for a duck on a `learned:*`
+  brain): the network's last decision, live. A strip of 80 bars is the
+  observation as the network gets it — ToF cells, ages, the tracker's
+  target slots, the last action, speed, the coasting/yaw/confirmed flags —
+  each scaled by its own range (hover a bar for the slot and value), with
+  the target block also in words. Under it, one gauge per action on a track
+  that spans the brain's own bounds; an action pinned on a bound shows `⊣`
+  in amber. The exported graph clamps the network's output itself, so there
+  is no visible "ask" past the edge — the pin is the ask, and a brain pinned
+  every decision, target or no target, is the saturated-mean trap showing
+  itself while the duck walks. Wire shape: `brain.view` in the frame
+  (`runtime.brain_view`): the observation, the action before and after the
+  intent clip, and the bounds.
 - **Map** (`M`): the selected duck's occupancy grid, painted on the floor —
   what it believes the room is, from its ToF frames and its own odometry
   (amber occupied, teal free). Switch its `odom` preset in the inspector to
