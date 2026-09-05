@@ -2,6 +2,9 @@
 # (see README "Getting set up"). This repo tracks only the local-training stack.
 /microduck/
 /microduck_rl/
+# …or symlinked in from elsewhere (a trailing slash does not match a symlink)
+/microduck
+/microduck_rl
 
 # Python
 __pycache__/
@@ -12,6 +15,30 @@ __pycache__/
 
 # Training artifacts and runtime state (regenerated; runs/ grows to GBs)
 microduck_local/runs/
+microduck_local/brains/*
+# …except the shipped learned brain (112 kB ONNX + its contract), so
+# `learned:follow-v1` works out of the box; the SB3 checkpoint stays local.
+!microduck_local/brains/follow-v1/
+microduck_local/brains/follow-v1/*
+!microduck_local/brains/follow-v1/brain.onnx
+!microduck_local/brains/follow-v1/brain.json
+!microduck_local/brains/follow-v3/
+microduck_local/brains/follow-v3/*
+!microduck_local/brains/follow-v3/brain.onnx
+!microduck_local/brains/follow-v3/brain.json
+!microduck_local/brains/follow-v2/
+microduck_local/brains/follow-v2/*
+!microduck_local/brains/follow-v2/brain.onnx
+!microduck_local/brains/follow-v2/brain.json
+!microduck_local/brains/follow-v4/
+microduck_local/brains/follow-v4/*
+!microduck_local/brains/follow-v4/brain.onnx
+!microduck_local/brains/follow-v4/brain.json
+!microduck_local/brains/follow-v5/
+microduck_local/brains/follow-v5/*
+!microduck_local/brains/follow-v5/brain.onnx
+!microduck_local/brains/follow-v5/brain.json
+microduck_local/recordings/
 microduck_local/lab-state.json
 microduck_local/teach-weights.json
 # 🤗 BYOK Hugging Face token (the viewer's ⚙ settings) — never commit
@@ -31,3 +58,5 @@ microduck_local/farm-state.json
 microduck_local/farm-server.log
 # backend log (restart.sh writes it)
 microduck_local/lab-server.log
+# viewer log (viewer.sh writes it)
+duck-viewer/viewer-server.log

@@ -419,3 +419,59 @@ def test_envs_per_worker_batching_matches_one_per_worker():
     assert after[:2] == before[:2] and after[3:] == before[3:]
     a.close()
     b.close()
+
+
+def test_packing_is_off_by_default_on_every_machine():
+    """Packing several envs into one worker halves the per-vec-step semaphore
+    traffic but also halves the worker processes available to fill the cores
+    the serial PPO update leaves idle. It shipped briefly as a profile
+    default on a single +7% point; re-measured with four interleaved reps,
+    order rotated each rep, it was BEHIND one process per env at every count
+    (-1.7% at 8, -3.9% at 16, -2.6% at 32). Its other claimed win, startup,
+    was the per-worker numba JIT that `_warm_jit` now pays once in the parent
+    for every layout.
+
+    So no profile packs and the default is 1 everywhere. It stays a manual
+    knob because it is still parity-tested and still worth re-measuring at
+    env counts far above these — but it has to be asked for."""
+    import microduck_local.machine as M
+
+    # The knob is not a profile concern any more, on any machine.
+    for name in M.PROFILES:
+        prof = M.build_profile(name, cores=4)
+        assert not hasattr(prof, "pack_workers")
+        assert not hasattr(prof, "envs_per_worker")
+
+
+def test_the_manual_packing_knob_is_the_only_way_in(monkeypatch):
+    """`MICRODUCK_ENVS_PER_WORKER` is the escape hatch, and it defaults to 1."""
+    import os
+    import pathlib
+
+    import microduck_local.vec_env as V
+
+    monkeypatch.delenv("MICRODUCK_ENVS_PER_WORKER", raising=False)
+    assert int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "1") or 1) == 1
+    monkeypatch.setenv("MICRODUCK_ENVS_PER_WORKER", "2")
+    assert int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "1") or 1) == 2
+
+    src = pathlib.Path(V.__file__).read_text()
+    assert "MICRODUCK_ENVS_PER_WORKER" in src
+
+
+def test_packing_when_asked_for_is_only_safe_because_the_stream_is_identical():
+    """Whenever the knob IS used, the reason it is safe is mechanical rather
+    than statistical: the packed layout is step-for-step identical, which the
+    parity test above pins. If that test ever goes, the knob goes with it."""
+    import pathlib
+
+    import microduck_local.vec_env as V
+
+    src = pathlib.Path(V.__file__).read_text()
+    assert "BIT-IDENTICAL" in src, (
+        "the knob's justification must stay written next to it")
+    # And an explicit env var still wins in both directions.
+    import os
+    from unittest import mock
+    with mock.patch.dict(os.environ, {"MICRODUCK_ENVS_PER_WORKER": "1"}):
+        assert os.environ["MICRODUCK_ENVS_PER_WORKER"] == "1"

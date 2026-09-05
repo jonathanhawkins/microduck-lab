@@ -35,20 +35,11 @@ function bodyColor(name: string): string {
 // mouth pink, and the beak/shoes a flat gold where the real parts are
 // orange with yellow soles. Override those by material name; everything
 // else renders straight from the streamed rgba.
-const MATERIAL_FIX: Record<string, string> = {
-  face_part_material: "#a5a6a2", // face panel — light grey, exports dark slate
-  noenoeil_material: "#f2b705", // eye ring — yellow print, not grey
-  soft_mouth_top_material: "#e06a1e", // soft TPU mouth seam
-  jaw_soft_material: "#e06a1e",
-  jaw_material: "#e8862e", // lower beak: orange, not gold
-  bottom_head_shell_material: "#e8862e",
-  foot_left_material: "#e8862e", // TPU shoes orange…
-  foot_right_material: "#e8862e",
-  ankle_left_material: "#e8862e",
-  ankle_right_material: "#e8862e",
-  sole_left_material: "#f2b705", // …with yellow soles
-  sole_right_material: "#f2b705",
-};
+// Per-material colour overrides by MJCF material name. The 2026-09 upstream
+// CAD re-export (microduck_rl #29) carries the right colours itself — orange
+// beak and shoes, yellow eye ring and soles, light-grey face — so the table is
+// empty; it stays as the place to put the next export's mistakes.
+const MATERIAL_FIX: Record<string, string> = {};
 
 /** Resolved sRGB→linear color for one geom (override → MJCF rgba → fallback). */
 function geomColor(g: SceneGeom, bodyName: string, out: THREE.Color): THREE.Color {
@@ -118,6 +109,7 @@ export function Duck({
   const labelDivRef = useRef<HTMLDivElement>(null);
   const spawnDivRef = useRef<HTMLDivElement>(null);
   const ringRef = useRef<THREE.Mesh>(null);
+  const ballRef = useRef<THREE.Mesh>(null);
   const tmpP = useMemo(() => new THREE.Vector3(), []);
   const tmpQ = useMemo(() => new THREE.Quaternion(), []);
 
@@ -160,6 +152,19 @@ export function Duck({
         ringRef.current.position.lerp(tmpP, alpha);
       }
     }
+    // The find_ball ball: streamed as [x, y, z, r] in the duck's own frame
+    // (it lives in the env, not the physics, so it is not a body). Hidden
+    // for every other brain.
+    if (ballRef.current) {
+      const ball = duck.ball;
+      ballRef.current.visible = !!ball;
+      if (ball) {
+        tmpP.set(ball[0], ball[1], ball[2]);
+        ballRef.current.position.lerp(tmpP, alpha);
+        const r = ball[3] || 0.035;
+        ballRef.current.scale.set(r, r, r);
+      }
+    }
     if (labelDivRef.current) {
       const s = labelDivRef.current.style;
       // HUD 🏷 toggle, applied per-frame like the rest of the label styling
@@ -195,6 +200,12 @@ export function Duck({
           <group key={b} ref={(el) => void (bodyRefs.current[b] = el)} />
         )
       )}
+      {/* the ball a 🔎 find_ball duck is looking for (unit sphere, scaled to
+          the streamed radius) — orange like the real 70 mm kick ball */}
+      <mesh ref={ballRef} visible={false} castShadow>
+        <sphereGeometry args={[1, 24, 16]} />
+        <meshStandardMaterial color="#ff8c00" roughness={0.5} />
+      </mesh>
       {/* drop-target ring, flat on the floor (XY plane in this Z-up group).
           hideInCapture: 📷 snapshots hide it for their capture render. */}
       <mesh

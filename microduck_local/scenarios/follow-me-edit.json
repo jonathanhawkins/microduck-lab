@@ -1,0 +1,139 @@
+{
+  "name": "follow-me-edit",
+  "seed": 0,
+  "floor": {
+    "size": [
+      6.5,
+      5.5
+    ]
+  },
+  "walls": [
+    {
+      "from": [
+        -3.0,
+        -2.5
+      ],
+      "to": [
+        3.0,
+        -2.5
+      ],
+      "height": 0.3,
+      "thickness": 0.02
+    },
+    {
+      "from": [
+        3.0,
+        -2.5
+      ],
+      "to": [
+        3.0,
+        2.5
+      ],
+      "height": 0.3,
+      "thickness": 0.02
+    },
+    {
+      "from": [
+        3.0,
+        2.5
+      ],
+      "to": [
+        -3.0,
+        2.5
+      ],
+      "height": 0.3,
+      "thickness": 0.02
+    },
+    {
+      "from": [
+        -3.0,
+        2.5
+      ],
+      "to": [
+        -3.0,
+        -2.5
+      ],
+      "height": 0.3,
+      "thickness": 0.02
+    }
+  ],
+  "boxes": [],
+  "balls": [],
+  "ducks": [
+    {
+      "id": "d0",
+      "spawn": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "policy": "pollen:alpha_walking",
+      "tof": "datasheet",
+      "detector": "datasheet",
+      "brain": "follow",
+      "odom": "ideal"
+    },
+    {
+      "id": "d1",
+      "spawn": [
+        -0.58,
+        -0.19,
+        0.0
+      ],
+      "policy": "pollen:alpha_walking",
+      "tof": "datasheet",
+      "detector": "datasheet",
+      "brain": null,
+      "odom": "ideal"
+    },
+    {
+      "id": "d2",
+      "spawn": [
+        -0.96,
+        -0.9,
+        0.0
+      ],
+      "policy": "pollen:alpha_walking",
+      "tof": "datasheet",
+      "detector": "datasheet",
+      "brain": null,
+      "odom": "ideal"
+    }
+  ],
+  "persons": [
+    {
+      "id": "p0",
+      "pos": [
+        1.2,
+        0.0
+      ],
+      "yaw": 1.57,
+      "path": [
+        [
+          1.2,
+          1.2
+        ],
+        [
+          -1.2,
+          1.2
+        ],
+        [
+          -1.2,
+          -1.2
+        ],
+        [
+          1.2,
+          -1.2
+        ]
+      ],
+      "speed": 0.25,
+      "radius": 0.2,
+      "height": 1.0
+    }
+  ],
+  "pickables": [],
+  "basket": null,
+  "goal_width": 0.0,
+  "collision": "walk",
+  "version": 1
+}

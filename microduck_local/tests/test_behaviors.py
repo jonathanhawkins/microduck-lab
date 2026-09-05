@@ -1021,7 +1021,10 @@ def test_only_the_one_sided_recipes_opt_out_of_the_mirror_prior():
     imitates a clip) has to be listed here — the default is True and silence
     would train it under a wrong prior."""
     asymmetric = {b.id for b in BEHAVIORS.values() if not b.symmetric}
-    assert asymmetric == {"one_leg", "imitate"}
+    # find_ball: from a symmetric start (ball unseen, memory empty) a
+    # mirror-consistent policy must output a zero yaw sweep — it cannot pick
+    # a side to look first, so the exported mean would sit and stare.
+    assert asymmetric == {"one_leg", "imitate", "find_ball"}
     # spin stays mirror-safe: the direction COMMAND rides the wz slot, and
     # the mirror map negates that slot and the gyro together, so a mirrored
     # episode is just the opposite commanded direction. The rest are sagittal
@@ -1189,6 +1192,622 @@ def test_spin_pays_the_commanded_direction_not_a_wiggle():
     assert abs(float(obs[50])) == pytest.approx(1.0)
 
 
+# ------------------------------------------------------------- find_ball
+
+def _ball_env(seed=0, **kw):
+    env = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=seed, **kw)
+    env.reset(seed=seed)
+    return env
+
+
+def test_find_ball_rides_the_head_slots_and_nothing_else():
+    """The ball's detector output lives in obs[51:55] (bx, by, seen, memory)
+    and the twist stays a trick's pinned zero. Placing the ball straight
+    ahead at 1 m must read as seen, centred horizontally and BELOW centre
+    (the camera is 25 cm up and level at STAND).
+
+    The NEAR end changed with the real camera and it is worth knowing: this
+    test used to assert that a ball at 0.3 m is under the field of view, which
+    was true of the 62 deg placeholder VFOV (half-angle 31 deg against a
+    35.6 deg depression). The actual lens is 116 deg in this axis, half-angle
+    58 deg, so the whole spawn window is in frame at a LEVEL gaze and nodding
+    down is no longer how you find a near ball. See test_find_ball_near_balls_
+    no_longer_need_a_nod for the consequence."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    np.testing.assert_allclose(obs[48:51], 0.0, atol=1e-6)
+    assert obs[53] == 1.0
+    assert abs(obs[51]) < 0.05 and -1.0 < obs[52] < -0.2
+    assert abs(obs[54]) < 0.02          # memory = body bearing / pi = 0
+    # Still below centre, and further down than the 1 m ball.
+    far_by = obs[52]
+    _ball_place(env, 0.3, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    assert obs[53] == 1.0 and obs[52] < far_by
+
+
+def test_find_ball_near_balls_no_longer_need_a_nod():
+    """The recipe's near-floor pitch band exists because a ball closer than
+    ~0.5 m used to sit BELOW a level gaze. The real camera (116 deg vertical,
+    half-angle 58) removes that constraint: every distance the spawner can
+    produce is in frame with the head level, so the nod-down band is now
+    covering a case the hardware does not have.
+
+    Locked so that swapping the camera back to a narrow lens — or remounting
+    it landscape, which puts 60 deg on this axis — fails here loudly rather
+    than quietly making the recipe's pitch bands load-bearing again."""
+    from microduck_local.behaviors import _BALL_KNOBS, _ball_place, _ball_sense
+    env = _ball_env()
+    lo, hi = (_BALL_KNOBS["MICRODUCK_BALL_DIST_LO"],
+              _BALL_KNOBS["MICRODUCK_BALL_DIST_HI"])
+    for d in (lo, 0.5, 1.0, hi):
+        _ball_place(env, d, 0.0)
+        _ball_sense(env, force=True)
+        assert env._ball_seen, f"ball at {d} m is out of frame at a level gaze"
+    # ...and it is genuinely the VERTICAL axis doing it: at the old 62 deg
+    # placeholder the closest spawn was not visible.
+    narrow = _ball_env(spawn_overrides={"MICRODUCK_BALL_VFOV_DEG": "62"})
+    _ball_place(narrow, lo, 0.0)
+    _ball_sense(narrow, force=True)
+    assert not narrow._ball_seen
+
+
+def test_find_ball_bearing_signs_match_the_detector():
+    """duck_detect::Detection::bearing is -1 hard LEFT .. +1 hard RIGHT. A
+    ball 17 deg to the duck's left (+y in its yaw frame) must read negative
+    across the frame and positive in the body-bearing memory slot."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, 0.3)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and env._ball_bx < -0.3
+    assert env.head_cmd[3] == pytest.approx(0.3 / np.pi, abs=1e-3)
+    _ball_place(env, 1.0, -0.3)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and env._ball_bx > 0.3
+    assert env.head_cmd[3] == pytest.approx(-0.3 / np.pi, abs=1e-3)
+
+
+def test_find_ball_memory_fades_while_lost_and_snaps_back_when_seen():
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    # No ball events: a teleport or roll mid-test would put it back in frame.
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    _ball_place(env, 1.0, 0.3)
+    _ball_sense(env, force=True)
+    m0 = float(env.head_cmd[3])
+    assert m0 > 0.05
+    _ball_place(env, 1.0, np.pi)           # gone behind: lost
+    # Drive the sensing loop directly (the physics is frozen at the spawn
+    # pose, so this is the memory logic alone, not a toppling duck).
+    for _ in range(100):                   # 2 s of the 4 s fade
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_seen is False
+    assert env.head_cmd[2] == 0.0
+    # (the detector holds its last report for DETECT_EVERY steps, so the
+    # fade starts a step late — 1% slack covers it)
+    assert env._ball_mem_conf == pytest.approx(np.exp(-2.0 / 4.0), rel=0.01)
+    # The memory slot still points where the ball WAS (the old bearing,
+    # decayed), never the new true bearing the policy could not have seen.
+    assert float(env.head_cmd[3]) == pytest.approx(m0 * np.exp(-0.5), rel=0.01)
+    _ball_place(env, 1.0, 0.0)
+    for _ in range(3):
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_seen and env.head_cmd[2] == 1.0 and env._ball_mem_conf == 1.0
+
+
+def test_find_ball_pays_nothing_while_lost_except_new_ground():
+    """A per-step SEARCH penalty would make falling over the cheapest way
+    out of a hard search (the episode ends, the charge stops). While the
+    ball is out of frame the only income is bounded coverage pay, and a
+    gaze parked on the same cell earns none of it."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, np.pi)
+    _ball_sense(env, force=True)
+    env._ball_mem_conf = 0.0
+    terms = {t.key: t for t in BEHAVIORS["find_ball"].terms}
+    assert terms["eyes_on_ball"].fn(env) == 0.0
+    assert terms["ball_in_view"].fn(env) == 0.0
+    assert terms["face_the_ball"].fn(env) == 0.0
+    env._ball_new_bins = 0
+    assert terms["new_ground"].fn(env) == 0.0
+    env._ball_new_bins = 1
+    assert terms["new_ground"].fn(env) == 1.0
+    assert terms["turn_to_belief"].fn(env) == 0.0      # no belief, no pay
+    assert not any(t.is_penalty and "search" in t.key for t in terms.values())
+
+
+def test_find_ball_centred_beats_edge_of_frame():
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    eyes = {t.key: t for t in BEHAVIORS["find_ball"].terms}["eyes_on_ball"].fn
+    _ball_place(env, 1.5, 0.0)
+    _ball_sense(env, force=True)
+    centre = eyes(env)
+    _ball_place(env, 1.5, 0.35)
+    _ball_sense(env, force=True)
+    assert env._ball_seen
+    assert eyes(env) < centre
+
+
+def test_find_ball_ladder_carries_no_reward_edits():
+    """Stages ladder only the WORLD (spawn window, ball events) — the sealed
+    term set is identical in every stage (AGENTS.md)."""
+    b = BEHAVIORS["find_ball"]
+    assert len(b.curriculum) == 3
+    allowed = {"MICRODUCK_BALL_BEARING_MAX", "MICRODUCK_BALL_EVENT_RATE",
+               "MICRODUCK_BALL_ROLL_PROB"}
+    for st in b.curriculum:
+        assert set(st.env) <= allowed, st.env
+    # The first rung keeps the ball in front; the last opens the whole circle.
+    assert float(b.curriculum[0].env["MICRODUCK_BALL_BEARING_MAX"]) < 1.6
+    assert float(b.curriculum[-1].env["MICRODUCK_BALL_BEARING_MAX"]) > 3.0
+
+
+def test_find_ball_spawn_window_knob_and_reports(monkeypatch):
+    monkeypatch.setenv("MICRODUCK_BALL_BEARING_MAX", "0.3")
+    monkeypatch.setenv("MICRODUCK_BALL_EVENT_RATE", "0")
+    env = _ball_env(seed=4)
+    for _ in range(20):
+        env.reset()
+        assert abs(env._ball_psi) <= 0.3 + 1e-6
+        assert env.last_spawn.startswith("ball ")
+    from microduck_local.behaviors import ball_marker_payload
+    payload = ball_marker_payload(env)
+    assert len(payload) == 4 and payload[2] == pytest.approx(0.035, abs=1e-3)
+    cap = env.behavior.caption_fn(env)
+    assert cap.startswith(("SEEN ", "LOST ")) and len(cap) <= 31
+    assert env.behavior.report_fn(env)[0].startswith("ball:")
+    markers = env.behavior.markers_fn(env)
+    assert len(markers) == 2 and markers[0][1] == pytest.approx(0.035)
+
+
+def test_find_ball_teach_card_and_matcher():
+    card = behavior_card(BEHAVIORS["find_ball"])
+    assert card["curriculum"] and card["terms"]
+    assert match_behavior("find the ball").id == "find_ball"
+    assert match_behavior("look around for the ball").id == "find_ball"
+    assert match_behavior("stand on one leg").id == "one_leg"
+
+
+def test_find_ball_belief_slot_is_seeded_and_never_goes_silent():
+    """Slot 54 starts as the daemon's prior (the ball's side, noisy, half
+    confidence) or as the sweep-left-first convention (+0.15), and while
+    the ball is lost its confidence floors at 0.15 rather than fading to
+    nothing — the cue that turns a stand-and-stare into a sweep."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env(seed=7, spawn_overrides={"MICRODUCK_BALL_PRIOR_PROB": "1",
+                                              "MICRODUCK_BALL_PRIOR_NOISE": "0",
+                                              "MICRODUCK_BALL_EVENT_RATE": "0"})
+    for _ in range(10):
+        obs, _ = env.reset()
+        if env._ball_seen:
+            continue                    # a seen ball overrides any prior
+        assert obs[54] == pytest.approx(0.5 * env._ball_psi / np.pi, abs=5e-3)
+        assert env.last_spawn.endswith("prior")
+    env = _ball_env(seed=8, spawn_overrides={"MICRODUCK_BALL_PRIOR_PROB": "0",
+                                              "MICRODUCK_BALL_EVENT_RATE": "0"})
+    for _ in range(10):
+        obs, _ = env.reset()
+        if env._ball_seen:
+            continue
+        assert obs[54] == pytest.approx(0.15, abs=1e-3)
+        assert env.last_spawn.endswith("blind")
+    # Lose it for a long time: confidence floors, the slot keeps its sign.
+    _ball_place(env, 1.0, 0.3)          # 17 deg left: inside the 24 deg half-FOV
+    _ball_sense(env, force=True)
+    assert env._ball_seen
+    _ball_place(env, 1.0, np.pi)
+    for _ in range(1000):
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_mem_conf == pytest.approx(0.15)
+    assert env.head_cmd[3] == pytest.approx(0.15 * 0.3 / np.pi, abs=2e-3)
+
+
+def test_find_ball_scan_clock_runs_while_lost_and_parks_while_seen():
+    """obs[59:61] is sin/cos of the scan phase: parked at (0, 1) while the
+    detector reports the ball, advancing at 2pi/SCAN_PERIOD from zero at
+    every loss — the phase a memoryless policy sweeps on."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                     "MICRODUCK_BALL_SCAN_PERIOD": "2"})
+    _ball_place(env, 1.0, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    assert env._ball_seen and obs[59] == 0.0 and obs[60] == 1.0
+    _ball_place(env, 1.0, np.pi)
+    for _ in range(25):                       # 0.5 s of a 2 s period = 90 deg
+        env.step_count += 1
+        _ball_sense(env)
+    obs = env._get_obs()
+    # (the held detector report delays the loss by up to DETECT_EVERY steps)
+    assert obs[59] == pytest.approx(1.0, abs=0.08) and abs(obs[60]) < 0.1
+    _ball_place(env, 1.0, 0.0)
+    for _ in range(3):
+        env.step_count += 1
+        _ball_sense(env)
+    obs = env._get_obs()
+    assert obs[59] == 0.0 and obs[60] == 1.0
+
+
+def test_find_ball_facing_slopes_all_the_way_round():
+    """The facing pay must have a gradient with the ball straight behind —
+    a Gaussian wide layer paid ~0.04 there and the export dithered around
+    "directly behind" instead of turning (see _ball_face)."""
+    env = _ball_env()
+    face = {t.key: t for t in BEHAVIORS["find_ball"].terms}["face_the_ball"].fn
+    env._ball_seen = True
+    vals = []
+    for deg in (0, 45, 90, 135, 170, 180):
+        env._ball_psi = np.radians(deg)
+        vals.append(face(env))
+    assert vals[0] == pytest.approx(1.0)
+    assert all(a > b for a, b in zip(vals, vals[1:]))   # strictly decreasing
+    assert vals[-2] - vals[-1] > 0.001                   # still sloping at 170 deg
+    assert vals[-1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_find_ball_turn_pay_is_signed_by_the_belief_and_off_while_seen():
+    env = _ball_env()
+    turn = {t.key: t for t in BEHAVIORS["find_ball"].terms}["turn_to_belief"].fn
+    env._ball_det[2] = 0.0
+    env._ball_mem, env._ball_mem_conf = 1.0, 1.0        # believed to the LEFT
+    env._gyro[2] = 1.0                                   # turning left
+    assert turn(env) == pytest.approx(0.5)
+    env._gyro[2] = -1.0                                  # turning right: charged
+    assert turn(env) == pytest.approx(-0.5)
+    env._gyro[2] = 10.0                                  # capped, no pay for violence
+    assert turn(env) == pytest.approx(1.0)
+    env._ball_mem_conf = 0.5
+    assert turn(env) == pytest.approx(0.5)
+    env._ball_det[2] = 1.0                               # seen: the facing term owns it
+    assert turn(env) == 0.0
+
+
+def _aim_head(env, nod: float) -> None:
+    """Pitch the head DOWN by `nod` rad and refresh the kinematics, so the
+    camera frame the ball is projected through is the posed one. Negative
+    neck_pitch looks down (the camera element's +z is the optical axis)."""
+    import mujoco
+
+    from microduck_local import contract as C
+
+    env.data.qpos[env.joint_qpos_adr[5]] = C.DEFAULT_POSE[5] - nod
+    mujoco.mj_forward(env.model, env.data)
+
+
+def test_find_ball_handoff_needs_half_a_second_squared_up_on_the_ball():
+    """The gate a kick policy is handed: ball centred in the DETECTOR's frame
+    and the head straight ahead (so the body is what's pointing at it), held
+    0.5 s. Both halves are detector + joint encoders — the daemon has to be
+    able to run this same test, so no privileged state may leak into it."""
+    from microduck_local.behaviors import (
+        _BALL_AIM_STEPS,
+        _BALL_HEAD_YAW_ID,
+        _ball_place,
+        _ball_sense,
+    )
+    b = BEHAVIORS["find_ball"]
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    # Straight ahead at 1.2 m, head nodded down 0.18 rad. The nod is not
+    # decoration: the camera is 25 cm up, so a floor ball at 1.2 m sits 12 deg
+    # BELOW a level gaze (by = -0.34) and does not count as centred until the
+    # duck looks down at it. Handing a kick a ball the duck is only looking
+    # over the top of is exactly the failure this gate exists to prevent.
+    _aim_head(env, nod=0.18)
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and abs(env._ball_by) < 0.25
+    assert not b.handoff_fn(env)          # one aimed instant is not a handoff
+    # Fires exactly at the threshold, not before. Driven off the streak rather
+    # than a step count because the reset's own sample counts when the episode
+    # happens to spawn already aimed.
+    while env._ball_aim_steps < _BALL_AIM_STEPS - 1:
+        env.step_count += 1
+        _ball_sense(env)
+    assert not b.handoff_fn(env), "handed off before the half second"
+    env.step_count += 1
+    _ball_sense(env)
+    assert env._ball_aim_steps == _BALL_AIM_STEPS and b.handoff_fn(env)
+    # Turning the head to hold the ball means the BODY is not square: the
+    # streak breaks even though the ball is still dead centre in frame.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.8
+    env.step_count += 1
+    _ball_sense(env)
+    assert env._ball_aim_steps == 0 and not b.handoff_fn(env)
+
+
+def test_find_ball_handoff_breaks_when_the_ball_leaves_the_frame():
+    from microduck_local.behaviors import _BALL_AIM_STEPS, _ball_place, _ball_sense
+    b = BEHAVIORS["find_ball"]
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    _aim_head(env, nod=0.18)
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    for _ in range(_BALL_AIM_STEPS + 5):
+        env.step_count += 1
+        _ball_sense(env)
+    assert b.handoff_fn(env)
+    _ball_place(env, 1.2, np.pi)          # gone: the streak resets, not decays
+    for _ in range(4):                     # past the held detector report
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_aim_steps == 0 and not b.handoff_fn(env)
+
+
+def test_find_ball_hands_off_to_a_kick_and_keeps_its_heading():
+    """It aims a ball-BLIND kick, so the handoff target is the kick — and the
+    turn it just made toward the ball is the deliverable, which is why the
+    lab's post-handoff yaw recentring is off for this recipe."""
+    b = BEHAVIORS["find_ball"]
+    assert b.handoff_policy == "pollen:ball_kick_right"
+    assert b.handoff_recenter is False
+    # The flip family keeps the default: its handoff IS a landing, and the
+    # heading a landing imparts is drift, not a choice.
+    for bid in ("backflip", "airflip"):
+        assert BEHAVIORS[bid].handoff_fn is None
+        assert BEHAVIORS[bid].handoff_recenter is True
+
+
+def test_find_ball_body_aimed_pays_the_body_not_the_neck():
+    """`body_aimed` exists because `face_the_ball` did not buy the turn: the
+    shipped export held the ball dead centre using ~21 deg of head yaw and
+    left the body 18-20 deg off. So the term must be worth nothing to a duck
+    that centres the ball by craning its neck, and near its maximum only when
+    the head is straight — which is what makes the body the thing aiming."""
+    from microduck_local.behaviors import (
+        _BALL_HEAD_YAW_ID,
+        _ball_body_aimed,
+        _ball_place,
+        _ball_sense,
+    )
+
+    env = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    for _ in range(20):    # settle the drop-in: at the spawn pose the head is
+        env.step(np.zeros(14, np.float32))   # still high and a floor ball sits
+    _ball_place(env, 1.2, 0.0)               # low in the frame (by = -0.39)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and abs(env._ball_bx) < 0.25
+
+    # ~0.70: a floor ball at 1.2 m sits ~4 deg BELOW a level gaze (the camera
+    # is above it), which is geometry, not bad aiming — the tight layer is
+    # 7 deg, so a perfectly squared-up duck still scores a little under 1.
+    straight = _ball_body_aimed(env)
+    assert straight > 0.65, straight
+
+    # Same centred detector report, head cranked to where the export sat
+    # (21 deg = 0.37 rad): the pay has to collapse, or it is another term
+    # that a neck can farm.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.37
+    craned = _ball_body_aimed(env)
+    assert craned < 0.5 * straight, (craned, straight)
+    # ...and it still SLOPES there, or there is no gradient home from 21 deg.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.30
+    assert craned < _ball_body_aimed(env) < straight
+
+    # Nothing is paid while the ball is not in frame: this term is about the
+    # aimed state, and `new_ground` / `turn_to_belief` own the search.
+    _ball_place(env, 1.2, np.pi)
+    _ball_sense(env, force=True)
+    assert not env._ball_seen and _ball_body_aimed(env) == 0.0
+
+
+def test_wide_upright_slopes_where_the_narrow_one_is_flat():
+    """`_upright`'s single Gaussian is worth ~0.007 at 30 deg of tilt and
+    ~0.0002 at 41 — past ~25 deg it prices being upright but not RECOVERING,
+    so a committed lean is free and the duck rides it to the floor. The wide
+    two-layer version has to still SLOPE out there, which is the whole point;
+    a term that is merely nonzero would not pull anything back."""
+    import math
+
+    from microduck_local.behaviors import _upright, _upright_wide
+
+    env = _ball_env()
+
+    def at(tilt_deg):
+        """Roll the trunk to a known tilt and read both terms."""
+        import mujoco
+        half = math.radians(tilt_deg) / 2
+        env.data.qpos[3:7] = [math.cos(half), math.sin(half), 0.0, 0.0]
+        mujoco.mj_forward(env.model, env.data)
+        return _upright(env), _upright_wide(env)
+
+    # Upright: both peak, and the wide one must not inflate the ceiling.
+    n0, w0 = at(0.0)
+    assert n0 == pytest.approx(1.0, abs=1e-6)
+    assert w0 == pytest.approx(1.0, abs=1e-6)
+
+    # The dead zone the falls live in: narrow has collapsed, wide has not.
+    n30, w30 = at(30.0)
+    assert n30 < 0.02 and w30 > 0.25, (n30, w30)
+    n41, w41 = at(41.0)
+    assert n41 < 0.01 and w41 > 0.15, (n41, w41)
+
+    # ...and it SLOPES there — recovering from 41 to 30 deg has to pay, or it
+    # is a floor, not a gradient. The narrow term's own slope is ~zero.
+    assert w30 - w41 > 0.05
+    assert n30 - n41 < 0.02
+
+    # Monotone: leaning further is never worth more.
+    vals = [at(t)[1] for t in (0, 10, 20, 30, 45, 60, 90)]
+    assert all(a > b for a, b in zip(vals, vals[1:])), vals
+
+
+def test_no_recipe_has_adopted_the_wide_upright():
+    """`_upright` is shared — it is a catalog term, it gates one_leg's hold,
+    and it SCALES backflip's brake penalty and two of imitate's terms, so the
+    wide shape is opt-in and NOTHING opts in today: A/B'd on find_ball, it was
+    Pareto-dominated (docs/roadmap.md). Kept because the shape and its measured
+    failure are worth more than the two lines they cost, and because the next
+    person to have this idea should find the result before the experiment.
+
+    If a recipe ever adopts it, this test is the reminder that it re-prices a
+    term four other behaviors read."""
+    from microduck_local.behaviors import _upright, _upright_wide
+
+    wide = {bid for bid, b in BEHAVIORS.items()
+            for t in b.terms if t.fn is _upright_wide}
+    assert wide == set(), wide
+    # ...and the recipes that name the term all still use the narrow one.
+    narrow = {bid for bid, b in BEHAVIORS.items()
+              for t in b.terms if t.fn is _upright}
+    assert "find_ball" in narrow, narrow
+
+
+def test_lean_spawn_is_tipped_but_recoverable():
+    """The lean spawn exists to put the duck in states it otherwise only ever
+    visits on its way to the floor. Two ways that goes quietly wrong, both of
+    which this repo has hit before: the spawn lands past the fall threshold and
+    every episode is a zero-length no-op, or a foot is wedged in the floor and
+    the solver ejects it (the backflip "invisible wall"), spending the state on
+    a launch nobody asked for."""
+    import math
+
+    import numpy as np
+
+    env = _ball_env(spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "1.0"})
+    tilts = []
+    for ep in range(12):
+        env.reset(seed=500 + ep)
+        g = env._projected_gravity()
+        tilts.append(math.degrees(math.acos(max(-1.0, min(1.0, -float(g[2]))))))
+        # Recoverable, not pre-lost: nothing terminates on the first step.
+        _, _, term, _, _ = env.step(np.zeros(14, np.float32))
+        assert not term, f"lean spawn terminated immediately at {tilts[-1]:.0f} deg"
+        # ...and it is standing on the floor, not wedged in it or dropped from
+        # a height (the attitude-aware clearance).
+        assert 0.10 < float(env._trunk_xpos[2]) < 0.22
+
+    assert 20.0 <= min(tilts) and max(tilts) <= 40.0, (min(tilts), max(tilts))
+    # Tipping BOTH ways across episodes — recovery must not be a one-sided
+    # trick, and a fixed axis would let the policy memorise one save.
+    env2 = _ball_env(spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "1.0"})
+    rolls = []
+    for ep in range(12):
+        env2.reset(seed=700 + ep)
+        rolls.append(float(env2._projected_gravity()[1]))
+    assert min(rolls) < -0.05 and max(rolls) > 0.05, rolls
+
+
+def test_lean_spawn_is_a_quarter_of_training_and_none_of_the_battery():
+    """The recipe trains with 25% leaning starts — that is what buys the kick
+    handoff (92% vs 85%) and cuts the falls to a third. But `eval-find-ball`
+    must NOT fire them: its job is a comparable measurement, and every number
+    in docs/roadmap.md and the policy READMEs was taken on plain standing
+    starts. A family firing inside the battery would change the test without
+    saying so, which is the same trap as measuring `centred` in normalized
+    bearing across two cameras."""
+    from microduck_local.behaviors import _ball_spawn_leaning
+    from microduck_local.eval_find_ball import run_battery
+
+    fams = BEHAVIORS["find_ball"].spawn_families
+    assert [fn for _, fn in fams] == [_ball_spawn_leaning]
+    assert [p for p, _ in fams] == [0.25], fams
+
+    # Training env: leaning starts really do fire.
+    env = _ball_env()
+    tilted = 0
+    for ep in range(60):
+        env.reset(seed=900 + ep)
+        tilted += abs(float(env._projected_gravity()[2])) < 0.98
+    assert 5 <= tilted <= 30, tilted
+
+    # Battery env: they do not, without being asked.
+    res = run_battery("policies/find_ball/policy.onnx", episodes=2, seconds=0.2,
+                      seed=3)
+    assert res["rows"], res
+    from microduck_local.behaviors import BehaviorEnv
+    probe = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                        action_delay=False, random_yaw=False, seed=3,
+                        spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                         "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0"})
+    for ep in range(20):
+        probe.reset(seed=900 + ep)
+        assert abs(float(probe._projected_gravity()[2])) > 0.98, "battery spawned tilted"
+
+
+def test_stale_fix_carries_the_held_bearing_without_compounding_it():
+    """find_ball had the same stale-pose bug tidy's `_locate` did: a bearing
+    measured off the camera at capture, held while the head kept sweeping, so
+    the policy acted on a pose the duck had already left. Compensating removes
+    the detector-rate cliff outright (4 Hz kick handoff 2% -> 80%, falls
+    16 -> 4 per 60).
+
+    The trap locked here is the one that briefly hid that result: the
+    correction must be computed from the CAPTURED bearing, never from `det`
+    itself. `det` is mutated in place, so re-adding the whole
+    rotation-since-capture compounds it — about 2.5x over-correction at 10 Hz
+    and worse below, which reads convincingly as "compensation does not
+    work"."""
+
+    import mujoco
+
+    from microduck_local.behaviors import _ball_place, _ball_sense
+
+    def bearing_after_head_turn(stale_fix):
+        env = _ball_env(spawn_overrides={
+            "MICRODUCK_BALL_EVENT_RATE": "0",
+            "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0",
+            "MICRODUCK_BALL_DETECT_EVERY": "10",
+            "MICRODUCK_BALL_STALE_FIX": stale_fix})
+        for _ in range(20):
+            env.step(np.zeros(14, np.float32))
+        _ball_place(env, 1.2, 0.0)
+        _ball_sense(env, force=True)          # capture, head straight
+        captured = float(env.head_cmd[0])
+        # Turn the head WITHOUT letting the detector re-report.
+        env.data.qpos[env.joint_qpos_adr[7]] = 0.30
+        mujoco.mj_forward(env.model, env.data)
+        env.step_count += 1
+        _ball_sense(env)
+        return captured, float(env.head_cmd[0])
+
+    held_from, held_to = bearing_after_head_turn("0")
+    assert held_to == pytest.approx(held_from, abs=1e-6), "report was not held"
+
+    fixed_from, fixed_to = bearing_after_head_turn("1")
+    assert fixed_from == pytest.approx(held_from, abs=1e-6)
+    # +1/half_h per rad of camera yaw, measured — the head turned ~0.30 rad.
+    assert fixed_to > fixed_from + 0.3, (fixed_from, fixed_to)
+
+    # On in the shipped recipe: ~2 points of handoff at the nominal 25 Hz,
+    # and it buys the entire cliff below it.
+    from microduck_local.behaviors import _BALL_KNOBS
+    assert _BALL_KNOBS["MICRODUCK_BALL_STALE_FIX"] == 1.0
+
+    # THE COMPOUNDING GUARD. Hold one report while the head turns steadily and
+    # the correction must track the TOTAL rotation since capture, growing
+    # linearly. A version that sums its own output accelerates instead.
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                     "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0",
+                                     "MICRODUCK_BALL_DETECT_EVERY": "50",
+                                     "MICRODUCK_BALL_STALE_FIX": "1"})
+    for _ in range(20):
+        env.step(np.zeros(14, np.float32))
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    base = float(env.head_cmd[0])
+    seen = []
+    for i in range(1, 5):
+        env.data.qpos[env.joint_qpos_adr[7]] = 0.05 * i
+        mujoco.mj_forward(env.model, env.data)
+        env.step_count += 1
+        _ball_sense(env)
+        seen.append(float(env.head_cmd[0]) - base)
+    steps = [b - a for a, b in zip(seen, seen[1:])]
+    assert min(steps) > 0.0 and max(steps) < 1.6 * min(steps), (
+        f"correction is compounding, not tracking total rotation: {seen}")
+
 # ---------------------------------------------------------------------------
 # deep_squat — the recipe that lives UNDER the walk env's fall line, and the
 # per-recipe height_termination knob that makes it learnable.
@@ -1213,8 +1832,11 @@ def _fold_until_fall_line(env, max_steps=60):
     from microduck_local import contract as C
     dp = np.asarray(C.DEFAULT_POSE, dtype=np.float64)
     q = dp.copy()
-    q[3] = dp[3] + 1.4;  q[2] = dp[2] + 0.2;  q[4] = -(q[2] + q[3])
-    q[12] = dp[12] - 1.4; q[11] = dp[11] - 0.2; q[13] = -(q[11] + q[12])
+    # knee, hip, then the ankle closing the chain — left and right mirrored.
+    q[3], q[2] = dp[3] + 1.4, dp[2] + 0.2
+    q[4] = -(q[2] + q[3])
+    q[12], q[11] = dp[12] - 1.4, dp[11] - 0.2
+    q[13] = -(q[11] + q[12])
     full = (q - dp).astype(np.float32)
     for i in range(max_steps):
         _, _, terminated, _, _ = env.step(full * min(1.0, (i + 1) / 5))
@@ -1230,8 +1852,8 @@ def test_height_termination_is_a_recipe_knob():
     does: locomotion turns it off (GPU parity), the deep squat turns it off
     (its target is under the line), standing tricks keep it, and an explicit
     env kwarg still wins. The lab preview mirrors it like terminate_on_fall."""
-    from microduck_local.behaviors import BEHAVIORS, Behavior
     from microduck_local import viz_server as V
+    from microduck_local.behaviors import BEHAVIORS, Behavior
     assert Behavior.__dataclass_fields__["height_termination"].default is True
     assert BEHAVIORS["run"].height_termination is False
     assert BEHAVIORS["deep_squat"].height_termination is False

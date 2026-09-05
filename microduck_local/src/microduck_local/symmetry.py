@@ -92,7 +92,9 @@ import torch
 from gymnasium import spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.utils import explained_variance
+from torch import nn
 from torch.nn import functional as F
 
 from . import contract as C
@@ -311,6 +313,41 @@ class FastActorCriticPolicy(ActorCriticPolicy):
 # `_run_speed` dropped median KL from ~0.30 to 0.044 at constant 1e-3.
 
 
+class SharedTrunk(BaseFeaturesExtractor):
+    """A trunk shared by the actor and the critic.
+
+    SB3 >= 1.8 removed shared layers from `net_arch`: `dict(pi=[...],
+    vf=[...])` builds two INDEPENDENT MLPs, so the default
+    512-256-128/512-256-128 runs the expensive early layers twice. Putting
+    them in the features extractor (which `ActorCriticPolicy` shares by
+    default) computes them once and leaves small per-head MLPs behind.
+
+    Where the cost is: 61x512 + 512x256 is 162k multiply-adds against 33k for
+    a 256x128 head, so sharing removes about 40% of the network work from both
+    the rollout forward and the update — and those are 12% and 42% of wall
+    time at 32 envs.
+
+    It is a real modelling change, not a free one: the value loss now
+    backpropagates into the features the actor reads, which rsl_rl
+    deliberately avoids by keeping the two separate. Hence the flag, and the
+    A/B. `export_onnx.OnnxWalkPolicy` needs no change — it already goes
+    through `extract_features` then `forward_actor` then `action_net`.
+    """
+
+    def __init__(self, observation_space, arch: tuple[int, ...] = (512, 256),
+                 activation_fn: type[nn.Module] = nn.ELU):
+        super().__init__(observation_space, features_dim=int(arch[-1]))
+        layers: list[nn.Module] = []
+        prev = int(np.prod(observation_space.shape))
+        for h in arch:
+            layers += [nn.Linear(prev, int(h)), activation_fn()]
+            prev = int(h)
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.net(obs)
+
+
 class SymmetryPPO(PPO):
     """SB3 PPO plus rsl_rl's mirror loss.
 
@@ -339,7 +376,25 @@ class SymmetryPPO(PPO):
     def __init__(self, *args, symmetry_coef: float = DEFAULT_SYMMETRY_COEF,
                  desired_kl: float | None = DEFAULT_DESIRED_KL,
                  ent_anneal: bool = False, overlap_update: bool = False,
-                 update_device: str | None = None, **kwargs):
+                 update_device: str | None = None,
+                 symmetry_augment: bool = False, **kwargs):
+        # rsl_rl's OTHER symmetry mode. Upstream ships `use_mirror_loss` with
+        # `use_data_augmentation=False`, which is what `symmetry_coef` above
+        # implements: a penalty pulling pi(M o) toward M pi(o), with the
+        # mirrored samples kept out of the surrogate and value losses.
+        # `symmetry_augment` is the augmentation variant: every minibatch is
+        # DOUBLED with its mirror image, and the mirrored halves go through
+        # the surrogate and value losses as ordinary samples.
+        #
+        # Why it might pay here: this trainer runs ~250x fewer samples than
+        # the GPU stack, so anything that buys sample efficiency rather than
+        # more samples is the only lever it has. Why it might not: the
+        # mirrored sample reuses the ORIGINAL's `old_log_prob`, which is
+        # correct only if the old policy was exactly mirror-equivariant. It
+        # is not, so the importance ratio on the mirrored half is biased —
+        # rsl_rl makes the same approximation. Off by default until an A/B
+        # says otherwise (AGENTS.md #4 and #5).
+        self.symmetry_augment = bool(symmetry_augment)
         # overlap_update runs the PPO update in a background thread while the
         # NEXT rollout is collected with a frozen pre-update snapshot of the
         # policy (see learn()). Off by default: it introduces a one-update
@@ -501,7 +556,10 @@ class SymmetryPPO(PPO):
 
         # --- symmetry: snapshot the obs normalizer once per update ---
         use_symmetry = self.symmetry_coef > 0.0
-        norm = self._obs_normalizer() if use_symmetry else None
+        # The normalizer is needed by the mirror LOSS and by augmentation:
+        # both mirror observations, and the mirror is defined on RAW ones.
+        norm = (self._obs_normalizer()
+                if (use_symmetry or self.symmetry_augment) else None)
         if update_dev is not None and norm is not None:
             norm = (norm[0].to(update_dev), norm[1].to(update_dev))
         symmetry_losses: list[float] = []
@@ -535,6 +593,30 @@ class SymmetryPPO(PPO):
                 if isinstance(self.action_space, spaces.Discrete):
                     # Convert discrete action from float to long
                     actions = rollout_data.actions.long().flatten()
+
+                if self.symmetry_augment:
+                    # Double the minibatch with its mirror image. The mirrored
+                    # sample keeps the original's advantage, return, value and
+                    # old_log_prob: under a mirror-equivariant policy the
+                    # mirrored transition has the same value and the same
+                    # probability, so those carry over. The old policy is only
+                    # approximately equivariant, which is the bias this mode
+                    # trades for the extra samples.
+                    m_obs = (mirror_obs(rollout_data.observations) if norm is None
+                             else mirror_normalized_obs(rollout_data.observations,
+                                                        norm[0], norm[1]))
+                    rollout_data = type(rollout_data)(
+                        observations=torch.cat([rollout_data.observations, m_obs], 0),
+                        actions=torch.cat([rollout_data.actions,
+                                           mirror_action(rollout_data.actions)], 0),
+                        old_values=torch.cat([rollout_data.old_values] * 2, 0),
+                        old_log_prob=torch.cat([rollout_data.old_log_prob] * 2, 0),
+                        advantages=torch.cat([rollout_data.advantages] * 2, 0),
+                        returns=torch.cat([rollout_data.returns] * 2, 0),
+                    )
+                    actions = rollout_data.actions
+                    if isinstance(self.action_space, spaces.Discrete):
+                        actions = rollout_data.actions.long().flatten()
 
                 if use_symmetry:
                     values, log_prob, entropy, mean_orig = self._evaluate_actions(

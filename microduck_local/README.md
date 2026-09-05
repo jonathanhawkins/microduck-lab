@@ -45,7 +45,8 @@ behavior works here, port the env design to an mjlab cfg and retrain on GPU:
 ## Commands
 
 ```bash
-uv sync                                     # one-time (needs ../microduck_rl checked out)
+uv sync                                     # one-time (needs ../microduck_rl checked out at the pinned sha —
+                                            # ../scripts/setup.sh does the clones, the pins, uv and npm in one go)
 uv run --with pytest pytest tests/          # contract tests — run before training
 uv run bench-walk                           # raw env-stepping throughput
 uv run bench-envs                           # PPO throughput vs --envs → the right worker count
@@ -66,6 +67,17 @@ cd ../microduck_rl && uv run scripts/infer_policy.py \
 
 # training curves:
 uv run tensorboard --logdir runs/
+
+# hold a training change to the repo's own standard before it ships:
+uv run bench-ab brains/baseline brains/candidate   # matched STEPS, not matched wall clock
+uv run select-brain my-run --seeds 100,200,300 --jobs 8   # brains: ship the best checkpoint, deterministically
+uv run select-run runs/my-run --jobs 8                    # locomotion: same, scored on achieved ground speed
+uv run bench-envs --ipc-floor                             # is a slow vec-step the plumbing or the physics?
+
+# the locomotion path that actually works (see "Fixing the falling"):
+uv run distill --teacher ../microduck/policies/alpha_walking.onnx --run-name my-walk
+uv run export-walk runs/my-walk
+uv run select-run runs/my-walk --behavior run --cmd 0.4 --jobs 8
 ```
 
 Measured on an M5 Max: ~26k control-steps/s raw env throughput at 12 workers
@@ -149,6 +161,154 @@ uv run bench-envs --envs 8,16,24 --repeats 3   # narrower, more repeats
 uv run bench-envs --compare-vec --compare-threads
 ```
 
+## Cloud and Linux training (`machine.py`)
+
+Every number above was measured on an 18-core M5 Max, and **that stays the
+default** — this harness is written for a Mac and advertised as one. But one
+of those tunings is wrong on a small Linux or cloud box, badly enough to lose
+a third of the machine, so `machine.py` detects which machine it is on and
+picks a profile. `uv run machine-facts` prints what yours resolved to.
+
+**What goes wrong on a 4-core cloud box.** The trainer, not the physics
+workers, eats the machine. torch's OpenMP pool spin-waits between the tiny
+batch-N policy forwards that make up a rollout, and those spinning threads
+take the cores the workers need: measured at 4 envs, the trainer process sat
+at **311% CPU while each worker got 18%**. The cores looked 90% busy and were
+mostly spinning. An M5 Max has enough cores to absorb that, which is exactly
+why `--pin-threads` measured a 21-24% *regression* there.
+
+The fix is not to pin threads — that gives the update one core, which is what
+cost 21% on the Mac. It is to give each PPO phase the threads it actually
+wants. Measured per phase at 32 envs on this box: **rollout 22.8 s, update
+2.9 s**, so the rollout is ~89% of wall time and is the phase the threads
+must not disturb.
+
+Medians of **four interleaved repetitions** on a 4-vCPU Xeon container — the
+arms measured back to back with their order rotated each rep, 40k timed steps
+per point — because this box drifts far too much to compare across windows
+(see the warning below):
+
+| envs | mac profile | phase-aware threads | gain |
+|---:|---:|---:|---:|
+| 8 | 892 | **1,420** | +59% |
+| 16 | 1,228 | **1,727** | +41% |
+| 32 (the default) | 1,764 | **2,155** | +22% |
+
+Per-arm spread across the four reps was 4-8%, and the mac arm reproduced
+within 4% at 32 envs, so the machine held still for this run.
+
+> **Do not compare these to a number you measure later.** The same script and
+> configuration on this same container ran 13.1 s in one window and 19.5 s a
+> few hours later — a 49% drift from noisy neighbours and CPU-credit
+> throttling, larger than every optimization in this file. Only the ordering
+> within a window transfers; re-measure both arms together
+> (`--compare-profiles`) rather than trusting any absolute figure here.
+
+The `linux` profile is that thread split, and it is the default off Darwin:
+
+- **Phase-aware torch threads.** One intra-op thread while collecting
+  rollouts, every usable core for the update. Implemented as an SB3
+  *callback* on `on_rollout_start` / `on_rollout_end` — the two hooks that
+  bracket the phase — so `train-walk`, `train-behavior` and `train-brain` all
+  get it without a vendored train loop. On the mac profile the callback list
+  is **empty**, not a no-op.
+- **Cores from the container, not the host.** `os.cpu_count()` reports the
+  *host's* cores inside Docker or Kubernetes, so a 4-CPU pod on a 64-core node
+  would start 64 spinning threads. `usable_cores()` takes the smallest of
+  `cpu_count`, CPU affinity and the cgroup quota.
+- **numba warmed once, in the parent.** The BAM kernels JIT on first call:
+  **528 ms** against a 0.95 ms steady step, and `cache=True` does not avoid it
+  across processes. `vec_env._warm_jit` pays it once before forking so the
+  workers inherit compiled code — the same trade as the shared `mjModel`,
+  for code. It restores every model array a warm-up step touches, so children
+  still inherit exactly the model the probe's construction left.
+
+`train-brain` also never called `configure_torch_cpu` at all, so it ran with
+torch's defaults (intra-op *and* inter-op at the core count). It does now.
+
+**Worker packing was measured and rejected.** Packing the fleet into one
+process per core (32 envs as 4 × 8) is the obvious companion optimization —
+extra processes cannot run in parallel anyway, and each costs the parent two
+semaphore ops per vec-step — and a single unreplicated point made it look
+like a +7% win. Four interleaved repetitions put it slightly *behind* one
+process per env at every count: **−1.7%** at 8 envs, **−3.9%** at 16,
+**−2.6%** at 32, never once ahead. Its other claimed advantage, faster
+startup, turned out to be the per-worker numba JIT that `_warm_jit` now
+removes for every layout (32-env setup 7.5 s unpacked vs 7.2 s packed). So no
+profile packs; `MICRODUCK_ENVS_PER_WORKER` remains the manual knob it always
+was, worth re-measuring only at env counts far above these. This is the
+second time here that one measurement disagreed with four — see the drift
+warning above.
+
+**What is deliberately NOT in a profile: the env count.** `--envs` sets the
+PPO batch size and therefore the learning dynamics, and this repo's rule is
+that throughput is not learning speed. It stays 32 everywhere. The one knob a
+profile does carry is quality-neutral by construction: thread counts do not
+enter the PPO math.
+
+```bash
+uv run machine-facts                           # cores + the profile they imply
+uv run bench-envs --compare-profiles           # both arms, interleaved repeats
+MICRODUCK_PROFILE=mac uv run train-behavior run   # force the historical settings
+MICRODUCK_ROLLOUT_THREADS=2 MICRODUCK_UPDATE_THREADS=6 uv run bench-envs  # try your own
+```
+
+**Sizing a cloud box.** A single trainer's ceiling is the serial parent loop,
+not the cores — the Mac numbers saturate near 27k steps/s. Past ~16 cores the
+way to use the machine is *several independent trainers* (`taskset` each to
+its own core group, each with its own `MICRODUCK_RUNS_DIR`), which is also
+what the seed-matched A/Bs this playbook demands need anyway. Per-core clock
+matters more than core count: one env steps in 0.34 ms here against 0.135 ms
+on the M5 Max, so a 4-vCPU box will not match the laptop whatever the
+threading does.
+
+**Measured and not adopted** (recorded so nobody pays for them twice):
+
+- `OMP_WAIT_POLICY=PASSIVE` on top of phase-aware threads — a small loss; the
+  update's threads then sleep between minibatches (update 3.3 s → 5.1 s at 16
+  envs). It is the best *no-code* fallback on its own, at +20%, but the two
+  do not stack.
+- Pinning OpenBLAS to one thread — neutral. The workers never spawn BLAS
+  pools on 61-dim ops.
+- **Pinning each worker to a core** (`sched_setaffinity`, round robin). 32
+  processes on 4 cores means the scheduler may migrate every worker on every
+  wake, so this looked obvious. Six interleaved runs: median 9.80 ms pinned
+  vs 9.56 ms default — neutral to slightly worse. Linux's scheduler is
+  already doing a better job than the naive pinning.
+- **A double-buffered (split-fleet) rollout.** Step half the fleet while the
+  parent computes actions for the other half, hiding its serial ~1.95 ms of
+  forward + dispatch behind worker compute. Prototyped with two independent
+  16-env vec envs, interleaved arms: **+6.2% at 8 envs, +7.1% at 16, +6.2%
+  at 32** — real, but a third of the ~18% the arithmetic suggested, because
+  splitting pays a second wait's sync cost and two batch-16 forwards cost
+  more than one batch-32. Not adopted, because ~5% end-to-end does not buy
+  what it costs: it *redefines what a step is*. The bitwise-collection test
+  (`test_overlap.py`) pins the vendored collect loop against stock SB3 and a
+  split fleet cannot satisfy it; `VecNormalize`
+  updates `obs_rms` once per step, so halves give two updates of 16 rows and
+  a different running normalizer — which is baked into every exported ONNX;
+  and the rollout buffer's `add()` takes a full row, so half-rows need
+  staging in the most correctness-sensitive code here. The scratch prototype
+  is not in the tree; re-derive it from these numbers before reopening.
+
+Two known gaps: the lock file resolves CUDA torch wheels on Linux (a 7.2 GB
+venv for a CPU trainer — CI installs from the CPU index first, and a
+`[tool.uv.sources]` entry would fix `uv sync` too), and `--update-device`'s
+`auto` only knows about MPS, so a CUDA cloud box needs an explicit
+`--update-device cuda` (the code path is device-generic but unmeasured).
+
+**Where the remaining time goes on this box**, at 32 envs after all of the
+above: the vec-step is ~10.8 ms — policy forward 0.96 ms (8.9%),
+`step_async` 1.00 ms (9.2%), `step_wait` 8.83 ms (81.9%). Uncontended physics
+for 32 envs on 4 cores would be ~4.9 ms, and the gap is the memory contention
+of 32 concurrent mjData working sets that the `--ipc-floor` decomposition
+below already pins down on a quieter machine. Worth noting that the two
+agree from opposite directions: that section predicted a rollout-loop rewrite
+could recover "at best ... about 6% of wall", and the split-fleet prototype
+went and measured 6.2-7.1%. The next real step-change is batched physics (one
+`mujoco.rollout` call for the whole fleet), which needs the BAM actuator in C
+rather than Python — it targets the physics row, not the plumbing.
+
 ### The 2026-08-31 speed pass (measured, in order applied)
 
 - **Semaphore IPC in `ForkVecEnv`** (`vec_env.py`): step traffic had cost two
@@ -163,6 +323,23 @@ uv run bench-envs --compare-vec --compare-threads
   order preserved — held to the golden float64 rollouts in
   `test_bam_perf_parity.py`. numba is optional; without it the numpy path
   remains.
+- **One kernel for the whole BAM substep** (2026-09-04, `_bam_substep_kernel`):
+  the three kernels above still crossed the Python boundary ~8 times and
+  allocated ~5 arrays of 14 floats per substep. Profiled *in situ* — timed
+  between real `mj_step` calls, so the constraint set is honest — no piece
+  dominated: motor torque 6.0 µs, the efc scan 6.7, the friction budget 7.0,
+  writes and clamp 6.3. It was dispatch and allocation spread thin, which is
+  what a single call fixes. **+10.4% per `env.step`** (median of 8 interleaved
+  measurements) and **+4.0% end-to-end** at 32 envs (median of 6 interleaved
+  pairs, individual pairs −5.5% to +17.2% — the training loop is much noisier
+  than one env). The dilution is the arithmetic working out: `env.step` is
+  ~45% of a vec-step here, and 0.45 × 10.4% ≈ 4.7%. Bit-identical: the golden
+  rollout still passes, and a new live pair test asserts fused == unfused to
+  the bit on qpos, qvel, every torque and the model fields.
+  The kernel writes *through* cached slice views
+  into MuJoCo's own arrays, so it is gated on the DOF selection being a
+  contiguous slice (a fancy-index selection would hand it a copy and the
+  writes would vanish). `MICRODUCK_BAM_FUSED=0` restores the previous path.
 - **`FastActorCriticPolicy`** (`symmetry.py`): hand-rolled diag-Gaussian
   rollout forward, 234 → 215 us at batch 32. Small and exact (log-probs match
   `evaluate_actions` to float tolerance — `test_fast_policy.py`).
@@ -181,9 +358,24 @@ uv run bench-envs --compare-vec --compare-threads
 - **Env batching** (`ForkVecEnv(envs_per_worker=k)` /
   `MICRODUCK_ENVS_PER_WORKER`): several envs per worker process, stepped
   serially inside it — semaphore ops and pipes scale with workers, not envs.
-  Default 1 (identical behavior, pinned by a step-for-step parity test);
-  meant for 48+ env counts where 1:1 packing costs 2 sem ops per env per
-  vec-step.
+  Packing also halves the worker processes available to fill the cores the
+  serial update leaves idle, and those two pull opposite ways, so the curve
+  CROSSES (measured 2026-09-03, real PPO, quiet machine):
+
+  | envs | k=1 | k=2 | |
+  |---:|---:|---:|---|
+  | 8 | 11,516 | 10,829 | −6.0% |
+  | 16 | 15,651 | 14,713 | −6.0% |
+  | 32 | 19,456 | **20,536** | **+5.5%** |
+  | 32 | | 17,824 (k=4) | −8.2% |
+
+  So the default is now **k=2 from 32 envs up** (the trainers' own default
+  `--envs`) and 1 below. This is the one throughput default here that needs
+  no learning-quality A/B, and the reason is mechanical rather than
+  statistical: the packed layout produces a step-for-step BIT-IDENTICAL
+  obs/rew/done stream, pinned by
+  `test_envs_per_worker_batching_matches_one_per_worker`. If that test ever
+  goes, the default goes with it.
 - **MPS update** (`SymmetryPPO(update_device="mps")` / `--update-device`,
   default `auto`): the minibatch loop hops policy + Adam state to the GPU;
   rollouts stay on CPU where batch-32 inference beats GPU dispatch latency.
@@ -198,6 +390,246 @@ update, 4 envs/worker), saturating ~27k — the parent's serial per-vec-step
 work is the remaining wall. A single worker's `env.step` is down to 0.135 ms
 idle, so physics itself would allow ~130k; closing the gap means replacing
 the SB3 rollout loop wholesale, not tuning it.
+
+### Fixing the falling: it was cloning fidelity
+
+Every locally trained `run` policy fell in 100% of episodes, at 45-130 steps
+of a 1000-step limit — so gait quality was never the binding constraint. The
+diagnosis started from one fact: the TEACHER (`alpha_walking`) survives all
+1000 steps in this exact env, and its clone did not.
+
+It is not compounding distribution shift, which was the obvious suspect.
+Driving the env with the clone and asking the teacher what it would have done
+at each state, the disagreement is FLAT at ~0.021 rad for a whole episode —
+it does not drift. So the clone is a slightly-wrong controller, and the fix
+is to make it less wrong. Five fitting budgets, scored on the deterministic
+export, **correlation(action MSE, fall rate) = +0.93**:
+
+| episodes | epochs | mse rad² | falls | ep_len | m/s |
+|---:|---:|---:|---:|---:|---:|
+| 120 | 30 | 0.00030 | 0.75 | 289 | 0.238 |
+| 250 | 40 *(old default)* | 0.00017 | 0.08 | 924 | 0.193 |
+| 250 | **120** | 0.00011 | **0.00** | **1000** | 0.196 |
+| 600 | 120 | 0.00006 | **0.00** | **1000** | 0.194 |
+
+Below ~0.00011 rad² the falling stops outright. Note the top row: the
+lowest-fidelity clone is the FASTEST, at 0.238 m/s — while falling three
+episodes in four. Speed without survival is the trap `select-run`'s fall
+floor exists to catch.
+
+The default fitting budget is now 250 x 120. It costs 33 s once (17 s → 50 s)
+and the clone is cached. Scored on four **held-out** eval seeds x 10 episodes
+— seeds no checkpoint selection ever touched, which matters because `falls`
+over a handful of episodes takes only a few discrete values and flatters a
+policy:
+
+| policy | m/s | ep_len | falls |
+|---|---:|---:|---:|
+| teacher `alpha_walking` | 0.202 | 1000 | 0.00 |
+| its clone, seed 51 | 0.207 | 932 | 0.08 |
+| its clone, seed 52 | 0.211 | 820 | 0.20 |
+
+On the development seeds the clone read 1000 / 0.00; on held-out seeds it is
+0.08-0.20. Still a transformation of the old budget's 0.75, but only the
+teacher itself is genuinely at zero.
+
+**PPO fine-tuning on top is NOT fixed, and three obvious levers did not fix
+it.** From four identical clones (all mse 0.00009), 400k-step fine-tunes were
+run under the current rate (2e-4 → 3e-5), a 4x cooler one, and rsl_rl's
+adaptive-KL rate. Scored deeply (3 seeds x 12 episodes on the best
+checkpoint):
+
+| arm | mean ep_len | falls | m/s |
+|---|---:|---:|---:|
+| base (current lr) | 640 | 0.40 | 0.205 |
+| 4x cooler lr | 463 | 0.58 | 0.240 |
+| adaptive KL | 607 | 0.43 | 0.206 |
+| base, 1M steps | 528 | 0.55 | 0.186 |
+
+Every pairwise comparison is unresolved at four seeds, and every arm falls
+far more than the clone it started from. Two things were learned. The
+collapse is **progressive erosion over ~130k steps**, not one bad update —
+all four seeds decay, two just decay slower. And **shorter beats longer** as
+a point estimate (400k falls 0.40 against 1M's 0.55), which is what
+`select-run` and a plateau stop are for.
+
+**Fourteen paired seeds resolve it, and it is not instability — it is a
+trade.** Each seed's clone against its OWN fine-tune, 400k steps, scored on
+40 held-out episodes (selection and evaluation on disjoint eval seeds):
+
+| | clone | fine-tuned | delta | 95% interval | |
+|---|---:|---:|---:|---|---|
+| episode length | 806 | 392 | **-414** | -596 … -233 | **clone better** |
+| fall rate | 0.21 | 0.65 | **+0.44** | +0.250 … +0.628 | **clone better** |
+| ground speed (m/s) | 0.213 | 0.254 | **+0.041** | +0.007 … +0.075 | **tuned better** |
+
+All three resolved. PPO is not randomly destabilising the gait — it is
+systematically **trading survival for speed**, and the trade is a bad one at
+these weights. The seed table shows it plainly: the five fastest fine-tunes
+(0.30-0.33 m/s) are the five that collapse to ~50-step episodes. Only seed 66
+went the other way, reaching 977 steps and 0.03 falls by giving up speed
+(0.171 against its clone's 0.218).
+
+That pointed at the scorecard — the `run` recipe has **no explicit fall
+penalty**, so falling only forfeits future reward, weak at gamma 0.99 over
+~100 remaining steps against a per-step speed payoff. So one was added
+(`MICRODUCK_RUN_FALL_PENALTY`, a one-off cost on the terminal step) and
+measured. **It does not work.** Weights 0/10/30/100 screened at four seeds
+put 30 ahead (+121 steps, -0.12 falls); extended to fourteen paired seeds the
+sign reversed to -34 steps and +0.05 falls, both unresolved:
+
+| | clone | w0 | w30 |
+|---|---:|---:|---:|
+| episode length | 930 | 470 | 436 |
+| fall rate | 0.08 | 0.58 | 0.62 |
+| ground speed (m/s) | 0.209 | 0.246 | 0.253 |
+
+The term ships inert (weight 0). Its value is as evidence about the
+diagnosis: pricing the terminal event does not stop the trade, so "no fall
+penalty" is not the explanation either.
+
+**What survives every test is simpler.** Three learning rates, four fall
+weights and two training lengths all failed to make a fine-tuned policy beat
+the clone it started from. At this sample budget, fine-tuning a
+teacher-quality gait is not productive — so for locomotion, **the distilled
+clone is the deliverable**:
+
+```bash
+uv run distill --teacher ../microduck/policies/alpha_walking.onnx --run-name my-walk
+uv run export-walk runs/my-walk
+uv run select-run runs/my-walk --behavior run --cmd 0.4 --seeds 1001,1002 --jobs 8
+```
+
+(`--behavior run` because a distill run has no `behavior.json` to read it
+from.) Verified end to end: **0.203 m/s, 1000-step episodes, zero falls** on
+held-out eval seeds — the teacher's own numbers, in about a minute.
+
+`select-run` refuses the fast fallers, which is exactly the population PPO
+produces here.
+
+### The `run` scorecard: achievement gating, and a correction
+
+**First, the correction.** An earlier note here reported that the `run`
+reward was anti-correlated with walking, correlation **-0.90** against
+`select-run` ground speed. That was largely an **episode-length artifact**.
+`ep_rew` is a per-episode SUM; every locally trained `run` policy falls in
+100% of episodes, so episodes are short (45-130 steps of a 1000 limit) and
+they LENGTHEN as the policy learns to survive — which lifts the sum whether
+or not the duck travels. Per STEP, over six runs' checkpoints:
+
+| run | corr(SUM, m/s) | corr(PER STEP, m/s) |
+|---|---|---|
+| g-off-s41 | -0.15 | **+0.55** |
+| g-on-s41 | -0.29 | **+0.94** |
+| g-off-s42 | -0.61 | -0.38 |
+| g-on-s42 | -0.39 | **+0.24** |
+| c-on-s21 | -0.91 | -0.94 |
+| c-off-s22 | -0.70 | **+0.07** |
+
+Four of six are POSITIVE per step. The failure is real but is not the rule.
+`bench-ab --metric ep_rew_per_step` divides by `ep_len` for exactly this
+reason, and on one real pair it reverses the verdict: `ep_rew` says "B is
+better (+8.7%)", the rate says "A is better (-17.1%)".
+
+**Then the actual defect.** Every POSITIVE shaping term gated on
+`_run_cmd_norm` — the COMMANDED speed — so the whole shaping budget was
+collectable by a duck that ignored the command. `air_time`'s ceiling
+(2.0 x 3.0 = 6.0) sat above `keep_pace`'s entire 1.0 x 4.0, letting the
+gait-shaping term outbid the task it was meant to shape; measured, it rose
++0.26 (x3 = +0.78 weighted) while `keep_pace` fell -0.11 (x4 = -0.46).
+
+`air_time` and `stay_upright` are now scaled by how well the command is
+ACTUALLY tracked — `floor + (1-floor) x _run_speed`, reusing the audited,
+baseline-subtracted term that already pays 0 for standing. Shaping can
+amplify the task; it can no longer substitute for it. Four paired seeds,
+distilled warm start, 1M steps:
+
+| | ON - OFF | seeds ahead | 95% interval | |
+|---|---|---|---|---|
+| per-step corr(reward, speed) | **+0.366** | **4/4** | +0.073 … +0.660 | **resolved** |
+| final ground speed (m/s) | -0.002 | 2/4 | -0.109 … +0.104 | unresolved |
+| mean episode length | +6.0 | 3/4 | -22.2 … +34.2 | unresolved |
+
+**Then the result got taken away again.** That arm gated `stay_upright`
+too — and `test_run_upright_is_gpu_run_std_and_additive` records that
+multiplying upright onto the speed term "is why local speed saturated at
+0.27 m/s". A prior specific measurement beats a weaker current one (these
+arms never reached speeds where a 0.27 cap could show), so upright stays
+additive. Re-measured with `air_time` gated ALONE, which is what ships:
+
+| | ON - OFF | seeds ahead | 95% interval | |
+|---|---|---|---|---|
+| per-step corr(reward, speed) | +0.195 | 2/4 | -1.93 … +2.32 | unresolved |
+| final ground speed (m/s) | -0.009 | 2/4 | -0.143 … +0.126 | unresolved |
+| mean episode length | +27.4 | 1/4 | -89.4 … +144.2 | unresolved |
+
+So the resolved half of the win was the half that cannot ship. `air_time`
+gating is implemented, tested and **off by default** (`MICRODUCK_RUN_GATE=1`
+opts in) until it has seeds behind it.
+
+**And the scorecard is not what is limiting these runs.** Every checkpoint
+of all eight arms fell in 100% of episodes, at 45-130 steps of a 1000-step
+limit. Gait quality was never the binding constraint — falling is — so
+reward surgery is not where the next gain lives.
+
+### The 2026-09-03 pass: where the time really goes (and what that ruled out)
+
+The note above says the parent's serial per-vec-step work is the wall, and
+that "closing the gap means replacing the SB3 rollout loop wholesale". That
+turns out to be **wrong**, and the measurement that settles it is
+`uv run bench-envs --ipc-floor`: a vec-step over envs that do NO work, which
+is pure IPC and scheduling. At 32 envs on a quiet machine:
+
+| | us per vec-step | share |
+|---|---:|---:|
+| IPC + scheduling floor (`--ipc-floor`, k=2) | 86 | 10% |
+| the physics itself, plus memory contention | 482 | 55% |
+| policy forward (batch 32) | 174 | 20% |
+| the rest of SB3's rollout loop | 141 | 16% |
+| **one real vec-step** | **883** | |
+
+And `collect_rollouts` is 58% of wall against the update's 42%. So the Python
+plumbing everyone suspects is 10%, and a rollout-loop rewrite could recover
+at best the "rest of SB3" row — about 6% of wall. The 55% is physics: 16
+worker processes stepping 2 envs each is ~162 us of actual work, and it
+measures 482, the difference being the memory contention of 32 concurrent
+~0.9 MB mjData working sets. **Not a Python problem, and not worth a
+rewrite.**
+
+The same numbers close the "make the numpy nogil and revisit the thread
+backend" idea. Threads would delete the 86 us IPC floor — 10% — and pay for
+it in GIL contention on the 36% that is Python. The measured `elu`/`linear`
+split inside the forward is another dead end worth recording: ELU costs 1.7x
+the matmuls at batch 32, but `inplace=True` changes nothing (174.0 vs
+174.1 us) and `torch.jit.trace` buys 2.4%, because it is per-op dispatch
+across ~14 tiny ops, not arithmetic. Thread count does not move it either
+(171-175 us at 1, 2, 4 and 8 intra-op threads).
+
+**Mirror data augmentation** (`train-behavior --symmetry-augment`) is
+rsl_rl's other symmetry mode, and now implemented: every minibatch is doubled
+with its mirror image and the mirrored halves go through the surrogate and
+value losses, rather than only being penalised for asymmetry. It is the one
+lever that buys sample EFFICIENCY rather than more samples, which is the only
+currency a trainer running ~250x fewer samples than the GPU stack has. On
+reward per step it looked like a clear win — +24.7% and +8.0% in the settled
+tail on two seeds, leading over 97% and 86% of the run, at a 16% throughput
+cost. **Then the deterministic export was scored and every policy in both
+arms was standing still at 0.001 m/s.** 1.5M steps from scratch buys "do not
+fall", nothing more, so that reward signal was not measuring the task at all
+— exactly the trap AGENTS.md #1 exists for. It ships OFF, with the honest
+note that its own mirrored samples reuse the original's `old_log_prob`, so
+the importance ratio on the mirrored half is biased.
+
+**The distilled warm start** (`train-behavior --distill`) clones the shipped
+walker into a fresh SB3 policy and starts PPO from there — cached, so the
+clone is paid once. It works as advertised: the clone walks at 0.194-0.206
+m/s against the teacher's 0.196. What it does NOT do is survive fine-tuning
+at this budget: 1M steps of PPO afterwards left every checkpoint of all four
+arms falling in 100% of episodes, several at negative ground speed.
+`distill.py`'s own header predicts the mechanism ("the critic starts
+untrained ... expect a dip before any gain"); the measurement says the dip is
+longer than 1M steps. So it stays opt-in, and the honest summary is that the
+clone is a good warm start and nobody has yet shown what budget exploits it.
 
 **And the number that actually matters** — reward per wall-second on the
 real recipe — does NOT follow raw steps/s. Both throughput-maximizing
@@ -266,6 +698,1686 @@ caveats there because the lab pins `domain_rand=False` and steps its ducks
 serially in one frame loop; a lab launched with `MICRODUCK_ACTUATOR=bam` falls
 back to private models.
 
+## World mode: rooms, sensors, brains (the viewer's `/sim` page)
+
+The roster above gives every duck a private env. **World mode** composes a
+whole room into ONE MuJoCo model — walls, boxes, a ball, N ducks — so the
+ducks can bump into each other and a sensor on one can see another
+(`world/compose.py`, MjSpec attaching the upstream robot MJCF once per duck
+under an id prefix; `world/arena.py` steps every duck's reflex policy in one
+`mj_step`). It is the base for everything in `docs/sim-roadmap.md`.
+
+```bash
+uv run duck-lab --world living-room          # no roster needed; built-ins:
+                                             # empty-floor, wall-test, living-room
+# then open the viewer's /sim page
+```
+
+What a duck senses lives in `sensors/`: `TofSensor` is the head's 8×8
+time-of-flight matrix on the MJCF's `tof` site (45° FOV, 4 m, 15 Hz on a
+fixed grid, uint16 mm frames shaped like the robot's `tof.stream`, with
+`ideal` / `datasheet` / `hostile` noise presets you can flip live from the
+inspector). It never reaches the policy: `brain/` is where senses become
+intents. `Wander` is the first brain — it reads the middle columns of the
+depth matrix and emits only a twist, the same `robot.move` the real robot
+takes — and it drives every ToF-equipped duck in auto mode; press **P** on
+the page to take the wheel yourself.
+
+Scenarios are JSON in `scenarios/` (`world/scenario.py` is the contract and
+validator; `make_room(seed)` generates one). `GET/PUT/DELETE /scenarios/{n}`,
+`POST /world/load`, `POST /world/noise` and the `/ws/sim` socket are
+documented in `world_server.py`. Invariants worth knowing: a one-duck world
+reproduces `MicroduckWalkEnv` step for step (`tests/test_arena.py`), and the
+world never runs rewards or domain randomization — reflex training keeps its
+own env.
+
+### Senses → intents: the brain layer (roadmap Phase 2)
+
+The policy on the robot is blind by contract; everything that *sees* is a
+separate tier that only emits intents — a twist for `robot.move`, a head
+pose, a beak open/close, a skill name. `brain/runtime.py` is that contract
+(`Senses` in, `Intent` out, every input stamped with its age so a brain can
+refuse stale data); `brain/controllers.py` has the scripted brains (`Wander`,
+`Follow`, `Script`), and the page's inspector shows each brain's inputs and
+its current intent live.
+
+- `sensors/detector.py` is a **geometric detector** in place of a neural
+  one: what a camera-side model would output (class, bearing, elevation,
+  apparent width, confidence) computed from the sim, gated by a frustum, an
+  occlusion ray and apparent size, with latency, misses and ghosts per noise
+  preset. Every frame carries the camera pose it was captured from (height
+  and depression) — on the robot that is IMU pitch plus the neck servos
+  through the kinematics — because the walking gait holds the head 0.08 rad
+  higher than the standing pose and rocks it ±0.02 rad, which is tens of
+  centimetres of range for anything ranged by elevation.
+- **Persons** are mocap capsules that walk waypoint paths; press the page's
+  possess button (or send `{"possess": "p0"}`) to drive one yourself and
+  see how a brain reacts.
+- `brain/tracker.py` is the **tracker** over the detector's frames: ids
+  from association (class, bearing gate, range gate), smoothing, hit
+  counts, and coasting through misses with the remembered bearing turning
+  with the body (from odometry). `Follow` acts on a track, not on whatever
+  the last frame said, and a one-frame ghost never confirms. In the sim the
+  detector also hands out true names; the tracker keeps them for the tools,
+  its ids are its own.
+- `brain/gait.py` holds the **walker facts every brain shares** (measured
+  with `walker-facts`): from a standstill NO turn starts below the full
+  ±1.0 command — not a weak turn, an exactly zero one, in both directions —
+  so a cold turn gets a 0.2 m/s forward kick that starts the gait and is
+  dropped as soon as the body is turning. `GaitWatch` decides "cold" from
+  odometry, never from the intent. **And it walks backwards, faster than it
+  walks forwards** — see below.
+- **A locomotion "fact" that was a dead band, and cost three brains a
+  workaround each.** `gait.py` said "it does not walk backwards (a -0.3 m/s
+  command moves 4 mm in 2 s)" and every brain believed it: `tidy.py` leaves
+  a rim with a ~7 s sidestep-turn-around-walk, the chase brain retreats by
+  turning away, and the line-up gives up on any pre-spot behind the duck.
+  The measurement was right and the fact was wrong — **-0.3 is the inside
+  of a dead band**. One notch past it:
+
+  | vx command | −0.40 | −0.35 | −0.30 | −0.25 | +0.20 | +0.25 | +0.30 | +0.40 |
+  |---|---|---|---|---|---|---|---|---|
+  | steady m/s | **−0.23** | **−0.20** | −0.00 | +0.00 | −0.00 | +0.11 | +0.13 | +0.19 |
+
+  The walker reverses at 0.23 m/s — **faster than it moves in any other
+  direction**, on an empty floor, over six start headings, with no falls.
+  The turn is the same shape: cold, every |wz| below 1.0 is exactly zero
+  and so is −1.0, while warm the rate is roughly linear (0.15 / 0.28 /
+  0.47 / 0.61 rad/s at +0.25…+1). And `TURN_KICK = 0.2` is inside the
+  forward dead band as well: it starts the gait for a cold turn, but a
+  brain that "walks" at 0.2 moves 9 mm in 6 s.
+
+  **And then a second lesson, on top of the first.** Reversing while
+  turning looked at first like the limit the straight reverse was not: net
+  displacement over 6 s is 1.31 m straight but only 0.62 m at `wz` 1.0, and
+  "it cannot reverse and turn at once" was written into `gait.back_up`'s
+  docstring on that reading. Rendering the rollout and *looking* at it
+  killed that in one glance — the duck is reversing the whole time and
+  visibly rotating, so it drives an **arc**, and an arc curves back toward
+  where it started. Measured along the duck's own heading instead of the
+  frame it began in, the reverse is unimpaired: −0.219 m/s straight,
+  −0.208 at `wz` 0.5, −0.209 at 1.0, −0.230 at −1.0, while the body turns
+  at 0.30–0.40 rad/s. The first reading was a fact about the coordinate
+  frame. **A dead band and a rotating frame are the same mistake twice:
+  a number measured correctly and read as more than it says.**
+
+  It is a real gait, too — 3.43 m in 15 s at a steady 0.228 m/s, four start
+  headings agreeing to 6 mm with under 0.1 rad of drift and no falls — and
+  unlike the turn it needs no warm gait: cold reaches 2 cm in 0.48 s
+  against 0.38 s warm, at the same final speed.
+
+  Three things came out of this beyond the numbers. `walker-facts` now
+  **sweeps the command ranges** instead of sampling one value each
+  (`command_deadbands()`), on an empty floor — `make_room`'s 3.0 × 2.5 m
+  room with four boxes cannot hold the 1.3 m a 6 s reverse covers, so
+  measuring the gait in it measures the boxes, which is how the first
+  re-measurement of this came out wrong too. `gait.back_up()` hands out a
+  reverse clamped past the dead band's edge, because a brain that politely
+  asks for −0.3 gets 4 mm and no error. And `tests/test_walker_facts.py`
+  locks the edge as well as the inside, so the next walker that changes
+  this breaks a test instead of a benchmark six months later. **The general
+  rule: a locomotion limit read off a single command value is a reading of
+  the dead band, not of the robot.** The brains still use their old
+  workarounds, and the first one re-measured says why.
+
+  **`tidy`'s back-off, tried with a reverse: worse, and the reason is the
+  interesting part.** Leaving the basket is a 1.5 s left sidestep, a 2.6 rad
+  turn in place and a 1.5 s walk — about 7.3 s, after every delivery — and
+  its comment justified that sequence with "the walker cannot walk
+  backwards". `backoff_back_s` replaces the lot with a straight reverse. On
+  16 paired seeds × 300 s × 6 toys: **in the basket 5.31 → 4.94** (0.885 →
+  0.823 of the toys, −0.38 ± 0.18, p = 0.111, better on 2 of 16 and worse
+  on 8, six ties). Falls 0.31 → 0.44 — 5 events against 7, unresolvable at
+  this size, so the "it removes the turn-at-the-rim fall mode" half is
+  neither shown nor refuted.
+
+  The saving was real. Traced over 3 seeds, seconds a 300 s run:
+
+  | | backoff | scan | explore | approach | deliver |
+  |---|---|---|---|---|---|
+  | sequence | 39.5 | 60.1 | 20.5 | 64.0 | 72.2 |
+  | reverse 2 s | **9.4** | 76.5 | 10.0 | **114.5** | 53.5 |
+
+  The reverse cuts the back-off by 30 s a run exactly as promised — and
+  `approach` grows by 50. A reversing duck ends 0.56 m from the basket
+  centre against 1.05 m after the sequence, right on the `basket_keepout`
+  line, so it scans from beside the basket and then walks the length of the
+  room to whatever it finds. **The turn-and-walk is not overhead.** The
+  comment called it "leaving the rim"; what it actually does is put the
+  duck back in the *room*, where the toys are, pointed away from the
+  basket. The 30 s it costs buys shorter approaches for the rest of the
+  cycle and is repaid with interest.
+
+  **Then the matched version, at 80 seeds — and the back-off turns out to
+  be doing two jobs.** "A reverse that keeps the walk-out" does not exist:
+  after backing out the duck *faces* the basket, so there is no walking
+  clear without the 2.6 rad turn, which is the expensive part. What the
+  histogram indicts is the distance, so the variants are about reaching
+  1.05 m. Measured open-loop from a post-drop pose:
+
+  | | 2 s | 3 s | 4 s | 5 s | 6 s |
+  |---|---|---|---|---|---|
+  | straight reverse | 0.57 | 0.80 | **1.04** | 1.28 | — |
+  | reverse arc, `wz` 1 | 0.51 | 0.64 | 0.69 | 0.65 | 0.56 |
+
+  The **arc is geometrically dead** — it curves back toward where it began,
+  so distance from the basket peaks at 0.72 m near 4 s and then falls away;
+  the duck circles the basket instead of leaving it. That is the same arc
+  property that had already fooled one reading of `back_up`, this time
+  saving a battery instead of costing a docstring. And the 2 s arm's
+  deficit has a simpler name: it reached 0.57 m, so it was never "reverse
+  vs sequence", it was **half a retreat against a full one**.
+
+  So: `backoff_back_s` 4.0, the same 1.04 m in 4.0 s instead of 7.3 s.
+
+  | | in the basket | | falls a run | |
+  |---|---|---|---|---|
+  | screen, seeds 0–15 (16) | 5.31 → 5.56 | p = 0.43 | 0.31 → 0.62 | p = 0.40 |
+  | **confirm, 16–79 (64)** | 5.27 → 5.12 | p = 0.39 | 0.41 → 0.77 | **p = 0.003** |
+  | **pooled (80)** | 5.28 → 5.21 | p = 0.69 | 0.39 → 0.74 | **p = 0.002** |
+
+  The screen's +0.25 toys **reversed** on fresh layouts and pools to
+  nothing (0.879 → 0.869 tidied; 25 seeds better, 25 worse, 30 tied). The
+  falls did the opposite — they replicated and *sharpened* with n, which is
+  what a real effect does and what none of the soccer effects ever did.
+  +90%, 31 events against 59, and not exposure: work done is flat (picks
+  +1%, deliveries +2%), so falls per pick nearly doubled, 0.067 → 0.128,
+  p = 0.002.
+
+  Traced, the falls are not where the argument put them. **Not the reverse
+  itself** (1 of 11 while backing), **not the walls** (median clearance
+  1.25 m in both arms), and back-off falls actually went *down*, 3 → 2 — so
+  the "no turn at the rim" half was right. They moved to `approach`, 1 → 4.
+  Since the two arms are distance-matched by construction, the variable
+  left is **heading**: the sequence ends facing away from the basket, a
+  reverse ends facing it, and the next route then sets out across the
+  basket zone — whose 6 cm rim sits below the ToF guard until the last
+  0.26 m and trips the walker.
+
+  **The 7.3 s buys two things, not one: distance and heading.** Each
+  variant bought a different half — 2 s gave neither and cost tidying, 4 s
+  gives distance without heading and costs falls. The dead-band fix was
+  real, the mechanism argument on top of it was sound, the manoeuvre was
+  genuinely faster, and "make the back-off faster" was the wrong frame
+  throughout. It ships at 0, with the numbers in the parameter's comment.
+
+- **Odometry drift** (roadmap 1.7): the `(x, y, yaw)` a brain gets is dead
+  reckoning — a per-run distance scale, a gyro bias, per-step noise — under
+  the same `ideal` / `datasheet` / `hostile` presets (`Duck.odom`, the
+  inspector's odom select, `eval-tidy --odom`). The presets are
+  assumptions until someone measures the robot; the point is that a brain
+  has to live with them.
+- **Room mapping** (`brain/mapping.py`): an occupancy grid per duck in its
+  own odometry frame, built from the ToF frames' mount pose (each frame
+  carries where the sensor was on the body) and its own pose, floor hits
+  traced as free space. The page paints it on the floor (`M`). Under
+  drift it **closes the loop on its own walls**: each frame's wall hits
+  are fitted with a line, the map's wall near it with another, and the
+  angle and gap between them correct the heading and position (a
+  deadband keeps line-fit noise from moving good odometry). Measured on a
+  duck walking at a corner under a 1.5°/s gyro bias (1.5× the hostile
+  preset's σ): pose error 0.21 → 0.12 m, occupied cells within 10 cm of a
+  true wall 0.64 → 0.85; under a 3°/s bias 0.42 → 0.20 m; ideal odometry
+  stays within 2 cm and 0.5°. A correlative search over cells was tried
+  first and measured to trade yaw error for sideways error — a 45° depth
+  matrix cannot tell the two apart by overlap, which is the lesson.
+- `brain/brain_env.py` turns the brain tier into a gymnasium env
+  (`BrainEnv`: 80-float obs from senses, a 3-float twist action, decisions
+  at 10 Hz, the shipped walker frozen underneath, domain randomization on
+  the *senses* only) and `train-brain` / `eval-brain` train and score one:
+
+  ```bash
+  uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety \
+      --title "Follower v4" --description "v3 recipe to 2M with variety"   # ~15 min; the /train page shows the title, not the name
+  uv run describe-brain p-n256-s31 --title ... --description ...   # name a run after the fact; write the FINDING in once it resolves
+  uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24   # vs `--brain follow`
+  uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24 --jobs 0   # …on every core
+  uv run duck-lab --world follow-me         # the duck starts on learned:follow-v4; swap to "follow" (the rule brain) in the inspector to compare
+  # …and watch the run live at http://localhost:63317/train (duck-viewer)
+  ```
+
+  **An episode is a pure function of `(seed, ep)`.** `BrainEnv.reset()`
+  re-seeds every generator that outlives `world.reset()` — the ToF's, the
+  detector's and the world's own, all three seeded once at construction
+  and untouched by their `reset()` — and zeroes the commanded twist that
+  `_respawn` leaves standing, so the warm-up steps that let the first
+  sensor frames land are not driven by whatever the last episode was
+  asking for. Nothing carries from episode k-1 into episode k. That is
+  what `--jobs N` rests on: it splits a battery over N processes, one env
+  each, and returns exactly the rows `--jobs 1` returns (2.6x on 4 cores
+  for a 24-episode battery; `tests/test_eval_brain_jobs.py` pins the
+  exactness, and 7 of its 8 cases fail if a carrier ever comes back).
+  Episodes used to be chained — episode 0 reproduced, everything after it
+  continued the previous episode's noise stream. Re-measuring both follow
+  tables independently moved no cell by as much as one seed-level sigma
+  (largest in band: 0.019), so no published ranking changed; what it did
+  change is that v4's lead over v5 now clears the noise in three cells of
+  four, where under chained sampling it cleared in none.
+
+  `brains/follow-v1` … `follow-v5` (112 kB each, `brain.onnx` + the
+  contract in `brain.json`) ship in the repo, so `learned:follow-v1` /
+  `-v2` / `-v3` / `-v4` / `-v5` work from a fresh clone; retrain to replace them
+  (the SB3 checkpoints and `progress.jsonl` stay local — which is why a
+  cloned brain shows no curve on the `/train` page). The observation comes in two
+  versions (`brain_env.py`): v1 fed the nearest raw detection; v2 feeds
+  the TRACKER's target (its bearing keeps turning with the body through
+  a miss), a coasting flag, confirmation and the odometry yaw rate, in
+  the three slots v1 reserved. A brain's `brain.json` says which it was
+  trained on and `LearnedBrain` builds that one, so v1 still runs
+  bit-for-bit. follow-v2 is v2, trained on the pinned 2026-09 model
+  (400k decisions, then 400k more warm-started).
+
+  **A person is seen by its legs.** The detector reports the part of a
+  tall target that is inside its 48° vertical frustum: from a 24 cm-high
+  camera a person's middle leaves the frustum at 1.2 m, and until this
+  the follow band (0.7 m) sat inside the range where the person was
+  invisible — every brain's "in sight" fell as it closed in, and the
+  scripted one coasted and searched with the person a metre ahead. A
+  point-like target (a ball) is unchanged. Every row below moved with
+  it (in sight 0.75 → 0.96 for `follow-v2`), so the table is the new
+  world. `follow-v4` is the first brain TRAINED in it; v1–v3 are scored in
+  it but were trained before it.
+
+  Measured on identical follow-me episodes (the pinned model) with the
+  **polite person that is now the benchmark's default** — it stops
+  0.55 m centre to centre short of a duck in its way and steps around
+  after 2.5 s — **240 episodes a cell** (24 episodes x 10 eval seeds;
+  every row has zero contact, falls at most 0.06), in band / in sight
+  under the datasheet and hostile presets. Re-measured on **independent
+  episodes** (below) on a 4-core Linux container; the same pass taken the
+  old chained way agreed with the M-series figures it replaces to within
+  0.02 a cell, and no cell moved by as much as one seed-level sigma:
+
+  | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
+  |---|---|---|---|---|
+  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.94** / 0.99 | **0.88** / 0.90 | **0.93** / 0.98 | **0.89** / 0.92 |
+  | `follow-v5` (v4's recipe against the polite person) + reflex tier | 0.92 / 0.97 | 0.86 / 0.86 | 0.92 / 0.97 | 0.89 / 0.89 |
+  | `follow-v2` + reflex tier | 0.91 / 0.97 | 0.83 / 0.90 | 0.90 / 0.96 | 0.84 / 0.91 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.90 / 0.98 | 0.82 / 0.92 | 0.90 / 0.97 | 0.81 / 0.90 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.86 / 0.97 | 0.74 / 0.94 | 0.86 / 0.97 | 0.75 / 0.94 |
+  | scripted `follow` + reflex tier | 0.76 / 0.96 | 0.66 / 0.91 | 0.76 / 0.95 | 0.67 / 0.90 |
+
+  v4 leads under hostile noise by 0.05 (10/10 eval seeds over v2, 10/10
+  on the variety cell) and by 0.04 on the clean preset (9/10); the
+  polite person lifted every band by 0.1–0.3 and took the bump counts
+  from 15–27 an episode to 0.3–4.6. The capsule that walks
+  through the duck (`--polite 0`) had capped every band for a reason
+  that has nothing to do with following; measured with it, and much
+  deeper — **240 episodes a cell** (24 episodes x 10 eval seeds), six
+  seeds deeper than 12-episode figures, which moved some cells by up to
+  0.04 and narrowed the seed spread to +-0.02..0.04 — the table is:
+
+  | brain | datasheet | hostile | +variety, datasheet | +variety, hostile |
+  |---|---|---|---|---|
+  | `follow-v4` (retrained on the legs detector) + reflex tier | **0.84 / 0.97** | **0.73** / 0.85 | **0.83 / 0.96** | **0.74** / 0.87 |
+  | `follow-v5` (v4's recipe against the polite person) + reflex tier | 0.74 / 0.94 | 0.65 / 0.79 | 0.74 / 0.94 | 0.66 / 0.80 |
+  | `follow-v2` + reflex tier | 0.76 / 0.94 | 0.67 / 0.85 | 0.76 / 0.95 | 0.66 / 0.86 |
+  | `follow-v3` (trained with the reflex tier and variety) + reflex tier | 0.74 / 0.94 | 0.64 / 0.86 | 0.75 / 0.95 | 0.63 / 0.85 |
+  | `follow-v1` (version-1 observation, no reflex tier) | 0.70 / 0.95 | 0.57 / 0.89 | 0.70 / 0.93 | 0.57 / 0.87 |
+  | scripted `follow` + reflex tier | 0.48 / 0.82 | 0.41 / 0.75 | 0.47 / 0.81 | 0.41 / 0.73 |
+
+  (Before the legs, at 12 episodes: 0.80 / 0.75, 0.63 / 0.61; 0.71 / 0.68,
+  0.63 / 0.57; 0.73 / 0.85, 0.60 / 0.75; 0.46 / 0.53, 0.42 / 0.40.)
+
+  **`follow-v4` is the follower to pick.** Every shipped brain before it was
+  trained while a person vanished inside 1.2 m; v4 is the first trained in
+  the world the legs detector made, and it is ahead in all four cells — by
+  0.07 on the datasheet preset and 0.07 under hostile noise, on 9/10 and
+  10/10 eval seeds respectively. The gap is widest exactly where the old
+  brains were worst, which is the shape you would expect if the thing they
+  were missing was the close-in half of the band. It also *bumps less*:
+  15.5 an episode against v2's 21.8 on the datasheet preset (21.2 vs 26.9
+  hostile) — the first learned brain to move that number, which had sat at
+  14-27 for all of them.
+
+  It cost 2M decisions (15 min, 12 envs, `--variety`, ~2.2k steps/s on an
+  M-series Mac) against v2's 800k and v3's 600k. Its reward curve is flat
+  from ~900k, so the budget, not the recipe, is what v3 was short of:
+
+  ```bash
+  uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety
+  ```
+
+  Watch a run go at `/train` in the viewer (below) rather than tailing the
+  log.
+
+  **Retraining against the polite person did not widen the lead.**
+  `follow-v5` is that command run with the person the benchmark now
+  uses (`train-brain` defaults to `--polite 0.55` and `brain.json`
+  records it; v1–v4 were trained against the capsule that walks through
+  the duck). It trains faster and settles higher (reward 171 from ~410k
+  decisions against v4's 161 from ~610k — the polite world is the easier
+  one; 9 min at 3.7k steps/s), and **the interesting part is where it
+  loses.** v5's TYPICAL episode is the better one: its median band is
+  level or ahead in all four cells (0.962 against v4's 0.955 on the clean
+  preset, 0.940 against 0.927 hostile) and per episode it is ahead more
+  often than not (104 of the 159 non-tied episodes on the clean preset).
+  Its BAD episodes are much worse, and that is what the means show: 15
+  episodes under 0.7 band against v4's 2 on the clean preset, 39 against
+  23 hostile, and a 10th percentile of 0.775 against 0.865 (0.579 against
+  0.705 hostile). Paired over the same 240 episodes a cell, v4's lead is
+  +0.018 / +0.020 / +0.014 / +0.007 in band and clears the seed noise in
+  three cells of four (t = 2.9 / 2.0 / 2.1, and 0.8 on +variety hostile,
+  which does not). Under the old chained sampling it cleared in NONE of
+  them (t <= 1.6) — the carried noise was hiding the tail this comparison
+  turns on.
+
+  What v5 learned instead is that the person stops for it: it trips the
+  bump signal 3.4 times an episode against v4's 0.4 on the datasheet
+  preset and 12.5 against 4.1 under hostile noise, is in sight less
+  (0.86 vs 0.90 hostile) and falls more with furniture about (0.05 vs
+  0.02). Scored back in the world v4 was trained in (`--polite 0`, 240
+  episodes a cell) the habit shows plainly: 0.74 / 0.65 in band against
+  v4's 0.84 / 0.73, ahead on at most 1/10 seeds in any cell. A brain
+  trained against a person who walks through the duck had to keep out of
+  the way; one trained against a person who yields is paid for standing
+  in it. **`follow-v4` stays the follower to pick** — trained in the
+  harder world, scored in the polite one — and v5 ships as the
+  measurement.
+
+  The **reflex tier** is the thing that moved: under a version-2 brain
+  the env yaws the head toward the tracked target (0.8 × the body
+  bearing, ±0.6 rad — the 62° camera keeps the person while the body
+  catches up) and refuses a forward command with something inside 0.25 m
+  ahead. It took `follow-v2` from 0.69 to 0.80 in band on the datasheet
+  preset and the scripted brain from 0.47 to 0.53 in sight; hostile
+  noise moved less. Detection frames now carry the camera's yaw and the
+  tracker keeps tracks in the BODY frame, so a brain steers the body
+  whatever the head is doing. A version-1 brain is scored in the world it
+  was trained in — no tracker, no reflex (`eval-brain` runs the env at
+  the brain's observation version; measured under a gaze it never saw,
+  v1 fell from 0.73 to 0.60). `+variety` (`eval-brain --variety`,
+  `train-brain --variety`) is two free 30 cm boxes re-scattered every
+  episode and a second duck walking a slow circle: every brain loses
+  0.03–0.14 to it; v3 and v4, trained on it, lose least (v4 is
+  fractionally BETTER with variety than without, 0.82 vs 0.81). v3 was
+  never otherwise better than v2 (600k decisions vs v2's 800k; its reward
+  was still climbing) — `follow-v4` settles that by running the same recipe
+  to 2M, and it is the follower to pick. Bumps sat at 14–27 an episode for
+  every learned brain — the person walks through the duck as often as the
+  duck walks into the person, and a reflex stop cannot help with the first
+  — until v4 took the datasheet figure to 15.5.
+
+  **Getting out of the way** (`brain/controllers.ClosingWatch`, `eval-brain
+  --charge S --avoid`): the case where the person — or another duck —
+  walks straight at the follower. `--charge 6` makes the person's next
+  waypoint a point past the duck every 6 s, so it walks through the
+  duck's spot; the benchmark then reports contact seconds (truth: the
+  capsule against the body) and dodges. The watch reads the ToF's
+  clearance ahead (body-height returns): it shrinks at the duck's own
+  speed when it walks at a wall and faster when something comes at it,
+  and the difference, fitted over 0.4 s, is the closing rate. Past
+  0.12 m/s inside 1.2 m the manoeuvre is a turn toward the freer side,
+  then a walk. It ships OFF, with the numbers: the walker cannot clear a
+  person (measured from a standstill it sidesteps 1 cm in its first
+  second and 6 cm in two at the largest lateral command; a turn-and-walk
+  moves it 0.1 m off the line in 1.8 s; walking diagonally 0.13 m in
+  2 s — and the person arrives in 2–5 s). On the charge case (datasheet,
+  12 episodes) the scripted follow's contact is 5.3 s an episode without
+  the dodge and 4.9 with it, falls 0.17 → 0.08; `follow-v3` under the
+  reflex dodge 3.4 s either way, falls 0.50 → 0.25 — within the noise of
+  12 episodes. In ordinary following the dodge fires on a person who is
+  merely walking toward the duck and loses it: in band 0.49 → 0.39, in
+  sight 0.86 → 0.57 (lazier triggers, 0.8 m / 0.2 m/s and 0.6 m / 0.3
+  m/s, cost less and buy the same nothing). The mechanism and the flag
+  stay for the robot, where a person does not walk through it.
+
+  **A polite person** (`Person.yield_m`, `eval-brain --polite M`) settles
+  it. The mocap capsule walked through the duck, so contact seconds could
+  not fall whatever the duck did; a real person stops. With `yield_m`
+  the walker stands when a duck is inside that range on its way (facing
+  the way it wants to go) and after 2.5 s gives the waypoint up and
+  steps around — turning in place first, not arcing through what is
+  beside it. On the charge case with the person stopping 0.55 m centre
+  to centre (its surface 0.35 m from the duck), datasheet, 12 episodes:
+  the scripted follow holds the band **0.92** of the time with **no
+  contact and no falls** (`follow-v2` 0.93, `follow-v3` 0.93), and the
+  dodge only costs (0.83 in band, 25 bumps an episode, the dodge walking
+  into the person). Facing the person and standing — what the follow
+  already does inside the band — is the right behaviour; the dodge stays
+  off. (With the person stopping 0.35 m centre to centre, nearly touching
+  a 0.2 m capsule, every brain fell out of band, 0.28–0.32, with the
+  same zero contact: the band is the metric that moved, not safety.)
+
+  Why the scripted one loses: a probe of both on the same episodes showed
+  the learned brain sidestepping ±0.23 the whole time and holding the
+  bearing at 0.13 rad, while the scripted one stood still between
+  corrections, went cold (a standing walker cannot start a right turn and
+  starts a left one slowly) and averaged 0.82 rad off — the person walked
+  out of the frame before the body followed. An idle sidestep toward the
+  target's side plus a turn gain of 8 (swept over 8 episodes: 0.46 → 0.49
+  in band, 0.36 → 0.51 in sight) is what ships; speed, lead-on-bearing-
+  rate and crab-strafe variants all measured worse. The rest of the gap is
+  the learned brain's continuous motion, which a hand-written
+  hold-and-correct loop does not have. The obs layout is a contract shared
+  by training and the in-world `LearnedBrain` (`brain/learned.py`), and
+  the exported ONNX bakes the normalizer in, like `export-walk`.
+
+#### The 2026-09-03 brain-training pass (measured, and one honest negative)
+
+  **The 2M-decision recipe is about 8x more budget than the benchmark can
+  see.** `select-brain` scores every checkpoint of a run on the deterministic
+  export — the artifact that actually ships — instead of on the reward curve,
+  which measures the noise-crutched stochastic policy. Run over a fresh 2M
+  training run (12 envs, `--variety`, seed 7, 40 episodes a checkpoint,
+  datasheet preset):
+
+  | checkpoint | 250k | 500k | 750k | 1.0M | 1.25M | 1.5M | 1.75M | 2.0M | final |
+  |---|---|---|---|---|---|---|---|---|---|
+  | in band | 0.938 | 0.895 | 0.918 | **0.940** | 0.935 | 0.937 | 0.938 | 0.934 | 0.939 |
+
+  The curve is flat from the FIRST checkpoint: 0.938 at 250k against 0.939
+  at 2M. `ep_rew` climbed the whole way (159 → 177) and none of that climb
+  reached the benchmark. The reward curve and the thing being bought parted
+  company at 250k, which is why `select-brain` exists and why
+  `--plateau-patience` is worth arming on a long run.
+
+  ```bash
+  uv run select-brain my-run --seeds 100,200,300,400,500 --jobs 16 --dry-run
+  ```
+
+  **So stop on the benchmark, not on the reward.** `train-brain --probe-every`
+  scores the deterministic export mid-run — 40 benchmark episodes in a spawn
+  pool while the forked training workers sit blocked on their semaphores,
+  ~3 s a probe against the ~2 min of training between two — and logs it as
+  `probe`. `--plateau-patience` watches THAT series.
+
+  Run live on the same recipe and seed as the arm above, against the full-
+  length run it is trying to replace:
+
+  | | trained | shipped | in band (240 eps) | bumps/ep |
+  |---|---|---|---|---|
+  | full run + `select-brain` | 2.00M | 1.00M ckpt | 0.947 | 6.8 |
+  | `--probe-every` + patience 3 | **1.75M** | 1.25M ckpt | **0.945** | 3.7 |
+
+  0.002 apart, ahead on 4/10 eval seeds — the same brain, 12% less training.
+  Fed the same run's REWARD series the detector never fires at all, which is
+  the whole argument for paying the probe's 2%.
+
+  **How much it saves is run-dependent, and the probe has to be big enough to
+  see.** Replayed over the first arm's `select-brain` series — which was flat
+  from 250k — patience 3 stops at 1.0M, a 50% saving for the identical
+  checkpoint (pinned in `tests/test_plateau.py`). The live run's benchmark
+  genuinely kept climbing to 1.0M, so it stopped later. That is the detector
+  working, not failing. What DID fail was a first attempt at an 8-episode
+  probe: it read 0.903 where the 40-episode score was 0.938, and +-0.035 of
+  noise walks straight through a 1% bar — it never stopped at all. The probe
+  is 40 episodes by default for that reason.
+
+  ```bash
+  uv run train-brain --run-name my-run --envs 12 --steps 2_000_000 --variety \
+      --probe-every 250_000 --plateau-patience 3
+  uv run select-brain my-run --seeds 100,200,300,400,500 --jobs 16
+  ```
+
+  **`eval-brain --jobs N`** runs the battery in parallel (2.3-3.3x measured).
+  It is NOT the same numbers as `--jobs 1`, and the flag says so: episodes are
+  chained — the ToF and detector generators are seeded once per World and
+  `reset()` never reseeds them, and the duck's commanded twist survives a
+  respawn into the five settle steps of the next episode — so episode k's
+  start only exists after episode k-1 has been simulated. `--jobs N` seeds
+  every episode independently instead (identical for every N >= 2, so a number
+  never depends on the core count); the shift is <= 0.02 in band, which is the
+  size of the gaps the table above uses to rank brains. **The published table
+  stays `--jobs 1`**, which is byte-for-byte the original loop.
+
+  It earns its keep unevenly and that is the point: on this run it moved the
+  shipped brain by +0.001, on a sibling run by +0.030 (the final checkpoint
+  was the third-worst of nine). A run whose last checkpoint happens to be
+  its best loses nothing by being scored.
+
+  **`select-run` is the same idea for anything that travels**, and it exists
+  under the condition `train_behavior.py` set when it reverted its own
+  attempt: score ACHIEVED GROUND SPEED, not a reward term. That attempt used
+  `keep_pace * ep_len`, which is ~90% ep_len, so it collapsed into
+  "longest-surviving" — and the pace term pays 0.29 at zero velocity, so a
+  motionless duck scored well. Here the number is the body-frame forward
+  velocity a deterministic rollout actually reaches, and **falls are a
+  rejection floor, never a term traded against speed**. On a deliberately
+  under-trained 12k-step run every candidate falls, and the tool ships
+  nothing rather than crowning the fastest faller — which is the one diving
+  forward hardest, and which its own table shows: 0.160 m/s over 41 steps
+  against the final policy's 0.106 over 133. `train-behavior
+  --checkpoint-every` keeps the candidates (off by default; `live.onnx` and
+  `model.zip` are still overwritten as before).
+
+  **`train-brain` on the shared-model fork backend.** `ForkVecEnv` sized its
+  shared memory from the WALK contract's 61 observations and 14 actions,
+  which silently made the backend walk-only — the brain trainer was left on
+  `SubprocVecEnv`, paying a private MJCF compile per worker and a pickled
+  pipe round-trip per worker per step. The buffers now come from the env's
+  own spaces. Measured at 8 workers with `--variety`, same machine and load:
+
+  | | setup | throughput |
+  |---|---|---|
+  | `subproc` (before) | 2.77 s | 1,644 decisions/s |
+  | `fork` (now) | 0.37 s | 1,879 decisions/s |
+
+  Rollouts are step-for-step BIT-IDENTICAL between the two backends
+  (`tests/test_brain_vec_env.py`), which is the bar a throughput change has
+  to clear here. `MICRODUCK_VEC_ENV=subproc` restores the old path.
+
+  **Two brain runs at once beat one.** A 12-env brain run has the machine to
+  itself at 3,007 steps/s; two of them side by side hold 2,092 steps/s each,
+  so the pair moves 4,184 steps/s — **1.39x the aggregate** of running them
+  in sequence. A 12-env fleet leaves cores idle whenever the trainer is in
+  its serial update, and a second run fills them. Since the currency here is
+  experiments finished, not steps in one run, an A/B costs about 1.4 runs of
+  wall time rather than 2. (Measured on the four 2M A/B arms below; the pair
+  arms and the solo arm ran the identical recipe.)
+
+  **Eval seeds do not measure a training run. This is the trap.** The
+  trainer had three arguable defects — a batch of 1024 against a 1536-sample
+  buffer, so SB3 truncated every update into a 1024 and a 512 minibatch (it
+  warns); a constant learning rate, which `train_behavior` blames for every
+  trick run peaking and coming apart; and no cap on the action `log_std`
+  across a warm-start chain. Five seed-matched 2M runs, each scored on 240
+  benchmark episodes:
+
+  | arm | recipe | training seed | in band |
+  |---|---|---|---|
+  | `ab-legacy` | pre-fix | 7 | 0.947 |
+  | `ab-batch` | + even minibatches | 7 | 0.932 |
+  | `ab-batch-lr` | + decayed lr | 7 | 0.931 |
+  | `ab-fixed` | + log_std cap | 7 | 0.929 |
+  | `ab-legacy-s8` | **pre-fix, unchanged** | **8** | **0.926** |
+
+  Read against the pre-fix arm alone, every change "lost" 0.015–0.018 and was
+  ahead on only 1–2 of 10 eval seeds — by the same standard the follow table
+  above uses, a verdict. Then the control: the SAME recipe at a different
+  TRAINING seed lands 0.021 away, ahead on 1/10 eval seeds. The whole spread
+  is one run's luck. Nothing here is resolvable at one training run an arm.
+
+  Ten eval seeds control the eval; they say nothing about run-to-run
+  variance, which on this task is **±0.02 in band** — bigger than the eval
+  spread of ±0.013–0.023 and bigger than every effect above. Two brains that
+  differ by less than ~0.02 are not ranked by this method, whatever the
+  seed-win count says. (The follow table's own gaps are 0.05–0.09, comfortably
+  clear of it.) `MICRODUCK_BRAIN_LEGACY=1` reproduces the pre-fix arm exactly,
+  so any of this stays runnable.
+
+  **Pairing the seeds resolves it.** Train both arms on the SAME seed and the
+  run's luck cancels in the per-seed difference. Four paired seeds at 1M
+  decisions, 240 benchmark episodes a cell (`bench_ab.paired_delta`):
+
+  | training seed | 11 | 12 | 13 | 14 | mean | 95% interval |
+  |---|---|---|---|---|---|---|
+  | even minibatches − pre-fix | −0.003 | −0.002 | −0.006 | **+0.011** | **+0.000** | −0.012 … +0.012 |
+
+  Exactly zero, and the interval says an effect above ±0.012 would have been
+  seen. The unpaired reading of "−0.015, ahead on 1/10 eval seeds" was
+  entirely run luck. Note the interval must use Student's t: at n=2 the
+  normal 1.96 understates it 6.5-fold and turned an unresolved pair into
+  "excludes 0".
+
+  What shipped, on that evidence:
+
+  * **Even minibatches: on.** Measured neutral (+0.000 ± 0.012) — which is
+    the bar for a defect fix. It has to show it does no harm, not that it
+    helps.
+  * **Decayed learning rate: off** (`--lr-end` turns it on). A tuning change
+    with no measured benefit does not get to be a default.
+  * **`log_std` cap: kept, raised to 0.0.** At `train_behavior`'s -0.5 it
+    would bind from step 0, because the brain's `log_std_init` IS -0.5. All
+    five runs drove their own log_std down to -0.55…-1.22 unaided, so the cap
+    never binds on a healthy run; it is there for the warm-start ratchet that
+    reached 3.2 on a trick chain.
+
+  **A mixed person un-learns the habit `follow-v5` picked up**
+  (`train-brain --polite-mix 0,0.55`). v5 was v4's recipe against a person
+  who ALWAYS stops, and what it learned was that the person stops: it tripped
+  the bump signal 2.6 times an episode against v4's 0.3. Drawing the person's
+  politeness per episode removes the incentive. Four paired seeds:
+
+  | | in band, polite | bumps/ep, polite | in band, walk-through |
+  |---|---|---|---|
+  | fixed-polite person | 0.930 | 5.4 | 0.760 |
+  | mixed person | 0.920 | **1.3** | 0.794 |
+  | paired difference | **−0.010** | **−4.1 (−76%)** | +0.033 |
+  | 95% interval | −0.016…−0.005 | −6.7…−1.5 | −0.004…+0.071 |
+
+  **A bigger brain network is not resolvable, and would not have been worth
+  it if it were** (`train-brain --net-arch`). The trick trainer's network is
+  54% of its wall time, so shrinking it is worth ~1.44x there. On the BRAIN
+  trainer the PPO update is **5.3%** and collection is 94.7% — the brain env
+  is physics, and a 128-128 MLP over 80 observations costs almost nothing.
+  Measured on the A/B arms themselves, 128-128 and 256-256 ran 113,664 and
+  112,128 decisions in the same 85 s. So the only question worth asking was
+  whether the brain is CAPACITY-limited. Six paired seeds, 1M decisions,
+  240 benchmark episodes a cell:
+
+  | seed | 31 | 32 | 33 | 34 | 35 | 36 | mean |
+  |---|---|---|---|---|---|---|---|
+  | 256-256 − 128-128 | +0.017 | +0.002 | +0.006 | +0.011 | +0.008 | **−0.011** | **+0.006** |
+
+  Ahead on 5/6 seeds, 95% interval −0.004 … +0.016: **unresolved**. It is
+  worth recording how it got there. At n=4 the mean was +0.009 with sd 0.0066
+  and the interval missed zero by 0.0013; the projection said two more seeds
+  would settle it. Seed 36 came in negative, the sd rose to 0.0095, and the
+  interval got WIDER. A power projection that assumes the observed spread
+  will hold is itself a small-sample estimate.
+
+  At the measured spread, resolving a +0.006 effect needs **14 paired seeds —
+  28 runs, ~8 h**. The effect is 31% of the benchmark's own per-seed spread
+  (±0.013–0.023). Not worth it: `128,128` stays the default and the flag
+  ships for anyone who wants to spend that budget.
+
+  **A coarser decision period early buys nothing** (`train-brain
+  --decide-every-start 10`). The idea was a shorter credit-assignment horizon
+  — 100 decisions to explain a 20 s episode instead of 200 — with the period
+  dropping to the deployment 5 halfway through, since `brain.json` records
+  one period and `LearnedBrain` runs at whatever it records. It is also NOT a
+  saving, contrary to how it was first framed: at period 10 each PPO sample
+  covers ten control steps, so a fixed decision budget costs twice the
+  physics. Four paired seeds: mean −0.002 in band, 95% interval −0.015 …
+  +0.010, ahead on 1/4 seeds — unresolved, at **47% more wall time**
+  (1108 s against ~750 s for the same decision budget). It ships off.
+
+  A real trade, and the first two are resolved: the mix gives up 0.010 of
+  band in the polite world to bump 76% less. In the walk-through world (the
+  capsule that walks through the duck, where v5 scored worst) it is ahead on
+  4/4 training seeds by 0.033, but the interval just includes zero — so treat
+  that half as suggestive. It stays **off by default**: this is a choice
+  about which world you want a brain for, not a defect fix.
+
+### Where the soccer track actually stands (read this before the rest)
+
+The sections below are chronological and they read like a run of wins.
+They are not. **Of everything tried at the brain tier, nothing has
+survived a confirmation on layouts it was not found on.** The list, with
+what killed each:
+
+| tried | how it died |
+|---|---|
+| poacher supporter | reversed on 12 fresh seeds (10 v 3, then 21 v 12, then 13 v 19) |
+| ball memory (`seek_s`) | dissolved over 48 seeds |
+| seven shelved knobs, re-screened | nothing came back; the one p < 0.05 was a false positive |
+| a searching head sweep | that false positive — and it makes the body turn MORE, 5/5 seeds |
+| kick cone, ToF floor ball, aimed look, head gaze | never cleared the noise |
+| two-stage line-up | loses to the shipped brain on goals, 45 v 71 over 24 seeds |
+| `lineup_lat` (that line-up made 21% faster) | first block promised +26% kicks; fresh block gave +5% |
+| **the bump-stand rule** | **the last one standing, and it failed too: −1.88 on its own 12 layouts, +0.25 on 12 fresh ones** |
+| `bump_back` (reverse out of a contact instead of standing) | a *closed* null: it cuts contact time 43% and moves falls by exactly 0.00 |
+| **a learned striker** (roadmap 4.4) | **loses to the scripted brain: it carries the ball toward its OWN goal** |
+
+The learned striker is the sharpest of these, because it is the one that
+was supposed to sidestep the hand-written brain entirely. `striker-v1`
+(88 obs, a kick logit per foot, reward = the benchmark's own signed
+`ballProgress`, 600k decisions) against the scripted `Chase` on identical
+seeds: **1v0**, 24 paired seeds — advance 0.86 → 0.31 (paired −0.550,
+t = −5.74, down on 22 of 24), possession 11.8 → 5.9 s/min, falls 0 → 14.
+**1v1**, 36 paired seeds (24 + 12 fresh) — signed progress **+0.10 →
+−0.16**, and the sign is the finding: the scripted brain carries the ball
+toward the goal it attacks and this one toward its own, with both halves
+agreeing (−0.068 discovery, −0.067 fresh). Rendered and read: it never
+reaches the ball, drifting at a fifth of the walker's pace and firing the
+kick at empty floor — 3612 kicks against 116, and 43× less ball moved per
+touch. Not a reward problem (the same reward pays the scripted brain +6.3
+an episode and this one −0.5) but an approach problem. And the training
+curve climbed the whole way, on the assisted distribution, while the
+exported brain carried the ball backwards on the honest pitch — the
+playbook's first verification rule, demonstrated again.
+
+What *has* survived is of three kinds, and none of it is a brain idea:
+**bugs fixed** (the ToF placed hits without the head's rotation; clearance
+read by sensor column instead of by bearing), **hardware questions
+answered** (kicks scale with lens width, p < 0.001, but only if the pixels
+scale too — the shipped camera is adequate), and **measurement
+discipline** (event counts, paired reads, power, `--out`/`--tag` resume,
+and the rule that catches all of the above: confirm on seeds the effect
+was not found on).
+
+The measured reason is in "Where the run actually goes" below: **the duck
+spends 47% of a 1v1 run rotating on the spot**, at the walker's ceiling of
+0.655 rad/s, with the command range already asking for everything it has.
+A brain that decides better still has to wait for the body to point. That
+is why roadmap 3.7 was rewritten from head-pose to turn rate, and why the
+next thing worth spending a GPU on is the walker, not the brain.
+
+### Two ducks, one ball (the soccer track's first form)
+
+`pitch` is a walled 3 × 2.5 m room with a ball in the middle and two ducks
+running the `chase` brain: track the ball, line up behind it, stand, and
+kick it with the robot's own shipped kick policy (`ball_kick_left` /
+`ball_kick_right`, run as a 0.5 s window with an all-zero command exactly
+as robotd does). The World counts a goal whenever the ball crosses either
+short wall's line inside the goal width and puts it back in the centre;
+the page shows the score; `eval-pitch` is the benchmark.
+
+What was measured on the way: a ball 8 cm ahead and 6 cm to the foot's
+side flies 1.6 m, 10 cm dead ahead barely moves, the other side is not
+touched; a floor ball leaves both the camera and the ToF in the last
+0.3 m, so the line-up is dead reckoning in odometry; a kick started
+mid-stride fell 4 times in 7, so the duck stands 0.4 s first; a full
+walk-around to kick toward the goal crossed walls and the other duck
+(4 kicks and 2 falls a run for 1.0 goal), plain line-of-sight kicks were
+11 kicks, 1.25 falls and 1.0 goal, and aiming at the goal only when it
+costs under a 60° detour is **1.75 goals, 6.8 kicks and 1.5 falls a run**
+(`eval-pitch --seeds 4 --seconds 300`; over 8 seeds 1.5 goals, 8.5
+kicks, 2.1 falls). The falls were then duck-on-duck: 5 of 7 falls in 4
+traced runs had the other duck 3–9 cm away and this one turning in place
+(searching, blocked, or lining up) — the walker tips over when it turns
+against a body its ToF rows do not see. A yield rule (stand when the
+other duck is close and clearly nearer the ball) was measured over the
+same 8 seeds and shipped OFF: 1.1 goals for the same 2.1 falls. The
+**body-aware avoid** that replaced it — a tracked duck inside 0.4 m and
+ahead: turn away from it, never toward it, and stand still while it is
+touching — measures **1.38 goals, 6.5 kicks and 0.50 falls a run** over
+the same 8 seeds. The kick window also runs at robotd's standing tuning
+now (`STANDING_GAIN_RATIO`: the walking Kp × 0.8 for the 0.5 s, the
+whole action as always), which the measured kick distances above survive.
+
+**Second form** (`pitch`, `pitch-2v2`, `pitch-3v3`; `eval-pitch
+--per-side N`). The chase brain now tracks the ball with its head: a
+gaze law pitches the camera so a floor ball sits on its axis while the
+duck walks in (measured: 0.6 of head command = 0.647 rad of camera,
+0.20 m up), which keeps the ball in view to 0.2 m instead of 0.3 and
+refreshes the line-up spot to 0.35 m before the blind leg. The ToF
+bumper places every zone's hit in 3D from the mount pose the frame
+carries and counts only body-height returns, so the head looking down
+does not read the floor as a wall and the ball never counts as one; a
+wall beside the duck turns it toward the freer side instead of into the
+boards; a duck stood against something for 1.5 s retreats (turn to the
+free side, walk clear — two attackers otherwise waited nose to nose for
+8 s); after a kick it stands and looks down before searching, and the
+search dips the head every 1.5 s (a 9 s spin once passed a ball 0.17 m
+ahead). Kicks aim at the goal's centre (`goal` in the odometry frame)
+within a 60° detour of the line of sight, else along it.
+
+Three things were built, measured and shipped OFF, with the numbers next
+to the switch: **re-planning the spot from sightings inside 0.35 m**
+(at 0.2 m the bearing noise is centimetres and the foot choice flipped;
+the spot dithered for 8 s), a **walk-round via-point** to get behind a
+ball on the wrong side (it oscillated with the re-plan and crossed the
+other duck), and **dribbling** (`push_beyond`: stand behind the ball
+and walk through it — a pushed ball rolls on at about the walking speed
+on this floor and the duck follows it without ever lining up; the kick
+and a look win). Measured 1v1 over 8 seeds × 300 s: **1.12 goals, 11.8
+kicks, 0.50 falls a run** (1.38 / 6.5 / 0.50 before: kicks nearly
+doubled, goals within the noise of eight seeds, falls held).
+
+**A goal restarts play from a kickoff** (`World.kickoff`): the ball on
+the centre spot with 5 cm of random nudge (two mirror-image ducks would
+otherwise meet nose to nose), every duck back on its spawn with its
+odometry frame, and a 1 s hold during which every walker gets a zero
+command whatever its brain asks — play resumes from standing ducks, not
+from the heap at the goal mouth. `World.goal_seq` says a goal happened;
+`brain/team.kickoff_brains` makes every brain forget its plan (the chase
+brain keeps its kick tally) and wipes the team boards; the lab loop and
+`eval-pitch` both do this, and the page's score panel counts the kickoff
+down. Re-measured over 4 seeds × 300 s: **1v1 2.00 goals, 8.2 kicks,
+0.50 falls a run** (1.12 / 11.8 / 0.50 before), since every goal is
+followed by a clean approach from the spawns instead of a scramble at
+the wall.
+
+**Which goals are kicks.** `eval-pitch` now attributes a goal to a kick
+within 4 s of it, else to a bump: one run scored four goals from one
+kick. Over 8 seeds × 300 s of 1v1 the shipped brain scores **0.75
+kicked and 1.25 bumped goals a run from 8.4 kicks** — a chase at
+0.45 m/s sends a walked-into ball rolling about as far as a kick does
+on this floor, and most goals are that. "One kick in four" above was
+this: read it as one goal per four kicks, most of them not the kick's.
+
+**The kick map** (a standing duck, the ball swept over ahead × side of
+the trunk, `kick_left`; the right kick checked mirrored): the ball
+leaves at an angle to the BODY heading that depends on the side offset —
+15°/cm near 2 cm, 4.5°/cm around 4–8 cm — and at the shipped spot
+(8 cm ahead, 6 cm to the side) it is +21.6° for the left foot (2.1 m)
+and −11° for the right (1.9 m), the same whichever way the body is
+yawed; 12 cm ahead the kick dies, 2 cm to the wrong side it barely
+moves. The sweet spot is 6–10 cm ahead and 4–8 cm to the side. Standing
+the body rotated by the deflection so a sweet-spot kick flies along the
+line to the goal (`kick_deflect_left` / `_right`) was built and measured
+OFF: in play the ball is 2–3 cm off the sweet spot when the kick fires
+— the line-up, not the map, scatters the shots (a 12-spot lone-shot
+probe: 35° mean absolute direction error without it, 28° with it, both
+noise-dominated) — and the rotated stance scored **1.38 goals a run
+against 2.00 without it** over 8 seeds × 300 s (10.4 vs 8.4 kicks). So
+the map's lesson that ships is where the next goals are: line-up
+precision at the spot (the stop lands 2–5 cm long, the aim tolerance is
+0.25 rad), not the aim.
+
+**Line-up precision, measured and shipped off** (`ChaseParams.two_stage`).
+A landing probe (12 lone shots: where the ball is in the body frame when
+the kick fires) said the ball was 9 ± 11 cm further ahead and 5 ± 11 cm
+further to the side than planned, with the heading 11° off; a second
+probe split that into 7 cm of sighting error and **15 cm of ball motion
+between the last sighting and the kick** — the walk-in's last steering
+steps and the square-up's turn in place, 8 cm from the ball, pushed it.
+Tightening the aim tolerance to 0.12 or 0.06 rad changed nothing. A
+two-stage line-up — square up at a pre-spot 22 cm behind the kick spot
+on the kick line, then walk in steering onto the line (on a pure forward
+command the walker holds its yaw but crabs 9 cm sideways), and back off
+rather than turn in place when the ball is at the feet or the heading is
+missed on the spot — puts the ball on the sweet spot: side error 3 cm,
+heading 4°, the ball moving 2 cm, **4 goals from 11 lone shots against 1
+from 12**. On the pitch it kicks **3.5 times a run against 8.4** and
+those kicks scored 0.00 kicked goals a run against 0.75 (bumped 1.25
+either way; falls 0.25 against 0.50), so it ships off: with this walker
+the kick that happens beats the kick that is placed. The kick-map
+deflection on top of it scored 1.88 goals a run, all but 0.4 of them
+bumps. A search that walks after 3 s and a **hunt** (walk the line a
+lost ball rolled off along — the kick's, or the duck's own heading —
+before the standing search; state histograms said half of every run is
+search) were measured with it: the hunt found the ball (2.00 bumped
+goals a run) and walked into the other duck (1.50 falls a run); aiming
+every kick at the goal cut kicks to 0.6 a run. The two-stage line-up and
+the search walk ship off behind their parameters with the numbers next
+to them; the hunt ships on, below.
+
+**The two-stage line-up, made fast, and still not worth it — and the
+premise it took down with it.** The state histogram said where its time
+goes: over 12 duck-runs it spends 68.9 s a run lining up, of which 48.4 s
+is stage one and 27.1 s of *that* is walking to the pre-spot, with 55
+attempts a run dying in the back-off whose cause is "the pre-spot is
+behind me". `lineup_lat` cuts that — a duck already on the kick line,
+squared up and short of the spot, starts stage two where it stands — and
+it works as designed: a kicking attempt 5.63 → 4.43 s (−21%), the
+back-offs 55 → 35, the ball moving 28.0 → 19.5 cm during an attempt. On
+**24 paired seeds over two independent blocks** (100–111, then 200–211)
+it buys nothing the benchmark can see: against `two_stage` alone, kicks
+72 → 83 (p = 0.44), goals 45 → 34 (p = 0.10), falls 16 → 11 (p = 0.54),
+advance and progress flat. The first block promised +26% kicks and falls
+12 → 4; the fresh block gave 37 → 39 kicks and falls 4 → 7. Neither
+replicated. It ships at 0.
+
+The premise is what actually died. Both careful arms lose to the shipped
+brain on goals — **71 against 45 and 34** over the same 24 seeds
+(p = 0.038 and p = 0.0003) — and the placed kick is not worth more when
+measured directly: the ball's travel in the two seconds after a swing is
+17.7 ± 3.9 cm for the shipped brain against 14.4 ± 3.4 and 13.6 ± 3.0,
+and toward the goal +0.8 cm against −5.1 and −4.9. Nor is the kick
+actually placed — it fires with the ball a median 21–25 cm ahead of the
+trunk where the sweet spot is 6–10 cm, because the plan is laid at
+`refresh_min` and goes stale while the ball moves 20–28 cm. **The
+accuracy limit is the stale plan, not the approach geometry**, which is
+why a faster approach barely moved it (25.5 → 22.6 cm). With this walker
+the kick that happens still beats the kick that is placed, and that now
+rests on 24 seeds and a direct measurement rather than on 8 seeds and a
+ratio.
+
+**The hunt, with its stops** (`hunt_s`). Traced with the hunt on, it
+alternated with "blocked" against the boards at 3 cm, where the ToF
+returns nothing, and walked turning at full rate into the other duck
+beside it at 90–110° — outside the camera's avoid cone and the ToF's
+middle columns. It is now slower (0.3 m/s), turns at most 0.5 rad/s,
+and ends — does not alternate — the moment the ToF has something inside
+0.45 m, any duck track is beside, or the boards are 0.35 m ahead in
+odometry. Over 8 seeds × 300 s: **8.6 kicks a run against 8.4, 0.12
+falls against 0.50**, goals within the noise of eight seeds (1.50
+against 2.00).
+
+**The search is a walking circle.** Instrumented over 300 s, during
+search the ball was inside the camera's frustum 1% of the time and
+detected 0%: it sat 90–120° off the nose, and a standing turn barely
+turns the walker (the cold-turn kick fires once, the next dip stands it
+still again). Probed with a lone duck, the search now sweeps at ~24°/s
+walking a slow circle (0.2 m/s with the turn): a ball straight behind is
+found in 7 s, one to the right — by the always-left turn — in 10 s.
+With the hunt and the circle, over 8 seeds × 300 s of 1v1: **2.25 goals
+(0.25 kicked, 2.00 bumped), 9.4 kicks, 0.38 falls a run** against 2.00
+(0.75 / 1.25), 8.4 and 0.50 before. Turning the search toward the side
+the ball was last on probed 4 s instead of 10 for a ball to the right
+and measured off (1.62 goals, 8.9 kicks, 0.62 falls a run: within the
+noise, the falls on the walker's weak right turn).
+
+Measured after it, on the same 8 seeds, and shipped off with the
+numbers: **deliberate bumping** (`push_beyond` 1.4, a push spot behind
+the ball and a walk through it toward the goal) scored the same 2.25
+goals a run (0.25 kicked, 2.00 bumped) from 6.4 kicks and 1.8 pushes
+with **0.75 falls against 0.38** — the deliberate bump scores no more
+than the accidental one and falls twice as often; and a **ball memory**
+(`seek_s`: the centre spot at a kickoff, every fresh sighting, the end
+of a hunted line, walked to before the circle) at 2.38 goals, 7.8 kicks
+and 0.75 falls — the goals did not move and the blind walks fell. (Both
+were re-screened later on fresh seeds with the continuous metrics, and
+neither came back: "The shelf, re-screened", below.) For
+the rosters (4 seeds): with the hunt and the circle off, 2v2 1.00 goals,
+8.8 kicks, 3.50 falls and 3v3 0.75 / 7.0 / 3.75 against 1.50 / 9.8 /
+3.50 and 1.50 / 5.0 / 4.50 with them on — more goals with them in both,
+the same falls in 2v2, 0.75 more in 3v3 — and a wider support standoff
+(1.0 m back, 0.6 m to the side) 3v3 1.75 / 5.2 / 4.50: the team
+defaults stay.
+
+**Where the ball is going** (`brain/tracker.py`): every track now carries
+an odometry-frame position and, from consecutive hits, a velocity, and
+`predict(t)` rolls it forward under the floor's deceleration. Probed with
+a kicked ball: it leaves at 1.4 m/s, slows at 0.04 m/s² (it rolls 3 m, to
+the boards) and leaves the level camera at once, 30–55° off the nose, so
+the old track coasted with a stale range for two seconds and a new one
+was born when the ball was found again. The chase brain can act on the
+prediction three ways — yaw the head toward the predicted bearing
+(`predict_s`, `head_yaw_gain`; always, or only while searching), open
+the search toward the predicted side and walk the hunt to the predicted
+point (`predict_steer`) — and **all of it measured off** over the same 8
+seeds × 300 s of 1v1, against 2.25 goals / 9.4 kicks / 0.38 falls a run
+with it off: yaw always with the steering 1.12 / 10.5 / 1.62; yaw off
+with the steering 2.12 / 9.1 / 1.12; yaw while searching with the
+steering 2.12 / 10.0 / 0.75; yaw while searching without it 2.12 / 6.5 /
+0.75 (with prediction off the run is bit-identical to before the
+tracker learned positions, so the tracker itself is neutral). Why: the
+head yaws 34° at most and the searching duck's ball sits 90–120° off its
+nose (instrumented: in the frustum 3% of search time with the gaze on,
+5% without), so the gaze cannot reach it, and the steering walked blind
+lines into things. The prediction stays tracked and drawn on the /sim
+page (an orange line from the ball to where it will stop); `predict_s`
+turns it back on with the best-measured settings.
+
+**The ToF placed by the head pose — a bug, fixed.** The body-height
+clearance (`tof_clearance_3d`, what every stop, hunt and wall rule reads)
+placed each zone's hit without the head's rotation: with the head dipped
+0.6 rad it reported a wall 0.33–0.37 m ahead in every column — the floor.
+Hits go through the mount rotation now, trunk-relative, and body height
+starts 8.7 cm above the floor (a ball is 7 cm tall). The 1v1 baseline on
+the fixed geometry, same 8 seeds × 300 s: **2.38 goals (0.25 kicked),
+7.4 kicks, 0.38 falls a run** (2.25 / 9.4 / 0.38 before — two fewer
+kicks a run, the ones the false wall had been interrupting one way or
+another). Every soccer number below this line is on the fixed geometry;
+the tidy brain never read that helper, so its rows stand.
+
+**How much can this benchmark actually resolve?** Read the event counts,
+not the per-run averages. Over 8 seeds × 300 s of 1v1 a battery contains
+roughly 50–130 kicks, ~20 goals, ~1–6 of them kicked, and **3–8 falls**.
+So kicks separate cleanly and falls barely separate at all: a baseline
+measured twice, once per clearance rule, gave 3 falls and 6 falls — the
+same brain to within 1% of its stopping decisions, and a 3/6 split of 9
+events comes up by chance half the time (p ≈ 0.5). Telling 0.38 falls a
+run from 0.75 would take dozens of seeds. Goals are nearly as bad: the
+standard error is about 0.5 a run, so anything under a goal and a half
+of difference at 8 seeds is noise. **Every claim below is stated with
+its event counts**, and a difference that does not clear them is written
+as "no effect measured", not as a result. Several rows in earlier
+revisions of this file did not clear them and have been demoted.
+
+**So the benchmark grew two continuous metrics** (`world/metrics.py`,
+re-exported by `eval_pitch`; both accumulated per team at the 50 Hz
+control tick). Goals are ~2.5 a run and no amount of care in the
+reporting fixes that; what the ducks do thousands of times a run is
+*reach the ball* and *move it*:
+
+- **`possession`** — seconds a minute the duck nearest the ball is ours
+  and within `POSSESSION_R` = 0.25 m (about twice the kick spot's 0.12 m,
+  and inside the 0.40 m at which the chase brain starts avoiding the
+  other duck). No carry: one of ours was on the ball or it was not.
+  `possessionWide` runs the same clock at 0.40 m as a robustness check.
+- **`ballAdvance`** — metres a minute of the ball's displacement toward
+  the goal the team attacks, summed over the ticks that team is in
+  control, control persisting `CARRY_S` = 2 s past the last touch so a
+  kick's roll counts for the kicker. **`ballProgress`** is the same sum
+  *signed*, so a team that shoves the ball back toward its own goal is
+  charged for it. Attributing per possession is what keeps the signed sum
+  from telescoping into "goals in disguise": summed over a whole run and
+  both teams it collapses to the ball's net start-to-end position, which
+  after every kickoff recentring is goals again, with goals' variance.
+
+Measured 16 seeds an arm (two independent 8-seed batteries that agree),
+with each metric's coefficient of variation and the seeds ONE ARM needs
+to resolve a 25% shift at p < 0.05 and 80% power — the metric's own
+noise, with the size of that particular contrast divided out:
+
+| metric | CV | seeds for a 25% shift | r with goals (32 runs) |
+|---|---|---|---|
+| goals | 0.76 | **146** | — |
+| kicks | 0.49 | 62 | 0.30 [−0.06, +0.59] |
+| falls | 1.22 | **376** | 0.07 [−0.29, +0.40] |
+| `ballAdvance` | 0.40 | **43** | **0.50 [+0.19, +0.72]** |
+| `possession` | 0.16 | **9** | 0.33 [−0.02, +0.61] |
+| `possessionWide` | 0.11 | 6 | 0.23 [−0.13, +0.53] |
+| `ballProgress` (run total) | 4.20 | — | 0.11 [−0.25, +0.44] |
+
+So `ballAdvance` is the discriminator — the only metric here, `kicks`
+included, whose association with goals is resolved away from zero, at
+about a third of goals' seeds — `possession` is the cheap screen that
+says two variants differ *at all*, and goals stay reported and stop being
+the judge. Nine seeds against a hundred and forty-six is the difference
+between a screen that runs in an afternoon and one that never runs.
+
+**Never quote `ballAdvance` alone.** It keeps only the forward part of
+each step, so anything that makes the ball move MORE scores higher on it
+without moving the ball anywhere, and that caught a wrong conclusion the
+day the metric shipped: the attacker-claim fix below raised advance
+**+0.18 ± 0.06 (2.9 σ)** with kicks +64%, while signed `ballProgress`
+stayed **flat (−0.003 ± 0.136, 0.0 σ)** and the advance PER KICK
+**halved, 0.202 → 0.106**. The ball moved more and got no nearer the
+goal. Read advance, signed progress and advance-per-kick together or
+read none of them — and for any new metric, ask first which cheap
+behaviour maximises it.
+
+**The `left` / `right` keys of a row are goal MOUTHS, not team scores**
+(documented, not renamed): `World._check_goal` files a ball crossing at
++x under `right`, and `World.goal_for` sends the LEFT team at +x, so a
+row's `right` count is what the left team scored. Run totals are
+unaffected — the failed replications below compared totals between arms
+of identical brains — but every per-side reading is inverted if it is
+missed, and reading it the natural way flipped the sign of a whole
+correlation table here before it was caught.
+
+The lab ticks the same `PitchMetrics` on its own step, so the /sim pitch
+panel shows the three per-team rates live (the signed one in red when a
+team is losing ground) and a number on the page is the number the battery
+reports.
+
+**The camera, as a hardware question — three batteries, one answer.** The
+detector's field of view is one constant (`DetectorSpec.fov_h_deg`,
+62° × 48° as shipped — an assumption about a Pi-camera-class module), so
+the sim can price a wide-angle camera. It has to price it *honestly*:
+the two apparent-width thresholds that decide whether a target is found
+were written as angles but justified in **pixels** of a 320 px frame
+over 62°, so a wider lens on the same sensor must find small distant
+things *less* often. They are derived from pixels per radian now
+(exactly unchanged at the shipped lens, verified bit-identical), which
+costs 120° a duck at 3.9 m — found 73 times in 400 against 260 at 62°.
+The first battery is soccer, where the wide lens wins: paying that gate,
+over 8 seeds × 300 s of 1v1 against a 51-kick, 19-goal, 1-kicked-goal
+baseline:
+
+| lens | kicks | goals | kicked goals | falls |
+|---|---|---|---|---|
+| 62° × 48° (shipped) | 51 | 19 | 1 | 6 |
+| 90° × 70° | 94 | 17 | 4 | 4 |
+| 120° × 93° | **105** | 22 | 6 | 3 |
+| 150° × 116° | **130** | 17 | 4 | 7 |
+
+Kicks scale with the lens and the effect is overwhelming (105 against
+51, p < 0.001) — a duck with a wide camera loses the ball far less often
+and spends its run playing instead of searching. Goals do not follow
+(22 against 19 is noise), and kicked goals only hint at it (6 against 1,
+p = 0.13).
+
+**The second battery pointed the same lens at the tidy task, and it
+lost.** Soccer wants a wide view of a big orange ball; tidying wants to
+resolve a 3 cm brick across a room, and the honest size gate takes that
+away. 24 seeds a lens, paired on the same layouts, `--toys 6`:
+
+| lens, same 320 px | tidied | vs shipped, per seed |
+|---|---|---|
+| 62° × 48° (shipped) | **0.889** (128/144) | — |
+| 90° × 70° | 0.743 (107/144) | −0.88, worse on 14 of 24 |
+| 120° × 93° | 0.632 (91/144) | **−1.54, worse on 24 of 24** (sign p = 1e-7) |
+| 120° × 93° on **640 px** | 0.819 (59/72) | −0.33, inside the noise (p ≈ 0.13) |
+
+It replicated across both halves of the battery, and it breaks in exactly
+one place: **the scan**, not the deliver leg and not the grasp. Traced,
+a toy at 1–1.5 m is found in 36% of the frames it appears in at 62° and
+**2%** at 120°; one seed had a toy in frustum for 1182 frames at 1.5–2 m
+and found it three times. The geometric floor for a 3.2 cm brick falls
+from 1.83 m to 0.95 m, which in a 3 × 2.5 m room turns "scan the room"
+into "bump into things": scanning goes from 8% of the run to 40%, and at
+120° no seed ever reached 6/6. The basket is unaffected (hit rate
+0.95–0.98 to 2 m at both lenses — it is 12 cm across and re-measured at
+0.42 m before any release), grasp success is unchanged (0.87 vs 0.85),
+falls are identical (8 vs 8), and release accuracy is if anything better.
+
+**Then the third battery: more pixels at the lens the robot already
+has.** 62° on a 640 px sensor is 591 px/rad against the shipped 296, the
+size gate halving with it, and it buys **nothing**. Soccer, 12 seeds
+paired against the same baseline: possession 17.5 → 17.0 s/min
+(−0.49 ± 0.70, p = 0.50), `ballAdvance` +0.74 → +0.64 m/min
+(−0.10 ± 0.10, p = 0.36), signed progress −0.01 → −0.06 m/min, 28 goal
+events against 26 and 71 kicks against 97 (kicks −2.17 ± 1.15, p = 0.09 —
+if anything fewer). Tidying, the same 12 layouts as the shipped lens:
+0.917 against 0.875 (66 of 72 toys against 63), +0.25 toys a seed, better
+on 5 seeds and worse on 2 — inside the noise on the cheap screen and on
+the discriminator both.
+
+**And then the hardware answered back, which changes what this battery
+means.** The vendor spec for the replacement module is **D 142.2° / H 116° /
+V 60°** on a 1/2.9", 2.75 µm, natively-1080p sensor at up to 90 fps — so
+**116° is essentially the 120° arm above, already measured here.** At the
+NPU's current 320 px YOLO input that is 158 px/rad: the row that tidied
+0.632, worse on 24 of 24 seeds. At 640 px it is 316 px/rad: the row that
+came back to 0.819. **The deciding variable is the inference input, not the
+camera** — and the sensor is not the constraint either, since 1920 px across
+is six times what the detector consumes. The 60° vertical is a clear win
+either way.
+
+Two things also came out of tracing what the robot actually has, and both
+say the baseline below is not the robot's. Upstream identifies an **IMX219**
+(Pi Camera v2, quoted 62.2° × 48.8° — where the 62/48 here came from), but
+`mediad` pins the *sensor* to 1920 × 1080, which on that part is a centred
+**crop** (`(680, 692)/1920x1080`, 59% of the columns and 44% of the rows).
+With the stock lens that is **39.0° × 22.5°** — so this baseline may be ~23°
+too wide and ~25° too tall, and the vertical error is the one that bites.
+And the new lens is **not rectilinear** (a pinhole focal length solved from
+H, V and D disagrees; an equidistant model agrees near the quoted 2.9 mm
+EFL), while `Detector` maps pixels to bearing with a pinhole model and no
+distortion — wrong exactly at the edges, which is where a wide lens keeps
+its extra view. `docs/camera-hardware.md` holds all of it, with the open
+questions.
+
+So the whole recommendation, as one finding: **the shipped camera is
+adequate, and what breaks it is widening the lens without adding pixels.**
+Doubling the resolution at 62° changes neither task; spreading the same
+320 px over 120° takes the tidy rate from 0.889 to 0.632 (worse on 24 of
+24 seeds, sign p = 1e-7); and 120° on 640 px — 305 px/rad, which is what
+the shipped 62°/320 px frame already had — tidies back inside the shipped
+lens's noise. The variable is pixels per radian, and `DetectorSpec.px_h` is the
+knob that says so. A wide lens is worth buying only WITH the sensor to
+pay for it, and then what it buys is the soccer contact above, not a
+robot that sees better. A 320 px sensor spread over 120° is a downgrade
+wearing a wide-angle badge.
+
+**Shooting only from inside the goal's cone — no effect measured.** One
+shot in four scores, and a lone shot's direction error is 28–35°, so the
+obvious move is to refuse the long ones: with `kick_cone`, a ball whose
+goal mouth subtends less than that half-angle is dribbled closer (the
+push spot) until the cone opens. It does exactly what it says and buys
+nothing. At 0.35 rad (about a metre out on a 0.7 m goal): 36 kicks, 23
+pushes, 16 goals, **1 kicked goal** against the baseline's 51 / 0 / 19 /
+1. At 0.5 rad: 47 kicks, 30 pushes, 17 goals, **0 kicked**. Kicks turn
+into pushes and the kicked goals do not move, so the shot that a
+28–35° error scatters is not scattered any less from a metre out. Ships
+at 0 (off).
+
+**The head, unlocked, still cannot help.** The chase brain had capped
+head yaw at 0.6 rad; the walker is trained to ±1.40 (upstream's head-pose
+curriculum). With the cap at 1.4: the look after a kick yawed to the
+foot's kick-map exit angle near the horizon (`look_aim`) 2.25 goals,
+6.4 kicks, 0.50 falls; that plus a gaze on the ball track while
+searching (`predict_s`, `head_yaw_when="search"`) 1.88 / 4.6 / 0.25;
+the aimed look plus a searching head that sweeps ±1.4 rad
+(`search_sweep`; old geometry) 1.88 / 6.8 / 0.38 — all against 2.38 /
+7.4 / 0.38. Fewer kicks every time: a head turned away from the walking
+line leaves the ToF bumper looking sideways, and the brain stops for
+what it then sees. That last part was a real bug and is fixed
+(`tof_clearance_bearings`, below); re-measured on the fixed geometry the
+aimed look gives 61 kicks and 21 goals against a 51-kick, 19-goal
+baseline, which does not clear the noise either. All three ship off
+behind their flags — on the evidence that nothing has yet shown them
+helping, not on evidence that they hurt. All three were re-screened on
+12 fresh seeds with `possession` and `ballAdvance` ("The shelf,
+re-screened", below); the sweeping head is the false positive in that
+table.
+
+Worth saying plainly, because the cap being raised to 1.4 reads like a
+capability that shipped: **with all three off, the shipped brain never
+yaws its head at all.** Every path that sets `look_at` is behind one of
+them, so `head_yaw_max` is inert, and an instrumented 1v1 run confirms
+it — `max |head yaw| commanded 0.000` over 1200 duck-seconds. The only
+head motion shipping is the pitch that looks down at the ball.
+
+And the reason none of them helped is now measured rather than guessed.
+The walker's head is not the bottleneck: it tracks a yaw command to
+1.42 rad *while walking*, at 7.5 rad/s — 11× the body's yaw rate — for a
+12% forward-speed cost and no falls, which turns a 62° camera into a
+210° gaze cone for free. Handing the brain that cone does not buy back
+one second of body rotation: with `search_sweep` on, the body turned
+**more**, on 5 of 5 paired seeds (+8.6% of the in-place yaw, +9.2% of
+the total, n ≈ 150,000 ticks an arm). It finds the ball sooner and then
+still has to turn the body to it. **Finding the ball was never the
+bottleneck; pointing the body at it is** — see the next paragraph.
+
+**Where the run actually goes: 47% of it is the robot spinning on the
+spot.** Instrumenting a 1v1 run (1200 duck-seconds, commanded twist and
+achieved body yaw every tick) says the chase brain spends 47.1% of it
+turning in place and another 26.6% steering while walking — sweeping
+371 rad, twenty-odd full revolutions a duck a run, at 0.655 rad/s. That
+0.655 is the walker's ceiling and `ANG_VEL_Z_RANGE`'s ±1.0 is already
+asking for all of it. Holding the yaw demand fixed, a walker that turned
+at 1.0 rad/s would free 16% of every run, and one at 1.5 rad/s would free
+**27%** — bigger than any brain-level change measured in this repo, and
+the reason roadmap 3.7 was rewritten from "head-aware locomotion" (done,
+by upstream, already) to "a faster body yaw" (not done, and the ceiling).
+
+This is a claim about time, not about falls. Turning beside a *static*
+body fell 0 times in 98 trials down to 8 cm of separation; the falls need
+a duck that is *moving* into you. Do not sell a faster turn on falls.
+
+**Clearance by bearing, not by sensor column.** The ToF is *in the
+head*, so calling the middle columns "ahead" only holds while the head
+looks along the walking line. Yawed 1.2 rad at boards 0.40 m away, those
+columns reported a wall at 0.52–1.19 m that was really 69° off the nose,
+and the brain stopped for it. `tof_clearance_bearings` places every hit
+in the body's heading frame and selects by bearing, so a turned head
+reads +inf ahead: honestly blind rather than confidently wrong. Ranges
+stay aperture-relative so the tuned thresholds mean what they meant, and
+a synthetic frame with no mount pose still falls back to the level-head
+columns. It ships on its mechanism, not on a score: traced against the
+column version over two full matches, the shipped brain never yaws its
+head at all (the gaze is off), the two disagree about stopping in 0.7%
+of samples, and the bearing version reads 1.2 cm nearer on average. The
+batteries agree to within their noise (19 goals / 51 kicks against 19 /
+59). What it buys is that the head experiments above are now *testable*.
+
+**The ToF sees the ball at the feet — and ships off.** The level camera
+loses a floor ball inside 0.3 m, exactly where the line-up and the kick
+live, and the 8×8 ToF at 45° shows a 7 cm ball at 0.3 m as a 3–6 zone
+blob 3–10 cm above the floor plane (`tof_floor_ball`: at least two
+adjacent such zones, in columns with nothing taller near — a wall or a
+duck has hits above the band in the same columns, a ball has the floor
+behind it; tested against a ball, an empty floor, a level head and the
+boards). Fed to the chase brain's tracker as a ball sighting whenever the
+camera has none (`tof_ball_m`), it measured **1.62 goals, 8.1 kicks,
+0.75 falls a run against 2.38 / 7.4 / 0.38**: a blob at the feet is as
+often the other duck's foot as the ball, and a line-up on a foot is a
+fall. The detector stays for the page and for a pitch with one duck on
+it, and the knob was re-screened on 12 fresh seeds below without coming
+back.
+
+**Teams** (`brain/team.py`): teammates share a blackboard — one message
+a second over Wi-Fi on the robot: my id, my distance to the ball, where
+I put it. The nearest attacks, the others support (0.7 m behind the
+ball toward their own goal, spread sideways by rank, facing it, never
+inside 0.45 m of it); the attacker keeps the role until a teammate is
+clearly nearer, so two ducks a centimetre apart in range do not swap
+every frame. Measured over 4 seeds × 300 s, with the kickoff: **2v2 2.00
+goals, 7.8 kicks, 2.75 falls a run (0.69 per duck); 3v3 0.75 goals, 5.2
+kicks, 4.75 falls a run (0.79 per duck)** on a pitch that grows 0.4 ×
+0.35 m a side (before the kickoff 2.25 / 10.8 / 3.0 and 1.00 / 5.8 /
+5.25). Six ducks crowd one ball: falls per duck climb with the roster
+(0.25 → 0.69 → 0.79) as the avoid and retreat rules fire against three
+bodies at once, and the supporters' spots overlap the opponents'
+attackers. The next form is positional play — supporters that mark
+rather than shadow. The scoreboard that counts possession exists now
+(`world/metrics.py`, above); positional play does not.
+
+**3v3 falls, traced** (3 seeds × 300 s, 14 falls): 10 were supporters
+turning in place with a teammate 5–28 cm away or against the boards —
+a body beside the duck is outside the camera's 62° and the ToF's 45°,
+so neither the avoid rule nor the wall rule saw it. Two answers: the
+support spot stays 0.35 m inside the pitch (the brain gets the pitch's
+bounds from `make_pitch`), and a supporter with any duck track inside
+0.3 m within the last 1.5 s (a track's bearing turns with the body, so
+a duck seen a second ago still says where it is) stands instead of
+turning in place. 3v3 over 4 seeds: **1.00 goals, 7.8 kicks, 3.50 falls
+a run (0.58 per duck)**, from 0.75 / 5.2 / 4.75 (0.79). With the hunt
+and the walking search (below, measured on 1v1) the same 4 seeds give
+2v2 1.50 goals, 9.8 kicks, 3.50 falls a run (0.88 per duck; 2.00 / 7.8
+/ 2.75 without) and 3v3 1.50 / 5.0 / 4.50 (0.75; 1.00 / 7.8 / 3.50
+without): more goals in 3v3, more falls in both — four seeds of six
+ducks walking blind lines through a crowd. `hunt_s` and `search_vx`
+switch them off per brain if a roster prefers it.
+
+**Teammates on the board** (`Team.mates`): every claim now carries the
+claimant's own pose too — the same one-message-a-second — because a
+teammate beside or behind a duck is invisible to its camera and its ToF.
+The chase brain can treat a teammate inside `mate_keepout` as a duck
+beside it (no turn in place, no hunt) and, ahead, as a duck to avoid.
+**Measured off** (3v3, 4 seeds × 300 s): 1.50 goals, 4.5 kicks, 5.25
+falls a run with it at 0.4 m against 1.50 / 5.0 / 4.50 without. A fresh
+trace of two seeds (13 falls) said why: 12 were beside an *opponent* —
+which no board carries — and all but one were standing turns, most of
+them a supporter at its spot turning to face the ball. The poses stay on
+the board (the inspector shows them); the keep-out ships at 0. Making
+that turn a walking one (`support_turn_vx` 0.2, like the search circle)
+measured off too: 2v2 1.50 goals, 8.8 kicks, 4.00 falls a run against
+1.50 / 9.8 / 3.50, 3v3 1.00 / 4.2 / 5.25 against 1.50 / 5.0 / 4.50 — a
+walking turn bumps what it cannot see. What a crowded pitch needs is a
+sense of the bodies beside the duck — a wider ToF field, or the bump the
+IMU could read — before any rule can act on them.
+
+**The attacker claim is a predicted TIME to the ball, not a distance**
+(`brain/team.py`). Traced, the role churned: it changed hands **14.0
+times a duck a run** with a **median tenure of 4.30 s**, a fifth of the
+spells lasted under a second, and the duck the board called the attacker
+was the team's actually-nearest one only **56.1%** of the time. A
+straight line was wrong in three ways the trace named. It **ignores the
+turn** — this walker turns in place at ~0.7 rad/s once the gait is going
+and walks at 0.45 m/s (`walker-facts`, `ChaseParams.speed`), so a duck
+facing away at 0.4 m is 4.7 s from the ball and one facing it at 0.6 m is
+1.0 s, and the line sent the second one back to its support spot. It read
+**losing sight as resignation** — the chase brain claims `inf` when its
+track goes cold, and the level camera loses a floor ball inside 0.3 m,
+which is exactly where an attacker lines up, so the duck ON the ball
+handed the role to one a metre away and walked off. And **a stale claim
+competed on equal terms**. The cost is now a predicted time built from
+those measured walker facts; a duck that cannot see the ball is costed
+off the board's freshest fix plus `blind_s`; age is priced at `age_rate`
+a second and stops counting past `stale_s`; and the role moves only for a
+challenger `switch_s` = 0.6 s quicker held `hold_s` = 1.2 s continuously,
+unless it is `give_up_s` = 2.0 s quicker (the incumbent is out of the
+play — fallen, or the ball kicked past it).
+
+Measured over 6 seeds × 300 s of 3v3, **516 attacker spells against
+365**, and replicated on three seeds it was not tuned on: **handovers
+14.0 → 9.8 a duck a run, median tenure 4.30 → 6.96 s**, spells under a
+second 21.3% → 10.4%, **the attacker really the nearest duck 56.1% →
+68.2%** and really the quickest 68.4% → 79.3%.
+
+**What it does not do, stated plainly.** It does not improve the play:
+over 16 paired seeds kicks rose 64% and `ballAdvance` +0.18 ± 0.06 (2.9
+σ), but that metric keeps only forward motion and churn inflates it —
+signed `ballProgress` is **flat** (−0.003 ± 0.136, 0.0 σ), advance per
+kick **halved** (0.202 → 0.106) and possession is down 13%. The ball
+moves more and gets no nearer the goal. And it does not fix the crowding
+the defect report opened with: nobody within 0.3 m of the ball 41.2% →
+40.9%, two teammates inside 0.5 m of it 24.5% → 23.7%. Role churn was not
+what kept six robots off the ball. Aiming the claim at an intercept
+(`lead_max_s`: ball velocity plus lead) was measured **worse**, not
+merely unhelpful — 18.2 handovers a duck a run against 12.3, a median
+spell of 3.0 s against 5.8, 31% of spells under a second against 13%,
+over the 3 seeds the hysteresis was swept on — because the board's
+velocity is differenced from fixes a walking duck drags between frames;
+it ships at 0. So this change stands on role stability and correctness,
+measured on hundreds of events and replicated, and claims nothing about
+the score.
+
+**A bump sense** (`Senses.bumped`), and a lesson about four seeds. The
+World reads its contact list — in the walk scene only the feet carry
+collision geometry, so a bump is feet touching feet, which is what a
+duck-duck fall is; on the robot it is the IMU and the servo loads — and a
+chase brain that has been bumped stands instead of turning in place for
+`bump_stand_s`. Over 4 seeds × 300 s it looked decisive — 3v3 falls 5.00 →
+1.75 a run — and **that number did not replicate**: the same rule over
+twelve seeds gives 3.17 and over twelve others 4.17. So it was measured
+properly, the rebuilt rule against no rule at all — **and it did not
+survive the confirmation either.** Three batteries, 3v3, 300 s a seed:
+
+| block | no rule | rule at 0.5 s | falls a run | |
+|---|---|---|---|---|
+| seeds 24–35 | 4.83 | 3.25 | −1.58 ± 0.92 | p = 0.14, better on 8/12 |
+| seeds 24–35, again | 6.17 | 4.00 | −2.17 ± 1.01 | p = 0.060, better on 8/12 |
+| **seeds 200–211, fresh** | **4.08** | **4.33** | **+0.25 ± 1.04** | **p = 0.88, better on 5/12** |
+| **all 24 distinct layouts** | | | **−0.81 ± 0.69** | **p = 0.264, better on 15/24** |
+
+The first two batteries are the same twelve layouts measured twice, not
+24 seeds — averaged per layout they give −1.88 ± 0.84, p = 0.055 (pooling
+them as 24 says p = 0.012, which is repeated measures, not replication,
+and was written here first). On twelve layouts nobody had run, the effect
+is **absent and slightly reversed**. Pooled over all 24 distinct layouts
+it is −0.81 ± 0.69, p = 0.264. **The claim "a third fewer falls" is
+withdrawn.** This is the poacher's shape exactly — found, reproduced on
+its own seeds, gone on fresh ones — and the rule that catches it is this
+repo's own third: confirm on seeds the effect was NOT found on.
+
+**And backing out instead of standing changes nothing either — which is
+the most closed null here.** Standing was measured never to end a
+contact (from 0.10 m of separation, 16 trials, a standing duck is still
+at 0.099 m four seconds later and clears 0.30 m in 0 of them, where a
+straight reverse clears it in a median 1.6 s), and the walker reverses at
+0.23 m/s once you leave the dead band. So `bump_back` backs out on
+exactly the stand's gate. A third arm on the same twelve fresh layouts:
+
+| 3v3, seeds 200–211 | falls | kicks | goals | possession | advance |
+|---|---|---|---|---|---|
+| no rule | 4.08 | 6.50 | 2.17 | 11.83 | 0.40 |
+| stand | 4.33 | 7.33 | 1.58 | 13.00 | 0.42 |
+| back out | 4.33 | 6.67 | 2.00 | 11.97 | 0.44 |
+
+`stand → back` on falls is **exactly 0.00 ± 1.13, p = 1.000** (52 events
+against 52), and nothing else resolves. The knob is not inert: over one
+instrumented 3v3 run it issues 690 reverse commands (13.8 s a run) and
+drops the ticks spent touching another body from 4473 to 2529 of 90 000 —
+**a 43% cut**, which is precisely the self-feeding the 838-bump trace
+found ("standing on a body keeps touching it"). The mechanism is real, it
+operates, and it does not matter. **Time in contact is not what makes a
+3v3 duck fall** — which agrees with the probe the idea came from: a turn
+beside a *static* body fell 0 times in 98 trials down to 8 cm, and every
+fall in those probes needed a duck that was *moving* into you. The
+remaining lever is the closing duck, not the contact.
+
+The stand still ships on for rosters (`team_bump_stand_s`), and that is a
+default nobody has earned in either direction. Over all 24 layouts the
+point estimate still favours it (−0.81, better on 15/24) and nothing it
+was suspected of costing moved — kicks +0.83 (p = 0.51), goals −0.58
+(p = 0.50), advance and signed progress flat, on the confirmation block —
+so flipping it off now would be reading noise in the other direction.
+Falls need ~376 seeds to resolve a shift this size and this is 24: the
+question is open, not settled, and the honest label is "not shown to
+help", the same as every other knob on the shelf. Possession did move on
+the fresh block (11.83 → 13.00, +1.17 ± 0.48, p = 0.034) — one arm in six
+at p < 0.05 is what chance produces about a quarter of the time, and
+possession is the screen, never the verdict.
+
+Its first form did have a real defect, found by tracing 838 bumps, and
+the trace is worth more than the numbers above. The obvious premise — two
+attackers' feet meet at the ball and the one that stands loses it — is
+**false**: the feet meet a median 0.66 m from the ball, both ducks are
+inside 0.35 m of it in 18% of bumps, and two seconds later the ball is
+further from *both* by the same 7.4 cm. What the rule actually did was
+cancel the *escape*: 70% of its firing was in `blocked`, a state that is
+12.6% of the run, where the walk is already zeroed and the turn is the
+only command left — 6 of 8 falls were a stand leaning on the other duck —
+and 5 more were in `search`, whose circle walks. And it fed itself:
+standing on a body keeps touching it, so the timer never expired, bumps
+went 44 → 105 a run and one freeze ran 74 s. It is edge-triggered from
+the onset of a contact and scoped to the states where a standing turn
+beside a body is the danger.
+
+**A poacher supporter — found, confirmed, then killed by fresh seeds.**
+Supporters shadow the ball (traced: 0.89 m from it on median, 29% of
+their time inside 0.5 m, while 41% of the run has no duck at all within
+0.3 m of it), so standing them between the ball and the goal they attack
+looked obvious. It scored 10 goals against 3 over four seeds, then 21
+against 12 over twelve. On twelve seeds nobody had looked at, it
+**reversed**: 13 against 19. Pooled over all 24, 34 against 31, p = 0.80.
+The middle battery was never independent — it contained the four seeds
+the effect was found on. `support_mode="ahead"` stays as the record of
+it.
+
+**The shelf, re-screened — and nothing came back.** Most of the knobs in
+the index at the top of `ChaseParams` ship off on differences that never
+cleared the noise: "measured off" meant "not shown to help", and they were
+judged on goals at 8 seeds, which resolves nothing. `possession` resolves
+a 25% shift in 9 seeds, so re-screening them is an afternoon. Seven
+knobs and a baseline, eight batteries of **12 seeds × 300 s of 1v1 each,
+on seeds 40–51 — fresh ground, and the same seeds for every arm so every
+reading is paired** — the baseline run interleaved in the same window on
+the same code (2.17 goals, 8.08 kicks, 0.67 falls a run; possession
+17.50 s/min, signed progress −0.01 m/min, advance +0.74 m/min, 0.091 m of
+advance per kick):
+
+| knob (what it is) | possession Δ (s/min) | signed progress Δ (m/min) | advance Δ (m/min) | advance / kick | kicks Δ (a run) |
+|---|---|---|---|---|---|
+| `predict_s` 3.0 (head gaze at the predicted ball) | +2.04 ± 1.69 (p = 0.25) | +0.01 | +0.00 | 0.091 → 0.083 | +0.83 |
+| `look_aim` (the look after a kick aims by the kick map) | +0.21 ± 1.41 (p = 0.88) | +0.07 | +0.01 | → 0.105 | −1.00 |
+| `search_sweep` 1.4 (a searching head that sweeps ±1.4 rad) | **+3.75 ± 1.21 (p = 0.010)**, up on 10/12 | +0.11 | −0.01 | → 0.073 | +1.83 |
+| `tof_ball_m` 0.5 (the ToF's ball at the feet) | +1.83 ± 1.81 (p = 0.33) | +0.21 | +0.17 | → 0.118 | −0.33 |
+| `seek_s` 8.0 (a ball memory the search walks to) | +1.68 ± 1.85 (p = 0.38) | +0.34 ± 0.29 (p = 0.26) | +0.26 | → 0.148 | −1.33 |
+| `two_stage` (the two-stage line-up) | −3.47 ± 1.98 (p = 0.11) | +0.04 | −0.24 ± 0.10 (p = 0.034) | → 0.163 | **−5.00 (p < 0.001)** |
+| `push_beyond` 1.4 (deliberate dribbling) | +2.30 ± 1.86 (p = 0.24) | +0.12 | −0.04 | → 0.136 | −2.92 (p = 0.047) |
+
+**Read the `advance / kick` column as 1/kicks, not as kick quality.** It
+is arithmetically advance ÷ kicks, and `ballAdvance` is flat in every row
+here, so the column only ever reports its denominator: an arm that kicks
+less "improves" it. Measured on three line-up arms whose kick counts
+differ 2.6× over the same 24 seeds (185, 72, 83), total advance is
+statistically identical (0.400, 0.360, 0.342 m/min, every pairwise
+p > 0.17), while the ball's *actual* travel in the two seconds after each
+swing goes the other way — 17.7 ± 3.9 cm for the arm with the worst
+ratio, against 14.4 ± 3.4 and 13.6 ± 3.0 for the two with the best. The
+column stays in the table because it was quoted in the decisions below
+and deleting it would hide that; it is evidence of nothing. The rule it
+cost is in `AGENTS.md`: a ratio whose numerator is flat is its
+denominator, upside down.
+
+**The one arm that cleared p < 0.05 is the instructive row, and it is a
+false positive.** The head sweep took possession from 17.50 to 21.25
+s/min — +3.75 ± 1.21, p = 0.010, up on 10 of 12 seeds — and every reading
+churn cannot inflate says *worse*: `ballAdvance` −0.01 (flat), goals
+2.17 → 1.17 a run (−1.00 ± 0.52) and falls 0.67 → 1.67 (+1.00 ± 0.49, 8
+events against 20). A duck whose head sweeps
+stays near the ball and does less with it, which is precisely what
+possession pays for. That is the metric working as designed — it detected
+a real behavioural difference — and it is why possession is the screen and
+never the verdict. Seven arms tested at p < 0.05 also carry a
+30% chance of throwing at least one "significant" result from nothing at
+all; this is what one looks like from the inside.
+
+**Ball memory, the last candidate: dead at 48 seeds.** `seek_s` was the
+only arm whose signed progress looked like anything (+0.34 on the twelve
+discovery seeds), so it was carried onto fresh ground twice: **+0.20 over
+the next twelve seeds, then −0.11 over the twenty-four after that.**
+Pooled over all 48 paired seeds: **+0.08 ± 0.10, p = 0.45, up on 25 of
+48** — a coin flip. It never reversed the way the poacher did; it
+dissolved, which is what a null effect looks like when seeds keep being
+added to it. (Run together with `tof_ball_m` on the second twelve, the
+pair measured worse than either alone: −0.13 m/min of signed progress
+against the baseline's −0.05.) **Nothing on the shelf was rehabilitated**,
+and every knob above still ships off — now on a paired 12-seed reading
+with a metric that could have found an effect, which is a different and
+better kind of "off" than the one they had before.
+
+### Tidy the playroom (roadmap Track 12)
+
+`playroom` is the built-in that scatters toys on the floor of a walled room
+with a low basket in a corner, and `tidy` is the brain that clears it:
+
+```bash
+uv run duck-lab --world playroom          # watch it on /sim; the tidy score is top-left
+uv run eval-tidy --seeds 3 --toys 6 --seconds 300   # the benchmark: toys in the basket
+```
+
+**Long batteries are resumable.** A 16-seed tidy battery or a 12-seed 3v3
+one is well over an hour, so `eval-tidy` and `eval-pitch` print each seed
+the moment it lands and, given `--out FILE`, append it there as a JSON
+line and skip on a later run whatever the file already holds. Re-running
+the *same command* after an interruption continues it; `--seed0` extends a
+finished battery onto fresh seeds instead of redoing the same ones. The
+brain's own parameters never appear in a row, so `--tag` says which
+variant a file belongs to and a resume **refuses** a file written under a
+different tag, roster or run length rather than fabricating a comparison
+out of two halves. This was written after a cloud container was reclaimed
+twice mid-battery and, because the results were buffered to the end, took
+about ninety minutes of measurement with it both times.
+
+**Every fall is filed by state and by payload** (roadmap Track 12 step 1:
+does the walker fall *because* it is carrying?). A result row carries
+`falls_by_state` (brain state at the moment of the fall), `falls_laden` /
+`falls_unladen` (was the duck holding a toy on that step) and `m_laden` /
+`m_unladen` (true trunk metres walked in each condition, the respawn
+teleport left out). Each seed line prints the split — `falls 1 (deliver 1
+· 1 laden) · walked 9 m laden / 32 m unladen` — and the summary pools the
+states and gives laden vs unladen falls per 100 m:
+
+```
+mean tidied 0.81 · falls 0.38/run
+falls by state: backoff 2 · deliver 1
+laden 1 falls / 109 m = 0.92 per 100 m · unladen 2 falls / 212 m = 0.94 per 100 m
+```
+
+The keys are additive: an `--out` file written before they existed still
+resumes, its rows still count in falls/run, and the pooled lines say over
+how many seeds they were taken. The 64-seed answer (zero laden falls in
+1.7 km under ideal and datasheet drift; the falls live at the basket rim)
+is in `docs/roadmap.md` under Track 12.
+
+What is real and what is a model here, so nobody mistakes one for the other:
+
+- **Grasp is an attachment event**, not contact physics (`World.grasp`): when
+  the beak closes, the nearest toy within 4 cm of the mouth tip is welded to
+  the jaw with probability falling from 1 at zero error to 0 at the edge.
+  Release drops the weld. Contact-based grasping is roadmap 12.2's later step.
+- **The ground pick is the shipped skill**: `alpha_ground_pick.onnx` runs one
+  cycle as a hard swap of the reflex tier, exactly as the robot does, and the
+  beak closes at the phase where the tip bottoms out (measured: 2 cm up,
+  7.8 cm ahead of the trunk, 1.4 cm left). The carry needs no new reflex —
+  the shipped walker carries a 20 g block.
+- **The brain is a state machine over senses** (`brain/tidy.py`): scan,
+  approach (head down, camera 37° down), a blind last half-metre in
+  odometry, settle, pick, verify, carry, deliver (head level, the basket
+  re-measured standing still at 0.42 m, then a straight blind leg), drop,
+  back off. Every constant in it is a measurement on the walker, written
+  next to the number — the 8 cm beak overhang past the feet is why a
+  release is tight, and why the brain never walks at a toy that projects
+  into the basket.
+- Odometry is the sim's truth for now (roadmap 1.7 adds drift); the real
+  robot's drifts, which is why the basket is re-acquired by sight every trip.
+
+**Measured** (`eval-tidy --seeds 8 --toys 6 --seconds 300 --jobs 2`,
+datasheet sensor noise, upstream models at the pinned shas):
+
+| odometry | tether | tidied (mean of 16 seeds) | falls / run |
+|---|---|---|---|
+| ideal | onboard | **0.89** | 0.31 |
+| datasheet drift | onboard | 0.84 | 0.56 |
+| hostile drift | onboard | 0.79 | 0.75 |
+| ideal | 250 ms round trip | 0.81 | 0.19 |
+
+**The detector rate, and how the 10 Hz floor was removed.** Halving the
+camera detector from 10 Hz to 5 Hz used to cost **−0.55 toys** (64 paired
+layouts, p = 0.0003, worse on 35 of 64), and it broke the GRASP
+specifically — success 85% → 67%, attempts per pick 1.19 → 1.50, while
+picks barely moved. The duck found toys fine and fumbled them.
+
+The cause was a stale pose, not the rate: `_locate` read the camera's
+height and pitch off the frame but took x, y and yaw from the CURRENT
+odometry, so a frame one detector period old was placed from a pose the
+duck had already left — ~3 cm at 10 Hz, ~6 cm at 5 Hz, against a 3 cm toy.
+`TidyParams.stale_fix` keeps a second of the duck's own odometry and places
+the detection at the frame's timestamp. No ground truth, no new sensor.
+
+It only works **paired with `reach_pad`**, and that is the interesting
+part: the stop distance had been hand-fitted while the bias was present,
+so removing the bias alone made things *worse*. The 2×2 at 5 Hz:
+
+| | tidied | grasp | |
+|---|---|---|---|
+| fix off, pad +0.010 — what shipped | 0.771 | 69% | |
+| fix on, pad +0.010 | 0.807 | 68% | +0.22, p = 0.29 |
+| fix off, pad −0.008 (the control) | 0.688 | 52% | **−0.50, p = 0.046** |
+| **fix on, pad −0.008** | **0.849** | **95%** | **+0.47, p = 0.029** |
+
+Neither factor helps alone and one actively hurts. Pooled over 64 layouts
+the pair is **+0.41 toys at 5 Hz (p = 0.0066)** and **neutral at 10 Hz
+(+0.03, p = 0.88)**, with the grasp better at both rates (85% → 91% at
+10 Hz, 67% → 94% at 5 Hz). Against 10 Hz as it shipped, 5 Hz with the pair
+is −0.14 and **not resolved** (p = 0.32; SE 0.12, so a residual up to
+~0.25 toys would not have been seen). **The 10 Hz floor is no longer
+measurable** — which matters because a bigger NPU inference input is bought
+with frame rate (`docs/camera-hardware.md`).
+
+All four rows are on the 2026-09 CAD re-export (microduck_rl badc4e7),
+with the staged approach for rim toys, the sidestep-then-turn back-off,
+the slower last leg, and the brain steering by its own loop-closed pose
+(`loop_closure`, the wall-line matcher of `brain/mapping.py` folded
+into the tidy brain; `eval-tidy --no-loop-closure` steers by raw
+odometry). The loop closure is **measured neutral** here: the hostile
+row reads 0.79 / 0.75 with it on and off over the same 16 seeds (the
+matcher fires — 96 corrections in the first minute of a hostile run —
+but the brain re-acquires the basket and every toy by sight each trip,
+so only the odometry between two sightings matters, and that is short).
+It stays on for the map it builds; the win it was built for is the room
+map itself (5.5). Sixteen seeds now (`--seeds` default), each its own toy
+layout: eight seeds of six toys moved the hostile row 0.81 → 0.79 →
+0.62 across three runs of the same brain with different back-offs, so a
+difference under 0.05 is noise even here. The 8-seed rows before the
+loop-closed pose read 0.94 / 0.50 ideal, 0.88 / 0.50 datasheet, 0.62 /
+0.75 hostile, 0.79 / 1.50 tethered; before the rim staging 0.88 / 0.38
+ideal; on the previous export 0.88 / 0.12, 0.79 / 0.50 and 0.79 / 1.88
+for the drift and tether rows. A model bump is a re-measure, not a
+merge.
+
+The tether row is roadmap 12.10's answer in one line: a laptop brain over
+Wi-Fi keeps most of the tidying (0.81 against 0.89) and falls **no more
+than the onboard brain** (0.19 against 0.31). It read 0.76 / 2.19 before:
+every traced tethered fall was the stopping stride at the rim, because
+the stop was decided on senses a quarter of a second old (4.7 cm of
+overshoot at a 0.3 command, 3.0 at 0.25, which is why the last leg is
+walked at 0.25), and the fix is the one thing a tethered brain *can* do
+about its link — know it. The tether is modelled honestly now
+(`brain/tether.py`: senses reach the brain half a round trip late,
+re-aged; its intent lands half a round trip later — the sim used to
+delay only the intent, which let the brain see senses it would never
+get), so the brain reads the link off its own sensor ages: the floor of
+the ToF age over the last second is the one-way lag (near zero onboard,
+the sensor runs at 15 Hz), twice it is the round trip, and every stop
+moves out by its speed times that (`latency_gain`; ~4 cm at 0.16 m/s and
+250 ms). At the rim that was the margin every traced fall had spent
+(nine of ten falls in four traced runs were within 0.6 s of a release
+with the trunk 0.22–0.24 m from the basket): 0.71 / 0.25. At the toy it
+was the time: traced, the tethered seed 0 picked 3 toys in 8 attempts
+after its first three (onboard 5 in 5) and spent 80 s scanning, because
+the pick's stop landed late too and the beak came down past the toy —
+with the margin on the pick as well, 0.81 / 0.19. The 50 Hz reflex stays
+onboard either way.
+
+Up from 0.67 and 1.7 falls a run at the first close of the loop, and 0.11
+before that. What moved it: the basket is re-measured standing still and
+never released on a long-range guess; far sightings are directions, not
+ranges (at 2.3 m the elevation-to-range map is 34 m per radian); the held
+toy is masked out of the ToF guard (it sits 2.5 cm from the sensor and
+read as a wall); a stop out of a steering step lunges 2–3 cm, so the last
+centimetres are walked straight; the obstacle detour walks past whatever
+the servo wanted. Every step of the way there was a measurement, not a
+guess — `uv run walker-facts` re-measures them and `uv run trace-tidy`
+shows one run state by state, with every release, landing and fall in
+context. `.claude/skills/tidy-trace/SKILL.md` is the debugging guide.
+`--tether-ms` (roadmap 12.10) is a brain round trip — senses out half of
+it late, intents back the other half (`brain/tether.py`); `POST
+/world/tether` does the same live on the page, and the inspector's
+`latency` is what the tidy brain reads off its sensor ages.
+
 ## Teachable behaviors (the viewer's 🎓 teach panel)
 
 The `behaviors/` package is a library of trick recipes — plain-English reward terms over
@@ -293,6 +2405,228 @@ carry `training.stage {idx, count, label}` plus cumulative
 ("stage 2 of 3 · carrying the roll over the top"); `/teach/stop` stops the
 whole chain, and an explicit `initFrom` skips it (single run, final stage's
 env).
+
+### 🔎 `find_ball` — the eyes for soccer and fetch
+
+The shipped kick policies are ball-blind (upstream's `ball_kick` cfg: "the
+operator aims the robot at the ball"); `find_ball` is the aiming. It is a
+whole-body policy that sweeps (on a scan clock) for a ball it cannot see, nods down for the
+near ones (the camera is 25 cm up and level, so anything inside ~0.5 m is
+below a level gaze), steps the body round to face it, and keeps it centred
+while it rolls or jumps elsewhere. The intended handoff is the robot's own
+pattern: `find_ball` until the ball is centred and the body square, then
+`ball_kick_*` / `alpha_ground_pick`.
+
+There is no ball in the physics. The env tracks a point on the floor and
+projects it through the robot's own `head_camera` MJCF element, so what the
+policy sees is what a detector on the robot hands it — and it rides the
+four **head command slots** (`obs[51:55]`), the same way the imitation
+clip's phase rides two body slots. The 61-dim contract is untouched; the
+daemon fills the slots for this brain:
+
+| slot | meaning |
+|---|---|
+| 51 | horizontal bearing across the frame, −1 hard left … +1 hard right (`duck_detect::Detection::bearing`); 0 when not seen |
+| 52 | vertical bearing, −1 bottom … +1 top; 0 when not seen |
+| 53 | 1.0 while the detector reports the ball, else 0 |
+| 59, 60 | **scan clock**: sin/cos of a phase running at 1/4 s while the ball is lost, restarting at 0 at every loss, parked at (0, 1) while seen — the imitation recipe's phase trick, because a memoryless policy cannot sweep on its own (a sweep is a limit cycle in head yaw; 2M PPO steps produced a static gaze-vs-belief instead) but can map a phase to a sweep |
+| 54 | the daemon's **belief**: the ball's bearing in the duck's yaw frame ÷ π (+ = left) × confidence. 1.0 while seen; while lost, the last bearing dead-reckoned by the gyro yaw rate with confidence fading as exp(−t/4 s) down to a 0.15 floor. At episode start: a noisy prior at half confidence in 70% of episodes (the ball was in view before this brain took over), else the fixed convention +0.15 — "nothing known, sweep left first" |
+
+Detector realism: reports every 2 control steps (25 Hz against the 50 Hz
+loop), ±0.02 bearing jitter under `obs_noise`, and an optional dropout knob.
+FOV is the real camera's — a 1920×1080 / 2.75 µm / 1/2.9″ sensor behind a
+2.9 mm lens (116° × 60°), mounted rotated 90°, so in the robot's frame it is
+**60° across and 116° up**: tall and narrow, the right shape for hunting a
+ball on the floor (`MICRODUCK_BALL_HFOV_DEG` / `_VFOV_DEG`).
+
+Two numbers from the sensitivity sweeps in `docs/roadmap.md` are worth
+carrying into any hardware discussion:
+
+- **The detector needs ~4 Hz** — 10 Hz if the daemon does not carry a held
+  detection through the head's own rotation. Uncompensated, the behavior falls
+  off a cliff between 10 and 6 Hz (kick handoff 35% → 2% by 4 Hz); that cliff
+  is the held bearing going stale against a sweeping head, not the rate, and
+  correcting it with head encoders and the gyro takes 4 Hz back to an 80%
+  handoff on the same unretrained brain (`MICRODUCK_BALL_STALE_FIX`). Either
+  way the sensor's 90 fps is far more than the pipeline can use, so frame rate
+  is not where compute should go.
+- **Mount it portrait.** Rotated the other way (116° across, 60° up) costs
+  ~10 points of in-frame share and 40% more time to the kick handoff.
+
+Absolute HFOV barely matters — found rate is flat from 24° to 90°, because the
+detector reports bearing *normalized by the field of view*, so the geometry
+cancels. VFOV is the axis that bites. And note the projection is already right
+for a fisheye: `_ball_sense` divides an angle by the half-FOV angle, which is
+the equidistant f-θ mapping a 116° lens actually uses.
+
+The recipe pays for the ball being in frame, centred (two-layer Gaussian),
+and for the body facing it; while the ball is lost the only income is a
+bounded **coverage** pay for pointing the camera at a (10° yaw × near-floor /
+level pitch band) cell it has not looked at this sweep — a wiggle re-covers the same cells
+and earns nothing, a steady sweep pays every step. There is deliberately
+**no per-step search penalty**: falling over would then be the cheapest
+way out of a hard search. Balls spawn anywhere around the duck (0.3–1.5 m)
+and every ~3 s either teleport (a new search) or roll off at 0.3–0.9 m/s
+(a track, then a re-acquisition from the belief slot). The belief slot is
+also what makes the sweep learnable at all: with the ball equally likely on
+either side and no cue in the obs, turning left and right earn the same
+advantage and the mean action stays at zero while the exploration noise
+does the finding — the first stage-1 export stood and stared at a ball 42°
+off while the stochastic trainer saw it half the time. The three-stage
+curriculum ladders only the world: ball in the front 140° → anywhere,
+moving → mostly rolling. `symmetric=False` on purpose: from a symmetric
+start a mirror-consistent policy cannot choose which way to look first.
+
+```bash
+uv run train-behavior find_ball                     # single run, final-stage knobs
+# or stage by hand (the lab's 🎓 panel runs the chain for you):
+MICRODUCK_BALL_BEARING_MAX=1.2 MICRODUCK_BALL_EVENT_RATE=0.15 \
+    uv run train-behavior find_ball --steps 1_000_000 --run-name fb-s1
+uv run train-behavior find_ball --steps 2_000_000 --run-name fb-s2 --init-from runs/fb-s1
+uv run render-rollout --policy runs/fb-s2/policy.onnx --out /tmp/rr-fb   # ball + gaze dot drawn in
+uv run eval-find-ball runs/fb-s2/policy.onnx        # FINDING + AIMING tables (below)
+uv run eval-find-ball runs/fb-s2/policy.onnx --events 0.33   # ...and judge FALLS here
+```
+
+`eval-find-ball` prints **two** tables, because the first cannot see this
+behavior's actual failure. **FINDING** is time-to-first-sight, share of steps
+in frame and centred, and falls. **AIMING** is `head_yaw|centred` (mean head
+yaw over the steps the ball was centred — the handoff gate wants < 14°),
+`psi_final` / `psi_turned` (where the body ended up, and how much of the start
+bearing it actually turned out) and the share of episodes where the kick
+**handoff** fired. A gaze policy scores 100% in frame and 98% centred in
+FINDING while never once satisfying the handoff, which is exactly what the
+shipped s5 export does — see below.
+
+`--events` is worth knowing about: it defaults to 0 (a static ball, one search
+per episode, so each episode answers one question), but the recipe *trains* at
+0.33 and `render-rollout` runs at 0.33, and **the two regimes disagree about
+which policy is safest** — one A/B arm measured 0 falls at `--events 0` and 1
+at 0.33, another went 4 → 10. Judge falls at `--events 0.33`.
+
+`--env KEY=VALUE` (repeatable, same spelling as `render-rollout`'s) sets any
+behavior knob for the battery, which is how the sensitivity sweeps in
+`docs/roadmap.md` are run — e.g. `--env MICRODUCK_BALL_HFOV_DEG=40`. It wins
+over `--events` / `--prior` for the same key.
+
+**Measured (2026-09-03, `uv run eval-find-ball`, 40 static-ball episodes ×
+8 s per export, deterministic ONNX, randomizers off — the battery sweeps
+bearings round the circle; "found" = ball entered the frame within 8 s):**
+
+| export | front found / median | side found / median | back found / median | falls /40 |
+|---|---|---|---|---|
+| s1c (front window + belief + clock) | 100% / 0.03 s | 20% / 0.29 s | 0% | 0 |
+| s2 (anywhere, moving) | 100% / 0.03 s | 55% / 1.22 s | 0% | 0 |
+| s3 (rolling) | 100% / 0.03 s | 80% / 0.84 s | 40% / 2.64 s | 1 |
+| s4 (+ raised-cosine facing) | 100% / 0.03 s | 85% / 0.62 s | 30% / 3.16 s | 0 |
+| s5 (+ turn_to_belief, no up-band) | 100% / 0.03 s | 85% / 0.60 s | 60% / 0.94 s | 2 |
+| tight facing, placeholder camera | 100% / 0.03 s | 90% / 0.49 s | 100% / 1.92 s | 0 |
+
+Those rows are the cloud lineage plus the first Mac retrain, all measured on a
+static ball under the **placeholder** 48°×62° camera and normalized-bearing
+tolerances. They are kept because the shape of the progression is the story,
+but they are not comparable to the shipped brain: the camera, the tolerance
+units and the `centred` metric have all since changed.
+
+**The shipped export** (`policies/find_ball/`, see its README) is measured the
+way this behavior should be — real camera, ball events on, 60 episodes:
+**100% found in every bearing bucket**, **93% of episodes reach the kick
+handoff**, head yaw 9.6° against the gate's 14°, **1 fall / 60** — and it holds
+up as the detector slows (90% handoff at 4 Hz).
+
+Three separate things got it there, and conflating them would credit the wrong
+one. Most of the original gap was **under-training** — the shipped cloud export
+was not a converged instance of its own recipe, and retraining the *unchanged*
+terms halved the head yaw and removed the falls on its own. Then the tighter
+facing layer. Then, once the real camera turned out to be a 116° fisheye, two
+corrections that had nothing to do with any policy: aim tolerances expressed in
+**degrees** instead of normalized bearing (a lens swap was silently rescaling
+the reward), and a **leaning-spawn curriculum** that teaches the duck to
+recover from a tip instead of only ever meeting one on the way down.
+
+**It aimed its head, not its body — mostly fixed, and the best lesson here.**
+Handing off to a kick exposed it: over a full 8 s episode with the ball 15°
+off, the s5 export held the camera perfectly centred (bearing +0.11, elevation
+0.00, in frame 100% of steps) using **21° of head yaw**, while the body bearing
+stayed at 18–20° and drifted slightly further away. Every metric the battery
+had called that a success, which is why `eval-find-ball` now prints an AIMING
+table too. The head does the eyes-on job alone and for free; turning the body
+costs steps, smoothness penalties and fall risk, so the policy took the cheap
+option — and the two terms that were supposed to prevent that could not:
+`face_the_ball`'s tight layer at 0.4 rad still paid ~2/3 at 19° off, leaving
+the last 20° with almost no gradient behind it, and `turn_to_belief` only fires
+while the ball is *out* of frame, so once the head found it nothing paid for
+the body to catch up.
+
+Head yaw is now **9.5°** against 41°, under the handoff gate's 14°, and the
+handoff fires on **92%** of episodes against 15%. The body does the aiming.
+
+What is left is a genuine trade rather than a bug, and `docs/roadmap.md` has
+the evidence: falls and in-frame share sit on a **frontier** for this recipe,
+because the duck's effective fall line is ~20–25° of tilt — a body turn that
+produces a 30° lean is already a fall, so the only way to fall less is to turn
+less. Three reward sweeps and a spawn curriculum all slid along that line
+rather than moving it. The shipped brain picks the point that maximises the
+handoff (the deliverable) and keeps falls at 2/60, paying in-frame share for
+it. Moving the frontier needs a change to *how the duck turns* — stepping round
+instead of pivoting into a lean — which is a locomotion problem, not this
+recipe's reward.
+
+All three candidate fixes have been A/B'd on an M-series Mac, one at a time
+against a seed-matched control — **the tables and one clear negative result
+are in `docs/roadmap.md` item 1** — and the winner is shipped: the tight layer
+is now 0.2 rad, which nearly doubles the kick handoff (38% → 68% of episodes
+with ball events on) for one extra fall in sixty. `body_aimed` — a term that
+prices the handoff state directly, rather than hoping body-facing falls out of
+a bearing Gaussian — stays in the recipe at **weight 0**: it is by far the
+strongest lever on the aim (head yaw to 8°, handoff to 83%) and it also
+triples the falls, and falls are the veto here. Ungating `turn_to_belief` was
+the negative result: it is worse than the untouched control on every axis,
+because a yaw-rate pay that never switches off makes *arriving* worth nothing.
+
+The export ships in `policies/find_ball/` (see its README). Balls that start
+directly behind are the same problem seen from further away: the head's ±170°
+reaches them but the body has to commit to a turn, and the falls are that
+turn. That used to be the back bucket's whole story — s5 found 60% of back
+balls and fell on two of four in a render — and it mostly is not any more:
+the shipped export finds **100%** of them with **0 falls / 40** static and
+1 / 60 with events on. What is left is slower rather than broken (median
+1.92 s to first sight from behind, against 0.03 s from the front).
+The three things that made the sweep learnable at all are worth knowing
+before touching the recipe (the module header tells the whole story): the
+belief slot (a symmetric obs leaves the mean action with nothing to learn
+while the noise finds the ball), the scan clock (a memoryless policy cannot
+sweep without a phase), and a facing term that slopes all the way round.
+This whole chain took ~2.5 h on a 4-core cloud CPU at ~1.2k steps/s; an
+M5 Max runs the same at ~12× that.
+
+**Handing off to the kick.** The behavior declares its own handoff condition
+(`Behavior.handoff_fn`), so `render-rollout --handoff` and the lab's showcase
+duck ask the identical question rather than keeping two copies of a rule in
+step: the detector reports the ball centred (|bx|, |by| < 0.25) **and** the
+head is straight ahead (|head_yaw| < 0.25 rad), held 0.5 s. Head centred on
+the ball plus head aligned with the body means the *body* is pointing at it,
+which is the precondition the ball-blind `ball_kick_*` policies were trained
+under — and both halves are detector output plus joint encoders, so the daemon
+can run the same test. `handoff_policy` names the kick; `handoff_recenter` is
+off, because the lab's post-handoff yaw correction exists to undo the drift a
+*landing* imparts and would spin away a turn that was the whole point.
+
+What the gate cannot assert is **range**: the detector here reports a bearing,
+not a box size, so "aimed" is all it honestly knows. `ball_kick_*` wants the
+ball ~9 cm in front of the kicking foot, so a clean handoff that then whiffs is
+the expected first result and the argument for an approach behavior.
+
+```bash
+uv run render-rollout --policy policies/find_ball/policy.onnx \
+    --handoff ../microduck/policies/ball_kick_right.onnx --out /tmp/rr-soccer
+```
+
+`render-rollout` draws the ball (orange) and a gaze dot 30 cm down the
+optical axis (cyan while the ball is in frame, red while lost), adds a
+`ball …` caption line per frame and a `ball:` summary line (time to first
+sight, share of steps in frame / centred, losses); the lab streams the ball
+to the viewer, which draws it next to the duck.
 
 `behaviors/core.py` also has a **term CATALOG** — composable optional terms
 mirroring the official stack's reward vocabulary (`head_up`, `flat_feet`,
@@ -341,7 +2675,14 @@ src/microduck_local/
 ├── export_onnx.py  # bake normalizer → ONNX obs[1,61]->actions[1,14]
 ├── eval_onnx.py    # headless eval battery (fall rate, tracking error)
 ├── render_rollout.py  # offscreen rollout → mp4 + captioned contact sheet
-└── bench.py        # steps/sec benchmark
+├── bench.py        # steps/sec benchmark
+├── world/          # scenario contract, MjSpec composition, World (N ducks, one mjData,
+│                   # persons, toys, basket, grasp-as-attachment, skills)
+├── sensors/        # ray rig on mj_multiRay, the 8×8 ToF, the geometric detector
+├── brain/          # senses → intents: runtime contract, tracker, gait facts, Wander/Follow/
+│                   # Script, the tidy state machine, occupancy mapping, BrainEnv + LearnedBrain
+├── eval_tidy.py    # the playroom benchmark (eval-tidy)
+└── world_server.py # the /sim page's backend: /scenarios, /world, /ws/sim
 tests/              # contract locks: obs order, action semantics, DR non-accumulation,
                     # penalty signs, shipped-alpha-survives regression test
 ```

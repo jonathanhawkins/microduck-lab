@@ -1,0 +1,26 @@
+{
+  "name": "follow-v3",
+  "task": "follow",
+  "target_cls": "person",
+  "decide_every": 5,
+  "obs_dim": 80,
+  "obs_version": 2,
+  "act_low": [
+    -0.20000000298023224,
+    -0.30000001192092896,
+    -1.0
+  ],
+  "act_high": [
+    0.6000000238418579,
+    0.30000001192092896,
+    1.0
+  ],
+  "envs": 8,
+  "steps": 600000,
+  "seed": 0,
+  "fixed_preset": null,
+  "variety": true,
+  "title": "Follower v3 \u2014 reflex tier + variety",
+  "description": "Trained WITH the reflex tier and --variety (furniture and a wandering duck), 600k decisions on 8 envs. 0.74 / 0.63 in band \u2014 still climbing when it stopped, which v4 settles by running the recipe to 2M.",
+  "group": "shipped-followers"
+}

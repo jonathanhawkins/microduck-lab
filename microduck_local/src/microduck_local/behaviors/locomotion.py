@@ -143,6 +143,86 @@ def _run_track_ang(env) -> float:
     return float(np.exp(-(z_err2 + xy_err2) / _RUN_ANG_STD2))
 
 
+# --- achievement gating -----------------------------------------------------
+# Every POSITIVE shaping term in this recipe gated on `_run_cmd_norm` — the
+# COMMANDED speed. Nothing gated on what the duck actually achieved, so the
+# whole shaping budget was collectable by a duck that ignored the command.
+# Measured on real runs (select-run, deterministic export, mean body-frame
+# forward velocity):
+#
+#     steps    ep_rew    m/s        air_time   stay_upright   keep_pace
+#      254k       397   +0.295        0.114        1.381         0.587
+#     1.00M       708   -0.098        0.374        1.532         0.472
+#
+# correlation(ep_rew, ground speed) = -0.90. The duck learned to march in
+# place and then to reverse, and the scorecard PAID it: air_time alone rose
+# +0.26 (x3.0 = +0.78 weighted) against keep_pace's -0.11 (x4.0 = -0.46).
+# air_time's ceiling is 2.0 x 3.0 = 6.0, above keep_pace's entire 1.0 x 4.0 —
+# the gait-shaping term could outbid the task it was meant to shape.
+#
+# The gate makes positive shaping AMPLIFY the task instead of substituting
+# for it: each such term is scaled by how well the command is actually
+# tracked, which is `_run_speed` — already baseline-subtracted so standing
+# pays 0, already audited, already the keep_pace term. The floor keeps a
+# fraction of the shaping gradient alive early, when nothing tracks yet and
+# a purely penalty-shaped landscape would just teach the duck to stand.
+#
+# `stay_upright` is DELIBERATELY exempt. Gating it was tried here before and
+# measured: `test_run_upright_is_gpu_run_std_and_additive` records that
+# multiplying upright onto the speed term "is why local speed saturated at
+# 0.27 m/s". That is a specific, measured cap; the A/B that justified this
+# gate never reached speeds where it would show (every arm fell in 100% of
+# episodes), so it is weaker evidence than the result already on record.
+# air_time is the term that measurably drove the drift and the only one
+# gated.
+_RUN_GATE_FLOOR = 0.25
+
+
+def _run_gate_on(env) -> bool:
+    """OFF by default: it has not earned one. `MICRODUCK_RUN_GATE=1` opts in.
+
+    Two A/Bs, four paired seeds each, distilled warm start, 1M steps, scored
+    with `select-run` on the deterministic export:
+
+    * gating air_time AND stay_upright: per-step correlation between reward
+      and ground speed +0.366, ahead 4/4, 95% interval [+0.073, +0.660] —
+      resolved.
+    * gating air_time ALONE, which is what this ships: +0.195, ahead 2/4,
+      interval [-1.93, +2.32] — unresolved, as are speed and episode length.
+
+    So the resolved half of that win came from gating `stay_upright`, and
+    that is exactly what `test_run_upright_is_gpu_run_std_and_additive`
+    records as previously measured to cap local speed at 0.27 m/s. A prior
+    specific measurement beats a weaker current one, so upright stays
+    additive — and what remains has no evidence behind it yet.
+
+    The defect is still real (see the comment above): air_time's ceiling sat
+    above keep_pace's, gated on the COMMAND rather than on achievement. This
+    is the fix, tested and ready; it just needs seeds. It is also not the
+    binding constraint — every checkpoint of all eight arms fell in 100% of
+    episodes, so gait quality was never what limited them.
+    """
+    return os.environ.get("MICRODUCK_RUN_GATE", "") not in ("", "0")
+
+
+def _run_track_gate(env) -> float:
+    """`floor + (1-floor) * tracking`, memoized for the step like cmd_norm.
+
+    1.0 when the gate is off, so the old recipe is bit-for-bit unchanged.
+    """
+    if not _run_gate_on(env):
+        return 1.0
+    cache = env._step_cache if env._cache_active else None
+    if cache is not None:
+        v = cache.get("run_gate")
+        if v is not None:
+            return v
+    g = _RUN_GATE_FLOOR + (1.0 - _RUN_GATE_FLOOR) * _run_speed(env)
+    if cache is not None:
+        cache["run_gate"] = g
+    return g
+
+
 def _run_air_time(env) -> float:
     """GPU feet_air_time: 1.0 per foot whose CURRENT air time is inside
     [min, max], every step, gated on a live command. 0, 1 or 2.
@@ -162,7 +242,7 @@ def _run_air_time(env) -> float:
             air[side] += C.CTRL_DT
         if moving and _RUN_AIR_MIN < air[side] < _RUN_AIR_MAX:
             paid += 1.0
-    return paid
+    return paid * _run_track_gate(env)
 
 
 def _run_clearance_pen(env) -> float:
@@ -194,6 +274,74 @@ def _run_clearance_pen(env) -> float:
         vel = float(np.hypot(v6[3], v6[4]))
         tot += abs(z - _RUN_FOOT_TARGET) * vel
     return -tot
+
+
+# --- the fall penalty ------------------------------------------------------
+# The `run` recipe had NO explicit cost for falling. An episode that ends
+# simply forfeits its future reward, and at gamma 0.99 over the ~100 steps
+# that remain in practice that is a weak, and entirely CRITIC-MEDIATED,
+# signal — the policy only feels it once the value function has learned to
+# predict it.
+#
+# Measured over 14 paired seeds (each distilled clone against its own 400k
+# fine-tune, 40 held-out episodes, disjoint selection and evaluation seeds):
+#
+#                    clone   tuned    delta   95% interval
+#   episode length     806     392     -414   -596 .. -233
+#   fall rate         0.21    0.65    +0.44   +0.250 .. +0.628
+#   ground speed     0.213   0.254   +0.041   +0.007 .. +0.075
+#
+# All three resolved. PPO was not unstable — it was systematically TRADING
+# survival for speed, and the five fastest fine-tunes (0.30-0.33 m/s) were
+# the five that collapsed to ~50-step episodes. This term prices that trade
+# directly, once, on the step the episode ends in a fall.
+#
+# It is a penalty (<= 0 by construction, as AGENTS.md requires) and it is
+# sparse, which "no jackpots" permits in this direction: a policy cannot
+# farm a cost it can only avoid.
+#
+# MEASURED, AND IT DOES NOT WORK. Weights 0 / 10 / 30 / 100 were screened at
+# four seeds, where 30 looked best (+121 episode steps, -0.12 falls against
+# weight 0). Extended to FOURTEEN paired seeds the sign reversed: weight 30
+# came out -34 steps and +0.05 falls, both unresolved. The n=4 signal was
+# noise — the third time in one session a promising four-seed result flipped
+# at higher n. So the default is 0 and this term is inert.
+#
+# Read it as evidence about the DIAGNOSIS, not just the knob: pricing the
+# terminal event does not stop PPO trading survival for speed here, so the
+# "no fall penalty" theory is not the explanation either. What survives every
+# test is simpler — at this sample budget, fine-tuning a teacher-quality gait
+# is not productive, and the distilled clone is the deliverable.
+_RUN_FALL_W = "MICRODUCK_RUN_FALL_PENALTY"
+
+
+def _run_fall_weight() -> float:
+    """Read at behavior-BUILD time, so a training subprocess picks it up and
+    `behavior.json` records what the run actually trained under."""
+    try:
+        return max(0.0, float(os.environ.get(_RUN_FALL_W, "0")))
+    except ValueError:
+        return 0.0
+
+
+def _run_fell(env) -> bool:
+    """The env's OWN termination predicate, recomputed at reward time.
+
+    `_compute_reward` runs before `step` decides `terminated`, so a term
+    cannot read the flag — but both inputs are available and memoized here,
+    so this is the same test, not an approximation of it.
+    """
+    if not env.terminate_on_fall:
+        return False
+    fell = env._projected_gravity()[2] > env.FALL_GRAVITY_Z
+    if env.height_termination:
+        fell = fell or env._trunk_xpos[2] < env.FALL_HEIGHT
+    return bool(fell)
+
+
+def _run_fall_pen(env) -> float:
+    """-1 on the step the episode ends in a fall, 0 every other step."""
+    return -1.0 if _run_fell(env) else 0.0
 
 
 def _run_upright(env) -> float:
@@ -340,6 +488,10 @@ _register(Behavior(
                    1.0, _run_action_rate_pen, is_penalty=True),
         RewardTerm("no_limit_parking", "Penalty for grinding joints against their end stops",
                    1.0, _limit_parking_pen, is_penalty=True),
+        # Weight 0 = inert, and that is the default until an A/B moves it.
+        # See _run_fall_pen for the 14-seed measurement that motivates it.
+        RewardTerm("fall", "One-off cost for ending the episode on the floor",
+                   _run_fall_weight(), _run_fall_pen, is_penalty=True),
         # Straightness anchors — deliberately NOT in the GPU stack, which
         # tracks commanded twist and lets a teleoperator own the heading. We
         # ask for a straight autonomous run, and rate terms cannot stop slow

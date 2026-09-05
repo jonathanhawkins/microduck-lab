@@ -32,6 +32,9 @@ back in, which closes the loop.
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -41,8 +44,16 @@ from .train import RUNS_DIR
 
 
 def collect(teacher: str, episodes: int, cmd_lo: float, cmd_hi: float,
-            seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
-    """Roll the teacher out and record (raw obs, action) pairs.
+            seed: int = 0, gamma: float = 0.99
+            ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Roll the teacher out and record (raw obs, action, discounted return).
+
+    The returns are what lets `fit` initialise the CRITIC as well as the
+    actor. They are computed per episode from the env's own reward with the
+    trainer's `gamma`, bootstrapped at 0 — a truncated episode's tail is
+    therefore slightly under-valued, which is the standard Monte-Carlo
+    compromise and far closer to the truth than the zero-initialised critic
+    it replaces.
 
     Collected in MicroduckWalkEnv with its OWN command sampler, not with a
     pinned forward command. The first version swept only twist_cmd[0]: the
@@ -66,24 +77,49 @@ def collect(teacher: str, episodes: int, cmd_lo: float, cmd_hi: float,
                            random_yaw=True, seed=seed)
     obs_buf: list[np.ndarray] = []
     act_buf: list[np.ndarray] = []
+    ret_buf: list[np.ndarray] = []
     for ep in range(episodes):
         obs, _ = env.reset(seed=seed + ep)
+        rewards: list[float] = []
+        n0 = len(obs_buf)
         for _ in range(500):
             obs = np.asarray(obs, dtype=np.float32)
             act = sess.run(None, {inp: obs[None]})[0][0].astype(np.float32)
             obs_buf.append(obs.copy())
             act_buf.append(act)
-            obs, _, term, trunc, _ = env.step(act)
+            obs, rew, term, trunc, _ = env.step(act)
+            rewards.append(float(rew))
             if term or trunc:
                 break
-    return np.asarray(obs_buf, np.float32), np.asarray(act_buf, np.float32)
+        # Discounted return from each state to the end of THIS episode.
+        g = 0.0
+        tail = np.empty(len(rewards), np.float32)
+        for i in range(len(rewards) - 1, -1, -1):
+            g = rewards[i] + gamma * g
+            tail[i] = g
+        assert len(tail) == len(obs_buf) - n0
+        ret_buf.append(tail)
+    return (np.asarray(obs_buf, np.float32), np.asarray(act_buf, np.float32),
+            np.concatenate(ret_buf) if ret_buf else np.zeros(0, np.float32))
 
 
 def fit(obs: np.ndarray, act: np.ndarray, out: Path, epochs: int = 40,
-        batch: int = 4096, lr: float = 1e-3, seed: int = 0) -> float:
+        batch: int = 4096, lr: float = 1e-3, seed: int = 0,
+        returns: np.ndarray | None = None) -> float:
     """Fit a fresh SB3 policy to the teacher's actions; save a warm-start run.
 
-    Returns the final training MSE, in radians² of joint target.
+    With `returns`, the CRITIC is fitted too, on the teacher's own discounted
+    returns. That matters: this module's header used to note that "the critic
+    starts untrained, so the first PPO iterations after this will spend
+    themselves learning a value function — expect a dip before any gain", and
+    the measurement showed the dip is what killed the idea. Cloning the actor
+    alone and fine-tuning for 1M steps left every checkpoint of four arms
+    falling in 100% of episodes, several at NEGATIVE ground speed: PPO's first
+    updates are driven by a garbage advantage estimate, which wrecks a
+    perfectly good gait before the critic catches up. An initialised critic
+    is the targeted fix.
+
+    Returns the final ACTION MSE, in radians² of joint target.
     """
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -112,29 +148,45 @@ def fit(obs: np.ndarray, act: np.ndarray, out: Path, epochs: int = 40,
     norm = np.clip(norm, -venv.clip_obs, venv.clip_obs)
     x = torch.as_tensor(norm)
     y = torch.as_tensor(act)
+    v = None if returns is None else torch.as_tensor(returns.astype(np.float32))
     opt = torch.optim.Adam(model.policy.parameters(), lr=lr)
     n = len(x)
-    loss_val = float("nan")
+    loss_val = v_loss = float("nan")
     for ep in range(epochs):
         perm = torch.randperm(n)
-        tot, seen = 0.0, 0
+        tot, vtot, seen = 0.0, 0.0, 0
         for i in range(0, n, batch):
             idx = perm[i:i + batch]
             xb, yb = x[idx], y[idx]
             feats = model.policy.extract_features(xb)
             if isinstance(feats, tuple):        # SB3 returns (pi, vf) when the
-                feats = feats[0]                # extractors are not shared
-            latent = model.policy.mlp_extractor.forward_actor(feats)
+                pi_feats, vf_feats = feats      # extractors are not shared
+            else:
+                pi_feats = vf_feats = feats
+            latent = model.policy.mlp_extractor.forward_actor(pi_feats)
             pred = model.policy.action_net(latent)
             loss = torch.nn.functional.mse_loss(pred, yb)
+            a_loss = float(loss)
+            if v is not None:
+                # Same optimizer, one backward: the critic head is fitted on
+                # the teacher's discounted returns over the SAME states, so
+                # PPO's first advantage estimates are about right instead of
+                # noise.
+                v_lat = model.policy.mlp_extractor.forward_critic(vf_feats)
+                v_pred = model.policy.value_net(v_lat).squeeze(-1)
+                vl = torch.nn.functional.mse_loss(v_pred, v[idx])
+                loss = loss + vl
+                vtot += float(vl) * len(idx)
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tot += float(loss) * len(idx)
+            tot += a_loss * len(idx)
             seen += len(idx)
         loss_val = tot / max(seen, 1)
+        v_loss = vtot / max(seen, 1)
         if ep % 10 == 0 or ep == epochs - 1:
-            print(f"  epoch {ep:3d}  mse {loss_val:.5f} rad^2")
+            extra = "" if v is None else f"  value mse {v_loss:.3f}"
+            print(f"  epoch {ep:3d}  mse {loss_val:.5f} rad^2{extra}")
 
     # Exploration noise must be scaled to the CLONED policy, not to a fresh
     # one. log_std_init=0.0 means std 1.0, which utterly swamps a teacher whose
@@ -153,23 +205,136 @@ def fit(obs: np.ndarray, act: np.ndarray, out: Path, epochs: int = 40,
     return loss_val
 
 
+def default_teacher() -> Path:
+    """The shipped walker: the only stable gait this workspace has."""
+    from . import contract as C
+    return C.MICRODUCK_RL_DIR.parent / "microduck" / "policies" / "alpha_walking.onnx"
+
+
+def cache_is_valid(d: Path) -> bool:
+    """Is this cache entry usable, not merely present?
+
+    Checking `model.zip` EXISTS is not enough: a half-written one is exactly
+    what a lost race leaves behind, and SB3 then fails deep inside training
+    with "wasn't a zip-file" — after the vec-env workers have already forked.
+    Validating on read means a corrupt entry is silently rebuilt instead.
+    """
+    import zipfile
+
+    m, vn = d / "model.zip", d / "vecnormalize.pkl"
+    if not (m.exists() and vn.exists() and vn.stat().st_size > 0):
+        return False
+    try:
+        return zipfile.is_zipfile(m)
+    except OSError:
+        return False
+
+
+# Fitting budget. 120 epochs, not 40, because cloning FIDELITY is what
+# decides whether the clone stays upright — correlation(action MSE, fall
+# rate) = +0.93 over five budgets, measured on the deterministic export:
+#
+#   episodes  epochs   mse rad^2   falls   ep_len   m/s
+#        120      30     0.00030    0.75      289   0.238
+#        250      40     0.00017    0.08      924   0.193   <- the old default
+#        250     120     0.00011    0.00     1000   0.196
+#        600     120     0.00006    0.00     1000   0.194
+#
+# Below ~0.00011 rad^2 the falling stops outright, at the teacher's own
+# 0.196 m/s. The residual is not a diverging one — the clone tracks the
+# teacher to a FLAT 0.021 rad through a whole episode, it does not drift —
+# so this is approximation error costing robustness, not distribution shift,
+# and more fitting is the direct fix. It costs 33 s once (17 s -> 50 s) and
+# the result is cached.
+DISTILL_EPISODES = 250
+DISTILL_EPOCHS = 120
+
+
+def ensure_distilled(teacher: Path | str | None = None, seed: int = 0,
+                     episodes: int = DISTILL_EPISODES, epochs: int = DISTILL_EPOCHS,
+                     cache_dir: Path | None = None, critic: bool = True) -> Path:
+    """A distilled warm-start run dir, built once and reused.
+
+    Cloning the teacher costs a few hundred episodes of rollout plus the fit,
+    which is pure overhead to pay again on every launch — and the result is a
+    deterministic function of (teacher bytes, seed, episodes, epochs), so it
+    caches cleanly. The cache key includes the teacher's SIZE and MTIME so a
+    swapped policy file cannot be silently reused.
+
+    Returns a directory holding `model.zip` + `vecnormalize.pkl`, which is
+    exactly what `--init-from` wants.
+    """
+    import hashlib
+
+    t = Path(teacher) if teacher else default_teacher()
+    if not t.exists():
+        raise FileNotFoundError(
+            f"no teacher policy at {t} — clone pollen-robotics/microduck, or pass one")
+    st = t.stat()
+    key = hashlib.sha256(
+        f"{t.resolve()}|{st.st_size}|{int(st.st_mtime)}|{seed}|{episodes}|{epochs}|critic={critic}".encode()
+    ).hexdigest()[:16]
+    root = cache_dir or (RUNS_DIR / ".distill")
+    out = root / key
+    if cache_is_valid(out):
+        return out
+    print(f"[distill] cloning {t.name} -> {out} (once; cached by teacher+seed)", flush=True)
+    obs, act, ret = collect(str(t), episodes, 0.15, 0.60, seed=seed)
+    print(f"[distill]   {len(obs)} transitions; teacher |action| {np.abs(act).mean():.3f}; "
+          f"return {ret.mean():.1f} +- {ret.std():.1f}", flush=True)
+    # Build in a PRIVATE directory, then move it into place with a rename.
+    # Both arms of a paired A/B share a cache key (same teacher, same seed)
+    # and launch together, so without this they both miss, both `fit` into
+    # the same path, and interleave their writes — which produced a
+    # `model.zip` that "wasn't a zip-file" and killed two training runs.
+    tmp = root / f".tmp-{os.getpid()}-{key}"
+    mse = fit(obs, act, tmp, epochs=epochs, seed=seed,
+              returns=ret if critic else None)
+    (tmp / "distill.json").write_text(json.dumps({
+        "teacher": str(t), "teacher_size": st.st_size, "seed": seed,
+        "episodes": episodes, "epochs": epochs, "mse": mse,
+        "critic": critic}, indent=2))
+    try:
+        os.rename(tmp, out)          # atomic while `out` does not exist
+    except OSError:
+        if cache_is_valid(out):
+            # A sibling won the race. Drop our private copy — leaving it
+            # behind would grow a junk directory per lost race — and use theirs.
+            shutil.rmtree(tmp, ignore_errors=True)
+            return out
+        # `out` exists but is unusable (the interleaved-write case). Move it
+        # aside rather than deleting, then land ours.
+        os.rename(out, root / f".stale-{os.getpid()}-{key}")
+        os.rename(tmp, out)
+    print(f"[distill]   done, mse {mse:.5f} rad^2", flush=True)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--teacher", required=True, help="path to the ONNX policy to clone")
     ap.add_argument("--run-name", required=True, help="run dir to write the warm start into")
-    ap.add_argument("--episodes", type=int, default=250)
-    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument("--episodes", type=int, default=DISTILL_EPISODES)
+    ap.add_argument("--epochs", type=int, default=DISTILL_EPOCHS,
+                    help="fitting epochs. Fidelity is what keeps the clone upright: "
+                         "correlation(action MSE, fall rate) = +0.93, and falls stop "
+                         "outright below ~0.00011 rad^2")
     ap.add_argument("--cmd-lo", type=float, default=0.15)
     ap.add_argument("--cmd-hi", type=float, default=0.60)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-critic", action="store_true",
+                    help="clone only the actor, as before the critic fit existed "
+                         "(the A/B baseline: that arm's fine-tune fell 100%% of episodes)")
     args = ap.parse_args()
 
     print(f"collecting from {args.teacher} ...")
-    obs, act = collect(args.teacher, args.episodes, args.cmd_lo, args.cmd_hi,
-                       seed=args.seed)
-    print(f"  {len(obs)} transitions; teacher |action| mean {np.abs(act).mean():.3f}")
+    obs, act, ret = collect(args.teacher, args.episodes, args.cmd_lo, args.cmd_hi,
+                            seed=args.seed)
+    print(f"  {len(obs)} transitions; teacher |action| mean {np.abs(act).mean():.3f}; "
+          f"return mean {ret.mean():.1f}")
     out = RUNS_DIR / args.run_name
-    mse = fit(obs, act, out, epochs=args.epochs, seed=args.seed)
+    mse = fit(obs, act, out, epochs=args.epochs, seed=args.seed,
+              returns=None if args.no_critic else ret)
     print(f"done: {out}  (final mse {mse:.5f} rad^2)")
 
 

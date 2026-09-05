@@ -4,7 +4,7 @@ module exposed (private helpers included — the tests import them) is
 re-exported here, so `from microduck_local.behaviors import X` is untouched.
 
 Layout: core.py (dataclasses, registry, catalog, shared reward helpers) →
-poses / headstand / backflip / airflip / imitate / locomotion (each registers
+poses / headstand / backflip / airflip / imitate / locomotion / ball (each registers
 its behaviors on import, same order as the flat file) → env.py (BehaviorEnv).
 """
 import builtins as _builtins
@@ -17,6 +17,7 @@ import importlib as _importlib  # noqa: F401
 from ..motion import reload_modules as _reload_modules
 from . import airflip as _airflip
 from . import backflip as _backflip
+from . import ball as _ball
 from . import core as _core
 from . import env as _envm
 from . import headstand as _headstand
@@ -25,7 +26,7 @@ from . import locomotion as _locomotion
 from . import poses as _poses
 
 _SUBMODULES = [_core, _poses, _headstand, _backflip, _airflip, _imitate,
-               _locomotion, _envm]
+               _locomotion, _ball, _envm]
 
 # The BARE submodule names. `from . import core as _core` binds `_core` here
 # AND pins `core` on the package (the import system does that for every

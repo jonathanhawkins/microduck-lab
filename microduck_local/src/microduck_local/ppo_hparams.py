@@ -6,7 +6,7 @@ from `symmetry.py` (which imports torch) would put OpenMP thread pools in
 the parent and deadlock the fork on macOS.
 """
 
-import os
+from .machine import MAC_INTRA_THREADS, profile
 
 N_STEPS = 256
 TARGET_BATCH = 1024
@@ -20,7 +20,9 @@ N_MINI_BATCHES = 4
 # Intra-op threads for the PPO update on this M5 Max. Measured: a 1024×512
 # Linear peaks at 8 (0.38 ms) vs the PyTorch default of 6 P-cores (0.42 ms)
 # vs 18 (0.42 ms, E-cores hurt). Set after fork, in the trainer only.
-TORCH_INTRA_THREADS = 8
+# Re-exported from machine.py, which owns the per-machine policy now (a Linux
+# box wants every core for the update and ONE during rollouts — see there).
+TORCH_INTRA_THREADS = MAC_INTRA_THREADS
 
 # rsl_rl's value_loss_coef. SB3 defaults to 0.5; leaving that in place made
 # the critic half as loud as the GPU stack.
@@ -69,15 +71,37 @@ def ppo_batch_size(n_steps: int, n_envs: int, target: int = TARGET_BATCH,
 def configure_torch_cpu(torch_mod) -> None:
     """Trainer-side thread pool, called AFTER the vec-env workers fork.
 
-    Intra-op: 8 on this machine (see TORCH_INTRA_THREADS). Inter-op: 1,
-    because the PPO train loop is a single stream of ops — PyTorch's default
-    of cpu_count() idle inter-op threads just contend for the same cores.
-    Inter-op can only be set once per process; a RuntimeError means some
-    earlier CPU work already froze it, which is fine.
+    Intra-op: 8 on a Mac (see TORCH_INTRA_THREADS), every usable core on a
+    Linux/cloud box — where `machine.phase_thread_callbacks` then drops it
+    to 1 for the duration of each rollout, because those threads spin-wait
+    through the rollout's tiny forwards and starve the physics workers.
+    Inter-op: 1, because the PPO train loop is a single stream of ops —
+    PyTorch's default of cpu_count() idle inter-op threads just contend for
+    the same cores. Inter-op can only be set once per process; a
+    RuntimeError means some earlier CPU work already froze it, which is fine.
+
+    "Usable" is affinity- and cgroup-aware: `os.cpu_count()` reports the
+    HOST's cores inside a container, so a 4-CPU pod on a big node would
+    otherwise get a thread per host core.
     """
+    prof = profile()
     try:
-        torch_mod.set_num_interop_threads(1)
+        torch_mod.set_num_interop_threads(prof.interop_threads)
     except RuntimeError:
         pass
-    cpus = os.cpu_count() or TORCH_INTRA_THREADS
-    torch_mod.set_num_threads(min(TORCH_INTRA_THREADS, cpus))
+    torch_mod.set_num_threads(prof.update_threads)
+
+
+def linear_decay(start: float, end: float):
+    """SB3 learning-rate schedule: called with progress_remaining, 1.0 -> 0.0.
+
+    Lives here (torch-free) rather than in a trainer so every trainer can
+    share one decay. `train_behavior.py` documented why every run needs it:
+    EVERY constant-rate run so far peaked and then came apart (ep_rew
+    354->223, 177->29, 157->77), which is the classic signature of a rate
+    sized for early exploration still being applied once the policy is near
+    a good solution.
+    """
+    def f(progress_remaining: float) -> float:
+        return end + (start - end) * float(progress_remaining)
+    return f

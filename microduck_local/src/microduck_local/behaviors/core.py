@@ -132,6 +132,40 @@ class Behavior:
     # generic — behaviors own their knobs, the server just exports them into
     # each stage's subprocess environment.
     curriculum: tuple = ()
+    # TASK-STATE hooks, for behaviors whose world holds something the robot
+    # is not (a ball to find). `reset_fn(env)` runs at the end of every
+    # reset, after the spawn families have posed the duck, and the obs is
+    # rebuilt after it; `obs_fn(env)` runs before every observation is
+    # assembled and may write the command slots (the imitation clip's phase
+    # rides the body slots the same way — the 61-dim contract is untouched,
+    # only what the daemon must put in those slots changes per task).
+    reset_fn: Callable | None = None
+    obs_fn: Callable | None = None
+    # Read-side hooks, so the tools that LOOK at a policy can see the task
+    # state too: `caption_fn(env) -> str` is one extra contact-sheet caption
+    # line, `markers_fn(env) -> [(xyz, radius, rgba), ...]` draws the task's
+    # objects into the render, `report_fn(env) -> [str, ...]` adds lines to
+    # the episode summary, and `marker_payload(env)` is what the lab streams
+    # to the viewer (the ball's position, or None).
+    caption_fn: Callable | None = None
+    markers_fn: Callable | None = None
+    report_fn: Callable | None = None
+    # HANDOFF: the brain a finished behavior gives control to, and when.
+    # `handoff_fn(env) -> bool` is the condition, asked once per control step
+    # while a handoff is armed. It lives HERE, on the behavior, because the
+    # two callers — render_rollout's `--handoff` and the lab's showcase duck —
+    # have to agree exactly, and the flip's version is two copies of the same
+    # rule kept in step by a comment. A behavior that brings its own predicate
+    # gets one implementation and both callers by construction.
+    # `handoff_policy` names the shipped brain to hand to (default: the lab's
+    # alpha_stand, which rises from the crouch a trick lands in).
+    # `handoff_recenter` is the lab's post-handoff yaw correction, which
+    # exists to undo the heading a LANDING imparts — a behavior that chose
+    # its heading on purpose (find_ball turned to face the ball) must set it
+    # False or the commander spins that choice away.
+    handoff_fn: Callable | None = None
+    handoff_policy: str | None = None
+    handoff_recenter: bool = True
 
 
 def resolve_clip_name(behavior: Behavior, clip_name: str | None = None) -> str | None:
@@ -202,6 +236,30 @@ def _v6_buf(env) -> np.ndarray:
 def _upright(env) -> float:
     g = env._projected_gravity()
     return float(np.exp(-(g[0] ** 2 + g[1] ** 2) / 0.05))
+
+
+def _upright_wide(env) -> float:
+    """Two-layer upright: a wide pull that still slopes at big lean angles,
+    plus the original tight polish. Same 0..1 range, same value at 0.
+
+    `_upright`'s single Gaussian has a std of ~12.9 deg of tilt, so it is worth
+    0.55 at 10 deg, 0.10 at 20 and 0.007 at 30 — past ~25 deg there is no pay
+    left and therefore NO GRADIENT PULLING THE DUCK BACK. It prices being
+    upright but not RECOVERING, so once a lean is committed the fall is free.
+    That is the failure `_ball_face`'s docstring records for its own wide
+    Gaussian ("paid 0.04 with the ball straight behind and sloped nowhere the
+    policy was"), and this is the same fix: keep a layer alive out where the
+    policy actually is. Worth 0.44 at 20 deg, 0.31 at 30 and 0.21 at 41 — the
+    tilt at which find_ball's back-start falls become unrecoverable.
+
+    OPT-IN (`_upright_term(w, wide=True)`), because `_upright` is shared: it is
+    a catalog term, it gates `one_leg`'s hold, and it SCALES backflip's brake
+    penalty and two of imitate's terms. Widening it globally would silently
+    re-price all of those. See docs/roadmap.md — it needs an A/B on a non-ball
+    recipe before any of them adopt it."""
+    g = env._projected_gravity()
+    s = float(g[0] ** 2 + g[1] ** 2)
+    return 0.5 * float(np.exp(-s / 0.5)) + 0.5 * float(np.exp(-s / 0.05))
 
 
 def _still_penalty(env) -> float:
@@ -438,9 +496,12 @@ _BASE_REGULARIZERS = (
 )
 
 
-def _upright_term(w=1.5):
+def _upright_term(w=1.5, wide=False):
+    """The shared upright pay. `wide` swaps the single Gaussian for the
+    two-layer shape (see `_upright_wide`) while keeping the term KEY, so a
+    recipe's weight sliders and its behavior.json stay compatible."""
     return RewardTerm("stay_upright", "Points for keeping the body level", w,
-                      _upright)
+                      _upright_wide if wide else _upright)
 
 
 _lift_up_L, _stance_L, _hold_L = _one_leg("right", "left")

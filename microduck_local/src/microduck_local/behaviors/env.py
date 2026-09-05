@@ -1,4 +1,4 @@
-from .locomotion import *  # noqa: F401,F403 — cascades the full upstream namespace,
+from .ball import *  # noqa: F401,F403 — cascades the full upstream namespace,
 
 # mirroring the flat file's definition order exactly (each module sees
 # everything defined before it, helpers included).
@@ -38,6 +38,10 @@ class BehaviorEnv(MicroduckWalkEnv):
         # falling), and so does any pose whose target sits under the fall line.
         kwargs.setdefault("height_termination", self.behavior.height_termination)
         self.foot_contact_state = {"left": True, "right": True}
+        # Counts resets. Task-state hooks (Behavior.reset_fn / obs_fn) key
+        # their per-episode state on it, so an obs built DURING a reset —
+        # before the hook has seeded this episode — can tell it is stale.
+        self.episode_id = 0
         # Reference motion, if this behavior imitates one. The clip is
         # selectable per run (a user authors several in the timeline editor):
         # explicit kwarg wins, then MICRODUCK_CLIP for the trainer subprocess,
@@ -128,6 +132,7 @@ class BehaviorEnv(MicroduckWalkEnv):
         return default
 
     def reset(self, **kwargs):
+        self.episode_id += 1
         out = super().reset(**kwargs)
         self.data.qfrc_applied[:] = 0.0   # never carry an assist across episodes
         self.spotter_active = False
@@ -201,6 +206,12 @@ class BehaviorEnv(MicroduckWalkEnv):
         self.home_xy = (float(self.data.xpos[self.trunk_body_id][0]),
                         float(self.data.xpos[self.trunk_body_id][1]))
         self.home_yaw = _trunk_yaw(self)
+        # Task state (a ball to find) is placed relative to the duck's FINAL
+        # spawn pose, so it runs last — and the obs is rebuilt so the first
+        # observation of the episode already carries the task's slots.
+        if self.behavior.reset_fn is not None:
+            self.behavior.reset_fn(self)
+            out = (self._get_obs(), out[1])
         return out
 
     def _spawn_inverted(self):
@@ -378,6 +389,8 @@ class BehaviorEnv(MicroduckWalkEnv):
             self.body_cmd[4], self.body_cmd[5] = s, c
         if self.behavior.id == "spin":
             self.twist_cmd[2] = getattr(self, "_spin_dir", 1.0)
+        if self.behavior.obs_fn is not None:
+            self.behavior.obs_fn(self)
         return super()._get_obs()
 
     def _compute_reward(self):

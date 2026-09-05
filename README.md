@@ -174,6 +174,16 @@ records almost nothing in a throttled tab. Keep the tab visible while
 recording. A take where the scene never rendered gets refused with a message
 instead of saved as a 0.1 s "video".
 
+## Where this is going: `/sim`
+
+[docs/sim-roadmap.md](docs/sim-roadmap.md) is the plan for the next chapter:
+simulate the robot's other senses (the head's 8×8 ToF depth matrix, the NPU
+duck detector, microphones, speaker, BLE proximity, odometry), add a brain
+layer that turns them into the robot's own `robot.move` / `robot.head`
+intents, and open a `/sim` page where ducks follow people, map rooms, and
+play soccer against each other. It ranks the work, explains what each piece
+teaches, and covers Windows support.
+
 ## Working with AI assistants
 
 This repo is set up for agentic coding tools:
@@ -225,6 +235,14 @@ domain randomization, so don't ship its policies to a real robot. Once a
 behavior works here, port the env design to an mjlab cfg in `microduck_rl` and
 retrain on GPU (that repo's `AGENTS.md` is the sim2real recipe). Everything
 here keeps the deployment contract so that port is mechanical.
+
+## What's being worked on
+
+`docs/roadmap.md` is the working list: what to run next, the command for each,
+and the number that would settle it. Right now it is mostly the 🔎 `find_ball`
+brain — a scan-and-track behavior that aims the duck at a ball, so the
+ball-blind kick and ground-pick policies have eyes. It was prototyped on a
+cloud CPU and every open question on it wants a real machine.
 
 ## License
 

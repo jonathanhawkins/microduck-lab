@@ -1,0 +1,79 @@
+# Contract tests on the three desktops the lab targets. macOS and Ubuntu run
+# everything, the golden-bit parity files included: those goldens are
+# recorded PER PLATFORM (tests/goldens/, tests/golden_store.py) and a
+# platform without a recording skips them, so Linux checks its bits and a
+# Mac checks its own once someone records them there. Windows runs the
+# modules written spawn-safe from day one (world, sensors, brain, world
+# server) plus the pure contract tests — the fork-based vec env is a known
+# gap (docs/sim-roadmap.md §9).
+name: tests
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: microduck_local
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upstream checkouts (MJCF models, shipped policies)
+        working-directory: .
+        run: |
+          # PINNED: the contract, golden-bit and symmetry tests measure THESE
+          # models and policies (microduck_rl badc4e7 = the 2026-09-02 CAD
+          # re-export, #29; the drift test was re-measured against it). Bump
+          # the shas on purpose, with the tests re-measured, never by accident.
+          git clone --filter=blob:none https://github.com/pollen-robotics/microduck_rl
+          git -C microduck_rl checkout --quiet badc4e7ffe5507fd7acb1a21487bd2925c1afe5a
+          git clone --filter=blob:none https://github.com/pollen-robotics/microduck
+          git -C microduck checkout --quiet 2c61dcc1f03440541cdc0729f7a375b2a9ea3005
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (CPU torch; the lock resolves CUDA wheels on Linux)
+        run: |
+          uv venv --python 3.12 .venv
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            uv pip install --python .venv torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+          fi
+          uv pip install --python .venv -e . pytest
+      # The golden-bit rollout fingerprints lock the numba/libm bit patterns
+      # of one platform; tests/goldens/ carries the Linux x86_64 recording
+      # (made on the pinned model), the parity tests skip where there is none.
+      # Hosted runners come with more than one CPU model (measured: the same
+      # recording matched to the bit on two runs and differed in the last
+      # two hex digits on the third), so the bit comparison runs only on the
+      # CPU that recorded it and every other machine compares by tolerance.
+      - name: "Tests (macOS and Linux: everything; golden bits where recorded)"
+        if: runner.os != 'Windows'
+        run: .venv/bin/python -m pytest tests -q -p no:cacheprovider
+      - name: "Tests (Windows: spawn-safe modules + pure contract tests)"
+        if: runner.os == 'Windows'
+        run: .venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/test_sensors.py tests/test_world.py tests/test_arena.py tests/test_brain.py tests/test_world_server.py tests/test_env_contract.py tests/test_behaviors.py tests/test_clips.py
+
+  viewer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: duck-viewer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: duck-viewer/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

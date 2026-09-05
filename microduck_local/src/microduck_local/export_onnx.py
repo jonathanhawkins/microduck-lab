@@ -40,17 +40,25 @@ class OnnxWalkPolicy(torch.nn.Module):
         return self.policy.action_net(latent_pi)  # deterministic mean action
 
 
-def export(run_dir: Path, out_path: Path) -> Path:
-    model = PPO.load(str(run_dir / "model"), device="cpu")
+def export(run_dir: Path, out_path: Path, model_path: Path | None = None,
+           vn_path: Path | None = None) -> Path:
+    """Bake the normalizer into an ONNX policy.
+
+    Defaults to the run's final `model.zip` + `vecnormalize.pkl`. The explicit
+    paths are what `select-run` uses to export a numbered CHECKPOINT for
+    deterministic scoring without disturbing the shipped `policy.onnx`.
+    """
+    model = PPO.load(str(model_path or (run_dir / "model")), device="cpu")
     # VecNormalize.load needs a venv only for stepping; stats load without one.
     import pickle
-    with open(run_dir / "vecnormalize.pkl", "rb") as f:
+    with open(vn_path or (run_dir / "vecnormalize.pkl"), "rb") as f:
         vn: VecNormalize = pickle.load(f)
 
     wrapper = OnnxWalkPolicy(
         model.policy, vn.obs_rms.mean, vn.obs_rms.var, vn.clip_obs
     ).eval()
 
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     dummy = torch.zeros(1, C.OBS_DIM, dtype=torch.float32)
     torch.onnx.export(
         wrapper, (dummy,), str(out_path),

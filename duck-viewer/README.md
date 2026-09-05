@@ -25,6 +25,15 @@ uv run duck-lab --checkpoints runs/first-gait ../microduck/policies/alpha_walkin
 cd duck-viewer && npm run dev     # then open the printed localhost URL
 ```
 
+```bash
+npm test        # vitest: the canvas arithmetic (lib/*.test.ts). CI runs it.
+```
+
+Unit tests here cover the maths that decides *which pixels get asked for* —
+they cannot tell you the page looks right. For that, look at it:
+`.claude/skills/sim-smoke` brings the lab and viewer up and screenshots
+`/sim`.
+
 `?lab=host:port` on the page URL points it at a different lab (a scratch
 server on another port, a scratch lab on another port — the lab binds loopback, so same machine); default `127.0.0.1:8788`.
 
@@ -130,6 +139,218 @@ Panel states, chat history, and the camera persist in localStorage; the duck
 roster itself persists server-side (`microduck_local/lab-state.json`) across
 lab restarts.
 
+## `/sim`: the world page
+
+`http://localhost:63317/sim` renders the lab's **world mode** (start the lab
+with `uv run duck-lab --world living-room`, or load a scenario from the
+page's picker). The lab page's `🦆 duck lab` panel carries a `sim →` link to
+get here, and this page's `← lab` goes back. One room, many ducks, and what
+each duck senses:
+
+- **Scenario picker + load** (top bar): built-ins and anything saved under
+  `microduck_local/scenarios/`. Walls, static boxes and the floor come from
+  the scenario JSON; balls and free boxes stream their poses at 25 Hz.
+- **ToF overlay** (`T`): one dot per zone of each duck's 8×8 depth matrix,
+  at the depth the sensor *reports*, colored near→far amber→teal, plus the
+  four corner rays from the aperture. Select a duck (click, or `1`–`9`) to
+  see only its fan.
+- **Pitch panel** (on a soccer scenario): the score, the kickoff countdown,
+  goals split into kicked and walked in, and — under a rule — the three
+  per-team rates the benchmark actually judges by. Goals are about 2.5 a
+  run and cannot resolve a change (146 seeds for a 25% shift), so watching
+  them tells you almost nothing: `possession` (seconds a minute one of ours
+  is nearest the ball inside 0.25 m) is the cheap screen at 9 seeds,
+  `advance` (metres a minute the ball is carried toward the goal that team
+  attacks) is the discriminator at 43, and `signed` is the same thing with
+  backward motion charged for — the one churn cannot inflate, shown in red
+  when a team is losing ground. They come off the same `PitchMetrics` the
+  battery uses, so a number on screen is the battery's number.
+- **Chase overlay** (under `T` too, on a pitch): what each chase brain
+  thinks about the ball, drawn on the floor in its own odometry frame like
+  the map — an orange line from the ball track to where the brain predicts
+  it will stop (its head yaws that way and its hunt aims there), a grey
+  ring on the ball memory its search would walk to, a teal ring on its
+  line-up / push spot, and a violet ring on the ball-sized blob its 8×8 ToF
+  sees on the floor at its feet. That blob (`tofBall`, a bearing and a range
+  in the duck's heading frame) covers the last 30 cm, where a floor ball
+  drops out of the head camera's frame; it is measured *off* as a ball
+  source for the brain — at the feet it is as often the other duck's foot,
+  and a line-up on a foot is a fall — but it is computed, so it is drawn.
+  It is placed from the duck's odometry pose, so a duck without one gets no
+  ring. Every chase duck, the selected one bright. The inspector carries
+  both as rows: that blob's bearing and range, and `bump` — how long
+  since this duck's feet last touched another duck or a person
+  (contacts here, the IMU and the servo loads on the robot), amber while it
+  is inside half a second. That is the window a bumped duck stands through
+  instead of turning in place, which took 3v3 falls from 5.00 to 1.75 a
+  run. The pitch panel splits the goals into kicked (within 4 s of a kick)
+  and walked in, the same attribution `eval-pitch` prints.
+- **Inspector** (right): the selected duck's heatmap painted straight off the
+  stream, frame age (amber when stale), a noise preset select (`ideal` /
+  `datasheet` / `hostile`, applied live), and which brain is steering it.
+- **Panels go where you put them.** The inspector and the head-camera
+  inset drag by their title strip and remember where they were left
+  (localStorage, clamped back into view on resize); double-click the strip
+  to re-dock. Untouched, they sit at their designed spots below.
+- **Cam** (`V`): top-left, under the top bar (under the pitch scoreboard on
+  a pitch; hidden while the editor holds that corner), what the selected duck's head camera
+  sees, rendered from the `head_camera` site at the detector's field of view
+  (62°×48°), with the detector's output drawn over it as boxes — a bearing,
+  an elevation and an apparent width per thing it found, and nothing else
+  about the picture. That is what a brain gets, and why a floor ball
+  vanishes from the frame in the last 0.3 m unless the head pitches down.
+  The inset is rendered from the camera pose the frame was *captured* from
+  (the stream carries it), not from where the head is now: at 10 Hz plus
+  latency the walking head moves the picture by up to a fifth of its width
+  before a brain gets the frame — measured, and the lag a brain acts on.
+  It is a second, scissored pass of the same scene in the same canvas (a
+  priority-1 `useFrame` takes the render loop over), not a render target and
+  a readback; the sensor drawings (ToF dots, rays, map) sit on a layer the
+  head camera does not see. The scissor rectangle goes to three in **CSS
+  pixels** — `setScissor`/`setViewport` scale by the renderer's pixel ratio
+  themselves, so measuring the box in device pixels applies it twice. That
+  shipped: on a retina Mac the pass landed 1.5× off the panel, so the inset
+  showed the main orbit view straight through a transparent div (labels and
+  boxes intact, no picture) and the main view came back zoomed 1.5×. The
+  arithmetic lives in `lib/inset.ts` and is pinned by `lib/inset.test.ts`.
+- **Drive** (`P`, then WASD/arrows, Q/E strafe): every duck takes your twist
+  for 6 s after the last key; otherwise ToF-equipped ducks wander on the
+  lab's `Wander` brain and blind ducks follow a demo script. `R` restarts.
+- **Inspector · brain**: which brain steers the selected duck (`wander`,
+  `follow`, `tidy`, `script`, or a trained `learned:<run>`), switchable live,
+  its inputs with their ages (ToF, detector, the target it is tracking), its
+  current intent, and — for `tidy` — picked/delivered counts and the toys it
+  gave up on. `head` toggles whether the brain's head intents are applied.
+- **Persons + possess**: scenarios can carry walking persons (mocap capsules
+  on waypoint paths). Possess one from the inspector and drive it with the
+  same keys; the ducks keep their brains. This is how follow-me is tested.
+- **Editor** (`E`): place walls (two clicks), boxes, balls, ducks, persons,
+  toys and the basket on the floor, set each duck's brain, then save-and-load
+  under a name (`PUT /scenarios/{name}`; built-ins are read-only, so a draft
+  of one saves as a copy). The scene menu in the top bar splits into
+  `built in` and `saved by you`; each of your saved scenes carries a `✕`
+  that deletes it in place (`DELETE /scenarios/{name}`, after a confirm) —
+  built-ins have none, and the live world keeps running whatever it loaded.
+- **What the brain sees** (in the inspector, for a duck on a `learned:*`
+  brain): the network's last decision, live. A strip of 80 bars is the
+  observation as the network gets it — ToF cells, ages, the tracker's
+  target slots, the last action, speed, the coasting/yaw/confirmed flags —
+  each scaled by its own range (hover a bar for the slot and value), with
+  the target block also in words. Under it, one gauge per action on a track
+  that spans the brain's own bounds; an action pinned on a bound shows `⊣`
+  in amber. The exported graph clamps the network's output itself, so there
+  is no visible "ask" past the edge — the pin is the ask, and a brain pinned
+  every decision, target or no target, is the saturated-mean trap showing
+  itself while the duck walks. Wire shape: `brain.view` in the frame
+  (`runtime.brain_view`): the observation, the action before and after the
+  intent clip, and the bounds.
+- **Map** (`M`): the selected duck's occupancy grid, painted on the floor —
+  what it believes the room is, from its ToF frames and its own odometry
+  (amber occupied, teal free). Switch its `odom` preset in the inspector to
+  `datasheet` or `hostile` and watch the map smear like a real robot's.
+- **Perf** (top bar): the lab's cost per 20 ms tick as physics+policies +
+  sensors + frame encode, next to RTF and kB/s.
+- **Pitch score** (top-left, `pitch` / `pitch-2v2` / `pitch-3v3`): goals per
+  side while the `chase` brains go after one ball; in a team each duck's
+  inspector shows its role (attack / support) and the team's blackboard.
+- **Tidy score** (top-left, `playroom` scenario): toys in the basket, what the
+  duck is carrying, picks and deliveries — the same numbers `eval-tidy`
+  prints headless.
+- **Timeline** (bottom): the lab keeps a ring buffer of recent frames; pause
+  and scrub, or save the buffer as a recording.
+- Protocol: `lib/sim.ts` (`/ws/sim` frames, `/scenarios`, `/world`).
+
+The ducks are rendered by the main page's `Duck` component unchanged (merged
+geoms per body, DOM labels), which is why world frames carry the world body
+first, as `GET /scene` lists bodies. Everything else in the room is
+`components/SimStage.tsx`, which dresses the scenario JSON without changing
+what the lab simulates:
+
+- **Pitch** (`goal_width > 0`): a mown grass floor with the markings sized to
+  the room — touchlines, halfway line, centre circle, goal areas, penalty
+  spots, corner arcs — a dark apron outside white rink boards with an amber
+  stripe, and goal frames with nets on both short walls exactly where
+  `World` counts a goal. The ball wears a 32-panel skin so you can see it
+  roll.
+- **Rooms** (`living-room`, `playroom`, `follow-me`, anything you draw in the
+  editor): oak planks, plaster walls with a baseboard and a cap, a rug in the
+  middle of the room, bevelled furniture on soft footprint shadows, a wicker
+  basket with a bound rim, studded bricks / bevelled blocks / rolled socks.
+- **Grounding without shadow maps**: one instanced mesh of multiply-blended
+  contact blobs follows every duck, ball, toy, box and person (fading and
+  spreading as the thing lifts off the floor), and a darkening strip runs
+  along every wall base. A procedural `RoomEnvironment` PMREM on
+  `scene.environment` gives the shells and the ball their highlights.
+- Every texture is painted on a canvas at load (no image assets, no
+  fetches); the scenario-sized ones are rebuilt only when the floor, the
+  walls' extent or the goal width change, not on every edit click.
+
+![the pitch](../docs/media/sim-pitch.jpg)
+![the living room](../docs/media/sim-living-room.jpg)
+![the playroom](../docs/media/sim-playroom.jpg)
+
+## `/train`: brain training runs
+
+`http://localhost:63317/train` charts `train-brain` runs live.
+
+`train-brain` is a plain CLI process — it never talks to the lab — so a brain
+run used to be invisible while a `/teach` job was watchable. The lab's
+`GET /brains` reads the artifacts the trainer already writes
+(`brains/<run>/brain.json` and `progress.jsonl`) and this page polls it every
+2 s. Nothing here can start, steer or stop a run: it is a read of the disk.
+That also means it picks up a run started before the page was opened, and
+keeps the curve of one that has already finished.
+
+- **Run list** (left, the only scrolling region on the page — the page itself
+  is fixed to the viewport). One card per directory in `brains/`: progress
+  bar, steps done against the budget, last reward, elapsed, ETA, steps/s, and
+  the contract tags from `brain.json` (`variety`, `obs v2`, envs, seed). A
+  live run is marked `● live`; a finished one that exported is `shipped`.
+- **Chart** (right). Bold line is a 9-rollout trailing mean, faint line the
+  raw per-rollout value, toggled between episode reward and episode length.
+  Hover for a crosshair: a rule at the hovered step and a readout of every
+  charted run's value there. A run that had already stopped by that step is
+  greyed and labelled with the step it ended at, rather than showing its
+  final value as though it were current.
+- Click a card — anywhere on it, the swatch included — to add or remove that
+  run from the chart; a bordered, bright card is one that is charted. `all`
+  and `none` are separate buttons — the lit one is the current
+  state. The page opens on ONE run (the live one, else the first card): the
+  palette holds six colours, so forty-odd curves on the same axes come out
+  as an unreadable band.
+- **What is different.** The first charted run is the *baseline* and its
+  card shows the whole recipe from `brain.json` (batch, lr → lr_end, epochs,
+  arch, legacy hparams, polite, the git sha it trained at, …). Every other
+  card shows **only the knobs it changed**, as `lr_end 3e-5 ← 3e-4`, or
+  `= <baseline>` when the recipe is identical — so `ab-batch` against
+  `ab-batch-lr` reads as one chip, not two identical tag rows. A flag the
+  viewer has never heard of still diffs, under its raw key
+  (`lib/train.ts`: `recipeDiff`).
+- **Where the shipped brain came from.** `select-brain` probes every
+  checkpoint on the follow benchmark and ships the best one, which is
+  routinely not the end of the run (`ab-batch` ships step 751k of 2M). The
+  card says `◆ shipped from 751.1k · in_band 0.938 (final 0.923)` and the
+  chart puts a diamond at that step, labelled with the score. The curve
+  is training reward; the score is the benchmark — they are different
+  numbers, and the diamond is the one that decided what went on the robot.
+- **Sweep matrix** (the `matrix` tab where the chart was). Every run — not
+  just the charted ones — as a table: `in_band`, `final`, `shipped@`, last
+  reward, then one column per knob that *differs* between runs (a knob every
+  run shares is said once under the table; a run from before the trainer
+  recorded a knob shows `—` and does not make the column appear). `by
+  family` collapses `p-n256-s31..36` to one row with in_band as mean ± sd
+  over the seeds — the number that decides whether a knob did anything,
+  since one seed moves about ±0.02 on its own. A family is the name minus
+  its seed *and* one recipe: runs that share a name but were run with
+  different knobs split into `p-de` and `p-de (2)` rather than being
+  averaged together. Click a header to sort (knob columns sort by value,
+  not by their text), a row to put it (a family row: all its seeds) on the
+  chart.
+
+A brain cloned from the repo shows *no curve* — only `brain.onnx` and
+`brain.json` are committed, `progress.jsonl` stays local — and the card says
+so rather than reading as a broken run.
+
 ## Notes for future work
 
 - The scene payload is ~20 MB raw (gzipped over the wire, one-time). If it ever
@@ -140,12 +361,18 @@ lab restarts.
   duck), no shadow maps, DOM labels. The first version (560 shadow-casting
   meshes + drei `Text` GPU glyph atlases) lost the WebGL context in the
   embedded browser — keep an eye on `THREE.WebGLRenderer: Context Lost` if you
-  add GPU-heavy effects back.
+  add GPU-heavy effects back. The `/sim` stage's fidelity (SimStage.tsx) is
+  all canvas textures, one PMREM and one instanced blob mesh for that reason:
+  a room costs a few dozen draw calls regardless of how many ducks are in it.
+  Two three.js gotchas met on the way: `MultiplyBlending` needs
+  `premultipliedAlpha` on the material, and `mergeGeometries` refuses a mix
+  of indexed and non-indexed parts (flatten with `toNonIndexed()` first).
 - Duck colors are the MJCF material rgba streamed per geom, carried through the
   per-body merge as a vertex-color channel (so per-part color costs zero extra
-  draw calls). A few materials the OnShape export got wrong vs the printed
-  robot (eye ring, soft mouth, shoes) are overridden by name in `Duck.tsx`
-  (`MATERIAL_FIX`); against a lab too old to stream colors the viewer falls
-  back to one guessed color per body.
+  draw calls). `Duck.tsx` keeps a by-name override table (`MATERIAL_FIX`)
+  for materials an export gets wrong; the 2026-09 upstream CAD re-export
+  carries the right colours itself, so the table is empty today. Against a
+  lab too old to stream colors the viewer falls back to one guessed color
+  per body.
 - The lab loop is single-threaded Python: 8 ducks × 50 Hz ≈ 5% of one core.
   Dozens of ducks are fine; hundreds would want the envs in a worker pool.

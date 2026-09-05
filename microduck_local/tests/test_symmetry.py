@@ -382,7 +382,12 @@ def test_rollout_drift_starts_in_the_head_not_the_legs(envs, seed):
         f"{C.JOINT_NAMES[int(early.argmax())]} — that would point at the map"
     )
     others = np.delete(early, head_roll)
-    assert others.max() < early[head_roll] / 5
+    # Measured (`head_roll / others.max`, seeds 11..16) on microduck_rl
+    # 5946fd9: 25, 30, 28, 2.2, 30, 0.9 and on badc4e7 (the 2026-09 CAD
+    # re-export): 4.5, 30, 28, 8.2, 30, 1.5 — the ORDER is the robust fact,
+    # the ratio is chaotic past a few steps. 3× keeps teeth without pinning
+    # one model's rounding.
+    assert others.max() < early[head_roll] / 3
 
 
 def test_mirroring_head_roll_inertia_is_the_only_asymmetry_left(envs):
@@ -717,7 +722,12 @@ def _train_and_capture(tmp_path, monkeypatch, argv: list[str]) -> tuple[float, f
 
     def fake_learn(self, *a, callback=None, **k):
         trained.append(self.symmetry_coef)
-        callback.model = self  # what SB3's _setup_learn would have done
+        # What SB3's _setup_learn would have done. `callback` is a LIST since
+        # the trainer started appending the machine profile's thread callback
+        # (empty on a Mac), and SB3 wraps a list in a CallbackList that binds
+        # .model on every child — so bind them all, exactly as it would.
+        for cb in (callback if isinstance(callback, list) else [callback]):
+            cb.model = self
         return self
 
     monkeypatch.setattr(
@@ -747,3 +757,127 @@ def test_the_default_reaches_the_optimizer_and_the_record(
         [behavior_id, "--envs", "1", "--steps", "1", "--run-name", behavior_id])
     assert built == expected
     assert recorded == expected
+
+
+# --------------------------------------------------------------------------
+# Mirror DATA AUGMENTATION — rsl_rl's other symmetry mode.
+# --------------------------------------------------------------------------
+
+def _tiny_ppo(**kw):
+    """A minimal SymmetryPPO over two real envs, for the augmentation tests."""
+    import torch
+    from stable_baselines3.common.vec_env.vec_monitor import VecMonitor
+    from stable_baselines3.common.vec_env.vec_normalize import VecNormalize
+
+    from microduck_local.symmetry import FastActorCriticPolicy, SymmetryPPO
+    from microduck_local.train_behavior import make_env
+    from microduck_local.vec_env import as_sb3_vec_env, make_vec_env
+
+    venv = make_vec_env([make_env("one_leg", i, 0) for i in range(2)])
+    venv = VecNormalize(VecMonitor(as_sb3_vec_env(venv)), norm_obs=True,
+                        norm_reward=False, clip_obs=100.0)
+    model = SymmetryPPO(
+        FastActorCriticPolicy, venv, n_steps=32, batch_size=32, n_epochs=1,
+        device="cpu", seed=0, verbose=0, desired_kl=None,
+        policy_kwargs=dict(net_arch=dict(pi=[32], vf=[32]),
+                           activation_fn=torch.nn.ELU),
+        **kw)
+    return model, venv
+
+
+def _minibatch_sizes(model, steps=64):
+    """The batch sizes the update actually evaluates.
+
+    Two entry points, because `train()` has two: the zero-coef path calls
+    `policy.evaluate_actions` (so the bit-identity test against stock PPO
+    holds), and the mirror-loss path calls the `_evaluate_actions` helper,
+    which shares one feature extraction between the log-prob and the action
+    mean. Watch both or the answer depends on which branch ran."""
+    sizes: list[int] = []
+    real_policy = model.policy.evaluate_actions
+    real_helper = model._evaluate_actions
+
+    def spy_policy(obs, act):
+        sizes.append(int(obs.shape[0]))
+        return real_policy(obs, act)
+
+    def spy_helper(obs, act):
+        sizes.append(int(obs.shape[0]))
+        return real_helper(obs, act)
+
+    model.policy.evaluate_actions = spy_policy
+    model._evaluate_actions = spy_helper
+    model.learn(total_timesteps=steps, progress_bar=False)
+    return sizes
+
+
+def test_augmentation_is_off_by_default():
+    """It biases the importance ratio (the mirrored sample reuses the
+    original's old_log_prob), so it must be opted into, not inherited."""
+    model, venv = _tiny_ppo(symmetry_coef=0.0)
+    try:
+        assert model.symmetry_augment is False
+        assert set(_minibatch_sizes(model)) == {32}
+    finally:
+        venv.close()
+
+
+def test_augmentation_doubles_the_surrogate_batch():
+    """The whole mechanism: the mirrored half goes through the surrogate and
+    value losses as ordinary samples, unlike the mirror LOSS which keeps them
+    out of both."""
+    model, venv = _tiny_ppo(symmetry_coef=0.0, symmetry_augment=True)
+    try:
+        assert set(_minibatch_sizes(model)) == {64}
+    finally:
+        venv.close()
+
+
+def test_augmented_halves_are_the_mirror_of_the_originals():
+    """Pin the actual content, not just the shape: the second half must be
+    mirror_obs / mirror_action of the first, or this is just batch padding."""
+    import numpy as np
+    import torch
+
+    from microduck_local.symmetry import mirror_action, mirror_normalized_obs
+
+    model, venv = _tiny_ppo(symmetry_coef=0.0, symmetry_augment=True)
+    seen = {}
+    real = model.policy.evaluate_actions
+
+    def spy(obs, act):
+        seen.setdefault("obs", obs.detach().clone())
+        seen.setdefault("act", act.detach().clone())
+        return real(obs, act)
+
+    try:
+        model.policy.evaluate_actions = spy
+        model.learn(total_timesteps=64, progress_bar=False)
+        obs, act = seen["obs"], seen["act"]
+        n = obs.shape[0] // 2
+        mean = torch.as_tensor(venv.obs_rms.mean, dtype=torch.float32)
+        std = torch.sqrt(torch.as_tensor(venv.obs_rms.var, dtype=torch.float32)
+                         + venv.epsilon)
+        want = mirror_normalized_obs(obs[:n], mean, std)
+        np.testing.assert_allclose(obs[n:].numpy(), want.numpy(), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(act[n:].numpy(), mirror_action(act[:n]).numpy(),
+                                   rtol=1e-6, atol=1e-7)
+    finally:
+        venv.close()
+
+
+def test_augmentation_and_the_mirror_loss_are_different_mechanisms():
+    """rsl_rl ships `use_mirror_loss` with `use_data_augmentation=False`, and
+    conflating the two is the easy mistake: one PENALISES asymmetry and keeps
+    the mirrored samples out of the losses, the other TRAINS on them."""
+    loss_model, v1 = _tiny_ppo(symmetry_coef=0.5)
+    try:
+        assert set(_minibatch_sizes(loss_model)) == {32}, (
+            "the mirror loss must not grow the surrogate batch")
+    finally:
+        v1.close()
+    both, v2 = _tiny_ppo(symmetry_coef=0.5, symmetry_augment=True)
+    try:
+        assert set(_minibatch_sizes(both)) == {64}
+    finally:
+        v2.close()

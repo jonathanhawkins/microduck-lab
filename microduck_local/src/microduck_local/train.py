@@ -19,6 +19,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .machine import profile, with_phase_callbacks
 from .ppo_hparams import N_STEPS, VF_COEF, configure_torch_cpu, ppo_batch_size
 from .vec_env import as_sb3_vec_env, make_vec_env
 from .walk_env import MicroduckWalkEnv
@@ -83,6 +84,7 @@ def main() -> None:
     # Fork workers BEFORE importing torch. A torch-initialized parent has
     # OpenMP/Accelerate thread pools; forking them deadlocks on macOS.
     # One compiled mjModel for the whole fleet: see vec_env.py.
+    print(profile().describe())
     venv = make_vec_env([make_env(i, args.seed, **env_kwargs)
                          for i in range(args.envs)])
 
@@ -145,9 +147,15 @@ def main() -> None:
         save_freq=max(500_000 // args.envs, 1), save_path=str(out / "checkpoints"),
         name_prefix="model", save_vecnormalize=True,
     )
+    # On Linux/cloud `with_phase_callbacks` appends the profile's thread
+    # policy — the rollout gets one torch thread, the update every core
+    # (machine.py). On a Mac the list comes back unchanged. Throughput only:
+    # no PPO math moves.
     model.learn(
         total_timesteps=args.steps,
-        callback=[checkpoints, _penalty_sign_callback_cls(BaseCallback)()],
+        callback=with_phase_callbacks(
+            [checkpoints, _penalty_sign_callback_cls(BaseCallback)()],
+            BaseCallback),
         progress_bar=False,
         reset_num_timesteps=args.init_from is None,
     )

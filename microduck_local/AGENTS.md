@@ -34,6 +34,31 @@ does; this file covers how not to fool yourself.
   looked like an optimizer problem. Straightness/heading belongs to the
   velocity commander, not the reward. Before adding a term, point at the obs
   indices that let the policy see what you're scoring.
+- **A task the robot must SENSE puts its sensing in the command slots, in
+  the robot's own terms.** `find_ball` has no ball in the physics: the env
+  projects a point through the robot's `head_camera` and writes what a
+  detector would report (bearing across/up the frame, seen, a gyro-
+  dead-reckoned memory of which side it went) into the four head slots,
+  with the detector's cadence and jitter. The reward may use the true
+  bearing (privileged, like every reward here); the obs may not. The
+  memory slot exists because the policy is memoryless: without it the
+  ball rolling out of frame leaves nothing observable to say which way to
+  look, and the daemon can produce it with one gyro integral.
+- **A symmetric observation leaves the mean nothing to learn.** With the
+  ball equally likely on either side and no cue in the obs, "turn left"
+  and "turn right" carry the same advantage, the mean head-yaw action sits
+  at zero, and the exploration noise does the finding: the first find_ball
+  export stood and stared at a ball 42° off while the stochastic trainer
+  saw it half the time. Diagnose it by probing the exported ONNX directly
+  (feed one obs, vary one slot, read the action) — the network had learned
+  every slot's sign correctly; the failure was in what the obs could not
+  say. Break the tie in the obs (a belief slot with a fixed convention
+  when nothing is known), never by hoping PPO finds a side.
+- **A memoryless policy cannot sweep.** A search is a limit cycle in head
+  yaw and 2M PPO steps produced a static gaze-vs-belief instead. Give it a
+  clock (sin/cos of a phase in two command slots, the imitation recipe's
+  trick) and the sweep becomes a static mapping. Same rule as the phase
+  signal: anything the policy must do *over time* needs time in the obs.
 - **Mind MuJoCo's velocity frames.** `mj_objectVelocity(..., flg_local=0)`
   is the world frame; naive indexing once rewarded a sideways shuffle as
   "forward". When you write a term that reads a velocity, print it in a pose
@@ -71,8 +96,205 @@ does; this file covers how not to fool yourself.
   so a stage tuning that works has to earn its way back as a term or a
   physics knob before it can ship.
 
+## Every run is a record: name it, describe it, file it
+
+A board of 49 runs called `p-batch-s14`, `p-de-s11`, `z1` and `mix` could
+not be read a day after it was made. A name that encodes the knob still
+says nothing about the question or the answer, and `z1`/`z2` had no note
+anywhere — identical recipes on the same seeds was all their `brain.json`
+could say. So three fields ride in `brain.json` beside the recipe:
+
+* **`title`** — the human name the `/train` page shows in place of the run
+  name: `"Capacity sweep: 256-256"`, `"Follower v4 — the pick"`. The run
+  NAME is an identifier (`--init-from`, `learned:<name>`, `select-brain`,
+  the directory) and never changes; the title is what people read.
+* **`description`** — one or two sentences: what it tests, against what,
+  and — once known — **what it found, with the interval**: `"+0.000 paired,
+  95% −0.012…+0.012 — neutral, shipped on"`. Write the finding back in when
+  the experiment resolves; this is where the next person learns whether a
+  run was worth making.
+* **`group`** — the use case it files under, one of `describe-brain --help`'s
+  keys (`shipped-followers`, `trainer-ab`, `paired-sweeps`, `capacity`, …).
+  The `/train` cards and the `/sim` brain menu list by it. A group is the
+  QUESTION a set of runs answers, not the knob they turned.
+
+Set them at launch — `train-brain --title ... --description ... --group ...`
+warns when the title is missing — or after, with
+`describe-brain <run> --title ... --description ... --group ...`. A family's
+seeds share a title (`p-n256-s31..36` are one experiment); the seed is
+already in the name. Never launch a sweep with bare codes: ten seconds per
+launch against an hour of forensic annotation after the fact.
+
+## How much can the benchmark actually resolve? (read before any A/B)
+
+Every rule below exists because it was broken on 2026-09-03 and cost a day
+of wrong conclusions. Two results were published from four-seed batteries
+and later reversed; several "measured off" verdicts turned out to be noise.
+
+1. **Count the EVENTS, not the runs.** An 8-seed x 300 s 1v1 battery holds
+   ~50-130 kicks but only ~20 goals and 3-8 FALLS. The same brain measured
+   twice gave 3 falls and 6 - a chance split (p = 0.5). Quote a difference
+   with its event totals or do not quote it.
+2. **Know what your metric costs.** Measured, 16 seeds an arm: to resolve a
+   25% shift at p<0.05 / 80% power you need **goals 146 seeds, falls 376,
+   kicks 62, ballAdvance 43, possession 9**. If you are about to decide
+   something on goals at 8 seeds, you are about to decide it on nothing.
+   `eval-pitch` prints `ballAdvance` (the discriminator) and `possession`
+   (the cheap screen); goals stay reported and are not the judge.
+3. **Confirm on seeds the effect was NOT found on.** A "confirmation" that
+   re-uses the discovery seeds is not one. A poacher supporter scored 10
+   goals against 3 over four seeds and 21 against 12 over twelve - the
+   twelve CONTAINED the four - then reversed on twelve fresh ones, 13
+   against 19, for 34 against 31 over all 24 (p = 0.80). `--seed0` exists
+   so a battery extends onto fresh seeds instead of re-running the old ones.
+4. **Prefer a paired reading.** Both arms run the same seed layouts, so
+   report per-seed wins/losses alongside the totals; it is strictly more
+   powerful than comparing two means.
+5. **Ask what would inflate your metric.** `ballAdvance` keeps only the
+   forward part of the ball's motion, so anything that makes the ball move
+   MORE scores higher without moving it anywhere: the handover fix raised
+   it 2.9 sigma while signed `ballProgress` stayed flat (0.0 sigma). Read
+   advance and signed progress together, and for any metric ask first which
+   cheap behaviour maximises it.
+6. **A ratio whose numerator is flat is its denominator, upside down.**
+   "Advance per kick" was read here as kick QUALITY and it is not one.
+   Three line-up arms whose kick counts differ 2.6x (185, 72, 83 over the
+   same 24 seeds) have statistically identical total advance (0.400, 0.360,
+   0.342 m/min, every pairwise p > 0.17) — so the ratio moved 0.052 ->
+   0.120 -> 0.099 purely because the denominator fell. Measured DIRECTLY
+   (ball travel in the 2 s after each swing) the arms with the flattering
+   ratio kicked the ball LESS far: 17.7 +/- 3.9 cm against 14.4 +/- 3.4 and
+   13.6 +/- 3.0. Before quoting a per-X figure, test the numerator on its
+   own; if it does not move, you are reporting 1/X with extra steps, and it
+   will point whichever way costs you the most to believe.
+7. **A downstream constant may have absorbed the bias you are about to
+   fix. Fix them together or the fix measures as a regression.**
+   `brain/tidy.py`'s `stale_fix` places a detection from the pose the duck
+   HAD when the frame was taken instead of the pose it has now. It is
+   unambiguously correct and it works: the toy's placement error drops from
+   5.4 cm to 3.7 cm (medians, 4 seeds). It also lost **0.38 toys
+   (p = 0.031)**, with grasp success falling 88% -> 76%.
+
+   The diagnostic that explained it measured the TRUE duck-to-toy distance
+   at `settle`, where the beak has to reach: 8.7 cm with the bias, 10.5 cm
+   without it. The bias put the toy slightly AHEAD along the direction of
+   travel, so the duck walked past its own estimate and arrived at 8.7 cm —
+   which is `reach_ahead + reach_pad` = 8.8 cm, exactly where the grasp
+   wants it. The stop pad had been fitted, by hand, against the biased
+   estimate. Remove the bias and the duck stops honestly, 1.7 cm short, and
+   fumbles.
+
+   Correcting the pad by the 1.8 cm the bias was worth recovers it —
+   **+0.44 toys (p = 0.026)** with grasp at 93% and attempts per pick
+   1.15 -> 1.08. So the fix was right, the measurement was right, and the
+   conclusion "the fix hurts" would have been wrong.
+
+   The general shape: **any hand-fitted constant downstream of a biased
+   estimate has absorbed some of that bias**, because it was tuned to make
+   the system work WITH the bias present. Fixing the estimate alone moves
+   the system off the operating point the constant encodes. So when you
+   correct a systematic error, find the constants fitted against it and
+   sweep them in the same battery — a 2x2, not two separate arms. And run
+   the control cell (the corrected constant WITHOUT the fix): if that also
+   improves, the constant was simply mistuned and the fix is not what
+   earned it.
+
+   Corollary for reading results: a correct change that measures as a
+   regression is evidence about the SYSTEM, not only about the change. Ask
+   what was tuned around the thing you just fixed before you file it as a
+   null.
+7. **"Measured off" usually means "not shown to help".** Say which one you
+   mean. Several knobs in `ChaseParams` ship off on differences that never
+   cleared the noise; re-screening them with `possession` is cheap and at
+   least one of those verdicts is probably wrong.
+8. **A battery must survive the machine.** Use `--out FILE --tag TAG`:
+   every seed is appended as it lands and a re-run of the same command
+   skips what is already there. A cloud container reclaimed mid-run cost
+   about ninety minutes of 3v3 twice before the benchmarks streamed. The
+   tag is refused if it disagrees, so two variants can never be stitched
+   into one comparison.
+
+## Before you commit: `./scripts/precommit.sh` (1 second)
+
+It runs `ruff` and imports every battery entry point. It exists because
+this repo has twice been broken by a commit nobody ran anything against:
+an unterminated docstring in `brain/tracker.py` broke every import and
+killed three batteries that had been running for an hour, and the log that
+would have said so was not read until much later.
+
+The full suite is ~12 minutes, which is exactly why it gets skipped on
+"just a doc tweak" and why those got through. Run the suite before pushing
+anything that changes behaviour; run this before every commit without
+exception. `ruff` parses but does not execute, so the import step is not
+redundant — a module that parses can still fail on a bad relative import.
+
 ## Verification discipline — the rules that exist because of false reports
 
+0. **A knob that changes NOTHING is broken, not null.** `stale_fix` came
+   back bit-for-bit identical in all four cells of a 32-seed 2x2 — which is
+   not a null result, it is a dead code path. The guard read `det.t`, and a
+   `Detection` has no timestamp (only the FRAME does), so the branch never
+   ran. A real null still moves the seeds it does not help; identical rows
+   mean the knob is not wired. **And the test passed**, because it built a
+   `SimpleNamespace` stub carrying the `det.t` the real type lacks: a stub
+   that does not match the type it stands in for can make a dead path look
+   alive. Prefer the real type in a test; if you must stub, assert the shape
+   you are relying on.
+
+   The same shape has now bitten three times, and the third has its own
+   mechanism worth knowing. **A default argument object is bound once, at
+   `def` time.** `Detector.__init__(self, ..., spec=DetectorSpec())` holds
+   ONE `DetectorSpec` made at import; `World` constructs detectors without
+   a `spec=`, so patching `DetectorSpec.__init__.__defaults__` — the usual
+   trick for sweeping a frozen dataclass through a battery — changes what
+   `DetectorSpec()` returns from then on and changes NOTHING about the
+   detector that actually runs. A frustum sweep built that way returns
+   identical arms and looks like a null. (`TidyParams` is safe from this
+   only because `eval_tidy` builds a fresh `TidyParams(...)` per run; the
+   difference is invisible from the call site, so do not reason about it —
+   check.)
+
+   **So: assert on the object that is running, not on a fresh one.**
+   `assert DetectorSpec().fov_h_deg == 116` passes while the live detector
+   is at 62. `assert duck.detector.spec.fov_h_deg == 116` is the check that
+   would have caught it. Reach into the constructed world and read the
+   value back off the thing being measured — every sweep harness in
+   `scratchpad/` does this now, and the one that did not produced two
+   bit-identical arms.
+
+   **And it is not only a harness problem.** The turn-rate work found the
+   same shape in SHIPPING inference code: `LearnedBrain` clipped its
+   actions with the *module's* `ACT_HIGH`, so a brain trained at
+   wz ±2.0 was silently re-clipped to the current default when it ran —
+   halving its turn rate, and making any A/B across that bound measure
+   nothing at all. A trained policy's action bounds are part of its
+   contract, so they now come from its own `brain.json`. The general form:
+   **a limit applied at BOTH training and inference must come from one
+   place, and that place must travel with the artifact.** When a global
+   default and a per-artifact value can disagree, the global one wins
+   silently and the artifact is quietly worse than it was trained to be.
+8. **To call a sensor wrong, reproduce its exact frame and definition
+   first.** A probe splitting the ball's placement error into bearing and
+   range made the same mistake twice, and both times the artefact looked
+   like a finding:
+   - `range_est` is the 3-D SLANT range from the camera SITE to the target's
+     centre. The camera sits ~21 cm above a ball on the floor, so comparing
+     it against a 2-D ground distance shows a "+5.7 cm systematic range
+     bias" that is entirely the measurer's — at 0.35 m,
+     `hypot(0.35, 0.21) - 0.35 = 5.8 cm`, which is the whole "bias".
+   - `bearing` is in the CAMERA's frame, and brains yaw the head. Compared
+     against a body-frame bearing it charges the detector for the head's
+     rotation: it inflated the measured bearing error from 3.35° to 5.65°
+     and invented a -1.5° bias. `frame.cam_yaw` is what
+     `Tracker._associate` adds for exactly this reason.
+
+   Both errors are the arc lesson wearing a different hat (net displacement
+   in a start frame is not body-axis speed): **a difference between two
+   quantities is only an error when they are the same quantity.** Before
+   attributing a residual to the thing you are measuring, write down the
+   sensor's frame, its origin, and whether its number is 2-D or 3-D — and
+   check a case where you can predict the answer by hand. A bias that
+   happens to equal a geometric term you left out is the tell.
 1. **Training charts measure the noise-crutched stochastic policy.** Claims
    about a run are made from the deterministic exported ONNX, never from
    `ep_rew` curves. Export, then eval, then look.
@@ -88,11 +310,23 @@ does; this file covers how not to fool yourself.
    updates, big-batch) each raised steps/s ~25–40% and *halved*
    reward-per-step. Any change meant to make training faster gets a
    seed-matched A/B at matched *step counts* before it becomes a default.
-5. **A weird optimizer metric is usually a broken reward.** A KL blow-up here
+   `uv run bench-ab <a> <b>` is that comparison.
+5. **One training run per arm resolves nothing — pair the seeds.** Eval
+   seeds control the *eval*, not the run. On the follow benchmark,
+   run-to-run variance is **±0.02 in band**, larger than the ±0.013–0.023
+   eval-seed spread and larger than every hyperparameter effect measured
+   against it. Three changes each "lost" 0.015–0.018 and were "ahead on only
+   1–2 of 10 eval seeds" — then the same recipe at a different *training*
+   seed moved 0.021, and the whole result was one run's luck. Train both
+   arms on the **same** seeds and compare the per-seed DIFFERENCE
+   (`bench_ab.paired_delta`); that turned a spurious −0.015 into a real
+   −0.002. Use Student's t, not 1.96: at n=2 the normal value understates
+   the interval 6.5-fold and manufactures significance out of two runs.
+6. **A weird optimizer metric is usually a broken reward.** A KL blow-up here
    was chased as a PPO tuning problem for a day; the cause was an unlearnable
    reward term. Check what you're asking for before re-tuning how hard to
    ask.
-6. **Warm-start chains silently ratchet the action std into bang-bang.**
+7. **Warm-start chains silently ratchet the action std into bang-bang.**
    Every `--init-from` reloads the previous run's `log_std`, and the entropy
    bonus pushes it up each generation; one long chain reached std 21–26 in a
    ±4 action space. At that point the *clipped noise distribution* carries
@@ -102,6 +336,19 @@ does; this file covers how not to fool yourself.
    on load and every rollout; a mean-poisoned lineage cannot be consolidated
    and must be restarted from scratch. Probe `live.onnx` deterministically
    at every checkpoint — that is the policy that ships.
+7. **An eval env that carries state between episodes hides the tail.**
+   `BrainEnv` used to reseed nothing on reset: the ToF's, the detector's and
+   the world's generators were seeded once at construction, and `_respawn`
+   left the commanded twist standing, so episode 0 reproduced and every
+   episode after it continued the one before. The cell MEANS barely noticed
+   (re-measuring both follow tables independently moved no cell by as much
+   as one seed-level sigma) — what it cost was resolution: v4's lead over
+   v5 clears the seed noise in three cells of four on independent episodes
+   and in NONE of them chained, because the comparison turns on v5's bad
+   episodes and carried noise smears exactly those. If a battery is the
+   evidence, make an episode a pure function of `(seed, ep)` and pin it
+   with an exactness test (`tests/test_eval_brain_jobs.py`); a battery you
+   can shard is also a battery you can trust.
 
 ## Adding a behavior (the main community extension point)
 
@@ -125,10 +372,81 @@ does; this file covers how not to fool yourself.
 ## Performance work
 
 `README.md` documents the measured optimization history (shared-model fork
-vec env, semaphore IPC, numba BAM kernels, MPS updates) including the ones
-that were **rejected for hurting learning**. Follow that precedent: measure
+vec env, semaphore IPC, numba BAM kernels and the fused substep, MPS updates,
+the per-machine thread profile) including the ones that were **rejected** —
+for hurting learning, for not reproducing, or for costing more than they
+bought. Follow that precedent: measure
 with `bench-envs` (real PPO, not raw stepping), and A/B learning quality
 before shipping any throughput win as a default.
+
+**Mac is the default; other machines get a profile, not a rewrite.**
+`machine.py` picks a per-machine thread policy, and the `mac` profile
+reproduces the historical settings term for term —
+`tests/test_machine.py` pins that, including that a Mac run gets *no* extra
+callback in its training loop. When you find that a tuning constant here was
+measured on an M5 Max and is wrong elsewhere (they mostly were), add it to a
+profile rather than changing the shared default. Three rules bound what a
+profile may contain:
+
+- **Only quality-neutral knobs.** Thread counts do not enter the PPO math.
+  The env count is the line: it sets the PPO batch size and therefore the
+  learning dynamics, so `--envs` stays 32 on every machine and is never
+  profiled. Verification discipline #4 applies to a profile like anything
+  else.
+- **A profile earns each knob separately, against the same window.** Worker
+  packing shipped in the first draft of the linux profile on one point that
+  showed +7%; four interleaved reps then put it behind 1:1 at every env
+  count and it was removed. Measure each knob with the others held fixed
+  (`MICRODUCK_ENVS_PER_WORKER=1` isolates packing from the thread split),
+  and never let a bundle of changes ride on one arm's total.
+- **Measure the profile you ship, on the machine you ship it for.**
+  `uv run bench-envs --compare-profiles` runs both arms interleaved with the
+  same repeats, which is the only form of that comparison worth reading
+  (`--profile mac` on a Linux box reproduces the old behavior exactly).
+
+**Prototype the win before you plumb it.** A profile decomposition tells you
+where time *is*, not what removing it *buys* — the two differ once the pieces
+interact. The double-buffered rollout was estimated at ~18% from the vec-step
+split (hide the parent's 1.95 ms of forward + dispatch behind worker
+compute); prototyped in 60 lines with two independent vec envs and no repo
+changes, it measured +6.2/+7.1/+6.2% at 8/16/32 envs, because splitting pays
+a second wait's sync cost and two half-batch forwards cost more than one full
+one. That prototype cost an hour; the real version would have rewritten the
+rollout buffer path. **When a change would touch a correctness-critical
+seam, build the throwaway that measures it first** — and let the measured
+number, not the estimate, decide whether to build the real one.
+
+**Price a change by what it redefines, not by its diff.** The same rollout
+split was rejected at ~5% end-to-end because it changes *what a step is*:
+`test_overlap.py::test_collect_matches_stock_sb3_bitwise` pins the vendored
+collect loop against stock SB3 and a split fleet cannot satisfy it,
+`VecNormalize` updates `obs_rms` once per step so halves change the running
+normalizer that gets baked into every exported ONNX, and the rollout buffer's
+`add()` takes a whole row. A change that forces you to delete an invariant
+test is not a throughput change, it is an architecture change; hold it to
+that bar. The three that did ship (thread policy, numba warm-up, the fused
+BAM substep) are all provably invisible to the math and each *added* a test
+rather than removing one.
+
+**A cloud VM is not a stable ruler.** On the box these profiles were measured,
+the *identical* script and configuration ran 13.1 s in one window and 19.5 s
+an hour later — a 49% drift with nothing changed, from noisy neighbours and
+CPU-credit throttling. That is larger than every optimization in this file, so
+a number compared against one taken earlier is worthless, and this bit almost
+shipped a false result here: a configuration re-measured in a later window
+looked like a regression in code that was provably not running (the callback
+was verified firing, and disabling the change reproduced the same "slow"
+number). Rules that follow, on any shared or virtualized machine:
+
+- **Interleave the arms.** Every comparison runs its arms back to back inside
+  one window and repeats the whole cycle, which is what `bench-envs
+  --repeats N` and `--compare-profiles` already do. Never quote arm A from
+  this hour against arm B from the last one.
+- **Re-measure the baseline whenever you re-measure anything.** A surprising
+  result is a drifted machine until the baseline says otherwise.
+- **Prefer ratios within a window to absolute steps/s across windows.** The
+  absolute numbers in `README.md` date a specific machine on a specific day;
+  the ORDERING of the arms is the transferable part.
 
 ## Sim2real honesty
 

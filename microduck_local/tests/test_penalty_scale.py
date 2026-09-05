@@ -141,14 +141,43 @@ def test_run_air_time_does_not_pay_a_shuffle():
     assert _run_air_time(env) == 0.0
 
 
-def test_run_air_time_pays_inside_the_stride_window():
-    """Dense GPU form: 1.0 this step while current air time is in-window."""
+def test_run_air_time_pays_inside_the_stride_window(monkeypatch):
+    """Dense GPU form: 1.0 this step while current air time is in-window.
+
+    Measured with the achievement gate OFF, which is what isolates the stride
+    window this test is about. The gate scales the payment by how well the
+    command is actually tracked (see `_run_track_gate`), and it has its own
+    tests; mixing the two here would make a stride-window regression and a
+    gate regression indistinguishable."""
+    monkeypatch.setenv("MICRODUCK_RUN_GATE", "0")
     env = _env("run")
     env.twist_cmd[:] = (0.4, 0.0, 0.0)
     # Already at 0.20 s; the fn adds CTRL_DT then checks the window.
     env._run_air = {"left": 0.20, "right": 0.0}
     env.foot_contact_state = {"left": False, "right": True}
     assert _RUN_AIR_MIN < 0.20 + C.CTRL_DT < _RUN_AIR_MAX
+    assert _run_air_time(env) == pytest.approx(1.0)
+
+
+def test_run_air_time_is_scaled_by_achievement_when_the_gate_is_on(monkeypatch):
+    """The same stride, gated: the payment is the window's 1.0 times how well
+    the command is tracked. air_time's ungated ceiling (2.0 x weight 3.0) sat
+    above keep_pace's entire 1.0 x 4.0, so a duck marching in place could
+    outbid the task it was meant to shape."""
+    from microduck_local.behaviors import locomotion as L
+
+    monkeypatch.setenv("MICRODUCK_RUN_GATE", "1")
+    env = _env("run")
+    env.twist_cmd[:] = (0.4, 0.0, 0.0)
+    env._run_air = {"left": 0.20, "right": 0.0}
+    env.foot_contact_state = {"left": False, "right": True}
+
+    monkeypatch.setattr(L, "_run_speed", lambda e: 0.0)
+    env._step_cache.clear()
+    assert _run_air_time(env) == pytest.approx(L._RUN_GATE_FLOOR)
+
+    monkeypatch.setattr(L, "_run_speed", lambda e: 1.0)
+    env._step_cache.clear()
     assert _run_air_time(env) == pytest.approx(1.0)
 
 

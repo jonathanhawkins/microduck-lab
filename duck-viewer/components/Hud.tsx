@@ -4,6 +4,7 @@
 // so the 25 Hz stream never causes React re-renders), a system-stats strip,
 // helper spawn/remove buttons, and the command bar.
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   deleteHfToken,
@@ -498,7 +499,17 @@ export function Hud({
             alignItems: "center",
           }}
         >
-          <span style={{ flex: 1 }}>🦆 duck lab</span>
+          <span style={{ flex: 1 }}>
+            🦆 duck lab{" "}
+            {/* The world page's only other way in is typing the URL. */}
+            <Link
+              href="/sim"
+              title="the world page — rooms, sensors, brains"
+              style={{ color: "#9aa5b1", fontWeight: 400, textDecoration: "none", marginLeft: 6 }}
+            >
+              sim →
+            </Link>
+          </span>
           <span style={{ color: link.color }} title={link.title}>
             {link.dot} {link.label}
           </span>

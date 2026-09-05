@@ -1,0 +1,1046 @@
+# `/sim` roadmap: real-time sensing, autonomy, and multi-duck play
+
+Where the lab goes after tricks: simulate the parts of the Microduck that are
+not servos (the head ToF depth matrix, the camera + NPU detector, the
+microphones and the speaker, BLE proximity, odometry), give the ducks a
+**brain layer** that turns those senses into the same `robot.move` /
+`robot.head` intents the real robot takes, and open a new `/sim` page in the
+viewer where people build worlds, watch what each duck senses, and train ducks
+to follow, map, tidy a playroom, and play soccer against each other.
+
+This document is a brainstorm and a plan. **Status:** Phases 1 and 2 are in
+the tree, and Track 12 has its first working loop:
+
+- Phase 1: `world/` (0.1–0.3 incl. the page's editor), `sensors/` ToF (1.1,
+  1.2, 1.8, 1.9), `world_server.py` + `/sim` (0.4, 0.6 record/replay, 7.1–7.4,
+  7.8), the CI matrix (9.6, Windows runs the spawn-safe modules).
+- Phase 2: the geometric detector (1.3) and a tracker with ids over it,
+  persons + possess, the brain runtime with freshness (2.1, 2.4), `Wander`
+  and `Follow` (2.3), `BrainEnv` + `train-brain` + `eval-brain` (3.1, 3.2),
+  odometry drift presets (1.7) and an occupancy map per duck in its own
+  odometry frame, painted on the page, with a wall-line loop closure
+  against drift (5.1, 5.5: pose error under a 1.5°/s bias halved). Two
+  benchmarks grew on top of it — soccer (`eval-pitch`) and follow-me
+  (`eval-brain`) — and the sub-bullets below are what they measured.
+  `brains/follow-v1` ships in the repo. Upstream is pinned (microduck_rl
+  badc4e7, the 2026-09 CAD re-export; microduck 2c61dcc) and every
+  model-dependent number here was re-measured against it — the tidy loop
+  needed its release distance re-measured (the new model's stop drifts
+  1–2 cm further), nothing else moved. Binary framing (0.5) stays open on a
+  measurement: the page's perf readout puts the JSON encode at 0.8 ms per
+  40 ms frame for two ducks with maps streaming (physics 1.6, sensors 0.6 —
+  the whole loop is ~7% of a core), so JSON holds until rosters of four or
+  more ducks make the encode the largest term.
+
+  - **Soccer, the first two forms.** The `pitch` scenario with two `chase`
+    brains, the robot's shipped kick policies as skills, goal counting and
+    `eval-pitch` (first form: 1.38 goals, 6.5 kicks, 0.50 falls a run over
+    300 s and 8 seeds, with a body-aware avoid of the other duck — falls
+    were 2.1 before it — and kick windows at robotd's standing gain), then
+    the second form — the head tracks the ball on the way in, a 3D-placed
+    ToF bumper, wall and retreat rules, goal-centre aiming — at 1.12 /
+    11.8 / 0.50, then a kickoff after every goal (ball to the centre spot,
+    ducks to their spawns, a 1 s hold, brains and team boards reset): 1v1
+    2.00 goals, 8.2 kicks, 0.50 falls a run over 4 seeds — one kick in four
+    scores where one in ten did. Goals are attributed now, and most are
+    bumps: 0.75 kicked, 1.25 bumped a run for the shipped brain. What
+    helped is a hunt with its stops — walk the line a lost ball rolled off
+    along, slowly, ending for the ToF, a duck beside or the boards — and a
+    search that walks a slow circle instead of standing (instrumented:
+    during search the ball was in the camera's frustum 1% of the time,
+    90–120° off the nose, a standing turn barely turns): 2.25 goals, 9.4
+    kicks, 0.38 falls a run over 8 seeds against 2.00 / 8.4 / 0.50.
+  - **Built, measured, shipped off, with the numbers kept.** A kick map
+    (the shipped kick leaves +21.6° / −11° off the body heading for the
+    left / right foot from the sweet spot, 4.5–15°/cm of side offset):
+    compensating it in the stance measured 1.38 goals against 2.00 over 8
+    seeds — the line-up's 2–3 cm, not the map, scatters the shots. A
+    two-stage line-up that squares up 22 cm behind the spot then walks in
+    on the line puts the ball on the sweet spot — 4 lone shots in 11
+    against 1 in 12 — and ships off too, kicking 3.5 times a run against
+    8.4 with 0.00 kicked goals against 0.75. A ball-trajectory prediction
+    (the tracker carries positions and velocities now; a kicked ball leaves
+    at 1.4 m/s, slows at 0.04 m/s² and leaves the level camera at once):
+    yawing the head toward where the ball is going, opening the search that
+    way and walking the hunt to the predicted stop measured 1.12–2.12 goals
+    with 0.75–1.62 falls a run against 2.25 / 0.38 with it off — the head
+    yaws 34° at most and the searching duck's ball sits 90–120° off its
+    nose, so the gaze cannot reach it; the page draws the prediction
+    anyway. Deliberate bumping and a ball memory were measured after the
+    circle and ship off — the same goals, twice the falls. A goal-cone kick
+    gate turns kicks into pushes and gains nothing. The ToF seeing the ball
+    at the feet ships off (a blob at the feet is as often the other duck's
+    foot). Dribbling, a walk-round and close-range re-planning were built,
+    measured worse, and ship off with the numbers.
+  - **Two ToF bugs, both real.** The clearance placed hits without the
+    head's rotation, so a dipped head read the floor as a wall 0.35 m ahead
+    — fixed. A second one followed, because the ToF is IN THE HEAD and
+    calling the middle sensor columns "ahead" only holds while the head
+    looks along the walking line (yawed 1.2 rad, they reported a wall
+    0.52 m ahead that was 69° off the nose and the brain stopped for it),
+    so clearance is selected by bearing in the body frame now and a turned
+    head reads honestly blind.
+  - **The round's real lesson is about the benchmark itself.** 8 seeds ×
+    300 s of 1v1 holds ~50–130 kicks but only 3–8 FALLS and ~20 goals, so
+    falls barely separate — the same baseline measured twice gave 3 and 6,
+    a chance split (p ≈ 0.5). Claims carry event counts now, and several
+    earlier rows that did not clear them were demoted, the head variants
+    among them.
+  - **So the benchmark grew metrics that can resolve something**
+    (`world/metrics.py`, ticked on the lab's own step as well as in the
+    battery, so the /sim pitch panel shows the number `eval-pitch`
+    reports). Per team, at the control tick: `possession` (seconds a minute
+    the nearest duck to the ball is ours and inside 0.25 m), `ballAdvance`
+    (metres a minute the ball is carried toward the goal that team attacks,
+    credit persisting 2 s past the last touch so a kick's roll counts for
+    the kicker) and the same sum signed, `ballProgress`. Measured 16 seeds
+    an arm, the seeds ONE ARM needs to resolve a 25% shift: goals 146,
+    falls 376, kicks 62, `ballAdvance` 43, `possession` 9. `ballAdvance` is
+    the only metric here, kicks included, whose correlation with goals is
+    resolved away from zero (0.50 [+0.19, +0.72] over 32 runs), so it is
+    the discriminator, `possession` is the cheap screen and goals stay
+    reported without being the judge. **`ballAdvance` is never quoted
+    alone:** it keeps only forward motion, so churn inflates it — the
+    attacker fix below moved it +0.18 ± 0.06 (2.9 σ) with kicks +64% while
+    signed `ballProgress` stayed flat (−0.003 ± 0.136, 0.0 σ) and the
+    advance per kick halved (0.202 → 0.106).
+  - **The camera, priced as hardware — and the answer is pixels per
+    radian.** A wider lens buys far more contact with the ball (kicks 51 →
+    94 → 105 → 130 at 62/90/120/150°, p < 0.001, paying an honest
+    pixel-limited size gate that costs 120° a duck at 3.9 m — found 73
+    times in 400 against 260), though the goals do not follow (22 against
+    19). Pointed at the tidy task the same lens LOSES: 24 seeds a lens,
+    paired on the same layouts, 62° tidies 0.889, 90° 0.743, 120° 0.632 —
+    worse on 24 of 24 seeds, sign p = 1e-7 — and it breaks in the scan (a
+    toy at 1–1.5 m is found in 36% of the frames it appears in at 62° and
+    2% at 120°; the geometric floor for a 3.2 cm brick drops 1.83 m →
+    0.95 m and scanning goes from 8% of the run to 40%). At 640 px the
+    120° lens tidies 0.819, back inside the shipped lens's noise, because
+    305 px/rad is what 62° / 320 px already gave. And more pixels at the
+    SHIPPED lens buy nothing: 62° on 640 px (591 px/rad against 296) tidies
+    0.917 against 0.875 on the same 12 layouts, and moves no soccer metric
+    over 12 paired seeds (possession −0.49 ± 0.70, `ballAdvance`
+    −0.10 ± 0.10, 71 kicks against 97). So the recommendation is one
+    finding, not two: the shipped camera is adequate, and what breaks it is
+    widening the lens without adding the pixels to pay for it.
+  - **Teams** (`brain/team.py`, `pitch-2v2` / `pitch-3v3`): 2v2 2.00 goals,
+    7.8 kicks, 2.75 falls a run; 3v3 1.00 / 7.8 / 3.50 after the traced fix
+    (supporters turning in place against a teammate or the boards: the
+    support spot stays inside the pitch and a supporter with a duck track
+    beside it stands; 0.75 / 5.2 / 4.75 before), and with the hunt and the
+    walking search 2v2 1.50 / 9.8 / 3.50, 3v3 1.50 / 5.0 / 4.50 — falls per
+    duck still climb with the roster. Teammates now share their poses on
+    the board; a keep-out around them (a teammate beside is invisible to
+    the camera and the ToF) measured off, 3v3 5.25 falls against 4.50,
+    because a fresh trace put 12 of 13 falls beside an *opponent* in a
+    standing turn, and a walking turn for supporters measured off too (2v2
+    4.00 falls against 3.50, 3v3 5.25 against 4.50): a crowded pitch needs
+    a sense of the bodies beside the duck before any rule can act on them.
+  - **The attacker claim is a predicted TIME to the ball, not a distance.**
+    The role changed hands 14.0 times a duck a run with a median tenure of
+    4.30 s, and the board's attacker was the team's nearest duck only 56.1%
+    of the time: a straight line ignores the turn (this walker turns at
+    ~0.7 rad/s once the gait is going, so a duck facing away at 0.4 m is
+    4.7 s from the ball and one facing it at 0.6 m is 1.0 s), reads a lost
+    sighting as resignation (the level camera loses a floor ball inside
+    0.3 m — exactly where the attacker lines up) and lets a stale claim
+    compete on equal terms. Costed as a predicted time, with blind claims
+    priced off the board's freshest fix, age charged per second, and the
+    role moving only for a challenger 0.6 s quicker held 1.2 s
+    continuously: over 6 seeds × 300 s of 3v3, 516 attacker spells against
+    365 and replicated on three seeds it was not tuned on — handovers 14.0
+    → 9.8 a duck a run, median tenure 4.30 → 6.96 s, spells under a second
+    21.3% → 10.4%, the attacker really the nearest duck 56.1% → 68.2% and
+    really the quickest 68.4% → 79.3%. It did NOT improve the play (signed
+    progress flat, advance per kick halved, possession down 13%) or the
+    crowding it was meant to explain (nobody within 0.3 m of the ball 41.2%
+    → 40.9%, two teammates inside 0.5 m of it 24.5% → 23.7%), so it stands
+    on role stability and claims nothing about the score. Aiming the claim
+    at an intercept measured WORSE — 18.2 handovers a duck a run against
+    12.3, a median spell of 3.0 s against 5.8 — and ships at 0.
+  - **The bump rule, measured properly at last.** A bump is feet touching
+    feet (the World's own contact list — the only collision geometry in
+    the walk scene, and what a duck-duck fall is), and a bumped duck
+    stands for half a second instead of turning in place. The claim it
+    shipped on — "halves the crowd's falls", 3v3 5.00 → 1.75 a run over
+    4 seeds — did
+    not replicate: the same rule gives 3.17 a run over twelve seeds and
+    4.17 over twelve others. Against NO rule it looked real on twelve fresh
+    layouts measured twice (falls 5.50 → 3.62 a run, −1.88 ± 0.84 per
+    layout, p = 0.055, better on 10 of 12; the two batteries alone give
+    −1.58 ± 0.92 and −2.17 ± 1.01, and pooling them as 24 independent
+    seeds gives p = 0.012, which is repeated measures, not replication).
+    **Then it failed its confirmation.** On twelve layouts nobody had run
+    (200–211) the effect is absent and slightly reversed: falls 4.08 →
+    4.33, +0.25 ± 1.04, p = 0.88, better on 5 of 12. Over all 24 DISTINCT
+    layouts: −0.81 ± 0.69, p = 0.264. **"A third fewer falls" is
+    withdrawn** — the same shape as the poacher, and caught by the same
+    rule (confirm on seeds the effect was not found on). Nothing it was
+    suspected of costing moved either (kicks +0.83 p = 0.51, goals −0.58
+    p = 0.50, advance and progress flat), so `team_bump_stand_s` stays on
+    as a default nobody has earned in either direction: falls want ~376
+    seeds and this is 24.
+    What the bump work also left is a trace of 838 bumps refuting
+    its own premise (the feet meet a median 0.66 m from the ball, and
+    afterwards it is further from BOTH ducks by the same 7.4 cm) and
+    finding the real defect: it cancelled the ESCAPE turn (70% of its
+    firing in `blocked`, 6 of 8 falls a stand leaning on the other duck)
+    and fed itself (standing on a body keeps touching it: 44 → 105 bumps a
+    run, one freeze of 74 s). It is edge-triggered and state-scoped now.
+  - **What fresh seeds did to the round's findings.** A poacher
+    supporter scored 10 goals against 3 over four seeds, 21 against 12 over
+    twelve — then **reversed** on twelve fresh ones, 13 against 19, for 34
+    against 31 over all 24 (p = 0.80); the middle battery shared the seeds
+    the effect was found on and was never independent. Then the shelf
+    itself was re-screened with `possession`, which costs 9 seeds where
+    goals cost 146: seven shelved chase knobs and a baseline, eight
+    batteries of 12 fresh seeds each, every arm paired against the
+    baseline run interleaved in the same window —
+    and NONE was rehabilitated. The only arm that cleared p < 0.05, a
+    sweeping search head (possession +3.75 ± 1.21, p = 0.010, up on 10 of
+    12 seeds), is a **false positive**: everything churn cannot inflate
+    says worse — advance flat, advance per kick 0.091 → 0.073, goals 2.17 →
+    1.17 a run, falls 0.67 → 1.67. A ball memory, the one candidate worth
+    extending, DISSOLVED rather than reversed: signed progress +0.34 on the
+    discovery seeds, +0.20 on the next twelve, −0.11 on the twenty-four
+    after that, pooling to +0.08 ± 0.10 (p = 0.45, up on 25 of 48). Both
+    lessons are tooling now: `--seed0` extends a battery onto seeds the
+    effect was NOT found on instead of re-running the old ones, and
+    `--out FILE --tag TAG` appends every seed as it lands, skips what a
+    file already holds and refuses a file written under a different tag,
+    roster or run length — written after this container was reclaimed
+    mid-battery twice, at about ninety minutes of 3v3 each time.
+  - **Follow-me.** Measured on identical
+    follow-me episodes (12, the pinned model, the detector seeing a person
+    by its legs — its middle leaves the 48° frustum at 1.2 m, inside the
+    follow band, which had every brain losing sight as it closed in) the
+    learned brains hold the distance band 0.81 / 0.76 (**`follow-v4`**, the
+    first brain RETRAINED in this world — v3's recipe, the reflex tier and
+    variety, run to 2M decisions), 0.77 / 0.67 (`follow-v2` under
+    the reflex tier — the env yaws the head toward the tracked target and
+    refuses to walk into something 0.25 m ahead), 0.74 / 0.63 (`follow-v3`,
+    trained with the reflex tier and variety: boxes and a wandering duck)
+    and 0.72 / 0.57 (`follow-v1`, version-1 observation, scored in the world
+    it was trained in) under the datasheet / hostile presets against the
+    scripted controller's 0.48 / 0.41; in sight 0.95 / 0.87, 0.96 / 0.87,
+    0.95 / 0.88, 0.94 / 0.88 vs 0.83 / 0.74 — measured with the capsule
+    that walks through the duck; with the polite person that is now the
+    benchmark's default (stops short, steps around; zero contact) the
+    bands are 0.91 / 0.92 (v4), 0.92 / 0.85 (v2), 0.90 / 0.82 (v3), 0.86 /
+    0.77 (v1) vs 0.76 / 0.67 at 12 episodes. Re-measured at 240 episodes a
+    cell (24 x 10 eval seeds), which moved some of the earlier 12-episode
+    cells by up to 0.04. v4 leads every cell — 9/10 eval seeds on the
+    datasheet preset, 10/10 under hostile noise — and is the first learned
+    brain to move the bump count (15.5 an episode against v2's 21.8); it is
+    the follower to pick. Retraining its recipe against the polite person
+    (`follow-v5`, 240 episodes a cell) did not widen the lead: level on the
+    clean preset (0.93 vs 0.94), −0.01 / −0.02 under hostile noise (ahead
+    on 2/10 and 3/10 eval seeds), 2.6 / 11.5 bumps an episode against v4's
+    0.3 / 4.2 — and 0.06–0.10 behind with double the contact when scored
+    back against the capsule that walks through. A brain the person stops
+    for learns to stand in its way; v4, trained in the harder world, stays
+    the pick.
+    The scripted one loses because it stands still and goes cold; an
+    idle sidestep took it from 0.36 to 0.51 in sight, the head gaze to
+    0.53, and the rest of the gap is the learned brain's continuous motion.
+    A dodge for a person walking at the duck (`ClosingWatch`: the ToF
+    clearance closing faster than the duck's own walk → turn to the freer
+    side, walk) was built, measured on a charge case (the person walks
+    through the duck every 6 s) and ships off: the walker cannot clear a
+    person in the 2–5 s it has (1 cm of sidestep in its first second),
+    contact time is the same either way (4.9 vs 5.3 s an episode) and in
+    ordinary following it fires on a person merely walking toward the duck
+    (in band 0.49 → 0.39). A polite person (`Person.yield_m`: stops short
+    of a duck in its way, steps around after 2.5 s) settles it — the mocap
+    capsule walked through the duck, a real person does not: on the charge
+    case the scripted follow holds the band 0.92 with no contact and no
+    falls, the learned brains 0.93, and the dodge only costs; facing the
+    person and standing is the behaviour. The page's camera inset (V) shows what the head
+    camera sees at the detector's field of view, from the pose the frame
+    was captured at, with the detections as boxes.
+- Track 12: toys, a basket, grasp-as-attachment, the shipped ground-pick as
+  a skill, and the `tidy` brain with `eval-tidy` (12.1–12.4, 12.6, 12.7,
+  12.13), the tether toggle (12.10: `--tether-ms`, `POST /world/tether`).
+  **Measured:** 0.89 of six scattered toys are in the basket after five
+  minutes on the pinned 2026-09 model (16 seeds, 0.31 falls a run; 0.84 /
+  0.56 under datasheet odometry drift, 0.79 / 0.75 under hostile drift —
+  the same with the brain's loop-closed pose on or off, so the map is not
+  what tidying needs — 0.81 / 0.19 with a 250 ms brain tether, the link
+  modelled both ways (senses late, intents late) and the brain reading
+  its latency off its own sensor ages to stop that much earlier at the
+  rim and at the toy; 0.76 / 2.19 before that, every traced tethered fall the stopping
+  stride at the rim on a stop decided 250 ms late) — up from
+  0.88 / 0.38 before rim toys were approached from the outside, 0.67 /
+  1.7 falls at the first close of the loop and 0.11 before that. What it took, each a measurement on
+  the walker, not a tune: releases only after a standing re-measure of
+  the basket at 0.42 m (walking rocks the head 0.02 rad and holds it
+  0.08 rad higher than standing — detection frames now carry the camera
+  pose); a release geometry with 3 cm to spare (beak 8 cm past the trunk,
+  feet 4 cm, rim contact from 0.185 m); a turn-around back-off because the
+  walker does not reverse at all; a forward kick on turns from a standstill
+  because a cold right turn never starts; tracked ids instead of a
+  confidence bar (a 2 cm toy at 1.5 m is 1.5° wide and confidence 0.2); a
+  keep-out disc around the basket and "a toy that projects into the basket
+  is delivered". `walker-facts` and `trace-tidy` (skill `tidy-trace`) are
+  the tools that found each of these. The carry-walk reflex (12.5) was not
+  needed: the shipped walker carries a 20 g block. The basket is designated
+  in the scenario/editor (12.9 in first form); the tether toggle (12.10),
+  graspability learning (12.8) and VLM designation (12.12) are still plans.
+
+- **The reflex tier under all of this: local PPO cannot produce a walker, and
+  a clone can.** Everything above rides on the shipped `alpha_walking`, and
+  the question of whether this harness can improve on it is now answered for
+  both routes. From scratch, two 1.5M-step arms reached `ep_rew` 2300-2900 at
+  **0.001 m/s** — standing still is the safest policy at this sample budget,
+  and the reward said nothing about it. Cloning the shipped walker instead
+  works and is close to free (`uv run distill`, ~1 min, cached): 0.203 m/s,
+  1000-step episodes, **0 falls** on held-out seeds, the teacher's own
+  numbers. Fidelity is the whole story there — correlation(action MSE, fall
+  rate) = **+0.93** over five budgets, and below ~0.00011 rad² the falling
+  stops outright; the old default sat at 0.00017 and fell 8% of episodes,
+  and the LOWEST-fidelity clone was the FASTEST (0.238 m/s) while falling
+  three episodes in four. But PPO on top of a good clone is a resolved bad
+  trade over 14 paired seeds — episode length **-414** [-596,-233], fall rate
+  **+0.44** [+0.250,+0.628], ground speed +0.041 [+0.007,+0.075] — with the
+  five fastest fine-tunes being the five that collapsed to ~50-step episodes.
+  Three learning rates, four fall-penalty weights and two training lengths
+  all failed to beat the clone, so for locomotion **the clone is the
+  deliverable** and the GPU stack is where a better walker comes from. Judge
+  candidates with `select-run` (achieved ground speed, falls as a rejection
+  floor), never `ep_rew`: it is an episode SUM and tracks survival, which
+  reversed a verdict on a real pair of runs.
+
+- **Fourth round: the camera stopped being an assumption, and the 10 Hz
+  detector floor came out.** Every behaviour result here was measured at
+  62 x 48 deg — the IMX219's FULL-ARRAY figure for a camera the robot pins
+  to a 1080p crop (39.0 x 22.5 with the stock lens), while the vendor's
+  replacement module is 116 x 60. Swept through `eval-tidy` on 64 paired
+  layouts, **the sim's baseline is better than either real candidate**: the
+  crop costs -1.53 +/- 0.17 toys (p < 0.0001, worse on 48 of 64) with falls
+  up 25 -> 144 events, the new module -2.03 (p < 0.0001, worse on 29 of 32,
+  better on 0). They fail in OPPOSITE ways — the crop has the best angular
+  resolution of the three and fails on field of view; the module has the
+  best field of view and fails on resolution. The module's cost then
+  decomposed, because its lens is not rectilinear: modelling the bearing
+  error a pinhole-calibrated reader makes on an equidistant lens (9.7 deg
+  at 116 against 1.2 at 62, past the chase brain's aim tolerance) splits
+  the 2.03 into **-1.12 geometry and -0.91 bearing error**, and the second
+  half is a calibration rather than hardware. Run as ONE arm rather than a
+  sum of two: **116 x 60 at 640 px with a calibrated lens tidies 0.880
+  against the baseline's 0.880 — +0.00 toys, p = 1.0000.** The two fixes
+  are additive (+0.91, +1.09, both +2.03) and either alone still loses.
+  Then the chain closed on compute: 640 px is 4x the pixels, which does not
+  fit a 10 Hz frame budget and plausibly fits a 5 Hz one — and 5 Hz used to
+  cost -0.55 toys (p = 0.0003), breaking the GRASP (85% -> 67%). The cause
+  was a stale pose, not the rate, and **fixing it alone made things worse**
+  (-0.38, p = 0.031) because the stop distance downstream had been fitted
+  against the bias. Corrected together: +0.41 toys at 5 Hz (p = 0.0066),
+  neutral at 10 Hz, grasp 94%, and 5 Hz is now indistinguishable from 10.
+  The transferable rule is that one — *a hand-fitted constant downstream of
+  a biased estimate has absorbed some of that bias* — and it comes with the
+  control cell that makes it readable (the corrected constant WITHOUT the
+  fix was the worst of the four arms). Two smaller results: the vertical
+  FOV measured off a STANDING duck (camera 11 deg down at 23.5 cm; 60 deg
+  buys 5.5 cm of floor over 48), and the ToF floor-ball re-opened at that
+  60 deg and closing harder — redundant on 88-94% of its firings and wrong
+  two times in three in the case it exists for. Full workings in
+  `docs/camera-hardware.md`; the tidy numbers in `microduck_local/README.md`.
+  The camera recommendation was then checked on a SECOND benchmark measured
+  a different way — the soccer line-up's placement error, every ball
+  sighting against truth — where it is a small win rather than break-even:
+  **25% more ball sightings** (16,881 -> 21,045) at slightly better
+  precision (5.6 -> 5.4 cm), while the module as it ships sees no more than
+  the baseline and places what it sees 34% less accurately (7.5 cm). That
+  is what 116 deg is FOR, and at 320 px it was entirely eaten by the
+  resolution penalty. What limits the number: at ~5.5 cm the ball's
+  placement error is dominated by the DETECTOR'S OWN bearing and range
+  noise, not the frustum and not either known stale-pose bias (which
+  contributes 1.7 cm) — closing the line-up's 2-3 cm scatter is a
+  detector-quality problem and a separate job. **3.7 also closed this
+  round** (a wider yaw cap: the mechanism is real, the freed time goes into
+  steering rather than play, and falls resolve worse — see its row), and
+  its work found rule 0's shape in SHIPPING code, where a learned brain was
+  silently re-clipped to the module's action bounds instead of its own.
+
+Numbers that shaped the design, all measured in this world: the walker only
+turns in place at a yaw command of 1.0 and stands still below ~0.2 m/s
+asked; it honours a head-pitch intent of +0.6 (camera 37° down, no falls,
+even walking) but cannot turn in place with the head down; it coasts ~1 cm
+after a stop and walks straight under the heading hold; the ground-pick
+tip bottoms 2 cm up and 7.8 cm ahead of the trunk; a 4 cm block is found by
+the simulated detector about half the time at 0.6 m and rarely beyond 1 m.
+Everything else below is still a plan. It was written after reading this repo (both checkouts), upstream
+`pollen-robotics/microduck` (the onboard Rust daemons and their design docs),
+`pollen-robotics/microduck_rl` (the official training stack), and the public
+Hugging Face and press material. Facts about the robot below cite where they
+came from; when something is an assumption it says so.
+
+Contents:
+
+1. [What the robot actually has](#1-what-the-robot-actually-has)
+2. [The one architectural decision](#2-the-one-architectural-decision-reflex-policy--brain)
+3. [The `/sim` page](#3-the-sim-page)
+4. [Task list, by track](#4-task-list-by-track)
+5. [What to build first, and why](#5-what-to-build-first-and-why)
+6. [Teaching with it](#6-teaching-with-it)
+7. [UX, debugging, and visualization principles](#7-ux-debugging-and-visualization-principles)
+8. [Performance plan](#8-performance-plan)
+9. [Windows support](#9-windows-support)
+10. [Sim2real for the brain layer](#10-sim2real-for-the-brain-layer)
+11. [Open questions and assumptions](#11-open-questions-and-assumptions)
+
+---
+
+## 1. What the robot actually has
+
+The relevant facts, from upstream code and docs rather than marketing pages.
+
+| Component | What the sources say | Where |
+|---|---|---|
+| Compute | Rockchip RK3566 with NPU, 1 GB RAM, 32 GB storage. Radxa Zero 3W is the bring-up board. | press kit via search; `docs/project/slice-2-bringup.md` |
+| Depth | **One** VL53L5/8CX 8×8 time-of-flight matrix on the head HAT's I²C bus, served by `tofd` on `/run/tofd/tof.sock` as a `tof.stream` subscription. The daemon publishes the sensor view only; consumers reproject it through `robotd`'s kinematics. | `docs/design/architecture.md` |
+| "LiDAR" | Press calls the ToF matrix an "8×8 time-of-flight LiDAR matrix". No scanning LiDAR appears anywhere in the onboard repo. **Assumption:** the "Compact LiDAR" and the "8×8 ToF matrix" are the same device. Section 11 covers what changes if they are not. | press via search; repo tree |
+| Camera | Front camera through `mediad` (libcamera, V4L2 M2M H.264, 30 fps, WebRTC out). Raw frames never cross a socket; only derived features do (tens of bytes, 10–30 Hz). | `docs/design/architecture.md` |
+| NPU detector | `duck-detect`: a quantized YOLO11n, 320×320 input, one class (duck), 3.9 MB INT8, mAP50 0.976, p50 25.7 ms / p95 58.4 ms per frame on the board. Detections are not yet exposed over IPC; the plan is to run it inside `mediad` and publish detections as state, then build "approaching, following, facing" on top. | `docs/project/npu-bringup.md` |
+| Microphones | `pet-detect`: 16 kHz mono from an AIC3104 codec, 40-band log-mel windows, a ~20 KB CNN in ONNX that classifies head-petting from the sound, with hysteresis. `robotd` polls it and plays a "coo" on onset. | `pet-detect/` |
+| Speaker / voice | `sounds/` crate, a procedural synth with pitch, level, and vowel set at runtime. `theremin.rs` maps depth to sound at 15 Hz. Press: each unit generates its own voice on first wake and keeps it. | `sounds/`, `docs/ideas/autonomous_behavior.md`, press |
+| IMUs | Two: body (v2 `imu_to_dxl` board, id 200 on the Dynamixel bus, gives the policy its gyro and projected gravity) and head. | `docs/design/robotd-design.md`, press |
+| Proximity | BLE beacons: nearby duck ids and RSSI as a distance proxy, plus a shared beat "±20 ms across ducks" for synchronized moves. Two NFC antennas. | `docs/ideas/autonomous_behavior.md`, press |
+| Odometry | Contact-anchored: one sole corner is pinned to the ground and the trunk pose follows by forward kinematics; heading is integrated IMU yaw with no magnetometer. Drift is inherent. Position and yaw are in the telemetry frame. | `docs/design/robotd-design.md` |
+| Control | 50 Hz loop in `robotd`, exactly `[f32; 61]` obs, 14 actions, ONNX Runtime, priority chain `roulade > kick > ground pick > sit/rise > stand > walk`, velocity deadman (intents stop, velocity zeroes, torque stays). | `docs/design/robotd-design.md` |
+| API | JSON-RPC 2.0 NDJSON over Unix sockets, one socket per daemon. Continuous intents: `robot.move {vx, vy, vyaw}`, `robot.head {neck_pitch, head_pitch, head_yaw, head_roll}`. Requests: `robot.enable/stop/init/relax/subscribe/health`. The same API is fronted by BLE, WebSocket, and the WebRTC "control" datachannel. | `docs/design/architecture.md` |
+| Brain | Milestone M9 "Autonomous brain" is future work with no code. The idea doc sketches a 16-state FSM (Chill, LookAround, Wander, TurnInPlace, Zoomies, Startle, Stretch, Ruffle, Preen, Sneeze, Dance, GroundPick, Nap, BallPlay, Petted, Held) over an energy/mood model, fed by ToF, the NPU detector, audio events, BLE, and the gamepad. Follow-the-leader is sketched as "RSSI holds spacing, ToF handles the duck directly ahead". | `docs/project/roadmap.md`, `docs/ideas/autonomous_behavior.md` |
+| Upstream RL and objects | The ball-kick task adds a 70 mm, 15 g ball but keeps the actor **blind**: only the critic sees ball position and velocity. The stated reason is that the real robot has no ball sensing and the operator aims it. The kick policy is hot-swapped in and auto-swaps back after ~2 s. | `microduck_rl` `microduck_ball_kick_env_cfg.py` |
+| Hub | The nine shipped ONNX policies are on the Hub as `pollen-robotics/microduck-policies`; M8 is the on-robot "policies from Hub" channel with a `manifest.json` contract. The `microduck-simulator` Space runs MuJoCo in WebAssembly with onnxruntime-web. | awesome-microduck, roadmap |
+
+Two things follow from this table and shape everything below:
+
+- **The RL policy is deliberately blind.** Everything exteroceptive on the
+  real robot reaches the legs only as a *command*: a twist and a head pose in
+  obs slots 48–60. That is the hot-swap contract this repo already refuses to
+  bend. So "train it to follow people" cannot mean "add ToF to the obs vector".
+- **The brain layer does not exist yet upstream.** Pollen has deferred it to
+  M9 with a design doc still to be written. A laptop lab that can simulate the
+  sensors, run a brain against them, and hand that brain to the real daemons
+  over the same JSON-RPC intents is a contribution, not a duplicate.
+
+## 2. The one architectural decision: reflex policy + brain
+
+Everything in `/sim` sits on a two-tier control stack that mirrors the robot:
+
+```
+                  sensors (simulated here, real on the robot)
+   ToF 8×8 @15 Hz · detector bearing/size @10 Hz · sound events · BLE RSSI · odometry
+                                   │
+                                   ▼
+   ┌────────────────────────────────────────────────────────────────┐
+   │  BRAIN  (10–30 Hz)  scripted FSM · hand-written controller ·   │
+   │         RL "brain policy" · LLM tool-caller · a human on WASD  │
+   │  emits INTENTS only:  robot.move {vx,vy,vyaw}                  │
+   │                       robot.head {neck_pitch,head_pitch,yaw,roll}
+   │                       policy select (walk / stand / kick / …)  │
+   │                       speaker {pitch, level, vowel}            │
+   └────────────────────────────────────────────────────────────────┘
+                                   │  obs[48:61] + policy slot
+                                   ▼
+   ┌────────────────────────────────────────────────────────────────┐
+   │  REFLEX  (50 Hz)  the unchanged 61-obs / 14-action ONNX policy │
+   │  shipped alpha_walking, or any run trained in this lab          │
+   └────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+                          MuJoCo world (one mjData: N ducks + objects)
+```
+
+Why this is the right split for a laptop lab:
+
+- **Contract-safe.** The 61-obs invariant in `microduck_local/AGENTS.md` is
+  untouched. Brains only write the command block, which the reflex policies
+  were trained on (with the tiny keep-alive ranges in `contract.py`).
+- **Cheap to train.** A brain policy is a small MLP over ~80 features acting at
+  10 Hz through a frozen ONNX walker. Physics cost per step is what it is
+  today; the brain adds a few microseconds. Brain RL runs are minutes long on
+  the same `ForkVecEnv`.
+- **Portable.** A brain's outputs are the robot's public intents. The same
+  Python brain can run against the sim lab or against a real duck over its
+  WebSocket/WebRTC control channel (section 10). For the brain layer the
+  sim2real gap is *perception* (noise, latency, dropouts), which this lab can
+  randomize, not actuator physics.
+- **Teachable.** The split *is* the lesson: reflexes are learned, deliberation
+  is composed; this is how the robot is built and how most real systems are.
+
+Hierarchical RL (a learned brain that also selects which reflex policy to run)
+is a natural later step, and section 4 lists it.
+
+## 3. The `/sim` page
+
+A second route in `duck-viewer` (`app/sim/page.tsx`) that reuses the stage,
+protocol client, and panel conventions of the current page, but is organised
+around **a world** rather than a roster of isolated ducks.
+
+### Layout
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 🌍 world: Living room ▾   ▶ ⏸ ⏮  RTF 1.00×   3 ducks · 1 person · 1 ball   ⚙ │
+├───────────────┬──────────────────────────────────────────┬───────────────────┤
+│ SCENARIOS     │                                          │ INSPECTOR (duck)  │
+│ · empty floor │          3D stage (shared Viewer)        │ ▸ Sensors         │
+│ · living room │   overlays toggled per layer:            │   ToF 8×8 heatmap │
+│ · obstacle    │   ▫ ToF frustum + 64 hit dots            │   detector cone   │
+│   course      │   ▫ detector cone + bearing needle       │   sound events    │
+│ · follow me   │   ▫ sound rings, BLE links               │   BLE RSSI        │
+│ · soccer 2v2  │   ▫ odometry trail vs truth trail        │   odom vs truth   │
+│ · custom…     │   ▫ occupancy grid on the floor          │ ▸ Brain           │
+│               │   ▫ goals / lines / score                │   FSM live graph  │
+│ WORLD EDITOR  │                                          │   inputs+freshness│
+│ walls · boxes │                                          │   intents out     │
+│ ball · goals  │                                          │ ▸ Policy (reflex) │
+│ person agent  │                                          │ ▸ Perf            │
+│ duck ↓ spawn  │                                          │                   │
+├───────────────┴──────────────────────────────────────────┴───────────────────┤
+│ TIMELINE  ●rec  ◀ ▶  scrub ───────────────────●─────────  events: goal! · … │
+│ MATCH   🔵 2 – 1 🔴   03:12   possession 61%   │ 📚 LESSON: "why is it blind?"│
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Scenarios** are JSON files in `microduck_local/scenarios/` (like clips):
+  a layout (walls, boxes, ball, goals, lights), spawn slots, the agents in
+  it, a scoring rule, and a lesson card. The picker loads one; the editor
+  edits it in place; save writes it back (`PUT /scenarios/{name}`).
+- **The stage** is the existing `Viewer` canvas with a world group: static
+  geometry instanced from the scenario, dynamic bodies (ball, boxes, person
+  capsules) streamed like duck bodies. Overlays are separate toggleable
+  layers so a screenshot can show exactly one idea.
+- **The inspector** is per selected duck, tabbed. Sensors shows raw
+  sensor views next to what they mean (the 8×8 heatmap with the hit dots
+  lit in the scene; the detector's bearing needle over the detected duck).
+  Brain shows the FSM as a live graph with the active state pulsing, each
+  input with its age (the "freshness gating" idea from upstream, made
+  visible), and the intents going out. Perf shows per-duck sensor cost,
+  brain tick time, and the world's real-time factor.
+- **Timeline** records everything the lab streamed (frames, sensors, brain
+  state, intents) to a ring buffer and to disk on demand, scrubs it, and
+  replays it with the overlays live. This is the debug tool everything else
+  leans on.
+- **Match / lesson strip** is scenario-dependent: a scoreboard for soccer, a
+  coverage percentage for mapping, a "distance held" gauge for follow-me, and
+  the lesson card for the scenario. **Built for soccer**, and it carries more
+  than the score, because goals are ~2.5 a run and a viewer watching them
+  sees almost nothing: the pitch panel shows the three per-team rates the
+  benchmark judges by — `possession` (9 seeds to resolve a 25% shift),
+  `advance` (43) and the signed version, red when a team is losing ground —
+  off the same `PitchMetrics` the battery uses.
+- **Possess.** `P` takes over the selected agent with WASD (the protocol
+  already carries `{"cmd"}`): drive the person the duck should follow, or
+  drive a duck yourself in a match against brains. Turning yourself into a
+  sensor input is the fastest way to understand what a brain sees.
+
+### Backend additions (in `microduck_local`)
+
+```
+src/microduck_local/
+├── world/            # one MjModel via MjSpec composition: N ducks + objects
+│   ├── scenario.py   # scenario JSON contract, validation, procedural rooms
+│   ├── arena.py      # WorldEnv: shared mjData, per-duck obs/reward views
+│   └── agents.py     # person capsule agent (scripted paths / possessed)
+├── sensors/          # simulated exteroception, sampled at REAL rates
+│   ├── ray.py        # generic ray rig on mj_multiRay (ToF today, LiDAR if ever)
+│   ├── tof.py        # 8×8 zones, FOV, range, 15 Hz, noise + dropouts
+│   ├── detector.py   # geometric "camera": frustum, occlusion ray, bbox, latency
+│   ├── audio.py      # sound sources, attenuation, event classifier stub
+│   ├── ble.py        # RSSI from distance + log-normal noise, shared beat
+│   └── odometry.py   # contact-anchored FK + integrated yaw (drifts on purpose)
+├── brain/            # the M9 layer, prototyped here
+│   ├── runtime.py    # 10–30 Hz tick, freshness gating, intent bus
+│   ├── fsm.py        # scripted states (upstream's 16), energy/mood model
+│   ├── controllers.py# follow, avoid, go-to, sweep-scan (hand-written)
+│   ├── brain_env.py  # gymnasium env: features -> intents, frozen reflex ONNX
+│   └── bridge.py     # same brain against a REAL duck over JSON-RPC
+└── viz_server.py     # +/world +/scenarios +/sensors framing +/brain +/replay
+```
+
+### Protocol additions
+
+- Frames gain `world: {objects: [{id, kind, bodies}], score, clock}` and
+  per-duck `sensors` and `brain` blocks. Depth cells and feature arrays go as
+  a **binary WebSocket frame** (a `Uint16Array` per duck for the 64 depth
+  cells) interleaved with the JSON frame; the viewer README already names
+  binary framing as the next lever.
+- New HTTP: `GET/PUT /scenarios`, `POST /world/load`, `POST /world/object`,
+  `POST /brain/{duck}` (set brain kind + params), `GET /replay/{id}`,
+  `POST /sensors/{duck}/noise` (live sliders on noise, latency, dropout).
+- New WS intents: `{"possess": {"agent": "person1"}}`, `{"brain": {"duck":
+  "d2", "kind": "fsm"|"follow"|"run:<brain-run>"|"none"}}`.
+
+## 4. Task list, by track
+
+Sizes: **S** ≈ a day, **M** ≈ a week, **L** ≈ several weeks. "Value" is the
+author's judgement on platform leverage + wow + teaching, argued in section 5.
+
+### Track 0: Foundations (everything depends on these)
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 0.1 | **World model via `MjSpec` composition** | Build one `MjModel` from a scenario: attach N duck MJCFs (from `microduck_rl`) plus floor, walls, ball, goals, boxes, person capsules. One `mjData` for the whole world; per-duck views for obs. Keep `shared_model_scope` semantics (one compiled model per scenario). | L | ★★★★★ |
+| 0.2 | **`WorldEnv` + per-duck reflex loop** | Step all ducks' 50 Hz reflex policies in one physics step. Reuse `Duck` for brain provenance, falls, speed. Contract test: a single-duck world is bitwise the walk env. | M | ★★★★★ |
+| 0.3 | **Scenario contract + editor endpoints** | JSON schema, validation, `scenarios/` directory, procedural room generator (seeded). | M | ★★★★ |
+| 0.4 | **`/sim` route skeleton** | Route, shared stage, scenario picker, world objects rendering (instanced), inspector shell, timeline shell. | M | ★★★★★ |
+| 0.5 | **Binary frame channel** | Interleaved binary WS messages for sensor arrays; JSON stays for everything else. | S | ★★★ |
+| 0.6 | **Record / replay ring buffer** | Lab-side recorder of frames + sensors + brain + intents, save as `.duckrec`, scrub and replay with overlays. | M | ★★★★★ |
+| 0.7 | **Spawn-safe process model** | Write all new multi-process code with `spawn` in mind from day one (section 9) so Windows is not a retrofit. | S | ★★★★ |
+
+### Track 1: Sensor simulation (real rates, real limits, tunable lies)
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 1.1 | **Ray rig** on `mj_multiRay` | Generic N-ray sensor attached to a body: origins, directions, groups, cutoff. ToF is one config; a planar scan is another. | S | ★★★★★ |
+| 1.2 | **ToF 8×8** | 8×8 zones over ~45°×45° (≈63–65° diagonal, VL53L5CX/L8CX), ~4 m max, 15 Hz at 8×8. Multiple rays per zone averaged; per-zone noise, range-dependent dropout, min-range saturation, and a "firmware upload" warm-up delay so freshness gating means something. Output shaped like `tof.stream`. | M | ★★★★★ |
+| 1.3 | **Geometric detector** ("camera" without rendering) | Project other ducks / people / the ball into the head camera's frustum, occlusion-check with one ray to the target centre, emit `{class, bearing, elevation, bbox_w, conf}` at 10 Hz with 26–60 ms latency (the measured p50/p95), false negatives by apparent size, occasional false positives. Classes: `duck` (exists on the NPU today), `person` and `ball` (would need a retrained detector, flagged as such). | M | ★★★★★ |
+| 1.4 | **Rendered camera (debug only)** | Optional real offscreen render from the head camera for the inspector, off by default; never an input the brain depends on. | M | ★★ |
+| 1.5 | **Audio events** | Sound sources in the world (person voice, another duck's quack, a clap); attenuation and bearing by inter-mic delay; a stub classifier emitting `{event, bearing, level}`; the pet-detect "petted" event from a click on the head. | M | ★★★ |
+| 1.6 | **BLE proximity** | RSSI from distance with log-normal noise and body shadowing; shared beat clock with ±20 ms jitter; NFC as a "touched" event. | S | ★★★ |
+| 1.7 | **Odometry that drifts** | Port the contact-anchored FK + yaw-integration scheme; expose estimate and truth so the trail overlay shows the gap. | M | ★★★★ |
+| 1.8 | **Noise console** | Live sliders for every sensor's noise, latency, dropout, and rate (`POST /sensors/{duck}/noise`), plus "presets": *ideal*, *datasheet*, *hostile*. | S | ★★★★ |
+| 1.9 | **Sensor contract tests** | Lock frame shapes, rates, and the ToF zone geometry against the datasheet so a future lab and a future bridge agree. | S | ★★★★ |
+
+### Track 2: The brain layer (upstream's M9, prototyped here)
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 2.1 | **Brain runtime** | 10–30 Hz tick decoupled from physics, last-value-wins sensor cache with ages, intent bus to the reflex command block + policy slot + speaker. Pluggable `Brain` interface. | M | ★★★★★ |
+| 2.2 | **Scripted FSM** | The 16 states from the idea doc over an energy/mood model; each state a small function. Start with Chill / LookAround / Wander / TurnInPlace / Startle / Petted / BallPlay. | M | ★★★★ |
+| 2.3 | **Hand-written controllers** | `follow(bearing, distance)`, `avoid(tof)`, `goto(odom target)`, `sweep_scan(head yaw)`. Simple, readable, the baselines RL is measured against. | S | ★★★★★ |
+| 2.4 | **Brain inspector** | Live FSM graph, input freshness bars, intent traces, "why did it transition" log. | M | ★★★★★ |
+| 2.5 | **Brain packaging** | A brain is a directory: `brain.json` (kind, params, feature spec) + optional `brain.onnx`. Assignable from the palette like a policy; shareable on the Hub. | S | ★★★ |
+| 2.6 | **LLM tool-calling brain (optional)** | A brain that exposes intents as tools to a language model at ~1 Hz with the FSM underneath for reflexes. Off by default; interesting for the community, not for the core. | M | ★★ |
+
+### Track 3: Learned skills with exteroception (brain RL)
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 3.1 | **`BrainEnv`** | Gymnasium env: obs = sensor features (64 ToF cells, detector tuple, odom delta, last intents, ~80 dims), action = `[vx, vy, vyaw, head_yaw, head_pitch]` at 10 Hz, frozen reflex ONNX underneath, `ForkVecEnv` parallelism as today. Domain randomization on sensor noise/latency, not physics. | M | ★★★★★ |
+| 3.2 | **Follow-me** | Scenario: a person capsule walks a random path; reward = keep 0.5–0.8 m and bearing near zero, penalize losing sight, collisions, jerky intents. Compare RL vs the scripted controller in the same scenario with the same noise preset. **Shipped (follow-v4); what the training ECONOMY turned out to be is in the sub-bullet below.** | M | ★★★★★ |
+| 3.3 | **Obstacle avoidance from ToF only** | Wander without collisions in procedural rooms; the classic "learn a policy over a depth image" lesson at 64 pixels. | M | ★★★★ |
+| 3.4 | **Go-to under odometry drift** | Reach a target given only drifting odometry; lesson on why closed-loop sensing beats dead reckoning. | S | ★★★ |
+| 3.5 | **Hierarchical brain** | Add a discrete head to the brain action: which reflex policy to run (walk / stand / kick / ground-pick). Needed for soccer kicking and for "sit when petted". **Done in its first form** (`brain/striker.py`): a kick logit per foot on top of the continuous twist, and the option is EXECUTED BY THE REFLEX TIER — it latches, stops the body, fires after 0.3 s of standing — because a kick issued mid-stride is the fall mode (4 falls in 25 episodes, all within 0.6 s of a kick; a speed-only gate made it worse at 11/25, the latch took it to 0–1). A cooldown is needed too: without it PPO found a lock, one kick every 0.93 s, so the duck never walks and never samples anything else. Both are world fixes, not reward terms. | M | ★★★★ |
+| 3.6 | **Brain teach panel** | Same UX as tricks: plain-English recipe cards, sliders, live snapshots hot-loaded on the trainee duck in `/sim`. Reuse `TeachPanel` with a brain behavior family. | M | ★★★★ |
+| 3.7 | **A faster body yaw (reflex side)** | Was "head-aware locomotion": a walk policy fine-tuned so head-pose commands are honoured while walking, on the premise that the shipped walker only sees keep-alive ranges. **Half of it is already done and the other half was aimed at the wrong joint.** Measured (`walker-facts`): the shipped walker tracks a head-yaw command to 1.42 rad WHILE WALKING at 7.5 rad/s, for a 12% forward-speed cost and no falls — `HEAD_CMD_RANGES`' ±0.07 is the curriculum's first stage, not the policy's range, and upstream runs `head_pose_range` out to ±1.40 with head-pose tracking as a primary reward. There is nothing to train there. What IS a wall is the BODY yaw: ~0.65 rad/s in a real run, ~0.6–0.8 at the ceiling, with `ANG_VEL_Z_RANGE`'s ±1.0 already delivering it — at full command there is nothing left to ask for. A 1v1 run spends **47% of itself rotating on the spot** (measured over 1200 duck-seconds, sweeping 371 rad at 0.655 rad/s; a 3v3 run is worse). Holding the yaw demand fixed, a walker that turned at 1.5 rad/s would free **~27% of every run** — larger than any brain-level change measured in this repo. So: retrain for TURN RATE, and widen the twist command range with it. **Step 0 was then run, and it refutes the premise — there is nothing to retrain.** The brief's own cheap check is "command the shipped walker past the ±1.0 the sweep stops at; if wz = 1.5 or 2.0 already produces more than 0.78 rad/s, the ceiling is not the training range and this experiment changes shape". It does. Warm, on the same `walker-facts` harness that produced the 0.65 figure, over 8 headings x 10 s with **zero falls in 48 runs**: at vx 0.40 the walker turns 0.733 rad/s asked +1.00 (the trained edge), **1.506 asked +2.00** (forward 0.188 → 0.176 m/s), **-1.802 asked -2.00** (forward unchanged), and 2.011 rad/s turning in place at +3.00. The response is close to LINEAR in the command (achieved/asked holds at 0.61-0.68 one way, 0.76-0.78 the other) out to 3x the trained `ANG_VEL_Z_RANGE` of ±1.0 — the policy extrapolates past its command range and stays upright doing it, losing 6% of forward speed at twice the yaw. So the wall is not the walker and not the robot: it is that **nothing asks for more than 1.0**, because `brain_env.ACT_HIGH` clamps a brain's wz there (`Duck.set_cmd` passes a larger one straight through). The ~27% of every run this task wanted to free is available for the price of widening one action bound, with no training: at 1.506 rad/s the 47% a run spends rotating at 0.655 becomes 20.4%, freeing **26.6%**. **That experiment was then run, and 3.7 is closed: a resolved trade that does not pay.** No retraining was needed — `gait.max_wz()` is the one place every scripted brain's turn cap lives, so `MICRODUCK_MAX_WZ` widens what `chase` asks for directly. 48 paired seeds x 300 s on `eval-pitch`, cap 1.0 against 1.5: spin rate 0.656 → 0.990 rad/s (**+0.333, resolved**), fraction of the run spinning 0.447 → 0.395 (**-0.052, resolved**), possession 18.93 → 20.41 s/min (**+1.48 [+0.35,+2.62], resolved**) — and falls 0.479 → 1.062 (**+0.583 [+0.13,+1.04], resolved WORSE**). `ballProgress` (+0.042), goals (+0.312) and kicks (+1.02) are all UNRESOLVED. Cap 2.0 is the same trade harder: 1.254 rad/s, spinFrac 0.365, kicks +71% resolved, falls 0.667 → 2.417 resolved worse. The mechanism is real and the prize is smaller than estimated — **12% of the run freed, not ~27%**, because the freed time goes into STEERING rather than play (at cap 2.0 `steerFrac` rises 0.290 → 0.383 as `spinFrac` falls). Goals cannot settle it at any sane cost: ~200 seeds to resolve a +0.3 effect. **So both caps stay at 1.0** (`MICRODUCK_MAX_WZ` for scripted brains, `MICRODUCK_BRAIN_WZ` for a learned brain's `ACT_HIGH[2]`): the turn rate was never the binding constraint on the GAME, only on the clock. A learned-brain arm was run too — 4 paired seeds, follow benchmark, wz 1.0 against 2.0 — and came out unresolved on band, sight and bumps, on a benchmark already sitting at 0.945 in band with no room to show a faster turn. **Before that run is launched, read this: local PPO cannot currently produce a walker, by either route, and both failures are measured.** From scratch, two 1.5M-step arms reached `ep_rew` 2300-2900 at **0.001 m/s** — they learn to stand and not fall, which is the safest policy available at this sample budget, and the reward says nothing about it. Warm-starting instead from a distilled clone of the shipped walker works (`uv run distill`, ~1 min, cached: 0.203 m/s / 1000-step episodes / 0 falls on held-out seeds, the teacher's own numbers) — but PPO ON TOP of that clone is a resolved bad trade over 14 paired seeds: episode length **-414** [-596,-233], fall rate **+0.44** [+0.250,+0.628], ground speed +0.041 [+0.007,+0.075]. The five fastest fine-tunes were the five that collapsed to ~50-step episodes. Three learning rates, four fall-penalty weights and two training lengths all failed to beat the clone. So a turn-rate run has to either (a) find a training recipe that survives fine-tuning, which is an open problem, or (b) go to the GPU stack, which is what `microduck_rl` is for. Judge any candidate with `select-run` (achieved ground speed, falls as a rejection floor), never `ep_rew` — it is an episode SUM and tracks survival, not rate. | M | ★★★★★ |
+
+**What brain training costs, measured (2026-09-03/04).** Four results that
+change how a brain A/B should be run, all on the follow benchmark:
+
+- **The benchmark plateaus long before the reward does.** `select-brain`
+  scores every checkpoint of a run on the DETERMINISTIC export. Over a fresh
+  2M-decision run the in-band score was 0.938 at the first 250k checkpoint
+  and 0.939 at 2M, while `ep_rew` climbed 159 → 177 the whole way. So size a
+  run by the benchmark, not the curve: `train-brain --probe-every` scores the
+  export mid-run (40 episodes, ~3 s, ~2% of the training between probes) and
+  `--plateau-patience` stops on THAT series. Fed the same run's reward
+  instead, the detector never fires. An 8-episode probe is too noisy to drive
+  it (it read 0.903 where the 40-episode score was 0.938).
+- **Run-to-run variance is ±0.02 in band — bigger than most effects.** Two
+  runs of the identical recipe at different training seeds differ by 0.021.
+  Three hyperparameter changes each "lost" 0.015-0.018 and were "ahead on
+  only 1-2 of 10 eval seeds" until the control showed the whole spread was
+  one run's luck. Train both arms on the SAME seeds and compare the per-seed
+  DIFFERENCE (`bench_ab.paired_delta`); use Student's t, not 1.96, which at
+  n=2 understates the interval 6.5-fold.
+- **Shorter runs are a FALSE economy for an A/B.** A 250k comparison recovers
+  the same point estimate as a 1M one (-0.0101 against -0.0102) at 2.4× the
+  paired spread — equal precision needs 5.9× the seeds, so 1.47× the total
+  cost. Run A/Bs at 1M.
+- **Two knobs measured and left off.** `--polite-mix` (draw the person's
+  politeness per episode) is a real trade — it costs 0.010 in band and buys a
+  **76% bump reduction** (5.4 → 1.3 an episode), both resolved over 4 paired
+  seeds — but which world you want a brain for is a choice, not a defect.
+  `--net-arch` on the brain is a CAPACITY knob and not a throughput one: the
+  PPO update is 5.3% of brain wall time (collection is 94.7%), and 256-256
+  against 128-128 was unresolved over six paired seeds (+0.006, interval
+  spanning zero, ~14 seeds needed to settle a third of the noise floor).
+
+### Track 4: Multi-duck and soccer
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 4.1 | **Multi-duck world** | N ducks in one `mjData` with duck–duck collisions; per-duck reflex + brain; palette drag onto any duck. | (0.1/0.2) | ★★★★★ |
+| 4.2 | **Soccer pitch scenario** | Pitch, two goals, the 70 mm / 15 g ball from upstream, spawn slots, out-of-bounds reset, scoreboard, match clock. | M | ★★★★★ |
+| 4.3 | **Ball perception** | Detector class `ball` (bearing, size ⇒ distance) plus ToF blob; honest label in the UI that the real robot cannot see a ball until someone trains that detector class. | S | ★★★★ |
+| 4.4 | **Striker brain (RL)** | 1v0: dribble toward the goal; reward = ball progress toward goal, being behind the ball, no collisions; discrete kick selection via 3.5. **Built, trained and measured — and it loses.** `brain/striker.py` + `train-brain --task striker` + `eval_striker`: 88 obs (the 80-float brain contract plus goal/ball geometry, all from odometry and detections), 5 actions (twist + a kick logit a foot, 3.5's head), reward = the benchmark's own signed `ballProgress`, kick made samplable by a spawn ladder rather than by pay. `striker-v1` (600k decisions) against the scripted `Chase` on identical seeds: 1v0 over 24 paired seeds, advance 0.86 → 0.31 (paired −0.550, t = −5.74, down on 22 of 24) and possession 11.8 → 5.9 s/min; 1v1 over 36 paired seeds (24 + 12 fresh), signed progress **+0.10 → −0.16** — the scripted brain carries the ball toward the goal it attacks and this one toward its own, and both halves agree (−0.068 discovery, −0.067 fresh). Rendered and read: it does not reach the ball, drifting at ~0.04 m/s and firing the kick at empty floor (3612 kicks against 116; 43× less ball moved per touch). Not a reward problem — the same reward pays the scripted brain +6.3 an episode and this one −0.5 — an APPROACH problem. Two failures were fixed in the world rather than the pay (a kick mid-stride is the fall mode; a kick that can re-fire is a lock that stops the duck walking). The scaffolding is done and reusable; the brain is not worth shipping. | M | ★★★★★ |
+| 4.5 | **Self-play ladder** | 1v1, then 2v2 with parameter sharing; league of past checkpoints as opponents; ELO in the scoreboard; the lesson is non-stationarity. | L | ★★★★★ |
+| 4.6 | **Team play tooling** | Team assignment UI, role tags, possession and heatmap stats, replay of goals, "possess a duck and play against the brains". **Done (first form):** `Duck.team`, `make_pitch(per_side)`, a team blackboard with attacker/support roles (`brain/team.py`), `pitch-2v2` / `pitch-3v3` built-ins, `eval-pitch --per-side`, a kickoff after every goal; measured 2v2 2.00 goals, 7.8 kicks, 2.75 falls a run, 3v3 1.00 / 7.8 / 3.50 with supporters that stay off the boards and stand beside a teammate (falls per duck climb with the roster: 0.25 → 0.69 → 0.58). The possession stats are done too (`world/metrics.py`): per-team `possession`, `ballAdvance` and signed `ballProgress` at the control tick, reported by `eval-pitch` and drawn live on the /sim pitch panel from the same class. The attacker role is a predicted TIME to the ball (handovers 14.0 → 9.8 a duck a run, median tenure 4.30 → 6.96 s), and the bump-stand rule's fall reduction FAILED its confirmation — real-looking on twelve layouts measured twice (5.50 → 3.62 a run, −1.88 ± 0.84, p = 0.055) and absent on twelve fresh ones (4.08 → 4.33, p = 0.88), for −0.81 ± 0.69, p = 0.264 over all 24 distinct layouts; it stays on as an unearned default, costing nothing measurable. Heatmaps, goal replay and the "possess a duck" mode are still plans. | M | ★★★★ |
+| 4.7 | **Goal / pitch sensing honesty** | Options: known pitch + drifting odometry (real-ish), or detector classes for goal markers. Expose the choice in the scenario; teach why it matters. | S | ★★★ |
+| 4.8 | **Flocking / follow-the-leader** | Upstream's sketch verbatim: RSSI holds spacing, ToF handles the duck ahead; then a learned version. Cheap once 1.2 + 1.6 exist. | S | ★★★ |
+| 4.9 | **Synchronized dance** | Shared BLE beat drives head-bobs across ducks; the speaker plays each duck's voice on the beat. Pure delight, ten lines once 1.6 and 6.x exist. | S | ★★ |
+
+### Track 5: Scan and map a room
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 5.1 | **Occupancy grid from ToF** | Reproject 64 zones through head + trunk kinematics (as `tofd` consumers must) into a 2–5 cm grid with log-odds updates; render as a floor overlay. | M | ★★★★★ |
+| 5.2 | **Head sweep scanning** | `sweep_scan` controller: stand and yaw the head through its range, tilting to cover floor and obstacles; "lighthouse" mode; the ToF's FOV limits become visible. | S | ★★★★ |
+| 5.3 | **Truth vs estimate** | Ground-truth map from the scenario next to the built map; coverage % and error metrics on the lesson strip. | S | ★★★★ |
+| 5.4 | **Exploration** | Frontier-based explorer (scripted) then RL with a novelty grid (the idea doc's Wander memory); coverage-per-minute leaderboard. | M | ★★★★ |
+| 5.5 | **Drift correction (light SLAM)** | Scan-to-map matching to correct yaw drift; optional, the lesson is "here is why real robots need loop closure". **Done (first form):** wall-line matching per frame (`brain/mapping.py`), pose error under a 1.5°/s bias 0.21 → 0.12 m, wall cells within 10 cm 0.64 → 0.85; a correlative search was measured to trade yaw for sideways error with a 45° FOV. | L | ★★★ |
+| 5.6 | **Map export** | Save the grid + trajectory; replay a real `tof.stream` log through the same mapper (section 10). | S | ★★★ |
+
+### Track 6: Audio and voice
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 6.1 | **Per-duck voice in the browser** | WebAudio synth with pitch / level / vowel (the same three knobs as `sounds/`), seeded from the duck id so each duck keeps its voice; spatialized by scene position. | S | ★★★ |
+| 6.2 | **Brain → speaker intents** | The FSM's coos, startles, greetings play in the viewer; the ToF theremin mode as a toy. | S | ★★ |
+| 6.3 | **Sound events as inputs** | Clap / voice / other-duck sources feed 1.5; "turn toward the sound" state. | S | ★★★ |
+| 6.4 | **Pet-detect in sim** | Click-and-hold on a head fires the petted event with the real classifier's hysteresis timing; ships the "Petted" state. | S | ★★ |
+| 6.5 | **Voice greeting memory** | Persisted list of duck ids met; a warmer sound for a friend (from the idea doc). | S | ★ |
+
+### Track 7: `/sim` UX, debugging, visualization
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 7.1 | **Overlay layers** | One toggle per idea (ToF, detector, sound, BLE, odom, grid, score); persisted; screenshot-friendly. | S | ★★★★★ |
+| 7.2 | **Sensor inspector** | 8×8 heatmap with the same cells lit in 3D on hover; detector bearing needle; event timeline; RSSI sparkline. | M | ★★★★★ |
+| 7.3 | **Freshness everywhere** | Every sensor value shows its age; stale turns amber then red; brain transitions caused by staleness are logged. | S | ★★★★ |
+| 7.4 | **Timeline scrub + step** | Frame-step forward/back, jump to events (goal, fall, transition), export a clip of the range with the capture pipeline. | M | ★★★★★ |
+| 7.5 | **Intent tracer** | Plot of commanded vs achieved twist per duck (the lab already knows both), with the deadman visible. | S | ★★★ |
+| 7.6 | **Compare mode** | Two brains in the same scenario with the same seed side by side (the current page's checkpoints trick, applied to brains). | M | ★★★★ |
+| 7.7 | **Reward and feature probes** | Click a term or a feature and see it drawn in the scene (the bearing that a reward scores; the ToF cells a feature averages). Enforces "never reward what the policy cannot observe". | M | ★★★★ |
+| 7.8 | **Perf HUD** | RTF, per-duck sensor µs, brain tick µs, physics µs, WS bytes/s; the stats strip already exists, extend it. | S | ★★★ |
+| 7.9 | **Keyboard and possess** | `P` possess, `1–9` select, `G` toggle grid, `T` toggle ToF, `L` lesson card. | S | ★★★ |
+| 7.10 | **Render-rollout for `/sim`** | Extend `render-rollout` and its contact sheet to world scenarios with sensor overlays burned in, so agents (and the `watch-training` skill) can *read* what a brain did. | M | ★★★★ |
+
+### Track 8: Performance
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 8.1 | **One world, one step** | N ducks in one `mjData` costs one `mj_step` per substep instead of N; measure against today's per-duck envs. | (0.1) | ★★★★ |
+| 8.2 | **Sensor cost budget** | ToF at 15 Hz × 64 rays via `mj_multiRay`; detector at 10 Hz with one occlusion ray per candidate; target < 5% of a core for 8 ducks. Bench + test. | S | ★★★★ |
+| 8.3 | **Binary framing + delta compression** | Sensor arrays binary; static world geometry sent once; ball/boxes as deltas. | S | ★★★ |
+| 8.4 | **Vectorised brain training** | `BrainEnv` under `ForkVecEnv` with `envs_per_worker` packing (worlds are heavier than single ducks); `bench-envs` support for world envs. **Done, and the packing half was measured off.** `ForkVecEnv` sized its shared memory from the WALK contract's 61 obs / 14 actions, which silently made the backend walk-only — `BrainEnv` is 80 and 3, so brain training sat on `SubprocVecEnv` paying a private MJCF compile per worker and a pickled pipe round-trip per step. Buffers now come from the env's own spaces: setup 2.77 s → 0.37 s, throughput 1,644 → 1,879 decisions/s at 8 workers, rollouts step-for-step BIT-IDENTICAL (`tests/test_brain_vec_env.py`). `bench-envs --task brain` sweeps the real trainer; the curve is FLAT from 12 envs (4,775 / 4,938 / 4,873 / 4,862 / 5,336 steps/s at 12 / 16 / 20 / 24 / 32), so the default 12 is within 4% of the knee and stays. `envs_per_worker` packing did NOT survive: interleaved reps put it behind 1:1 at every count, and the startup win it appeared to have was per-worker numba JIT, now removed for every layout. `bench-envs --ipc-floor` (a vec-step over envs that do nothing) is the number that settles these — 86 µs at 32 envs against an 883 µs real vec-step, i.e. the plumbing is 10% and the rest is physics plus memory contention. | M | ★★★★ |
+| 8.5 | **Viewer instancing** | Instanced meshes for walls/boxes; keep the no-shadow rule; grid overlay as one textured quad updated from a `Uint8Array`, not per-cell meshes. | S | ★★★★ |
+| 8.6 | **Replay off the main loop** | Recorder writes in a thread; replay serves from disk without a live world. | S | ★★★ |
+
+### Track 9: Windows and cross-platform (detail in section 9)
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 9.1 | **`spawn` vec-env backend** | Works on Windows; per-worker model compile or pickled `MjModel` handoff; parity test vs `fork`. | M | ★★★★ |
+| 9.2 | **Process-tree control without signals** | Replace SIGTERM plumbing with `psutil` tree terminate; already a dependency. | S | ★★★★ |
+| 9.3 | **Rendering backend** | `MUJOCO_GL=wgl`/glfw path for `render-rollout` on Windows; document. | S | ★★★ |
+| 9.4 | **Scripts → entry points** | The three skills' bash scripts become `uv run lab-restart` / `lab-teach` / `lab-watch` Python entry points with PowerShell one-liners in the skill docs. | S | ★★★ |
+| 9.5 | **Viewer script portability** | `next dev -p ${PORT:-63317}` is bash-only; use a node launcher. | S | ★★★ |
+| 9.6 | **Cross-OS CI** | GitHub Actions matrix macOS / Windows / Ubuntu running the contract tests (clone `microduck_rl` in CI). | S | ★★★★ |
+| 9.7 | **Bench on Windows** | Re-run `bench-envs`; thread settings were tuned on Apple P/E cores. | S | ★★ |
+
+### Track 10: Education
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 10.1 | **Lesson cards per scenario** | Short, in-page explanations tied to what is on screen: "why the policy is blind", "what 64 pixels can and cannot tell you", "why odometry drifts", "why self-play is unstable". | S | ★★★★ |
+| 10.2 | **Guided tours** | Click-through walkthroughs that toggle overlays and possess agents at each step. | M | ★★★ |
+| 10.3 | **Challenges** | Obstacle course, follow test, mapping coverage, soccer ladder; a scenario declares its metric; results export to the Hub. | M | ★★★★ |
+| 10.4 | **Docs** | `/sim` README, `AGENTS.md` rules for brains ("never feed the brain a feature the robot cannot produce"), and a skill for reading `/sim` contact sheets. | S | ★★★★ |
+
+### Track 11: Sim2real bridge for brains (section 10)
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 11.1 | **JSON-RPC client** | Python client for the robot's API (`robot.move`, `robot.head`, `robot.subscribe`, `tof.stream`) over WebSocket / the WebRTC control channel, mirroring the sim's intent bus. | M | ★★★★ |
+| 11.2 | **Real-log replay** | Play a recorded `tof.stream` + odometry log into the sensor inspector and the mapper; the first thing to do when hardware arrives. | S | ★★★★ |
+| 11.3 | **Hub round-trip** | Import `pollen-robotics/microduck-policies` into the palette; publish brains and scenario results to the user's Hub account with the existing BYOK token. | M | ★★★ |
+| 11.4 | **Detector dataset export** | Sim frames + labels (ducks, ball, person) as a Hub dataset for training the NPU detector classes the robot does not have yet. | M | ★★★ |
+
+### Track 12: Tidy the playroom (pick up, carry, deliver to a bin)
+
+The request: bring the duck into a room full of scattered toys (bricks,
+socks, blocks), point at a low basket, say "tidy", and have it find each
+pickable object, pick it up with its beak, carry it to the basket, drop it,
+and repeat until the floor is clear. Upstream already ships a ground-pick
+policy; this track is everything around it.
+
+**What upstream gives us, precisely.** The ground-pick policy is a *blind,
+phase-driven* 4-second cycle: the command slots carry `[cos 2πφ, sin 2πφ, 0]`
+and the reward walks the mouth tip to the floor (descent 0–1.5 s), holds
+briefly, then rises with a simulated 10–40 g payload pulling on `mouth_tip`.
+The MJCF has no actuated jaw ("the passive jaw joints are no longer part of
+the articulation"); on the robot the beak is motor slot 9 of 15, driven outside
+the policy and undocumented. So the real primitive is "crouch until the beak
+touches the floor under the head, then rise", and the operator aims the robot
+so the object is under the beak. Everything else in the loop is a *brain*
+problem, which is exactly what the rest of this roadmap builds.
+
+**Where the computation should live.** Three tiers, chosen by rate:
+
+| Rate | What | Where | Why |
+|---|---|---|---|
+| 50 Hz | Walk, carry-walk, ground-pick, stand (reflex ONNX) | Onboard `robotd` | Already true by architecture; `robotd` never blocks on another service. |
+| 5–15 Hz | Detector (objects, basket, duck), ToF, odometry, the tidy FSM, visual-servo approach | Onboard (NPU + CPU) **or** tethered Mac during development | A 320 px INT8 YOLO at ~26 ms is what the NPU already does for ducks; adding classes is a retrain, not a new capability. The FSM is trivial. A tether adds 100–300 ms, fine at these rates. |
+| ≤ 1 Hz | Open-vocabulary designation ("the blue bin", "everything that is a toy"), map memory, planning, data logging | Tethered Mac or cloud | Where a VLM earns its keep: one call per scan, results cached in the map. |
+
+A full **end-to-end VLA** (pixels and language in, 14 joint targets out at
+50 Hz) is the wrong tool here: the deployment contract is *intents*, not
+joints; `robotd` is authoritative on safety; a 1 GB RK3566 cannot host one;
+and the duck has no joint-level teleop to collect the demonstrations a VLA
+needs. What fits is a **VLA over skills**: a language/vision model at the
+brain tier whose actions are `goto(object)`, `pick`, `carry_to(bin)`,
+`release`, with the skills below doing the physics. In the lab this is 2.6
+plus a skill vocabulary. For the first version, a detector plus the scripted
+FSM does the whole loop without any language model, and the lab should prove
+that first; the VLM is an upgrade for designation and open-vocabulary
+"pickable", not a prerequisite.
+
+**The honest hard parts.**
+
+- *Grasp physics.* A beak grasp of a brick or a sock is a contact problem the
+  sim cannot cheaply model (deformables, jaw servo, friction). Plan: model
+  grasp as an **attachment event**: when the beak is closed with the mouth tip
+  within a tolerance of an object's grasp point, a weld constraint attaches
+  it, with success probability as a function of alignment error and object
+  class. Those probabilities are a *dataset* to learn from real attempts
+  (12.8), not a physics claim. The UI labels it as such.
+- *Alignment.* Ground-pick is blind; the approach must put the object under
+  the beak to ±2 cm. That is a visual-servo controller over the detector
+  bearing + ToF floor blob, then a final blind dead-reckoned step, exactly the
+  kick task's "±2 cm placement noise" in reverse.
+- *Carrying while walking.* The walker never trained with a payload in the
+  mouth or the head pitched to hold one. Needs a carry-walk reflex (a
+  `train-walk` variant with a mouth payload DR and a held head pose; ports to
+  an mjlab cfg), plus a check that walking with the head down does not tip the
+  gait. Bricks (2–10 g) are easy; a sock is a pendulum.
+- *Finding the basket again.* Odometry drifts, so "return home" is not enough
+  across a room. The basket needs a re-acquirable signature: a printed marker
+  the NPU can detect, a distinct colour/shape class in the detector, or the
+  spot the duck was NFC-tapped at, refined visually on approach. The rim must
+  sit below the beak (roughly ≤ 10 cm for a 25 cm duck standing), so "short
+  basket" means a tray or a cut-down bin, and the release is "head over rim,
+  open beak".
+- *Pickable or not.* Size class from bbox + ToF distance, on the floor plane,
+  not attached to anything, not the duck; plus a learned graspability score
+  from attempts. Bricks yes, a plush yes, a book no.
+- *Coverage.* The mapping track (5.x) turns "scan the room" into a frontier
+  sweep with remembered object positions in the grid, which becomes the work
+  queue; objects that keep failing get demoted to the end of it.
+
+| # | Task | What | Size | Value |
+|---|---|---|---|---|
+| 12.1 | **Playroom scenario** | Clutter generator (bricks, blocks, socks, balls, a plush), a low-rim basket with a marker, spawn slots, tidy score = objects in basket / total plus time and drops. | M | ★★★★★ |
+| 12.2 | **Beak grasp as attachment** | Closed-beak intent + mouth-tip tolerance ⇒ weld to the object; release intent breaks it; per-class success curve vs alignment error; payload mass rides along for the carry-walk. Labelled as a model, not physics. | M | ★★★★★ |
+| 12.3 | **Ground-pick in the lab** | Run upstream's ground-pick ONNX (or a lab-trained one via `train-behavior`) as a reflex skill with its 4 s phase in the command slots; verify the return with the payload. | S | ★★★★ |
+| 12.4 | **Visual-servo approach** | Detector bearing + ToF blob ⇒ align the object under the beak; final blind step; success measured against the ±2 cm window. Scripted first, then RL over approach offsets (3.1-style). | M | ★★★★★ |
+| 12.5 | **Carry-walk reflex** | `train-walk` variant with mouth payload DR (10–40 g, matching upstream) and a held head pose; eval: falls per metre while carrying. Ports to an mjlab cfg. | M | ★★★★ |
+| 12.6 | **Deliver and release** | Go-to basket with visual re-acquisition (marker / class), align, head over rim, open beak, verify the object left (payload gone, detector sees it in the bin). | M | ★★★★ |
+| 12.7 | **Tidy FSM** | Scan → Select → Approach → Pick → Verify → Carry → Deliver → Release → repeat; retry budgets, give-up rules, a work queue in the map; the brain inspector shows it. | M | ★★★★★ |
+| 12.8 | **Graspability learning** | Log every attempt (features → success) in sim and, later, on hardware; train a small classifier; feed it back into Select and into 12.2's curves. | M | ★★★ |
+| 12.9 | **Basket designation UX** | Three ways, all in sim: click it in `/sim`; NFC-tap "home" (the robot has two antennas); a printed marker. On the tether: tap it on the live video. | S | ★★★★ |
+| 12.10 | **Compute placement toggle** | Run the brain onboard (in the lab process) or "tethered" with simulated 100–300 ms link latency and dropouts from the noise console; the inspector shows the latency budget per tier. The lesson is *where should this run?* | S | ★★★★ |
+| 12.11 | **Detector classes + export** | Add brick / sock / toy / basket / marker to the geometric detector; render a sim dataset plus real photos; the same INT8 320 px recipe upstream used for ducks, so it runs on the NPU. | M | ★★★★ |
+| 12.12 | **VLM designation (optional)** | One call per scan labels pickables and the bin from a frame ("everything that is a toy, into the blue bin"); tethered or cloud; cached in the map; 2.6's skill vocabulary underneath. | M | ★★★ |
+| 12.13 | **Tidy benchmark** | N objects, time to clear, success rate, drops, collisions; a 10.3 challenge with a leaderboard. | S | ★★★★ |
+
+**Order inside the track:** 12.1 → 12.2 → 12.3 → 12.4 (first pick in sim)
+→ 12.6 + 12.7 (first full loop, one object) → 12.5 (carry properly) →
+12.9 + 12.10 → 12.11 (hardware path) → 12.8, 12.12, 12.13. The first
+screenshot is a duck walking one brick to a tray. Everything through 12.7 is
+a brain over existing reflexes plus one attachment trick, which is why this
+track slots in right after follow-me in the phase plan: it reuses 1.2, 1.3,
+2.1, 2.3, 3.1 and 5.1 and adds only the grasp model and the carry gait.
+
+## 5. What to build first, and why
+
+Ranked by leverage. Each phase ends in a demo somebody can screenshot.
+
+**Phase 1: the world and the eyes (Tracks 0 + 1.1–1.3 + 1.8 + 7.1–7.3).**
+Foundation for everything, and the first payoff is already educational:
+a duck standing in a living-room scenario with its ToF frustum drawn, the
+8×8 heatmap in the inspector, the cells lit on the wall, and a noise console
+that makes the sensor lie on demand. This is the most valuable phase because
+every later feature is a consumer of it, and because it settles the two hard
+engineering decisions (one-world `MjSpec` composition; binary sensor framing)
+while they are cheap to change. Demo: *"what the duck sees"*.
+
+**Phase 2: a brain and follow-me (Tracks 2.1–2.4 + 2.3 + 3.1–3.2 + 0.6).**
+The first end-to-end behavior that uses sensing, and the one with the most
+direct path to the real robot (a duck detector exists on the NPU today; a
+person class is one retrain away). Scripted follow first, then RL follow in
+the same scenario under the same noise preset, side by side. The record /
+replay timeline lands here because the first "why did it lose me?" question
+needs it. Demo: *possess the person, walk around, the duck follows; flip the
+noise to "hostile" and watch the scripted controller fail where the trained
+brain copes*.
+
+**Phase 2b: tidy the playroom (Track 12).**
+The first *useful* behavior, and the one most people asked for once they saw
+the beak. It is follow-me's brain pointed at a brick plus one honest trick
+(grasp as an attachment event) and one reflex variant (carry-walk). Demo:
+*point at a tray, scatter five bricks, watch the duck clear them*.
+
+**Phase 3: many ducks and soccer (Track 4).**
+Highest wow and the strongest community pull, but only worth doing once
+sensing and brains exist, because a soccer duck is a follow-me brain with a
+ball class, a goal, and an opponent. Start with 1v0 dribbling, then a
+self-play ladder. It teaches non-stationarity and credit assignment, the two
+multi-agent lessons no single-duck task can. Demo: *2v2, humans possess one
+duck per team against the brains, replay the goals*.
+
+**Phase 4: map the room (Track 5).**
+Lower wow than soccer but the cleanest robotics lesson in the set: what a 64
+pixel depth sensor on a nodding head can reconstruct, and how far odometry
+drift gets you before you need loop closure. Demo: *sweep-scan, watch the
+grid fill, compare to truth, then explore*.
+
+**Phase 5: sound, voice, social (Track 6 + 4.8–4.9).**
+Cheap once the brain exists and very on-brand for the product (every duck has
+its own voice), but it advances the platform least. Do it as the polish pass.
+
+**Throughout: Windows (Track 9) and education (Track 10).**
+Windows support is mostly a matter of not adding POSIX-only code to the new
+modules (section 9); the `spawn` backend and CI matrix should land during
+Phase 1 so nothing accretes. Lesson cards are written with each scenario, not
+afterwards.
+
+The features that expand the *platform* most are 0.1 (one world), 1.1 (ray
+rig), 2.1 (brain runtime), 3.1 (`BrainEnv`) and 0.6 (record/replay): each is
+a primitive that many later tasks are a thin layer over. The features that
+*educate* most are 1.8 (noise console), 2.4 (brain inspector), 5.3 (truth vs
+estimate) and 4.5 (self-play ladder). The features with the most *wow* are
+soccer, follow-me, and the per-duck voices.
+
+## 6. Teaching with it
+
+Each scenario carries one lesson, and the page makes the lesson visible
+rather than explained:
+
+| Scenario | The lesson | What the screen shows |
+|---|---|---|
+| Empty floor + ToF | Partial observability. The reflex policy is blind by design; the brain sees 64 numbers. | ToF frustum, heatmap, the wall cells lighting up; the obs vector with slots 48–60 highlighted as "the only door in". |
+| Noise console | Sim2real is a perception gap. | The same brain under *ideal* / *datasheet* / *hostile* presets; freshness bars going amber. |
+| Follow me | Classical control vs learned control; POMDPs with dropouts. | Scripted vs RL side by side, same seed; the moment the detector drops out and each one reacts. |
+| Obstacle course | Learning from a depth image; reward and feature probes. | The feature the reward reads drawn in the scene ("never reward what the policy cannot observe"). |
+| Map the room | Sensing geometry, dead reckoning, and drift. | Truth trail vs odometry trail; grid coverage %; loop-closure toggle. |
+| Soccer 1v0 → 2v2 | Hierarchical control, then self-play and non-stationarity. | Discrete kick selection lighting up; ELO over league generations; a checkpoint that beats its parent and loses to its grandparent. |
+| Dance / voices | Distributed timing, identity from a seed. | Shared beat jitter; each duck's voice parameters. |
+
+Every lesson has a "look, don't trust the curve" step, in keeping with the
+verification discipline in `microduck_local/AGENTS.md`: render the rollout
+with overlays, read the contact sheet, then believe the metric.
+
+## 7. UX, debugging, and visualization principles
+
+- **Every number has a picture and every picture has a toggle.** A sensor
+  value is drawn where it happens in the scene, in the inspector, and on the
+  timeline; each overlay is one switch so a screenshot can carry one idea.
+- **Show freshness, not just value.** Age is the most common cause of a
+  brain doing something odd. Every input is stamped and coloured by age.
+- **Truth next to estimate.** The lab knows the truth; the brain does not.
+  Draw both (trails, maps, ball position) so the gap is the thing you look at.
+- **Scrub before you speculate.** The recorder is always on (ring buffer);
+  jumping to "the fall at 01:12" is one click. Replays keep the overlays live.
+- **Same seed, side by side.** Comparing two brains or two noise presets
+  under one seed is the standard experiment; the UI makes it the default.
+- **Possess anything.** Driving the person or a duck yourself is the fastest
+  intuition for what a sensor delivers and what an intent does.
+- **Honest labels.** When a simulated sense does not exist on the robot yet
+  (ball class, person class, goal markers), the UI says so on the sensor
+  card, the way the current page marks assisted stretches with a spotter tag.
+- **Keep the stage light.** Instancing, no shadow maps, DOM labels, one quad
+  for the grid; the viewer README's context-loss story still applies.
+- **Agents can read it too.** `render-rollout` grows scenario support and
+  burned-in overlays so the existing skills keep working for `/sim` runs.
+
+## 8. Performance plan
+
+Budgets, to be measured with `bench-envs`-style tooling before any default
+changes (the repo's rule: throughput is not learning speed).
+
+| Item | Budget | Basis |
+|---|---|---|
+| World physics, 8 ducks + ball | ≤ 1 core at 50 Hz real time | One `mj_step` per substep for the whole world; today 8 separate ducks cost ~5% of a core, so headroom is large. |
+| ToF, per duck | 64 rays × 15 Hz via `mj_multiRay` | Sub-millisecond per call; ~1 ms/s per duck. |
+| Detector, per duck | ≤ 8 candidates × 1 occlusion ray × 10 Hz | Geometric, no rendering. |
+| Brain tick | ≤ 0.2 ms scripted, ≤ 1 ms ONNX | Small MLP; runs inside the lab loop. |
+| WS bandwidth | ≤ 200 kB/s at 8 ducks | Bodies as today; 64 × uint16 depth per duck binary; world deltas. |
+| Brain RL throughput | ≥ 10k brain-steps/s at 32 workers | One brain step = 5 physics-control steps of a frozen ONNX walker; same worker fleet as `train-behavior`. |
+| Viewer | 60 fps at 8 ducks + room | Instanced statics, single grid quad, no new per-frame React renders. |
+
+Two measurements to take early: (1) world-with-N-ducks vs N single-duck envs,
+to confirm the one-world model is a win and not a contention problem in
+`ForkVecEnv`; (2) `MjSpec` compile time for a room scenario, since the lab
+recompiles on scenario load and it should feel instant.
+
+## 9. Windows support
+
+macOS stays first, but nothing in the plan is Mac-specific. What is
+POSIX-specific today, and the fix:
+
+| Today | Problem on Windows | Plan |
+|---|---|---|
+| `vec_env.py` `fork` backend (one compiled `MjModel` inherited copy-on-write) | No `fork` on Windows. | Add a `spawn` backend: workers receive the MJCF path and compile privately (the old `subproc` cost: ~100 MB and a few seconds per worker), or receive a pickled `MjModel` (the Python bindings pickle models) to skip the compile. Semaphores and `multiprocessing.shared_memory` both work under `spawn`. Parity test against `fork` on macOS. |
+| `viz_server.py` SIGTERMs the trainer and its workers | No POSIX signals. | `psutil` process-tree terminate (already a dependency), one helper used on all platforms. |
+| `render-rollout` relies on CGL on macOS and documents EGL/OSMESA for Linux | Neither exists on Windows. | Support `MUJOCO_GL=wgl` (GLFW window context, the default on Windows desktops) and document it; the contact sheet path is pure PIL. |
+| `.claude/skills/*/*.sh` bash scripts | No bash by default. | Python entry points (`lab-restart`, `lab-teach`, `lab-watch`) plus PowerShell one-liners in the skill docs. |
+| `duck-viewer` `npm run dev` uses `${PORT:-63317}` | bash-only expansion. | A tiny node launcher or `cross-env`. |
+| `hf-token.json` written mode `0600` | `chmod` is a no-op on NTFS. | Document, and set an ACL where practical. |
+| MPS update path | Mac only. | Already auto-disables elsewhere; CUDA on Windows could be added later as a measured opt-in. |
+| Thread pinning tuned on P/E cores | Different scheduler. | Re-run `bench-envs` on a Windows box and record it. |
+
+Rules for new code so this does not regress: no `os.fork`, no signals, no
+`/tmp`, `Path` everywhere, `multiprocessing.get_context("spawn")`-safe
+picklable arguments, and a CI matrix (macOS, Windows, Ubuntu) running the
+contract tests from day one of `/sim`.
+
+## 10. Sim2real for the brain layer
+
+For the reflex policies, the honest path stays what `AGENTS.md` says: port
+the env design to `microduck_rl`, retrain on GPU, ship from there. For the
+brain layer the story is better, because the brain speaks the robot's
+intents:
+
+1. **Same interface both ways.** `brain/bridge.py` swaps the sim's sensor
+   cache and intent bus for the robot's `tof.stream` subscription,
+   `robot.subscribe` telemetry (odometry, active policy, safety verdict), and
+   `robot.move` / `robot.head` notifications. Detections arrive once upstream
+   publishes them from `mediad`; until then the bridge exposes the same
+   field as "unavailable" so the brain's freshness gating does its job.
+2. **Log first, run second.** Record real `tof.stream` and odometry, replay
+   into the sensor inspector and the mapper, and compare against the sim's
+   noise presets. Tune the presets to the data before trusting a trained
+   brain on hardware.
+3. **Respect the robot's authority.** `robotd` owns fall detection, limits,
+   and the deadman; the bridge never sends joint targets and never assumes an
+   intent was applied (telemetry carries `move.applied`).
+4. **Hub as the exchange.** Policies come from `microduck-policies`; brains
+   and scenario results go back under the user's own token, as the README
+   already promises for GPU jobs.
+
+## 11. Open questions and assumptions
+
+- **Is there a scanning LiDAR?** The onboard repo has only the 8×8 ToF. If
+  final hardware adds a planar LiDAR, the ray rig (1.1) makes it a config,
+  and the mapper (5.1) gets a much easier job. The plan is written for the
+  ToF and gets better, not different, with a LiDAR.
+- **Detector classes.** Only `duck` exists on the NPU today. Person and ball
+  classes are needed for follow-me and soccer on hardware; the lab flags
+  them as simulated-only and can export a training dataset (11.4).
+- **Detection publication.** Upstream has not decided the IPC shape for
+  detections (a `media.frame` call vs publishing from `mediad`). The bridge
+  mirrors the sim's `{class, bearing, elevation, bbox_w, conf}` and adapts
+  when upstream lands one.
+- ~~**Head-pose commands while walking.**~~ **This was wrong and is struck
+  out.** The shipped walker was NOT trained with keep-alive head ranges only
+  — `HEAD_CMD_RANGES`' ±0.07 is the curriculum's first stage, and upstream
+  runs `head_pose_range` out to ±1.40 with head-pose tracking as a primary
+  reward. Measured on the shipped policy: it holds a commanded head yaw at
+  1.42 rad *while walking at 0.3*, slewing at 7.5 rad/s, for a 12%
+  forward-speed cost and no falls. A brain that steers the gaze while
+  walking needs nothing trained; what it needs is a reason, and the one
+  tried so far (a searching sweep) made the body turn MORE on 5 of 5 seeds.
+- **Multi-duck on hardware** is BLE + ToF only; soccer on real ducks is a
+  long way off and the page should say so.
+- **`MjSpec` composition of the upstream MJCF.** Attaching several copies of
+  `robot_walk.xml` with prefixed names and separate keyframes needs a spike
+  early in Phase 1; it is the riskiest single technical item. The three
+  MuJoCo APIs the plan leans on (`mj_multiRay` for the ray rig,
+  `MjSpec.attach` for world composition, and pickling a compiled `MjModel`
+  for the `spawn` backend) were checked to exist in the pinned MuJoCo 3.10.0
+  while writing this; what has not been checked is how well `attach` handles
+  this particular robot file.

@@ -37,13 +37,34 @@ dependencies = [
 [project.scripts]
 train-walk = "microduck_local.train:main"
 export-walk = "microduck_local.export_onnx:main"
+distill = "microduck_local.distill:main"
 eval-walk = "microduck_local.eval_onnx:main"
 eval-run = "microduck_local.eval_onnx:main"
 bench-walk = "microduck_local.bench:main"
 bench-envs = "microduck_local.bench_envs:main"
+bench-ab = "microduck_local.bench_ab:main"
+machine-facts = "microduck_local.machine:main"
 duck-lab = "microduck_local.viz_server:main"
 train-behavior = "microduck_local.train_behavior:main"
 render-rollout = "microduck_local.render_rollout:main"
+train-brain = "microduck_local.train_brain:main"
+select-brain = "microduck_local.select_brain:main"
+describe-brain = "microduck_local.describe_brain:main"
+select-run = "microduck_local.select_run:main"
+eval-brain = "microduck_local.eval_brain:main"
+eval-tidy = "microduck_local.eval_tidy:main"
+eval-pitch = "microduck_local.eval_pitch:main"
+trace-tidy = "microduck_local.trace_tidy:main"
+walker-facts = "microduck_local.walker_facts:main"
+eval-find-ball = "microduck_local.eval_find_ball:main"
+
+[tool.pytest.ini_options]
+markers = [
+    # Tests that train or distil for real. They run by default — this repo's
+    # whole discipline is that a claim is measured — but `-m "not slow"`
+    # gives a fast loop while iterating.
+    "slow: runs a real training or distillation pass (tens of seconds)",
+]
 
 [tool.ruff]
 # Keep lint minimal and uncontroversial: pyflakes correctness + import order.

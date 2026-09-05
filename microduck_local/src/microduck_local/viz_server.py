@@ -174,8 +174,10 @@ from pydantic import BaseModel
 from . import behaviors as behaviors_mod
 from . import contract as C
 from . import motion as motion_mod
+from .brain.learned import brains_dir
 from .train import RUNS_DIR
 from .walk_env import MicroduckWalkEnv, shared_model_scope
+from .world_server import mount_world
 
 TICK_HZ = 50            # env control rate (real time)
 SEND_EVERY = 2          # broadcast at 25 Hz
@@ -487,8 +489,18 @@ class Duck:
         self._settle = 0
 
     def _handoff_due(self) -> bool:
-        """The trick is finished and the duck is on both feet."""
+        """The trick is finished and the duck is on both feet.
+
+        A behavior may own this (Behavior.handoff_fn) — find_ball hands to a
+        kick once it is squared up on the ball, which has nothing to do with
+        rotation. render_rollout.handoff_due consults the same field, so a
+        behavior that brings a predicate gets both callers from one
+        implementation instead of two copies kept in step by comment.
+        """
         env = self.env
+        fn = getattr(getattr(env, "behavior", None), "handoff_fn", None)
+        if fn is not None:
+            return bool(fn(env))
         rot = getattr(env, "_bf_rot", None)
         if rot is None or rot < 5.2:
             return False
@@ -518,6 +530,11 @@ class Duck:
         """
         if not self.handed:
             self._settle = 0
+            return None
+        # Opt-out for a behavior whose heading is the point: find_ball turned
+        # to face the ball, and "drive yaw back to the spawn heading" would
+        # undo exactly the work it just did (and aim the kick at nothing).
+        if not getattr(getattr(self.env, "behavior", None), "handoff_recenter", True):
             return None
         q = self.env.data.qpos[3:7]
         yaw = float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]),
@@ -638,7 +655,15 @@ class Duck:
 
 def _onnx_infer(path: Path):
     import onnxruntime as ort
-    sess = ort.InferenceSession(str(path))
+    # One thread per session, like brain_env's walker. The lab steps its whole
+    # roster serially in one frame loop, so a session's own thread pool can
+    # never overlap with anything — but ORT's DEFAULT is a thread per core, so
+    # an 8-duck roster meant 8 pools of N spinning threads in this one process,
+    # competing with the trainer subprocess a teach run just launched.
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    sess = ort.InferenceSession(str(path), sess_options=opts)
     in_name = sess.get_inputs()[0].name
 
     def infer(obs: np.ndarray) -> np.ndarray:
@@ -850,6 +875,20 @@ def load_policy_infer(policy_id: str):
     return infer
 
 
+def _same_run_dir(p: Path) -> bool:
+    """Is `p` the run dir that `run:<p.name>` resolves to?
+
+    is_trick_duck() and the palette both address a run by BARE NAME under
+    RUNS_DIR, so tagging a duck `run:<name>` is only honest when the directory
+    it came from really is that one. A run dir given by some other path
+    (a scratch copy, another checkout, MICRODUCK_RUNS_DIR pointing elsewhere)
+    keeps policy_id=None and the old conservative behavior."""
+    try:
+        return p.resolve() == (RUNS_DIR / p.name).resolve()
+    except OSError:
+        return False
+
+
 def build_ducks(args) -> list[Duck]:
     ducks: list[Duck] = []
 
@@ -883,13 +922,24 @@ def build_ducks(args) -> list[Duck]:
                 export(p, onnx)
                 print(f"[lab] exported {onnx} on the fly")
             if onnx.exists():
-                add(p.name, _onnx_infer(onnx), onnx_path=str(onnx))
+                # policy_id, not just a label: is_trick_duck() classifies on a
+                # "run:" prefix, so without this a run dir passed on the CLI is
+                # not recognised as a trick and the lab drives it with the
+                # WASD velocity command. For a ball/trick brain that command is
+                # pure out-of-distribution noise — `duck-lab runs/find_ball`
+                # measured 1058 falls and r̄ -3.2 in four minutes, while the
+                # identical dir dropped from the 🧠 palette (which does set
+                # policy_id) stood there quite happily.
+                same = _same_run_dir(p)
+                add(p.name, _onnx_infer(onnx),
+                    policy_id=f"run:{p.name}" if same else None,
+                    onnx_path=str(onnx))
             else:
                 print(f"[lab] skipping {p}: no policy.onnx / model.zip")
         else:
             print(f"[lab] skipping {spec}: not an .onnx or run dir")
-    if not ducks:
-        raise SystemExit("no ducks — pass run dirs or .onnx paths")
+    if not ducks and not getattr(args, "world", None):
+        raise SystemExit("no ducks — pass run dirs or .onnx paths (or --world <scenario>)")
     return ducks
 
 
@@ -2122,15 +2172,18 @@ def handoff_for(path: str | None):
         return None
     if not b.curriculum:
         return None
-    # Only offer the hand-off if the duck can ever ASK for it. _handoff_due
-    # tests env._bf_rot, the rotation accumulator that only the flip family's
-    # state_fn advances — a headstand never sets it, so attaching alpha_stand
-    # to that chain advertised "handoff: alpha_stand" in every frame for a
-    # swap that could not happen.
-    if getattr(b, "state_fn", None) is not behaviors_mod._bf_update:
+    # Only offer the hand-off if the duck can ever ASK for it. A behavior
+    # that declares handoff_fn answers that itself; otherwise the fallback
+    # rule tests env._bf_rot, the rotation accumulator that only the flip
+    # family's state_fn advances — a headstand never sets it, so attaching
+    # alpha_stand to that chain advertised "handoff: alpha_stand" in every
+    # frame for a swap that could not happen.
+    if (getattr(b, "handoff_fn", None) is None
+            and getattr(b, "state_fn", None) is not behaviors_mod._bf_update):
         return None
+    policy = getattr(b, "handoff_policy", None) or HANDOFF_POLICY
     try:
-        return load_policy_infer(HANDOFF_POLICY), HANDOFF_POLICY.split(":", 1)[-1]
+        return load_policy_infer(policy), policy.split(":", 1)[-1]
     except Exception:
         return None
 
@@ -2641,6 +2694,7 @@ def make_app(ducks: list[Duck]):
     @asynccontextmanager
     async def lifespan(_app):
         task = asyncio.create_task(lab_loop())
+        world.start()   # the /sim world loop, beside the roster loop
         # Nothing else ever retrieves this task's exception, so before this
         # callback a crash in lab_loop killed every duck SILENTLY: HTTP and
         # the WebSocket handshake kept working, the viewer kept its green
@@ -2658,6 +2712,7 @@ def make_app(ducks: list[Duck]):
         task.add_done_callback(_loop_died)
         yield
         task.cancel()
+        world.stop()
         if st.job:
             st.job.stop()
 
@@ -2693,6 +2748,11 @@ def make_app(ducks: list[Duck]):
         # let the two drift apart on the next port-scheme change.
         allow_origin_regex=LOCAL_ORIGIN_RE.pattern,
         allow_methods=["*"], allow_headers=["*"])
+
+    # World mode (the /sim page): its own World, routes and /ws/sim socket —
+    # see world_server.py. Mounted first so its routes exist before the
+    # lifespan starts its loop.
+    world = mount_world(app, load_infer=load_policy_infer, origin_allowed=origin_allowed)
 
     @app.get("/scene")
     def get_scene() -> dict:
@@ -2822,6 +2882,74 @@ def make_app(ducks: list[Duck]):
     def get_behaviors() -> dict:
         return {"behaviors": [behaviors_mod.behavior_card(b)
                               for b in behaviors_mod.BEHAVIORS.values()]}
+
+    # ------------------------------------------------ 🧠 brain training runs
+
+    # train-brain is a plain CLI process: nothing about it reaches the lab, so
+    # a brain run has always been invisible while a teach job is watchable.
+    # This reads the artifacts the trainer already writes — brain.json (the
+    # contract) and progress.jsonl (one row per rollout) — so the viewer's
+    # /train page can chart a run live without the trainer knowing about it.
+    # Read-only and derived entirely from disk: nothing here can steer a run.
+    BRAIN_ACTIVE_S = 30.0     # a progress file touched this recently is live
+    BRAIN_MAX_POINTS = 400    # downsample the curve; 2M steps is ~1300 rows
+
+    @app.get("/brains")
+    def get_brains() -> dict:
+        try:
+            root = brains_dir()
+        except Exception:
+            return {"brains": []}
+        if not root.is_dir():
+            return {"brains": []}
+        now = time.time()
+        out = []
+        for d in sorted(root.iterdir()):
+            if not d.is_dir():
+                continue
+            card: dict = {"name": d.name}
+            try:
+                card.update(json.loads((d / "brain.json").read_text()))
+            except Exception:
+                pass                      # a run mid-flight may not have one yet
+            card["shipped"] = (d / "brain.onnx").exists()
+            prog = d / "progress.jsonl"
+            rows = []
+            if prog.is_file():
+                try:
+                    for ln in prog.read_text().splitlines():
+                        ln = ln.strip()
+                        if not ln:
+                            continue
+                        try:
+                            rows.append(json.loads(ln))
+                        except json.JSONDecodeError:
+                            continue      # a half-written last line while training
+                except OSError:
+                    rows = []
+                card["active"] = (now - prog.stat().st_mtime) < BRAIN_ACTIVE_S
+            else:
+                card["active"] = False
+            card["rollouts"] = len(rows)
+            if rows:
+                last = rows[-1]
+                card["last"] = last
+                done, want = last.get("steps") or 0, card.get("steps") or 0
+                el = last.get("elapsed_s") or 0
+                card["progress"] = min(1.0, done / want) if want else None
+                card["steps_per_s"] = round(done / el, 1) if el else None
+                card["eta_s"] = (round((want - done) / (done / el))
+                                 if card["active"] and el and done and want > done else None)
+            # Downsample evenly, always keeping the first and last row.
+            if len(rows) > BRAIN_MAX_POINTS:
+                step = len(rows) / BRAIN_MAX_POINTS
+                idx = sorted({int(i * step) for i in range(BRAIN_MAX_POINTS)} | {len(rows) - 1})
+                rows = [rows[i] for i in idx]
+            card["curve"] = [{"steps": r.get("steps"), "ep_rew": r.get("ep_rew"),
+                              "ep_len": r.get("ep_len"), "elapsed_s": r.get("elapsed_s")}
+                             for r in rows]
+            out.append(card)
+        return {"brains": out}
 
     # ------------------------------------------------ 🎬 animation authoring
 
@@ -3586,6 +3714,10 @@ def make_app(ducks: list[Duck]):
                         "assist": bool(getattr(d.env, "spotter_active", False)),
                         "handed": bool(getattr(d, "handed", False)),
                         "handoff": getattr(d, "handoff_label", None),
+                        # Task objects that live in the env, not the
+                        # physics: the find_ball ball as [x, y, z, r] so
+                        # the viewer can draw what the duck is looking for.
+                        "ball": behaviors_mod.ball_marker_payload(d.env),
                         "bodies": d.pose_payload(),
                     } for d in st.ducks],
                 })
@@ -3617,6 +3749,9 @@ def main() -> None:
     ap.add_argument("--checkpoints", default=None,
                     help="run dir: add one duck per training checkpoint")
     ap.add_argument("--port", type=int, default=8788)
+    ap.add_argument("--world", default=None, metavar="SCENARIO",
+                    help="preload a /sim world (a built-in or scenarios/<name>.json); "
+                         "with --world the roster may be empty")
     ap.add_argument("--fresh", action="store_true",
                     help="delete lab-state.json and seed the roster from the "
                          "CLI args instead of restoring it")
@@ -3636,7 +3771,10 @@ def main() -> None:
     print(f"[lab] {len(ducks)} ducks: {', '.join(d.label for d in ducks)}")
 
     import uvicorn
-    uvicorn.run(make_app(ducks), host="127.0.0.1", port=args.port, log_level="warning")
+    app = make_app(ducks)
+    if args.world:
+        app.state.world.preload(args.world)
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

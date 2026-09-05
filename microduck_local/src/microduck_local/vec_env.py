@@ -42,6 +42,12 @@ Backends (pick with ``MICRODUCK_VEC_ENV``, or the ``backend=`` argument):
 Every backend keeps the caller's `env_fns` untouched: the model is injected by
 building the envs inside `walk_env.shared_model_scope()`, so `MicroduckWalkEnv`
 and `BehaviorEnv` need no signature change at the call site.
+
+The fork backend's shared-memory buffers are sized from the env's OWN spaces
+(read off the probe env that primes the model cache), not from the walk
+contract's 61/14. They were hardcoded, which silently made this backend
+walk-only and left `BrainEnv` — 80 observations, 3 actions — on `SubprocVecEnv`
+with a private MJCF compile per worker and a pickled pipe round-trip per step.
 """
 
 from __future__ import annotations
@@ -57,7 +63,6 @@ import cloudpickle
 import gymnasium as gym
 import numpy as np
 
-from . import contract as C
 from .walk_env import shared_model_scope
 
 # Which backend `make_vec_env` picks when nobody says. "fork" shares the model
@@ -96,18 +101,63 @@ class _SharedModelEnvFn:
             return self.fn()
 
 
-def _prime_model_cache(env_fn: Callable[[], gym.Env]) -> None:
-    """Compile the model in THIS process by building one throwaway env.
+def _prime_model_cache(env_fn: Callable[[], gym.Env]) -> tuple[gym.Space, gym.Space]:
+    """Compile the model in THIS process by building one throwaway env, and
+    report the spaces it declared.
 
     The scene an env will open is a function of its kwargs (walk scene vs the
     full-collision scene, per behavior), and the factories are opaque closures
     — so the robust way to learn it is to build one env and let it say. The
     compile lands in `walk_env`'s per-process cache, which is what the forked
     children then inherit instead of compiling their own.
+
+    The spaces come back because `ForkVecEnv` has to size its shared-memory
+    buffers BEFORE it forks, and the only honest source for the shapes is an
+    env. They used to be the walk contract's constants, which silently made
+    the fork backend walk-only.
     """
     with shared_model_scope(exclusive=True):
         probe = env_fn()
+    _warm_jit(probe)
+    spaces = (probe.observation_space, probe.action_space)
     probe.close()
+    return spaces
+
+
+def _warm_jit(probe: gym.Env) -> None:
+    """Pay the BAM kernels' one-off numba compile ONCE, here in the parent.
+
+    Same trade as the shared mjModel, for compiled code instead of a model:
+    the kernels are JIT-compiled on their FIRST call, and a fork child that
+    inherits an already-compiled dispatcher never pays it. Measured on this
+    x86 box: the first BAM control step costs 528 ms against a 0.95 ms
+    steady step, and `cache=True` does not avoid it across processes. At 32
+    workers on 4 cores that was ~4 s of every run's startup — paid again on
+    every warm restart (viz_server relaunches the trainer to rescale envs)
+    and every stage of a curriculum chain.
+
+    Side-effect-free by construction: a BAM step rewrites `dof_frictionloss`
+    and `dof_damping` on the model every substep, and a reset may draw new
+    `body_mass`/`geom_friction`, so all four are snapshotted and restored.
+    The children then inherit exactly the model the probe's CONSTRUCTION
+    left, as before — only the compiled code is new. Best-effort: a factory
+    whose env cannot take a zero action is not worth failing a run over.
+    """
+    env = probe.unwrapped
+    if getattr(env, "bam", None) is None:
+        return  # the "xml" actuator path has no numba kernels to warm
+    model = env.model
+    saved = {name: getattr(model, name).copy()
+             for name in ("dof_frictionloss", "dof_damping",
+                          "body_mass", "geom_friction")}
+    try:
+        probe.reset()
+        probe.step(np.zeros(probe.action_space.shape, dtype=np.float32))
+    except Exception:
+        pass
+    finally:
+        for name, value in saved.items():
+            getattr(model, name)[:] = value
 
 
 # --------------------------------------------------------------------------
@@ -143,11 +193,11 @@ def _shm_view(buf, dtype, shape):
 def _fork_worker(remote, parent_remote, env_fn_wrappers: list[_CloudpickleFn],
                  first_idx: int, widx: int, act_buf, obs_buf, rew_buf,
                  done_buf, ctrl_buf, go_sem, done_sem, pending,
-                 pending_lock) -> None:
+                 pending_lock, obs_dim: int, act_dim: int) -> None:
     parent_remote.close()
     envs = [fn() for fn in env_fn_wrappers]
-    act = _shm_view(act_buf, np.float32, (-1, C.NUM_JOINTS))
-    obs_s = _shm_view(obs_buf, np.float32, (-1, C.OBS_DIM))
+    act = _shm_view(act_buf, np.float32, (-1, act_dim))
+    obs_s = _shm_view(obs_buf, np.float32, (-1, obs_dim))
     rew = _shm_view(rew_buf, np.float64, (-1,))
     done_s = _shm_view(done_buf, np.int8, (-1,))
     ctrl = _shm_view(ctrl_buf, np.int8, (-1,))
@@ -242,8 +292,27 @@ class ForkVecEnv:
     """
 
     def __init__(self, env_fns: list[Callable[[], gym.Env]],
-                 envs_per_worker: int = 1):
+                 envs_per_worker: int = 1, spaces=None):
         n = len(env_fns)
+        # Buffer shapes come from the env's own spaces, not from the walk
+        # contract's constants. Hardcoding 61/14 made this backend silently
+        # walk-only: BrainEnv (80 obs, 3 actions) could not use it at all and
+        # the brain trainer was stuck on `SubprocVecEnv`, paying a private
+        # MJCF compile and a pickled pipe round-trip per worker per step.
+        # `spaces` is normally handed down by `make_vec_env` from the probe
+        # env it already builds to prime the model cache; constructing this
+        # class directly builds its own probe.
+        if spaces is None:
+            spaces = _prime_model_cache(env_fns[0])
+        obs_space, act_space = spaces
+        obs_dim = int(np.prod(obs_space.shape))
+        act_dim = int(np.prod(act_space.shape))
+        for name, sp in (("observation", obs_space), ("action", act_space)):
+            if sp.dtype != np.float32:
+                raise ValueError(
+                    f"ForkVecEnv shares {name} memory as float32; this env "
+                    f"declares {sp.dtype}. Widen the buffers before using it.")
+        self._obs_dim, self._act_dim = obs_dim, act_dim
         k = max(1, int(envs_per_worker))
         ctx = mp.get_context("fork")
         # env index -> (worker, local slot). Worker w owns the contiguous
@@ -253,16 +322,16 @@ class ForkVecEnv:
         self._worker_of = [i // k for i in range(n)]
         self._slot_of = [i % k for i in range(n)]
         # Allocate BEFORE fork so children inherit the mappings.
-        self._act_buf = mp.RawArray("f", n * C.NUM_JOINTS)
-        self._obs_buf = mp.RawArray("f", n * C.OBS_DIM)
+        self._act_buf = mp.RawArray("f", n * act_dim)
+        self._obs_buf = mp.RawArray("f", n * obs_dim)
         self._rew_buf = mp.RawArray("d", n)
         self._done_buf = mp.RawArray("b", n)
         # ctrl[w] = 1 tells a woken worker "read a command from your pipe"
         # instead of the shared-memory fast step. Owned by the parent: raised
         # before the wake, cleared after the reply.
         self._ctrl_buf = mp.RawArray("b", w_count)
-        self._act = _shm_view(self._act_buf, np.float32, (n, C.NUM_JOINTS))
-        self._obs = _shm_view(self._obs_buf, np.float32, (n, C.OBS_DIM))
+        self._act = _shm_view(self._act_buf, np.float32, (n, act_dim))
+        self._obs = _shm_view(self._obs_buf, np.float32, (n, obs_dim))
         self._rew = _shm_view(self._rew_buf, np.float64, (n,))
         self._done = _shm_view(self._done_buf, np.int8, (n,))
         self._ctrl = _shm_view(self._ctrl_buf, np.int8, (w_count,))
@@ -285,7 +354,8 @@ class ForkVecEnv:
                 args=(work_remote, remote, fns, first, w,
                       self._act_buf, self._obs_buf, self._rew_buf,
                       self._done_buf, self._ctrl_buf, self._go[w],
-                      self._done_sem, self._pending, self._pending_lock),
+                      self._done_sem, self._pending, self._pending_lock,
+                      obs_dim, act_dim),
                 daemon=True,
             )
             proc.start()
@@ -553,14 +623,24 @@ def make_vec_env(env_fns: list[Callable[[], gym.Env]],
     if name == "fork":
         # Compile here, in the parent, THEN fork: the children inherit the
         # compiled model copy-on-write and never open the MJCF at all.
-        _prime_model_cache(env_fns[0])
+        spaces = _prime_model_cache(env_fns[0])
         wrapped = [_SharedModelEnvFn(fn, exclusive=True) for fn in env_fns]
         # >1 packs several envs per worker process (stepped serially there):
         # fewer semaphore ops and pipes per vec-step, at the cost of longer
-        # per-worker latency. Worth it only at high env counts — measure with
-        # `bench-envs` before changing.
+        # per-worker latency. Default 1 on EVERY machine. Packing to one
+        # worker per core was tried as a Linux-profile default and measured
+        # off again: four interleaved reps put it behind 1:1 at every env
+        # count (-1.7% at 8, -3.9% at 16, -2.6% at 32), and its startup
+        # advantage turned out to be the per-worker numba JIT that
+        # `_warm_jit` now removes for every layout. Still here as a manual
+        # knob for env counts far above these — measure with `bench-envs`.
+        # Whenever it IS used it needs no learning-quality A/B, for a
+        # mechanical rather than a statistical reason: the packed layout is a
+        # step-for-step BIT-IDENTICAL obs/rew/done stream, pinned by
+        # test_envs_per_worker_batching_matches_one_per_worker. If that test
+        # ever goes, the knob goes with it.
         per_worker = int(os.environ.get("MICRODUCK_ENVS_PER_WORKER", "1") or 1)
-        return ForkVecEnv(wrapped, envs_per_worker=per_worker)
+        return ForkVecEnv(wrapped, envs_per_worker=per_worker, spaces=spaces)
 
     if name == "subproc":            # forkserver: children re-import, torch-safe
         from stable_baselines3.common.vec_env.subproc_vec_env import SubprocVecEnv

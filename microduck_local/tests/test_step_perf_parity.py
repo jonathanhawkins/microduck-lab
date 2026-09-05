@@ -34,6 +34,15 @@ landed; the optimization itself was verified bit-identical against
 pre-optimization goldens on every config at each stage. If an intentional env
 change ever invalidates a golden, recapture it with the OLD reward code —
 never by pasting in whatever new optimization work produces.
+
+2026-09-02: the upstream pin moved to the CAD re-export (microduck_rl
+badc4e7), which moved every per-term sum in the 5th digit — a model
+change, not a code change (the same code on the previous model still
+matched). The goldens were recaptured on that model, and moved out of this
+file into tests/goldens/ PER PLATFORM (golden_store.py): the digests lock
+one machine's bit patterns, so each platform records its own and one
+without a recording skips instead of failing — CI's Linux runner runs
+them, a Mac records its own with MICRODUCK_RECORD_GOLDENS=1.
 """
 
 import hashlib
@@ -99,12 +108,18 @@ def build_env(key):
 def fingerprint(env, steps=STEPS, reset_every=RESET_EVERY, seed=SEED):
     """sha256 over every obs byte, reward, per-term running sum and done flag
     of a multi-episode random-action rollout — plus the first episode's
-    per-term sums as float.hex, for a readable diff when the digest moves."""
+    per-term sums as float.hex, for a readable diff when the digest moves —
+    plus a per-EPISODE summary (per-term sums, reward total, obs sum and
+    abs-sum, step count, termination) that another CPU can compare by
+    tolerance (golden_store.py)."""
     h = hashlib.sha256()
     rng = np.random.default_rng(seed)
     obs, _ = env.reset(seed=seed)
     h.update(obs.tobytes())
     first_ep = None
+    episodes = []
+    ep = {"reward": 0.0, "obs_sum": float(np.sum(obs, dtype=np.float64)),
+          "obs_abs": float(np.sum(np.abs(obs), dtype=np.float64)), "steps": 0, "terminated": False}
     for i in range(steps):
         a = rng.uniform(-1.0, 1.0, C.NUM_JOINTS).astype(np.float32)
         obs, r, term, trunc, _ = env.step(a)
@@ -115,186 +130,74 @@ def fingerprint(env, steps=STEPS, reset_every=RESET_EVERY, seed=SEED):
         for k, v in env.reward_sums.items():
             h.update(k.encode())
             h.update(struct.pack("<d", v))
+        ep["reward"] += float(r)
+        ep["obs_sum"] += float(np.sum(obs, dtype=np.float64))
+        ep["obs_abs"] += float(np.sum(np.abs(obs), dtype=np.float64))
+        ep["steps"] += 1
         if term or trunc or (i + 1) % reset_every == 0:
+            ep["terminated"] = bool(term)
+            ep["terms"] = {k: float(v) for k, v in env.reward_sums.items()}
+            episodes.append(ep)
             if first_ep is None:
                 first_ep = {k: float(v).hex()
                             for k, v in env.reward_sums.items()}
             obs, _ = env.reset()
             h.update(obs.tobytes())
-    return h.hexdigest(), first_ep or {}
+            ep = {"reward": 0.0, "obs_sum": float(np.sum(obs, dtype=np.float64)),
+                  "obs_abs": float(np.sum(np.abs(obs), dtype=np.float64)), "steps": 0, "terminated": False}
+    return h.hexdigest(), first_ep or {}, episodes
 
 
-# Captured from the pre-optimization implementation — see module docstring.
-# fmt: off
-# 2026-08-31: no_stall was added to the headstand recipe and removed again
-# the same day (it taxed hold practice, never charged the relaxed parking
-# heap). ALL fingerprints verified bit-identical across both changes — no
-# headstand config is in this battery, and one_leg's no_stall comes from
-# the explicit weights above, not the headstand recipe.
-# backflip-*/imitate-xml recaptured 2026-08-30 after an INTENTIONAL reward
-# change (still_head term, straight_flip bound, per-episode reset of
-# _prev_tau/_prev_vz/_gp_prev_head). run/walk/stand/one_leg digests were
-# verified bit-identical across the change.
-GOLDEN = {'backflip-bam': ('9ec130e649abdf289fdea677cc460cc11a9229af378564627107d18fcc254eb8',
-                  {'arch_over': '0x0.0p+0',
-                   'calm_landed_penalty': '0x0.0p+0',
-                   'feet_under': '0x0.0p+0',
-                   'flip_progress': '0x1.3a79dbd77f9a8p+0',
-                   'gentle_head_penalty': '-0x1.791d1f170f726p+1',
-                   'gentle_joints_penalty': '-0x1.0c76e68991535p+2',
-                   'head_rise': '0x0.0p+0',
-                   'land_tall': '0x0.0p+0',
-                   'landed_hold': '0x0.0p+0',
-                   'lean_back': '0x1.cbce29ff80000p+2',
-                   'legs_over': '0x1.95d954694ca05p-3',
-                   'neck_kip': '0x0.0p+0',
-                   'neck_pushup': '0x0.0p+0',
-                   'no_jaw_parking_penalty': '0x0.0p+0',
-                   'no_limit_parking_penalty': '-0x1.6826786707ae1p+0',
-                   'push_off': '0x1.908ce1f7ec925p+3',
-                   'save_energy_penalty': '-0x1.d747cb4d7d082p+3',
-                   'smooth_moves_penalty': '-0x1.e2b164bd70a3dp+3',
-                   'soft_landings_penalty': '-0x1.0c63eb80707d8p+0',
-                   'stand_pose': '0x0.0p+0',
-                   'stay_home_penalty': '-0x1.36b53378dca21p-1',
-                   'stick_it_penalty': '0x0.0p+0',
-                   'still_head_penalty': '-0x1.f7eac7cdac219p+2',
-                   'straight_flip_penalty': '-0x1.98f6b25946fc1p+4',
-                   'tuck_ball': '0x1.3361b5f71013fp+2'}),
- 'backflip-xml': ('bf392e15e84896add7b520102484da37567124c73060e157d9701dcc8a91c3be',
-                  {'arch_over': '0x0.0p+0',
-                   'calm_landed_penalty': '0x0.0p+0',
-                   'feet_under': '0x0.0p+0',
-                   'flip_progress': '0x1.fcb15fe575e77p-12',
-                   'gentle_head_penalty': '-0x1.362cd6da4d046p+1',
-                   'gentle_joints_penalty': '-0x1.f09bc4d513229p+2',
-                   'head_rise': '0x0.0p+0',
-                   'land_tall': '0x0.0p+0',
-                   'landed_hold': '0x0.0p+0',
-                   'lean_back': '0x0.0p+0',
-                   'legs_over': '0x0.0p+0',
-                   'neck_kip': '0x0.0p+0',
-                   'neck_pushup': '0x0.0p+0',
-                   'no_jaw_parking_penalty': '-0x1.30cc2674d8d40p+4',
-                   'no_limit_parking_penalty': '-0x1.76c4e46919c9bp+1',
-                   'push_off': '0x1.e9c9d5cbcda45p+2',
-                   'save_energy_penalty': '-0x1.2190ca397ad96p+3',
-                   'smooth_moves_penalty': '-0x1.e2b164bd70a3dp+3',
-                   'soft_landings_penalty': '-0x1.93dfd1ed6a677p-1',
-                   'stand_pose': '0x0.0p+0',
-                   'stay_home_penalty': '-0x1.3b1f8b4778391p-3',
-                   'stick_it_penalty': '0x0.0p+0',
-                   'still_head_penalty': '-0x1.1c2479c61b8bfp+2',
-                   'straight_flip_penalty': '-0x1.3c427833cf49ep+4',
-                   'tuck_ball': '0x0.0p+0'}),
- 'imitate-xml': ('a76aac5d6946b548a7773c433b84110472d6f84d09e261586b9a1ddc46e7241a',
-                 {'gentle_head_penalty': '-0x1.9d911e7866b08p+1',
-                  'no_limit_parking_penalty': '-0x1.76c4e46919c9bp+1',
-                  'no_slip_penalty': '0x0.0p+0',
-                  'no_spin_penalty': '0x0.0p+0',
-                  'on_feet': '0x0.0p+0',
-                  'pose_match': '0x1.e3e619ceb00f7p+7',
-                  'rotation_match': '0x1.922751bf6f23bp+6',
-                  'save_energy_penalty': '-0x1.2190ca397ad96p+2',
-                  'soft_landings_penalty': '-0x1.93dfd1ed6a677p-1',
-                  'stick_it': '0x0.0p+0',
-                  'travel': '0x0.0p+0'}),
- 'one_leg-xml': ('36d7e7ace2ff33f7f0f6589174329d3b04c614656aea96e0761dd121c1be8790',
-                 {'calm_body_penalty': '-0x1.14e5dc404ee58p+3',
-                  'face_home_penalty': '-0x1.a80ab28602d09p+3',
-                  'flat_stance_foot': '0x1.9875d537f54abp+5',
-                  'foot_in_air': '0x1.b439f9534edddp-1',
-                  'gentle_joints_penalty': '-0x1.b7451ae8ba2ecp+3',
-                  'head_up': '0x1.fecbd7a340562p+3',
-                  'head_up_pull': '0x1.ffadd5d8e80ecp+4',
-                  'no_stall_penalty': '0x0.0p+0',
-                  'one_leg_hold': '0x1.0f9e02e7b0000p+4',
-                  'planted_foot': '0x1.f000000000000p+3',
-                  'save_energy_penalty': '-0x1.5b58b94507a49p+2',
-                  'smooth_moves_penalty': '-0x1.642d36999999cp+4',
-                  'stay_home_penalty': '-0x1.522ae80def5d0p-2',
-                  'stay_put_penalty': '-0x1.c2edc35d5efe1p+0',
-                  'stay_upright': '0x1.21eb0a0e28283p+5'}),
- 'run-bam': ('85ca0a2ba22bca35522155d05473d3d7d2092c1959a4a36f5b0e3f0dbc164e5e',
-             {'air_time': '0x0.0p+0',
-              'calm_roll_penalty': '-0x1.d90753004357ep+2',
-              'foot_clearance_penalty': '-0x1.ea015b7da1de7p-2',
-              'head_up': '0x1.2dda930500000p+7',
-              'keep_pace': '0x1.7f179f4d3af10p+1',
-              'no_limit_parking_penalty': '-0x1.92befbdc163bcp+0',
-              'plant_the_foot_penalty': '-0x1.e92f02c8df63fp-5',
-              'pose': '0x1.9c39f3aa12fffp+4',
-              'smooth_moves_penalty': '-0x1.5417e7999999cp+5',
-              'stay_upright': '0x1.0989faca90000p+6',
-              'track_turn': '0x1.a85643e8b4cf2p+1'}),
- 'run-xml': ('642d38dcf376af521cc8ffced9f57331dd534e711df5ffc0701a74cf5f91da33',
-             {'air_time': '0x0.0p+0',
-              'calm_roll_penalty': '-0x1.63a26826ddfafp+3',
-              'foot_clearance_penalty': '-0x1.c9651af382dd1p-1',
-              'head_up': '0x1.a515983f00000p+7',
-              'keep_pace': '0x1.0e318d39f2144p+5',
-              'no_limit_parking_penalty': '-0x1.f48de1e0690b0p+0',
-              'plant_the_foot_penalty': '-0x1.54956149d64d4p-3',
-              'pose': '0x1.1c30a0edfed85p+5',
-              'smooth_moves_penalty': '-0x1.f432d7f333336p+5',
-              'stay_upright': '0x1.9c1e04474c000p+6',
-              'track_turn': '0x1.7508918ed4ff8p+3'}),
- 'stand-xml': ('034adbb243264dee0055faf3f5b47fc7714777bfc03caaab98f2c18545e5dc54',
-               {'both_feet': '0x1.6800000000000p+4',
-                'face_home_penalty': '-0x1.a80ab28602d09p+2',
-                'flat_feet': '0x1.34e72cea4e8edp+5',
-                'gentle_joints_penalty': '-0x1.24d8bc9b26c9ap+2',
-                'head_up': '0x1.89d4e6d0bf655p+5',
-                'hold_still_penalty': '-0x1.14e5dc404ee58p+4',
-                'no_limit_parking_penalty': '-0x1.949ff21479d6dp+1',
-                'normal_pose': '0x1.142ab8c28409cp+6',
-                'save_energy_penalty': '-0x1.5b58b94507a49p+2',
-                'smooth_moves_penalty': '-0x1.1cf0f87ae147bp+3',
-                'stand_tall': '0x1.13cc4d11b4613p+7',
-                'stay_home_penalty': '-0x1.522ae80def5d0p-2',
-                'stay_upright': '0x1.828eb812e035ap+5'}),
- 'walkenv-bam': ('e377aa752e35a8fce7ae06896dadea1122b7420080e2d3464e123e31f3d38936',
-                 {'action_rate_penalty': '-0x1.5417e7999999cp+5',
-                  'ang_vel_xy_penalty': '-0x1.d90753004357ep+3',
-                  'feet_air_time': '0x0.0p+0',
-                  'head_pose': '0x1.58f9cc9800000p+6',
-                  'pose': '0x1.058027120a5ffp+5',
-                  'track_ang_vel': '0x1.a85643e8b4cf2p+1',
-                  'track_lin_vel': '0x1.c5a02920f346ep+2',
-                  'upright': '0x1.c74dfa58a4220p+5'}),
- 'walkenv-xml': ('4440ba91ed475c128022ceaad73313d46b8d3a862fad265a6e8a1ec07262ae6c',
-                 {'action_rate_penalty': '-0x1.f432d7f333336p+5',
-                  'ang_vel_xy_penalty': '-0x1.63a26826ddfafp+4',
-                  'feet_air_time': '0x0.0p+0',
-                  'head_pose': '0x1.d9aff89800000p+6',
-                  'pose': '0x1.63534e9dbebfdp+5',
-                  'track_ang_vel': '0x1.66faa98f43bb2p+3',
-                  'track_lin_vel': '0x1.ca2751a3441a1p+4',
-                  'upright': '0x1.57c377e2f50c0p+6'})}
-# fmt: on
+# The goldens live in tests/goldens/step_perf_parity-<platform>.json (see
+# golden_store.py): the bit patterns are a property of one machine, and a
+# model re-export moves them — record them on the machine and model they
+# are meant to pin, never paste in what new optimization work produces.
+GOLDEN_NAME = "step_perf_parity"
 
 
 def _fingerprint_all():
     out = {}
     for key in CONFIGS:
         env = build_env(key)
-        digest, first_ep = fingerprint(env)
+        digest, first_ep, episodes = fingerprint(env)
         env.close()
-        out[key] = (digest, first_ep)
+        out[key] = (digest, first_ep, episodes)
     return out
+
+
+def _golden():
+    """This platform's recorded fingerprints, or None (skip); records them
+    when MICRODUCK_RECORD_GOLDENS is set."""
+    import golden_store as gs
+    if gs.RECORD:
+        data = {k: list(v) for k, v in _fingerprint_all().items()}
+        print(f"recorded {gs.save(GOLDEN_NAME, data)}")
+        return {"provenance": gs.provenance(), "data": data}
+    return gs.load(GOLDEN_NAME)
 
 
 @pytest.mark.parametrize("key", sorted(CONFIGS))
 def test_rollout_fingerprint_matches_pre_optimization_golden(key):
-    digest, first_ep = GOLDEN[key]
+    import golden_store as gs
+    golden = _golden()
+    if golden is None:
+        pytest.skip(gs.skip_reason(GOLDEN_NAME))
+    digest, first_ep, episodes = golden["data"][key]
     env = build_env(key)
     try:
-        got_digest, got_first = fingerprint(env)
+        got_digest, got_first, got_episodes = fingerprint(env)
     finally:
         env.close()
-    # Per-term sums first: on a mismatch they say WHICH term moved.
-    assert got_first == first_ep
-    assert got_digest == digest
+    # Per-episode sums first, by tolerance: on a mismatch they say WHICH
+    # term of WHICH episode moved — and a golden made against another model
+    # or library is named before that.
+    stale = gs.check_provenance(golden)
+    assert len(got_episodes) == len(episodes), stale or "the episode count moved"
+    gs.close(got_episodes, episodes, stale or key)
+    if gs.same_cpu(golden):
+        # The CPU that recorded it: to the bit.
+        assert got_first == first_ep, stale or "a per-term sum moved (same model, same libraries, same CPU)"
+        assert got_digest == digest, stale or "the rollout digest moved"
 
 
 # ------------------------------------------------ unit parity vs verbatim refs
@@ -421,3 +324,22 @@ def test_helpers_track_out_of_band_state_changes():
     obs, *_ = env.step(np.zeros(C.NUM_JOINTS, np.float32))
     assert np.isfinite(obs).all()
     env.close()
+
+
+def test_cross_cpu_tolerance_passes_ulp_noise_and_fails_a_real_change():
+    """The other-CPU path (golden_store.close): a last-bits difference in a
+    per-term sum — what another runner's SIMD reduction order produces —
+    passes; a change in the 5th digit — what a model re-export or an
+    indexing bug produces — fails."""
+    import golden_store as gs
+    golden = gs.load(GOLDEN_NAME)
+    if golden is None:
+        pytest.skip(gs.skip_reason(GOLDEN_NAME))
+    _, first_ep, episodes = golden["data"]["walkenv-xml"]
+    noisy = [dict(e, terms={k: v * (1 + 3e-13) for k, v in e["terms"].items()}) for e in episodes]
+    gs.close(noisy, episodes, "ulp")
+    moved = [dict(e, terms={k: v * (1 + 2e-5) if v else v for k, v in e["terms"].items()}) for e in episodes]
+    with pytest.raises(AssertionError):
+        gs.close(moved, episodes, "moved")
+    hexed = {k: float.fromhex(v) for k, v in first_ep.items()}
+    gs.close(hexed, first_ep, "hex")
