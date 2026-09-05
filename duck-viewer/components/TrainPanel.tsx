@@ -33,6 +33,29 @@ import {
 
 const POLL_MS = 2000;
 
+// Below this width the two columns stop meaning anything side by side: a
+// 330px run list next to the chart leaves the chart narrower than its own
+// axis labels, and the head's tab pair runs off the edge. Under it the page
+// stacks and becomes the scroller instead.
+const NARROW_PX = 820;
+
+/**
+ * True while the viewport is too narrow for the two-column layout. Starts
+ * false so the server render and the first client render agree; the real
+ * answer arrives on mount.
+ */
+function useNarrow() {
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${NARROW_PX - 1}px)`);
+    const sync = () => setNarrow(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
+  return narrow;
+}
+
 export default function TrainPanel() {
   const [runs, setRuns] = useState<BrainRun[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -54,6 +77,7 @@ export default function TrainPanel() {
     });
   }, []);
   const seeded = useRef(false);
+  const narrow = useNarrow();
 
   useEffect(() => {
     const ac = new AbortController();
@@ -123,7 +147,7 @@ export default function TrainPanel() {
   const noneOn = shown.length === 0;
 
   return (
-    <main style={S.page}>
+    <main style={narrow ? { ...S.page, ...S.pageNarrow } : S.page}>
       <header style={S.header}>
         <Link href="/sim" style={S.back}>
           ← sim
@@ -144,8 +168,8 @@ export default function TrainPanel() {
           <code style={S.code}>uv run train-brain --run-name follow-v4 --variety</code>
         </p>
       ) : (
-        <div style={S.body}>
-          <section style={S.listCol}>
+        <div style={narrow ? { ...S.body, ...S.bodyNarrow } : S.body}>
+          <section style={narrow ? { ...S.listCol, ...S.listColNarrow } : S.listCol}>
             <div style={S.listHead}>
               <span style={S.colLabel}>
                 runs · {shown.length}/{runs.length} charted
@@ -211,7 +235,7 @@ export default function TrainPanel() {
             </div>
           </section>
 
-          <section style={S.chartCol}>
+          <section style={narrow ? { ...S.chartCol, ...S.chartColNarrow } : S.chartCol}>
             <div style={S.chartHead}>
               <span style={S.colLabel}>
                 {view === "matrix" ? "sweep matrix" : metric === "ep_rew" ? "episode reward" : "episode length"}
@@ -571,8 +595,12 @@ function Stat({ k, v }: { k: string; v: string }) {
   );
 }
 
-const W = 760;
-const H = 380;
+// The chart is drawn at the pixel size of its box (1 viewBox unit = 1 px),
+// measured below — a fixed canvas either overflowed the column or forced a
+// 2:1 aspect that pushed the note under it off a short viewport. These are
+// only the pre-measurement fallback.
+const W0 = 760;
+const H0 = 380;
 const PAD = { l: 56, r: 18, t: 16, b: 32 };
 
 /** Nearest point to `steps` by x — the curve is downsampled, so snap to data. */
@@ -600,6 +628,27 @@ function Chart({
   metric: "ep_rew" | "ep_len";
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
+  // A callback ref, not useRef: the box unmounts whenever the column swaps to
+  // the "nothing selected" placeholder, and a plain ref would leave the
+  // observer pointed at a detached node.
+  const [box, setBox] = useState<HTMLDivElement | null>(null);
+  const [size, setSize] = useState({ w: W0, h: H0 });
+  useEffect(() => {
+    if (!box) return;
+    const ro = new ResizeObserver(() => {
+      const w = Math.max(320, Math.round(box.clientWidth));
+      const h = Math.max(160, Math.round(box.clientHeight));
+      setSize((s) => (s.w === w && s.h === h ? s : { w, h }));
+    });
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, [box]);
+  const { w: W, h: H } = size;
+  // The box takes the column's leftover height, but capped to a chart-shaped
+  // slice of its own width: on a tall window a full-height chart is one flat
+  // line stranded in 700px of empty grid. The cap only ever makes the box
+  // shorter, so it cannot feed back into the measured width.
+  const boxCap = Math.max(220, Math.round(W * 0.55));
   const [hoverX, setHoverX] = useState<number | null>(null); // in viewBox units
   const series = useMemo(() => runs.filter((r) => r.curve.length > 1), [runs]);
   const val = useCallback(
@@ -629,16 +678,16 @@ function Chart({
 
   const x = useCallback(
     (s: number) => PAD.l + (s / (bounds.xMax || 1)) * (W - PAD.l - PAD.r),
-    [bounds.xMax]
+    [bounds.xMax, W]
   );
   const y = useCallback(
     (v: number) =>
       H - PAD.b - ((v - bounds.yMin) / (bounds.yMax - bounds.yMin)) * (H - PAD.t - PAD.b),
-    [bounds.yMin, bounds.yMax]
+    [bounds.yMin, bounds.yMax, H]
   );
   const invX = useCallback(
     (px: number) => ((px - PAD.l) / (W - PAD.l - PAD.r)) * (bounds.xMax || 1),
-    [bounds.xMax]
+    [bounds.xMax, W]
   );
 
   const onMove = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
@@ -648,7 +697,7 @@ function Chart({
     // The SVG scales to its box; map client px into viewBox units.
     const vx = ((e.clientX - r.left) / r.width) * W;
     setHoverX(vx >= PAD.l && vx <= W - PAD.r ? vx : null);
-  }, []);
+  }, [W]);
 
   const readout = useMemo(() => {
     if (hoverX == null || !series.length) return null;
@@ -697,7 +746,7 @@ function Chart({
 
   if (!series.length) {
     return (
-      <div style={{ ...S.chartBox, display: "grid", placeItems: "center", color: "#4b5563" }}>
+      <div ref={setBox} style={{ ...S.chartBox, maxHeight: boxCap, display: "grid", placeItems: "center", color: "#4b5563" }}>
         nothing selected
       </div>
     );
@@ -710,7 +759,7 @@ function Chart({
   const flip = tipLeftPct > 62;
 
   return (
-    <div style={S.chartBox}>
+    <div ref={setBox} style={{ ...S.chartBox, maxHeight: boxCap }}>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
@@ -861,6 +910,10 @@ const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
 const S: Record<string, React.CSSProperties> = {
   // Fixed to the viewport: the page itself never scrolls, only the run list.
   page: {
+    // border-box or the padding is ADDED to 100vh and the page is 40px taller
+    // than the viewport — with overflow:hidden that silently ate the bottom
+    // of whatever the chart column ended on.
+    boxSizing: "border-box",
     height: "100vh",
     display: "flex",
     flexDirection: "column",
@@ -870,7 +923,10 @@ const S: Record<string, React.CSSProperties> = {
     fontFamily: mono,
     padding: 20,
   },
-  header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexShrink: 0 },
+  // Stacked layout: the page itself becomes the (vertical only) scroller, so
+  // the two columns can sit one above the other instead of being clipped.
+  pageNarrow: { height: "auto", minHeight: "100vh", overflow: "hidden auto", padding: 14 },
+  header: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 16, flexShrink: 0 },
   back: { color: "#6b7280", fontSize: 12 },
   title: { fontSize: 15, fontWeight: 700, color: "#e5e7eb" },
   sub: { fontSize: 11, color: "#6b7280" },
@@ -888,9 +944,13 @@ const S: Record<string, React.CSSProperties> = {
   },
   // min-height:0 is what lets the flex children actually scroll instead of
   // stretching the page.
-  body: { display: "flex", gap: 20, flex: 1, minHeight: 0 },
-  listCol: { display: "flex", flexDirection: "column", width: 330, flexShrink: 0, minHeight: 0 },
-  listHead: { display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexShrink: 0 },
+  body: { display: "flex", gap: 20, flex: 1, minHeight: 0, minWidth: 0 },
+  bodyNarrow: { flexDirection: "column", gap: 16, flex: "none" },
+  listCol: { display: "flex", flexDirection: "column", width: 330, flexShrink: 0, minHeight: 0, minWidth: 0 },
+  // Stacked, the list keeps a scroller of its own — capped, so the chart is
+  // still a thumb-flick away however many runs pile up.
+  listColNarrow: { width: "auto", flex: "none", maxHeight: "34vh" },
+  listHead: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 8, flexShrink: 0 },
   colLabel: { fontSize: 11, color: "#9ca3af", letterSpacing: 0.4 },
   list: {
     display: "flex",
@@ -901,7 +961,14 @@ const S: Record<string, React.CSSProperties> = {
     minHeight: 0,
     paddingRight: 6,
   },
-  card: { borderRadius: 8, padding: "10px 12px", background: "#0f141b", cursor: "pointer", flexShrink: 0 },
+  card: {
+    borderRadius: 8,
+    padding: "10px 12px",
+    background: "#0f141b",
+    cursor: "pointer",
+    flexShrink: 0,
+    overflowWrap: "anywhere",
+  },
   cardTop: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
   swatch: { width: 11, height: 11, borderRadius: 3, cursor: "pointer", padding: 0 },
   name: { fontSize: 12.5, fontWeight: 700 },
@@ -935,8 +1002,13 @@ const S: Record<string, React.CSSProperties> = {
   tagBase: { background: "transparent", fontWeight: 700 },
   dim: { color: "#6b7280" },
   shipped: { fontSize: 10, color: "#d1d5db", marginTop: 8 },
-  chartCol: { flex: 1, minWidth: 420, display: "flex", flexDirection: "column", minHeight: 0 },
-  chartHead: { display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexShrink: 0 },
+  // minWidth MUST be 0, not a floor: a flex child that cannot shrink past its
+  // content pushes the column off the right edge, and `page`'s overflow:hidden
+  // then clips it with no scrollbar to reach it. The NARROW_PX stack is what
+  // keeps the column readable, not a minimum width.
+  chartCol: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 },
+  chartColNarrow: { flex: "none", height: "58vh", minHeight: 320 },
+  chartHead: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 8, flexShrink: 0 },
   tab: {
     fontFamily: mono,
     fontSize: 10,
@@ -973,14 +1045,18 @@ const S: Record<string, React.CSSProperties> = {
   tr: { cursor: "pointer", borderBottom: "1px solid #111827" },
   td: { padding: "4px 8px", color: "#c9d0d8" },
   num: { textAlign: "right", fontVariantNumeric: "tabular-nums" },
+  // The box takes the column's leftover height and the svg is drawn at that
+  // size, so the chart fits both ways round instead of deriving its height
+  // from a fixed aspect and shoving the note below it off the viewport.
   chartBox: {
     position: "relative",
     background: "#0f141b",
     border: "1px solid #1f2937",
     borderRadius: 8,
-    flexShrink: 0,
+    flex: 1,
+    minHeight: 160,
   },
-  svg: { width: "100%", height: "auto", display: "block", cursor: "crosshair" },
+  svg: { width: "100%", height: "100%", display: "block", cursor: "crosshair" },
   axis: { fill: "#4b5563", fontSize: 9, fontFamily: mono },
   tip: {
     position: "absolute",
@@ -1001,5 +1077,5 @@ const S: Record<string, React.CSSProperties> = {
   tipRaw: { fontSize: 9, color: "#6b7280", whiteSpace: "nowrap" },
   tipEnded: { fontSize: 9.5, color: "#6b7280", whiteSpace: "nowrap" },
   tipFoot: { fontSize: 9, color: "#4b5563", marginTop: 5 },
-  note: { fontSize: 10.5, color: "#6b7280", marginTop: 8, lineHeight: 1.7, maxWidth: 640 },
+  note: { fontSize: 10.5, color: "#6b7280", marginTop: 8, lineHeight: 1.7, maxWidth: 640, flexShrink: 0 },
 };
