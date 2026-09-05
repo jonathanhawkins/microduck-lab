@@ -11,6 +11,12 @@ Per seed: toys in the basket / total, picks, deliveries, falls, grasp
 attempts and misses, and how long it took to finish or give up. Headless,
 the same World the /sim page streams, so a number here is a number you
 can watch there (`playroom` scenario, brain `tidy`).
+
+Every fall is also filed under the brain state it happened in and under
+whether the duck was holding a toy, next to the true trunk metres walked
+laden and unladen (roadmap Track 12 step 1: is it the carry that falls?).
+The summary pools the states and prints laden vs unladen falls per 100 m,
+so the benchmark answers that question every time it runs.
 """
 
 from __future__ import annotations
@@ -44,6 +50,12 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
     brain = REGISTRY.make("tidy", p=TidyParams(loop_closure=loop_closure))
     t0 = time.time()
     states = []
+    # Track 12 step 1: each fall filed by state and by `holding`, and the
+    # trunk metres walked in each condition, so falls come out as a rate per
+    # laden / unladen metre and not as one integer.
+    falls_by_state: dict[str, int] = {}
+    falls_laden = falls_unladen = 0
+    m_laden = m_unladen = 0.0
     while w.t < seconds:
         tof, det = d.tof.last, d.detector.last
         s = Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
@@ -54,7 +66,25 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
         w.apply_intent(d, intent)
         if d.skill is None:
             d.set_cmd(w.data, intent.twist, intent.head)
+        held, falls_before = d.holding is not None, d.falls
+        pos_before = d.trunk_pos(w.data)[:2].copy()
         w.step()
+        if d.falls > falls_before:
+            # The fall belongs to the state the brain was in on this step
+            # (brain.state does not change inside w.step) and to what the
+            # duck held going in — the respawn releases the toy. The step's
+            # displacement is the respawn teleport, not walking: not counted.
+            falls_by_state[brain.state] = falls_by_state.get(brain.state, 0) + 1
+            if held:
+                falls_laden += 1
+            else:
+                falls_unladen += 1
+        else:
+            dm = float(np.hypot(*(d.trunk_pos(w.data)[:2] - pos_before)))
+            if held:
+                m_laden += dm
+            else:
+                m_unladen += dm
         if not states or states[-1][1] != brain.state:
             states.append((round(w.t, 1), brain.state))
             if not quiet:
@@ -66,15 +96,58 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
             "seconds": seconds,
             "inBasket": score["inBasket"], "picked": brain.picked,
             "delivered": brain.delivered, "falls": d.falls, "attempts": d.grasp_attempts,
+            "falls_by_state": falls_by_state, "falls_laden": falls_laden, "falls_unladen": falls_unladen,
+            "m_laden": round(m_laden, 2), "m_unladen": round(m_unladen, 2),
             "grasps": d.grasp_successes, "givenUp": sorted(brain.given_up),
             "simSeconds": round(w.t, 1), "wallSeconds": round(time.time() - t0, 1),
             "done": brain.state == "done", "transitions": len(states)}
 
 
+def _falls_detail(r: dict) -> str:
+    """`falls 3 (drop 2, approach 1 · 1 laden)` — the by-state and laden split
+    of a row's falls, or '' for a row written before they were recorded (a
+    resumed --out file: the falls in it are still real, only unsplit)."""
+    by_state, laden = r.get("falls_by_state"), r.get("falls_laden")
+    if by_state is None or laden is None or not r["falls"]:
+        return ""
+    states = ", ".join(f"{k} {v}" for k, v in sorted(by_state.items(), key=lambda kv: (-kv[1], kv[0])))
+    return f" ({states} · {laden} laden)"
+
+
 def _seed_line(r: dict) -> str:
+    m = ("" if r.get("m_laden") is None
+         else f" · walked {r['m_laden']:.0f} m laden / {r['m_unladen']:.0f} m unladen")
     return (f"seed {r['seed']}: {r['inBasket']}/{r['toys']} in the basket · picked {r['picked']} · delivered {r['delivered']}"
-            f" · grasps {r['grasps']}/{r['attempts']} · falls {r['falls']} · {r['simSeconds']} s sim"
+            f" · grasps {r['grasps']}/{r['attempts']} · falls {r['falls']}{_falls_detail(r)}{m} · {r['simSeconds']} s sim"
             f"{' · done' if r['done'] else ''}{' · gave up ' + ','.join(r['givenUp']) if r['givenUp'] else ''}")
+
+
+def _per_100m(falls: int, metres: float) -> str:
+    return "—" if metres <= 0 else f"{100.0 * falls / metres:.2f}"
+
+
+def summary_lines(rows: list[dict]) -> list[str]:
+    """The battery's summary: tidied fraction and falls/run, then the falls
+    pooled by state and the laden vs unladen rate per 100 m. Rows from before
+    the split was recorded are counted in falls/run and left out of the
+    pool, and the line says over how many seeds the pool was taken."""
+    frac = float(np.mean([r["inBasket"] / r["toys"] for r in rows]))
+    lines = [f"mean tidied {frac:.2f} · falls {np.mean([r['falls'] for r in rows]):.2f}/run"]
+    split = [r for r in rows if r.get("falls_by_state") is not None and r.get("m_laden") is not None]
+    if not split:
+        return lines
+    pooled: dict[str, int] = {}
+    for r in split:
+        for k, v in r["falls_by_state"].items():
+            pooled[k] = pooled.get(k, 0) + v
+    n = "" if len(split) == len(rows) else f" (over {len(split)} of {len(rows)} seeds)"
+    states = " · ".join(f"{k} {v}" for k, v in sorted(pooled.items(), key=lambda kv: (-kv[1], kv[0]))) or "none"
+    lines.append(f"falls by state{n}: {states}")
+    fl, fu = sum(r["falls_laden"] for r in split), sum(r["falls_unladen"] for r in split)
+    ml, mu = sum(r["m_laden"] for r in split), sum(r["m_unladen"] for r in split)
+    lines.append(f"laden {fl} falls / {ml:.0f} m = {_per_100m(fl, ml)} per 100 m · "
+                 f"unladen {fu} falls / {mu:.0f} m = {_per_100m(fu, mu)} per 100 m")
+    return lines
 
 
 def _run_one_args(a: tuple) -> dict:
@@ -145,8 +218,8 @@ def main() -> None:
     if args.json:
         print(json.dumps(rows))
         return
-    frac = float(np.mean([r["inBasket"] / r["toys"] for r in rows]))
-    print(f"mean tidied {frac:.2f} · falls {np.mean([r['falls'] for r in rows]):.2f}/run")
+    for line in summary_lines(rows):
+        print(line)
 
 
 if __name__ == "__main__":

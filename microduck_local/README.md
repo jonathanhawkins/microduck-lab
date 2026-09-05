@@ -2231,6 +2231,27 @@ out of two halves. This was written after a cloud container was reclaimed
 twice mid-battery and, because the results were buffered to the end, took
 about ninety minutes of measurement with it both times.
 
+**Every fall is filed by state and by payload** (roadmap Track 12 step 1:
+does the walker fall *because* it is carrying?). A result row carries
+`falls_by_state` (brain state at the moment of the fall), `falls_laden` /
+`falls_unladen` (was the duck holding a toy on that step) and `m_laden` /
+`m_unladen` (true trunk metres walked in each condition, the respawn
+teleport left out). Each seed line prints the split — `falls 1 (deliver 1
+· 1 laden) · walked 9 m laden / 32 m unladen` — and the summary pools the
+states and gives laden vs unladen falls per 100 m:
+
+```
+mean tidied 0.81 · falls 0.38/run
+falls by state: backoff 2 · deliver 1
+laden 1 falls / 109 m = 0.92 per 100 m · unladen 2 falls / 212 m = 0.94 per 100 m
+```
+
+The keys are additive: an `--out` file written before they existed still
+resumes, its rows still count in falls/run, and the pooled lines say over
+how many seeds they were taken. The 64-seed answer (zero laden falls in
+1.7 km under ideal and datasheet drift; the falls live at the basket rim)
+is in `docs/roadmap.md` under Track 12.
+
 What is real and what is a model here, so nobody mistakes one for the other:
 
 - **Grasp is an attachment event**, not contact physics (`World.grasp`): when

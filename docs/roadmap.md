@@ -1103,6 +1103,122 @@ square up → kick is the whole argument for this behavior.
 
 ---
 
+## Track 12 — does the carry need its own walker? (sim-roadmap 12.5) — CLOSED NEGATIVE (2026-09-04)
+
+Context: the playroom's pick-up stack is the shipped `alpha_walking` walker,
+the shipped `alpha_ground_pick.onnx` as a hard-swapped skill, and the
+hand-written `tidy` state machine (`brain/tidy.py`). Nothing learned in this
+repo tidies — every brain under `microduck_local/brains/` is a `follow`
+brain, and `train-brain` has no tidy task. So "a better model for pick-up"
+means one of the open Track 12 items, and 12.5, a carry-walk reflex, is the
+one with a ready-made benchmark (`eval-tidy`) and a walker slot to drop it
+into (`eval-tidy --walker`, `trace-tidy --walker`, `walker-facts --walker`).
+
+What is already known, and it cuts against the item:
+
+- `docs/sim-roadmap.md` records 12.5 as **not needed** — "the shipped walker
+  carries a 20 g block". The heaviest toy IS 20 g (`PICKABLE_KINDS`: brick
+  2.5 g, block 20 g, sock 20 g); upstream's carry DR is 10–40 g.
+- The one traced fall study (README, the `backoff_back_s` A/B, 80 seeds) put
+  the falls in **`approach`** and at the basket rim — the 6 cm rim sits under
+  the ToF guard until the last 0.26 m — not in `carry`. Falls per run rise
+  0.31 → 0.56 → 0.75 across ideal → datasheet → hostile odometry, which is
+  a heading/route effect, not a payload effect, unless step 1 says otherwise.
+- **Locomotion training here is a clone, not PPO**: from-scratch PPO stands
+  still (0.001 m/s), `uv run distill` clones the walker to 0 falls in ~1 min,
+  and PPO on top of the clone is a resolved bad trade over 14 paired seeds
+  (fall rate +0.44). A carry variant would have to be a clone with a
+  payload in the loop, and it would have to clear the same bar: judged by
+  `select-run` (falls as a rejection floor), never `ep_rew`.
+
+So the item was a measurement first and a training run only if the
+measurement earned it. It did not: **the answer is below, and the next
+lever for the tidy loop is the basket rim, not the walker.** The scratch
+tally that produced the table is gone; its durable version is in
+`eval-tidy` itself (2026-09-04): every result row carries
+`falls_by_state`, `falls_laden` / `falls_unladen` and `m_laden` /
+`m_unladen` (true trunk metres, the respawn teleport excluded), each seed
+line prints the split (`falls 1 (deliver 1 · 1 laden)`), and the summary
+pools the states and prints laden vs unladen falls per 100 m. Rows in an
+older `--out` file still resume and still count in falls/run; the pool
+says how many seeds it covered. So the table below is re-measured by
+every battery from now on — `eval-tidy --seeds 16 --seconds 300 --odom hostile`
+is the command, and a laden rate above the unladen one is what would
+reopen this item.
+
+- [x] **Step 1 — count the falls by state and by `holding` — DONE, and it
+      says no: the walker does not fall because it is carrying.** Ran the
+      benchmark loop (`eval-tidy`'s own `run_one` shape, via `trace_tidy.senses_of`)
+      with a per-step tally of state, `holding`, true trunk metres and each
+      fall, **64 seeds × 300 s × 6 toys per odometry preset**, ~5 s a seed
+      on the M-series Mac (2026-09-04, upstream models at the pinned shas):
+
+      | odometry | tidied | falls/run | laden falls / m | unladen falls / m | laden per 100 m | unladen per 100 m |
+      |---|---:|---:|---:|---:|---:|---:|
+      | ideal | 0.875 | 0.42 | **0** / 844 | 27 / 1770 | **0.00** | 1.53 ± 0.29 |
+      | datasheet | 0.888 | 0.39 | **0** / 873 | 25 / 1751 | **0.00** | 1.43 ± 0.29 |
+      | hostile | 0.818 | 0.53 | 5 / 886 | 29 / 1730 | 0.56 ± 0.25 | 1.68 ± 0.31 |
+
+      **Zero falls in 1.7 km of laden walking** under ideal and datasheet
+      drift, and under hostile drift the laden rate is a third of the
+      unladen one — every one of those five was in `deliver`, i.e. the
+      blind final leg at the basket rim, not the carry. The falls live at
+      the basket: by state, pooled over the three presets (81 falls),
+      `backoff` 29, `drop` 27, `deliver` 5 — **75% within a metre of the
+      rim** — then `approach` 13, `explore` 8, `scan` 3, `blind` 1. (A
+      `drop` fall counts as unladen because the weld is already released;
+      it is the same rim event.) The tidied fractions reproduce the README
+      benchmark's 0.89 / 0.84 / 0.79 within the ±0.03 run-to-run band.
+
+      **Verdict: the shipped walker carries every toy in the playroom
+      (2.5–20 g) without a single payload-attributable fall.** 12.5 stays
+      closed, now with a number behind it rather than a 20 g block. The
+      fall budget is the basket rim, which is 12.6/12.7 work in the brain
+      (the release stance and the retreat), not a reflex.
+      Original plan for this step:
+      `eval-tidy` records one `falls` integer per seed; `trace-tidy` prints
+      each fall with its state and `holding`. Run the trace over the
+      benchmark seeds under the drift preset where falls are highest:
+      `for s in $(seq 0 15); do uv run trace-tidy --seed $s --odom datasheet --seconds 300 --history 0; done`
+      and tally `=== FALL` lines by `state` and by `holding`. (Cleaner: add
+      a per-state fall count and metres-walked-while-holding to the
+      `eval-tidy` result row, so the 16-seed benchmark answers this every
+      time it runs — done, see above.)
+      **The number:** falls per carried metre vs falls per unladen metre.
+      If the laden rate is not above the unladen rate at n ≥ 16 seeds,
+      **close this item negative** — the walker carries the payload and the
+      falls belong to the route/rim work, which is a brain fix (12.4/12.7),
+      not a reflex.
+- [x] **Step 2 — NOT RUN, step 1 closed it** (0 laden falls; a payload
+      clone has nothing to fix). Kept for the day the toys get heavier
+      than 20 g or the carry pose changes:
+      Add a held-mass domain randomisation to `walk_env.py` next to the
+      trunk-mass DR (a 10–40 g mass on the head/jaw body, matching upstream,
+      plus the held head pose the tidy brain commands during carry), then
+      `uv run distill --teacher ../microduck/policies/alpha_walking.onnx --run-name carry-clone`
+      with that DR on, `uv run export-walk runs/carry-clone`, and judge it
+      by `uv run select-run` before anything else — a clone that falls
+      unladen is rejected there, whatever it does laden. Do NOT fine-tune
+      with PPO on top unless the clone itself fails laden; that route is
+      the recorded bad trade above. Note the clone learns the teacher's
+      mapping, not a new gait: the bet is that the teacher's DR already
+      covers 20 g and the clone only has to reproduce it under the held
+      pose, so if step 1 said the walker falls laden, expect this to
+      confirm the failure rather than fix it, and the fix moves to the GPU
+      stack (an mjlab cfg with mouth-payload DR, the sim2real route).
+      **The number:** `eval-tidy --seeds 16 --seconds 300 --odom datasheet --walker runs/carry-clone/policy.onnx`
+      paired against the shipped walker on the same seeds — falls/run
+      (must not rise; the effect that replicated in the 80-seed study was
+      +0.35 falls at p = 0.002, so that is the scale a real change shows at)
+      and toys in the basket (the 16-seed benchmark sits at 4.94–5.31 of 6;
+      the run-to-run band is about ±0.3 toys, so a win has to clear that).
+      Then **render and look** (`render-rollout --policy runs/carry-clone/policy.onnx --behavior stand`
+      and a `trace-tidy --walker` run) before claiming anything.
+- [x] **NOT RUN, same reason** — the carry-speed cap only mattered if
+      the carry fell, and it does not. `carry` walks at the brain's normal twist;
+      a `TidyParams` carry-speed cap is a one-line A/B on the same
+      `eval-tidy` seeds and needs no training. Run it before step 2.
+
 ## Later / parked
 
 - **Port `find_ball` to an mjlab cfg** and retrain on GPU in upstream

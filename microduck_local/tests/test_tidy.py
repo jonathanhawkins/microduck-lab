@@ -483,3 +483,38 @@ def test_the_stale_fix_and_the_stop_pad_ship_as_a_MATCHED_PAIR():
     # toy radius - i.e. the beak lands just beyond the toy's centre.
     stop = p.reach_ahead + p.reach_pad
     assert 0.06 < stop < PICK_REACH_AHEAD, "the stop must sit inside the beak's reach"
+
+
+def test_eval_tidy_files_each_fall_by_state_and_by_holding():
+    """Track 12 step 1 lives in the benchmark row, not a scratch tally: every
+    fall is filed under the brain state and under whether the duck was
+    holding, next to the trunk metres walked in each condition, so the
+    battery answers "is it the carry that falls?" every time it runs."""
+    import json
+    import math
+
+    from microduck_local.eval_tidy import _seed_line, run_one, summary_lines
+
+    r = run_one(seed=0, toys=2, seconds=8.0)
+    for k in ("falls_by_state", "falls_laden", "falls_unladen", "m_laden", "m_unladen"):
+        assert k in r, k
+    assert r["falls"] == r["falls_laden"] + r["falls_unladen"]
+    assert sum(r["falls_by_state"].values()) == r["falls"]
+    assert all(isinstance(k, str) and v > 0 for k, v in r["falls_by_state"].items())
+    assert math.isfinite(r["m_laden"]) and math.isfinite(r["m_unladen"])
+    assert r["m_laden"] >= 0 and r["m_unladen"] > 0, "eight seconds of scanning moves the trunk"
+    json.loads(json.dumps(r))                                   # the --out JSON-line shape
+    assert "walked" in _seed_line(r)
+
+    # A row written before the split existed (a resumed --out file) still
+    # prints and still counts in falls/run; only the pool leaves it out.
+    old = {k: v for k, v in r.items()
+           if k not in ("falls_by_state", "falls_laden", "falls_unladen", "m_laden", "m_unladen")}
+    assert "walked" not in _seed_line(old)
+    fell = {**r, "falls": 3, "falls_by_state": {"drop": 2, "approach": 1}, "falls_laden": 1, "falls_unladen": 2,
+            "m_laden": 10.0, "m_unladen": 40.0}
+    assert "falls 3 (drop 2, approach 1 · 1 laden)" in _seed_line(fell)
+    lines = summary_lines([fell, old])
+    assert lines[1] == "falls by state (over 1 of 2 seeds): drop 2 · approach 1"
+    assert lines[2] == "laden 1 falls / 10 m = 10.00 per 100 m · unladen 2 falls / 40 m = 5.00 per 100 m"
+    assert len(summary_lines([old])) == 1
