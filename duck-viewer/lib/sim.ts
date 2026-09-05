@@ -236,6 +236,25 @@ export const LEARNED_GROUPS: [key: string, label: string][] = [
   ["other", "Other"],
 ];
 
+/** The group a new user should meet: brains that ship, not experiments about the trainer. */
+export const SHIPPED_GROUP = "shipped-followers";
+
+/**
+ * What the brain menu offers. By default only the shipped brains (plus
+ * whatever the duck is on right now, so the select never shows blank);
+ * with `showAll`, every run under its heading. `hidden` is the count the
+ * toggle should promise — 44 experiment runs is a fact, not a menu.
+ */
+export function menuBrains(
+  learned: LearnedInfo[],
+  current: string | null,
+  showAll: boolean,
+): { groups: [label: string, brains: LearnedInfo[]][]; hidden: number } {
+  if (showAll) return { groups: groupLearned(learned), hidden: 0 };
+  const keep = learned.filter((b) => b.group === SHIPPED_GROUP || `learned:${b.name}` === current);
+  return { groups: groupLearned(keep), hidden: learned.length - keep.length };
+}
+
 /** Learned brains filed under their group heading, in LEARNED_GROUPS order;
  *  an unknown or missing group files under "Other". */
 export function groupLearned(learned: LearnedInfo[]): [label: string, brains: LearnedInfo[]][] {

@@ -25,3 +25,32 @@ describe("groupLearned", () => {
     expect(LEARNED_GROUPS.at(-1)![0]).toBe("other");
   });
 });
+
+import { menuBrains } from "./sim";
+
+describe("menuBrains", () => {
+  const runs: LearnedInfo[] = [
+    b("follow-v4", "shipped-followers", "Follower v4"),
+    b("follow-v1", "shipped-followers", "Follower v1"),
+    b("p-n256-s31", "capacity"), b("p-n256-s32", "capacity"),
+    b("z1-s81", "null-pair"),
+  ];
+
+  it("offers only the shipped brains by default, and says how many it hid", () => {
+    const m = menuBrains(runs, "wander", false);
+    expect(m.groups.map(([label, bs]) => [label, bs.length])).toEqual([["Followers (shipped)", 2]]);
+    expect(m.hidden).toBe(3);
+  });
+
+  it("never hides the brain the duck is on", () => {
+    const m = menuBrains(runs, "learned:z1-s81", false);
+    expect(m.groups.map(([label]) => label)).toEqual(["Followers (shipped)", "Null pair (seeds 81–84)"]);
+    expect(m.hidden).toBe(2);
+  });
+
+  it("shows everything when asked", () => {
+    const m = menuBrains(runs, null, true);
+    expect(m.groups.length).toBe(3);
+    expect(m.hidden).toBe(0);
+  });
+});

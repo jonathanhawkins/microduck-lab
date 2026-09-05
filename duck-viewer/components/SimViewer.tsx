@@ -29,7 +29,7 @@ import {
   depthColor,
   fetchRing,
   fetchScenarios,
-  groupLearned,
+  menuBrains,
   deleteScenario,
   fetchWorld,
   frameEvents,
@@ -1074,6 +1074,10 @@ export default function SimViewer() {
   const [lessonOpen, setLessonOpen] = useState(() => loadJSON("simControlsOpen", false));
   const [inspectorOpen, setInspectorOpen] = useState(() => loadJSON("simInspectorOpen", true));
   const [camOpen, setCamOpen] = useState(() => loadJSON("simCamOpen", true));
+  // The brain menu starts on the five brains that ship. The 44 experiment
+  // runs are one click away, not in the face of someone opening /sim for
+  // the first time — that list was the most daunting thing on the page.
+  const [allBrains, setAllBrains] = useState(() => loadJSON("simBrainMenuAll", false));
   const worldRef = useRef<WorldInfo | null>(null);
   worldRef.current = world;
   const [status, setStatus] = useState<{ rtf: number; mode: string; t: number; events: string[]; kbps: number; tidy: { total: number; inBasket: number; held: string[] } | null; perf: string; soccer: SimFrame["soccer"] }>({
@@ -1110,6 +1114,7 @@ export default function SimViewer() {
   useEffect(() => saveJSON("simControlsOpen", lessonOpen), [lessonOpen]);
   useEffect(() => saveJSON("simInspectorOpen", inspectorOpen), [inspectorOpen]);
   useEffect(() => saveJSON("simCamOpen", camOpen), [camOpen]);
+  useEffect(() => saveJSON("simBrainMenuAll", allBrains), [allBrains]);
 
   // Measure the top bar (it grows a row at a time as the window narrows) and
   // the stage, so the inspector can be placed below the header and capped to
@@ -1553,7 +1558,7 @@ export default function SimViewer() {
                       </option>
                     ))}
                     {world?.learned?.length
-                      ? groupLearned(world.learned).map(([label, brains]) => (
+                      ? menuBrains(world.learned, selDuck.brain.kind, allBrains).groups.map(([label, brains]) => (
                           <optgroup key={label} label={label}>
                             {brains.map((b) => (
                               <option key={b.name} value={`learned:${b.name}`} title={b.description ?? undefined}>
@@ -1569,6 +1574,18 @@ export default function SimViewer() {
                         ))}
                     {selDuck.brain.kind === "manual" && <option value="">manual</option>}
                   </select>
+                  {world?.learned?.length ? (() => {
+                    const hidden = menuBrains(world.learned, selDuck.brain.kind, allBrains).hidden;
+                    return allBrains || hidden > 0 ? (
+                      <button
+                        onClick={() => setAllBrains((v) => !v)}
+                        style={{ ...BTN, padding: "1px 6px", color: "#9aa5b1" }}
+                        title={allBrains ? "back to the brains that ship" : "the sweep and A/B runs — experiments about the trainer, filed by what they tested"}
+                      >
+                        {allBrains ? "hide experiments" : `+${hidden} experiments`}
+                      </button>
+                    ) : null;
+                  })() : null}
                   <label title="apply the brain's gaze intent to the walker's head command (the shipped walker never trained with one)">
                     <input type="checkbox" checked={selDuck.headApplied} onChange={(e) => client?.sendHead(selDuck.id, e.target.checked)} /> head
                   </label>
