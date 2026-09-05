@@ -1219,6 +1219,80 @@ reopen this item.
       a `TidyParams` carry-speed cap is a one-line A/B on the same
       `eval-tidy` seeds and needs no training. Run it before step 2.
 
+## Track 12 — the basket rim: where the tidy loop's falls are — MEASURED, no knob found (2026-09-04)
+
+Follow-on to the carry item above, which put 75% of the tidy loop's falls
+within a metre of the basket. Traced six of them (`trace-tidy --history 2.5`)
+and they are ONE event: the duck stops at the rim, releases, and within a
+second pitches nose-down over the rim — three of the "backoff" falls were
+already pitching during the drop. Then instrumented every drop over 2 × 64
+seeds (716 drops, ideal + datasheet odometry): trunk distance at the stop,
+MuJoCo contacts between duck and basket, peak forward gravity, landing.
+
+- [x] **What separates the 35 drops that toppled (4.9%) from the 681 that
+      did not.** Both toes on the basket wall (33/35 left, 32/35 right;
+      clean drops 18% / 30%), a stop a centimetre closer (true trunk distance
+      median 0.225 vs 0.237), and 3 cm of forward creep during the stand
+      (min distance 0.196 vs 0.226). By stop distance: **0 of 230 toppled at
+      ≥ 0.24, 18 of 431 in 0.225–0.24, 16 of 53 in 0.21–0.225.** The
+      release is not the push — `beak: open` only drops the weld, no servo
+      moves — and 34 of the 35 toppled drops had already landed the toy IN.
+      So a topple costs a respawn (spawn point, odometry reset, a fresh
+      search) and not a toy.
+- [x] **Move the stop out? NO — toys.** 64 paired datasheet seeds, the
+      baseline arm reproducing the README benchmark (5.33 of 6, 0.39 falls):
+
+      | `basket_reach` | tidied | falls/run | topple % | landed in % | Δtoys [95% CI] | Δfalls [95% CI] |
+      |---|---:|---:|---:|---:|---|---|
+      | 0.20 | 0.911 | 2.06 | 30.0 | 92.6 | +0.14 [−0.08, +0.36] | +1.67 [+1.31, +2.03] |
+      | 0.21 | 0.893 | 1.20 | 15.8 | 95.3 | +0.03 [−0.17, +0.23] | +0.81 [+0.53, +1.09] |
+      | **0.22** | 0.888 | 0.39 | 5.2 | 94.2 | — | — |
+      | 0.23 | 0.794 | 0.16 | 1.3 | 82.0 | −0.56 [−0.80, −0.31] | −0.23 [−0.42, −0.06] |
+      | 0.24 | 0.638 | 0.14 | 0.8 | 64.4 | −1.50 [−1.88, −1.14] | −0.25 [−0.41, −0.09] |
+      | 0.25 | 0.474 | 0.11 | 0.0 | 48.0 | −2.48 [−2.81, −2.17] | −0.28 [−0.45, −0.11] |
+
+      A centimetre out removes most of the topples and drops half a toy on
+      the rim; a centimetre in buys nothing measurable and triples the
+      falls. **0.22 is the knee and stays.** `neck_reach` 0.6 (pitch the neck
+      back to push the tip in) is worse at every stop: 68% landed at 0.22,
+      38% at 0.24, 20% at 0.25 — the earlier "ships OFF" verdict, now with
+      the mechanism (it is the landing, not the stance).
+- [x] **Leave the rim faster? NO.** Two new `TidyParams`, both defaulting
+      to today's behaviour: `backoff_clear_s` (a `gait.back_up` reverse before
+      the sidestep, so the toes come off the wall first) and `drop_s` (the
+      stand after the release, was a hard-coded 0.6). Same 64 seeds:
+
+      | arm | tidied | falls/run | topple % | landed % | Δtoys [95% CI] | Δfalls [95% CI] |
+      |---|---:|---:|---:|---:|---|---|
+      | clear 0.3 s | 0.833 | 0.34 | 4.2 | 90.1 | −0.33 [−0.53, −0.11] | −0.05 [−0.20, +0.11] |
+      | clear 0.5 s | 0.852 | 0.36 | 4.2 | 90.6 | −0.22 [−0.48, +0.03] | −0.03 [−0.20, +0.14] |
+      | clear 0.8 s | 0.859 | 0.36 | 4.5 | 93.5 | −0.17 [−0.41, +0.05] | −0.03 [−0.19, +0.12] |
+      | drop 0.2 s | 0.844 | 0.34 | 4.2 | 92.4 | −0.27 [−0.52, −0.02] | −0.05 [−0.22, +0.12] |
+      | drop 0.2 + clear 0.5 | 0.872 | 0.66 | 7.6 | 94.1 | −0.09 [−0.31, +0.11] | **+0.27 [+0.08, +0.45]** |
+      | drop 0.2 + clear 0.8 | 0.870 | 0.38 | 5.1 | 94.9 | −0.11 [−0.33, +0.09] | −0.02 [−0.22, +0.17] |
+
+      The topple rate does not move (it is decided in the stop stride,
+      before any of this runs), the reverse costs landings, and a short
+      stand plus a short reverse nearly doubles the falls. Both parameters
+      stay at their defaults; the numbers are in `tidy.py` next to them.
+- [ ] **What is left: the stop stride, not the stop distance.** The topple
+      is set by where the toes land in the LAST step — a centimetre of stop
+      spread (p10–p90 of the true stop is 0.227–0.247) is the whole
+      difference between 0% and 30%. Three candidates, none tried:
+      (a) tighten the stop spread — the `aim` look's estimate error is what
+      spreads it; more standing fixes or a closer `aim_range`, measured as
+      the p10 of the true stop distance at the same median; (b) a stop
+      *stride* the walker will actually do — a `walker-facts` probe of how
+      far the toes land past the trunk when the command goes 0.25 → 0 mid
+      stride, and whether a 2-step ramp (0.25 → 0.15 → 0) lands them
+      shorter without stalling in the dead band; (c) accept the falls — at
+      0.39 a run they cost ~8 s of 300, about 0.15 toys, which is inside
+      the benchmark's run-to-run band, so a fix has to be free to be worth
+      shipping. The per-drop instrumentation (stop distance, duck–basket
+      contacts, landing) was a scratch script; `eval-tidy` now carries the
+      per-state fall split, and a per-drop record there would make (a) and
+      (b) measurable with the benchmark alone.
+
 ## Later / parked
 
 - **Port `find_ball` to an mjlab cfg** and retrain on GPU in upstream

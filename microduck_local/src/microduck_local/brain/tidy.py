@@ -231,6 +231,49 @@ class TidyParams:
     # the wrong frame.
     backoff_back_s: float = 0.0
     backoff_back_wz: float = 0.0
+    # The rim topple (docs/roadmap.md, "the basket rim"): 5% of drops end
+    # with the duck pitching nose-down over the rim within a second of the
+    # release, and that one event is ~70% of every fall in a tidy run (81
+    # falls over 3 x 64 seeds: backoff 29, drop 27, deliver 5). Every one
+    # of them had BOTH toes on the basket wall (34 of 35 instrumented) and
+    # had stopped a centimetre closer than the clean drops (true trunk
+    # distance 0.225 against 0.237); no drop that stopped at 0.24 or further
+    # toppled (0 of 230), and 16 of 53 inside 0.225 did.
+    #
+    # `basket_reach` cannot move either way, measured over 64 paired
+    # datasheet seeds (toys of 6 / falls a run / topple % / landed in %):
+    #
+    #   0.20  5.47 / 2.06 / 30.0 / 92.6      0.23  4.77 / 0.16 /  1.3 / 82.0
+    #   0.21  5.36 / 1.20 / 15.8 / 95.3      0.24  3.83 / 0.14 /  0.8 / 64.4
+    #   0.22  5.33 / 0.39 /  5.2 / 94.2      0.25  2.84 / 0.11 /  0.0 / 48.0
+    #
+    # Out loses toys on the rim (-0.56 at 0.23, CI [-0.80, -0.31]; -1.50
+    # at 0.24), in triples then quintuples the falls for +0.03 / +0.14
+    # toys (CIs straddle 0): a fall costs time, a rim miss costs a toy,
+    # and 0.22 is the knee. `neck_reach` 0.6 on top of any stop is worse
+    # again (68% landed at 0.22, 38% at 0.24).
+    #
+    # Leaving faster does not help either, same seeds, same protocol:
+    # `backoff_clear_s` (a reverse before the sidestep, `gait.back_up`)
+    # at 0.3 / 0.5 / 0.8 s topples 4.2 / 4.2 / 4.5% of drops against 5.2
+    # and costs -0.33 / -0.22 / -0.17 toys (landed 90-93%); `drop_s` 0.2
+    # alone -0.27 toys; 0.2 with a 0.5 s reverse takes falls to 0.66 a
+    # run (+0.27, CI [+0.08, +0.45]). Both ship at today's values. What
+    # is left is the stop stride itself: the topple is decided by where
+    # the toes land in the last step, a centimetre either way.
+    drop_s: float = 0.6
+    backoff_clear_s: float = 0.0
+    # Stop on the distance to the near WALL'S PLANE, not to the basket's
+    # centre. The basket is square (ASSUMPTION: axis-aligned in the odometry
+    # frame, as the scenario builds it), so a duck coming in 30 degrees off
+    # a wall's normal has that wall 0.03 m nearer than the centre distance
+    # says, and its toes (0.045 m past the trunk at a stop) meet it.
+    # Experimental: see the roadmap's "stop stride" item.
+    basket_square: float = 0.0
+    # …or take the angle away instead: walk to a staging point on the near
+    # wall's NORMAL through the basket centre, `aim_range` out, and run the
+    # aim and the blind leg from there, head-on. Experimental (roadmap).
+    basket_normal: float = 0.0
     # Place a detection with the odometry the duck had WHEN THE FRAME WAS
     # TAKEN, not the odometry it has now.
     #
@@ -329,6 +372,7 @@ class Tidy:
         self.basket_mem: tuple[float, float] | None = None
         self.basket_confirmed = False    # seen from close enough that the estimate is trustworthy
         self.aimed = False               # this trip's standing re-measure of the basket is done
+        self._deliver_axis = None
         self._aim_rounds = 0
         self._aim_turning = False
         self._backoff_t = 0.0
@@ -752,6 +796,7 @@ class Tidy:
 
         elif self.state == "carry":
             self.aimed = False
+            self._deliver_axis = None
             self._aim_rounds = 0
             # The basket does not move and odometry is the truth here, so a
             # basket seen up close on an earlier trip beats a fresh sighting
@@ -801,11 +846,34 @@ class Tidy:
                 basket = self._nearest(senses, "basket")
                 if basket is not None and self._update_estimate(odom, basket, p.basket_z, t) is not None:
                     self.t_seen = t
-                twist, dist, bearing = self._servo(odom, p.basket_reach)
-                if dist <= p.aim_range:
-                    twist = (0.0, 0.0, 0.0)
-                    self._aim_fixes = []
-                    self._enter("aim", t)
+                if p.basket_normal:
+                    # Head for the near wall's normal, not the centre: the
+                    # axis is latched on the first step so a 45-degree
+                    # approach does not flip between two staging points.
+                    if self._deliver_axis is None:
+                        ddx, ddy = odom[0] - self.est[0], odom[1] - self.est[1]
+                        self._deliver_axis = ((math.copysign(1.0, ddx), 0.0) if abs(ddx) >= abs(ddy)
+                                              else (0.0, math.copysign(1.0, ddy)))
+                    ax, ay = self._deliver_axis
+                    stage = (self.est[0] + ax * p.aim_range, self.est[1] + ay * p.aim_range)
+                    via = self._via_point((odom[0], odom[1]), stage)
+                    saved = self.est
+                    self.est = via if via is not None else stage
+                    twist, sdist, bearing = self._servo(odom, p.route_stop)
+                    self.est = saved
+                    # `dist` stays the CENTRE distance: the rim stop below reads it.
+                    dist = math.hypot(self.est[0] - odom[0], self.est[1] - odom[1])
+                    note += " · to the normal" + (" (via)" if via is not None else "")
+                    if via is None and sdist <= p.route_stop:
+                        twist = (0.0, 0.0, 0.0)
+                        self._aim_fixes = []
+                        self._enter("aim", t)
+                else:
+                    twist, dist, bearing = self._servo(odom, p.basket_reach)
+                    if dist <= p.aim_range:
+                        twist = (0.0, 0.0, 0.0)
+                        self._aim_fixes = []
+                        self._enter("aim", t)
             else:
                 # The last 0.2 m after the standing look: walk with gentle
                 # steering only. Alternating turn-in-place and walk here once
@@ -813,6 +881,8 @@ class Tidy:
                 # stop coasts 1 cm); a straight leg with NO steering once
                 # walked off in whatever direction the ToF guard had left it.
                 twist, dist, bearing = self._servo(odom, p.basket_reach + self.stop_margin)
+                if p.basket_square and self.est is not None:
+                    dist = max(abs(self.est[0] - odom[0]), abs(self.est[1] - odom[1]))
                 if twist[0] > p.turn_kick:
                     # …and none at all in the last few centimetres: a stop
                     # out of a steering step lunged 2–3 cm instead of the
@@ -871,7 +941,7 @@ class Tidy:
 
         elif self.state == "drop":
             beak = "open"
-            if t - self.t_state > 0.6:
+            if t - self.t_state > p.drop_s:
                 if not senses.holding:
                     self.delivered += 1
                 self.scan_turned = 0.0
@@ -901,7 +971,11 @@ class Tidy:
                 if self._prev_yaw is not None and self.scan_turned < p.backoff_turn:
                     d = odom[2] - self._prev_yaw
                     self.scan_turned += math.atan2(math.sin(d), math.cos(d))
-                if t - self.t_state < p.backoff_side_s:
+                if t - self.t_state < p.backoff_clear_s:
+                    twist = back_up()
+                    self._backoff_t = t
+                    note += " · clear"
+                elif t - self.t_state < p.backoff_clear_s + p.backoff_side_s:
                     twist = (0.0, p.backoff_side_vy, 0.0)
                     self._backoff_t = t
                     note += " · sidestep"
