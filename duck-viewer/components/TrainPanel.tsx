@@ -15,14 +15,17 @@ import {
   BrainRun,
   CurvePoint,
   fetchBrains,
-  fmtKnob,
   humanDuration,
   humanSteps,
-  KNOBS,
+  matrixRows,
+  type MatrixRow,
+  recipeChips,
   recipeDiff,
   runColor,
+  sharedKnobs,
   shippedStep,
   smooth,
+  varyingKnobs,
 } from "@/lib/train";
 
 const POLL_MS = 2000;
@@ -32,6 +35,9 @@ export default function TrainPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [metric, setMetric] = useState<"ep_rew" | "ep_len">("ep_rew");
+  // The right column is either the curves or the sweep matrix — the same
+  // runs read two ways: over time, or across the knobs that changed.
+  const [view, setView] = useState<"chart" | "matrix">("chart");
   const seeded = useRef(false);
 
   useEffect(() => {
@@ -76,11 +82,24 @@ export default function TrainPanel() {
   // The first charted run is the baseline every other card diffs against:
   // it shows its whole recipe, the rest show only the knobs they changed.
   const baseline = shown[0] ?? null;
+  // A run's colour is its position in the list. One lookup, built once per
+  // poll, shared by the cards, the chart and the matrix.
+  const colors = useMemo(() => new Map(runs.map((r, i) => [r.name, runColor(r.name, i)])), [runs]);
   const toggle = useCallback((name: string) => {
     setHidden((h) => {
       const n = new Set(h);
       if (n.has(name)) n.delete(name);
       else n.add(name);
+      return n;
+    });
+  }, []);
+
+  const toggleMany = useCallback((names: string[]) => {
+    setHidden((h) => {
+      const n = new Set(h);
+      // Any member hidden → show them all; else hide them all.
+      const show = names.some((x) => n.has(x));
+      for (const x of names) if (show) n.delete(x); else n.add(x);
       return n;
     });
   }, []);
@@ -137,11 +156,11 @@ export default function TrainPanel() {
             </div>
             {/* The one scrolling region on the page. */}
             <div style={S.list}>
-              {runs.map((r, i) => (
+              {runs.map((r) => (
                 <RunCard
                   key={r.name}
                   run={r}
-                  color={runColor(r.name, i)}
+                  color={colors.get(r.name)!}
                   hidden={hidden.has(r.name)}
                   baseline={baseline}
                   onToggle={() => toggle(r.name)}
@@ -153,26 +172,44 @@ export default function TrainPanel() {
           <section style={S.chartCol}>
             <div style={S.chartHead}>
               <span style={S.colLabel}>
-                {metric === "ep_rew" ? "episode reward" : "episode length"}
+                {view === "matrix" ? "sweep matrix" : metric === "ep_rew" ? "episode reward" : "episode length"}
               </span>
               <span style={{ flex: 1 }} />
-              {(["ep_rew", "ep_len"] as const).map((m) => (
+              {view === "chart" &&
+                (["ep_rew", "ep_len"] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setMetric(m)}
+                    style={{ ...S.tab, ...(metric === m ? S.tabOn : null) }}
+                  >
+                    {m === "ep_rew" ? "reward" : "ep len"}
+                  </button>
+                ))}
+              <span style={{ width: 10 }} />
+              {(["chart", "matrix"] as const).map((v) => (
                 <button
-                  key={m}
-                  onClick={() => setMetric(m)}
-                  style={{ ...S.tab, ...(metric === m ? S.tabOn : null) }}
+                  key={v}
+                  onClick={() => setView(v)}
+                  style={{ ...S.tab, ...(view === v ? S.tabOn : null) }}
+                  title={v === "matrix" ? "every run against the knobs that changed, with its benchmark score" : "reward over training steps"}
                 >
-                  {m === "ep_rew" ? "reward" : "ep len"}
+                  {v}
                 </button>
               ))}
             </div>
-            <Chart runs={shown} all={runs} metric={metric} />
-            <p style={S.note}>
-              The bold line is a 9-rollout trailing mean; the faint one is the raw
-              per-rollout value. Hover the chart for exact values at a step. A run
-              still climbing at its last point is undertrained, whatever its final
-              number says.
-            </p>
+            {view === "chart" ? (
+              <>
+                <Chart runs={shown} colors={colors} metric={metric} />
+                <p style={S.note}>
+                  The bold line is a 9-rollout trailing mean; the faint one is the raw
+                  per-rollout value. Hover the chart for exact values at a step. A run
+                  still climbing at its last point is undertrained, whatever its final
+                  number says.
+                </p>
+              </>
+            ) : (
+              <Matrix all={runs} colors={colors} hidden={hidden} onToggle={toggleMany} />
+            )}
           </section>
         </div>
       )}
@@ -208,11 +245,7 @@ function RunCard({
   // different about this one", which brain.json has always held and the
   // five fixed tags here used to hide (ab-batch vs ab-batch-lr is lr_end).
   const diffs = baseline && !isBase ? recipeDiff(run, baseline) : null;
-  const recipe = KNOBS.flatMap(([key, label]) => {
-    const v = run[key];
-    if (v === undefined || v === null || v === false || (Array.isArray(v) && !v.length)) return [];
-    return [{ key, text: v === true ? label : `${label} ${fmtKnob(v)}` }];
-  });
+  const recipe = recipeChips(run);
   const shippedAt = shippedStep(run);
 
   return (
@@ -316,6 +349,168 @@ function RunCard({
   );
 }
 
+type SortCol = "name" | "score" | "final" | "shippedAt" | "reward" | `knob:${string}`;
+
+/**
+ * Every run against the knobs that differ between runs, with the benchmark
+ * score of what each one shipped. Grouped by family (name minus seed) by
+ * default, because that is the comparison that means anything: one seed's
+ * in_band moves ±0.02 on its own, so a knob is only shown to matter by the
+ * mean over seeds — and the ± column says how far to trust it.
+ *
+ * Rows are ALL runs, not just the charted ones; the swatch says which are
+ * on the chart and clicking a row toggles it (a family row toggles every
+ * seed), so the matrix doubles as the way to chart a whole sweep at once.
+ */
+function Matrix({
+  all,
+  colors,
+  hidden,
+  onToggle,
+}: {
+  all: BrainRun[];
+  colors: Map<string, string>;
+  hidden: Set<string>;
+  onToggle: (names: string[]) => void;
+}) {
+  const [byFamily, setByFamily] = useState(true);
+  const [sort, setSort] = useState<{ col: SortCol; dir: 1 | -1 }>({ col: "score", dir: -1 });
+  const knobs = useMemo(() => varyingKnobs(all), [all]);
+  const rows = useMemo(() => matrixRows(all, knobs, byFamily), [all, knobs, byFamily]);
+  const sorted = useMemo(() => {
+    // Knob columns sort on the RAW value, never the cell text: "1e-3" collates
+    // before "3e-4" and "2.00M" before "750000", and a sorted lr column that
+    // put the largest rate first was the bug. Booleans sort off < on.
+    const v = (r: MatrixRow): unknown => {
+      if (sort.col === "name") return r.key;
+      if (sort.col.startsWith("knob:")) return r.raw[sort.col.slice(5)];
+      return r[sort.col as "score" | "final" | "shippedAt" | "reward"];
+    };
+    const rank = (x: unknown): number | string | null => {
+      if (x === null || x === undefined) return null;
+      if (typeof x === "number") return x;
+      if (typeof x === "boolean") return x ? 1 : 0;
+      return String(x);
+    };
+    return [...rows].sort((a, b) => {
+      const x = rank(v(a));
+      const y = rank(v(b));
+      if (x === null && y === null) return 0;
+      if (x === null) return 1;   // blanks sink whatever the direction
+      if (y === null) return -1;
+      const c =
+        typeof x === "number" && typeof y === "number"
+          ? x - y
+          : String(x).localeCompare(String(y), undefined, { numeric: true });
+      return c * sort.dir;
+    });
+  }, [rows, sort]);
+  const best = useMemo(() => Math.max(...rows.map((r) => r.score ?? -Infinity)), [rows]);
+  // What every run shares — said once under the table instead of 49 times.
+  const shared = useMemo(() => sharedKnobs(all), [all]);
+
+  const click = (col: SortCol) =>
+    setSort((s) => (s.col === col ? { col, dir: s.dir === 1 ? -1 : 1 } : { col, dir: col === "name" || col.startsWith("knob:") ? 1 : -1 }));
+  // A plain render helper, not a component: a component declared inside
+  // render is recreated every pass and React remounts it (lint: react-hooks).
+  const th = (col: SortCol, label: string, title?: string, right = false) => (
+    <th
+      key={col}
+      onClick={() => click(col)}
+      title={title}
+      style={{ ...S.th, textAlign: right ? "right" : "left", color: sort.col === col ? "#e5e7eb" : "#6b7280" }}
+    >
+      {label}
+      {sort.col === col ? (sort.dir === 1 ? " ↑" : " ↓") : ""}
+    </th>
+  );
+
+  return (
+    <>
+      <div style={S.matrixBox}>
+        <table style={S.table}>
+          <thead>
+            <tr>
+              {th("name", byFamily ? "family" : "run")}
+              {/* Scores first: they are what you sort by, and with a wide
+                  sweep the knobs run off the right edge — the numbers must not. */}
+              {th("score", "in_band", "benchmark score of the checkpoint select-brain shipped — mean ± sd over the family's seeds", true)}
+              {th("final", "final", "the same benchmark on the end-of-run model — how much selecting a checkpoint bought", true)}
+              {th("shippedAt", "shipped@", "the step the shipped checkpoint came from", true)}
+              {th("reward", "reward", "last training reward — the curve's number, not the benchmark's", true)}
+              {knobs.map(([k, label]) => th(`knob:${k}`, label, `${label} differs between runs`))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((r) => {
+              const names = r.runs.map((x) => x.name);
+              const on = names.filter((n) => !hidden.has(n)).length;
+              const c = colors.get(names[0]) ?? "#9ca3af";
+              const isBest = r.score != null && r.score === best;
+              return (
+                <tr
+                  key={r.key}
+                  onClick={() => onToggle(names)}
+                  title={on === names.length ? "remove from the chart" : "add to the chart"}
+                  style={{ ...S.tr, opacity: on ? 1 : 0.5 }}
+                >
+                  <td style={S.td}>
+                    <span
+                      style={{
+                        ...S.swatch,
+                        display: "inline-block",
+                        verticalAlign: "middle",
+                        marginRight: 6,
+                        background: on === names.length ? c : on ? `linear-gradient(90deg, ${c} 50%, transparent 50%)` : "transparent",
+                        border: `1.5px solid ${c}`,
+                      }}
+                    />
+                    {r.key}
+                    {byFamily && names.length > 1 && <span style={S.dim}> ×{names.length}</span>}
+                  </td>
+                  <td style={{ ...S.td, ...S.num, color: isBest ? "#6ee7b7" : "#e5e7eb", fontWeight: isBest ? 700 : 400 }}>
+                    {r.score == null ? "—" : r.score.toFixed(3)}
+                    {r.scoreSd != null && <span style={S.dim}> ±{r.scoreSd.toFixed(3)}</span>}
+                  </td>
+                  <td style={{ ...S.td, ...S.num }}>{r.final == null ? "—" : r.final.toFixed(3)}</td>
+                  <td style={{ ...S.td, ...S.num }}>{r.shippedAt == null ? "—" : humanSteps(r.shippedAt)}</td>
+                  <td style={{ ...S.td, ...S.num }}>{r.reward == null ? "—" : r.reward.toFixed(1)}</td>
+                  {knobs.map(([k]) => (
+                    <td key={k} style={{ ...S.td, color: r.raw[k] == null ? "#4b5563" : "#c9d0d8" }}>
+                      {r.knobs[k]}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ ...S.chartHead, marginTop: 8, marginBottom: 0 }}>
+        {(["by family", "by run"] as const).map((m) => (
+          <button
+            key={m}
+            onClick={() => setByFamily(m === "by family")}
+            style={{ ...S.tab, ...(byFamily === (m === "by family") ? S.tabOn : null) }}
+            title={m === "by family" ? "one row per name-minus-seed AND recipe, scores averaged over the seeds" : "one row per run"}
+          >
+            {m}
+          </button>
+        ))}
+        <span style={{ flex: 1 }} />
+        <span style={S.colLabel}>{rows.length} rows · click a header to sort, a row to chart it</span>
+      </div>
+      <p style={S.note}>
+        Columns are the knobs that differ between runs; {shared.length > 0 && <>every run that records them shares {shared.join(" · ")}. </>}
+        A — is a run from before the trainer wrote that knob down.{" "}
+        in_band is the follow benchmark on the checkpoint that shipped, ± its spread over the family&apos;s seeds —
+        one seed moves about ±0.02 on its own, so a knob has to beat that to have done anything. Runs that share a
+        name but not a recipe are separate rows (&quot;p-de&quot;, &quot;p-de (2)&quot;), never averaged together.
+      </p>
+    </>
+  );
+}
+
 function Stat({ k, v }: { k: string; v: string }) {
   return (
     <div style={S.stat}>
@@ -346,11 +541,11 @@ function nearest(pts: CurvePoint[], steps: number): CurvePoint | null {
 
 function Chart({
   runs,
-  all,
+  colors,
   metric,
 }: {
   runs: BrainRun[];
-  all: BrainRun[];
+  colors: Map<string, string>;
   metric: "ep_rew" | "ep_len";
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -423,10 +618,9 @@ function Chart({
         const raw = nearest(r.curve, steps);
         const sm = nearest(smooth(r.curve), steps);
         if (!raw || !sm) return null;
-        const i = all.findIndex((a) => a.name === r.name);
         return {
           name: r.name,
-          color: runColor(r.name, i < 0 ? 0 : i),
+          color: colors.get(r.name) ?? "#9ca3af",
           steps: raw.steps,
           raw: metric === "ep_rew" ? raw.ep_rew : raw.ep_len,
           mean: metric === "ep_rew" ? sm.ep_rew : sm.ep_len,
@@ -448,7 +642,7 @@ function Chart({
     }[];
     if (!rows.length) return null;
     return { rows, anchorPt, snapX: x(anchorPt.steps) };
-  }, [hoverX, series, all, invX, x, metric]);
+  }, [hoverX, series, colors, invX, x, metric]);
 
   if (!series.length) {
     return (
@@ -496,8 +690,7 @@ function Chart({
         })}
 
         {series.map((r) => {
-          const i = all.findIndex((a) => a.name === r.name);
-          const c = runColor(r.name, i < 0 ? 0 : i);
+          const c = colors.get(r.name) ?? "#9ca3af";
           const sm = smooth(r.curve);
           const last = sm[sm.length - 1];
           const shipAt = shippedStep(r);
@@ -699,6 +892,29 @@ const S: Record<string, React.CSSProperties> = {
   // Full shorthand, not borderColor: this object is spread OVER S.tab, and
   // mixing `border` with `borderColor` makes React warn on every rerender.
   tabOn: { color: "#0b0f14", background: "#6ee7b7", border: "1px solid #6ee7b7" },
+  matrixBox: {
+    flex: 1,
+    minHeight: 0,
+    overflow: "auto",
+    background: "#0f141b",
+    border: "1px solid #1f2937",
+    borderRadius: 8,
+  },
+  table: { borderCollapse: "collapse", width: "100%", fontSize: 10.5, whiteSpace: "nowrap" },
+  th: {
+    position: "sticky",
+    top: 0,
+    background: "#0f141b",
+    padding: "6px 8px",
+    fontWeight: 400,
+    letterSpacing: 0.4,
+    cursor: "pointer",
+    borderBottom: "1px solid #1f2937",
+    userSelect: "none",
+  },
+  tr: { cursor: "pointer", borderBottom: "1px solid #111827" },
+  td: { padding: "4px 8px", color: "#c9d0d8" },
+  num: { textAlign: "right", fontVariantNumeric: "tabular-nums" },
   chartBox: {
     position: "relative",
     background: "#0f141b",

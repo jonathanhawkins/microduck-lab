@@ -1060,8 +1060,14 @@ export default function SimViewer() {
   // clean slate, or the camera flies on forever / the duck keeps its twist.
   useEffect(() => {
     cameraKeysClear();
+    // Leaving drive with a key down strands that twist: clearing the held-set
+    // means the coming keyup sends no stop. So stop the ducks — but ONLY then.
+    // A bare zero is still a manual command, and the lab holds one for
+    // OVERRIDE_HOLD_S (6 s), which would suspend every brain just because
+    // someone tapped P twice.
+    const stranded = held.current.size > 0;
     held.current.clear();
-    if (!driving) clientRef.current?.sendCmd([0, 0, 0]);
+    if (!driving && stranded) clientRef.current?.sendCmd([0, 0, 0]);
   }, [driving]);
 
   useEffect(() => saveJSON("simControlsOpen", lessonOpen), [lessonOpen]);
@@ -1131,7 +1137,22 @@ export default function SimViewer() {
     }, 250);
     // Drive: while P-mode is on, held keys become one twist, re-sent every
     // 100 ms (the lab holds a manual command for 6 s after the last one).
+    //
+    // This timer, not the keydown handler, is what actually feeds the world,
+    // so it is where scrub has to be honoured: a key already DOWN when the
+    // scrub began never sees another keydown, and would otherwise keep
+    // driving ducks around a live world the user is no longer watching.
+    // Entering the scrub retires those keys exactly like releasing them —
+    // one stop, then silence (the coming keyup finds the set already empty,
+    // so it sends nothing of its own).
     const driveTimer = setInterval(() => {
+      if (clientRef.current?.scrub) {
+        if (held.current.size) {
+          held.current.clear();
+          client.sendCmd([0, 0, 0]);
+        }
+        return;
+      }
       if (drivingRef.current && held.current.size) client.sendCmd(twistFromKeys(held.current));
     }, 100);
     return () => {
@@ -1184,21 +1205,25 @@ export default function SimViewer() {
         setSelectedDuck(d ? d.id : null);
         return;
       }
-      // While scrubbing the arrows step frames (the scrub bar owns them), but
-      // WASD/QE must keep flying: pausing and then looking around the frozen
-      // room is the whole point of the scrub.
-      if (clientRef.current?.scrub && k.startsWith("arrow")) return;
-      if (drivingRef.current && DRIVE_KEYS.has(k)) {
+      // Scrubbing is a view of the PAST: the arrows step frames (the scrub bar
+      // owns them), and nothing may command the live world you cannot see —
+      // a twist sent here moves ducks off-screen and only shows up when you
+      // go live again. Camera flight is exempt: pausing and then looking
+      // around the frozen room is the whole point of the scrub.
+      const scrubbing = !!clientRef.current?.scrub;
+      if (scrubbing && k.startsWith("arrow")) return;
+      if (!scrubbing && drivingRef.current && DRIVE_KEYS.has(k)) {
         e.preventDefault();
         held.current.add(k);
         // Send once immediately so a tap registers before the 100 ms tick.
         if (!e.repeat) clientRef.current?.sendCmd(twistFromKeys(held.current));
         return;
       }
-      // Drive mode OFF: the same keys fly the camera, exactly as on the lab
-      // page. Shift+R is the view reset there, so it must reach the store
-      // even though plain R restarts the world above.
-      if (!drivingRef.current && cameraKeyDown(k, e.shiftKey)) e.preventDefault();
+      // Whenever drive is not consuming the keys — mode off, or scrubbing,
+      // where it is inert — they fly the camera, exactly as on the lab page.
+      // Shift+R is the view reset there, so it must reach the store even
+      // though plain R restarts the world above.
+      if ((scrubbing || !drivingRef.current) && cameraKeyDown(k, e.shiftKey)) e.preventDefault();
     };
     const onKeyUp = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
@@ -1206,8 +1231,17 @@ export default function SimViewer() {
       if (held.current.delete(k) && held.current.size === 0) clientRef.current?.sendCmd([0, 0, 0]);
     };
     const onBlur = () => {
-      held.current.clear();
-      cameraKeysClear();   // stuck-key guard: never fly on after focus leaves
+      // Stuck-key guard: never fly on after focus leaves — and never DRIVE on
+      // either. A key down at cmd-tab never sees its keyup, and the lab holds
+      // the last twist for OVERRIDE_HOLD_S, so the ducks would walk out the
+      // hold with nothing in the viewer to stop them. Same shape as the scrub
+      // branch of driveTimer: stop only if something was actually held, so a
+      // bare zero never suspends the brains for nothing.
+      if (held.current.size) {
+        held.current.clear();
+        clientRef.current?.sendCmd([0, 0, 0]);
+      }
+      cameraKeysClear();
     };
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);

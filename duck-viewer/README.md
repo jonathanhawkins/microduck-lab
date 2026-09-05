@@ -315,6 +315,19 @@ keeps the curve of one that has already finished.
   chart puts a diamond at that step, labelled with the score. The curve
   is training reward; the score is the benchmark — they are different
   numbers, and the diamond is the one that decided what went on the robot.
+- **Sweep matrix** (the `matrix` tab where the chart was). Every run — not
+  just the charted ones — as a table: `in_band`, `final`, `shipped@`, last
+  reward, then one column per knob that *differs* between runs (a knob every
+  run shares is said once under the table; a run from before the trainer
+  recorded a knob shows `—` and does not make the column appear). `by
+  family` collapses `p-n256-s31..36` to one row with in_band as mean ± sd
+  over the seeds — the number that decides whether a knob did anything,
+  since one seed moves about ±0.02 on its own. A family is the name minus
+  its seed *and* one recipe: runs that share a name but were run with
+  different knobs split into `p-de` and `p-de (2)` rather than being
+  averaged together. Click a header to sort (knob columns sort by value,
+  not by their text), a row to put it (a family row: all its seeds) on the
+  chart.
 
 A brain cloned from the repo shows *no curve* — only `brain.onnx` and
 `brain.json` are committed, `progress.jsonl` stays local — and the card says
