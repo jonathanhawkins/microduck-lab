@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { loadJSON, saveJSON } from "@/lib/persist";
 import { groupLearned } from "@/lib/sim";
 import {
   BrainRun,
@@ -40,6 +41,18 @@ export default function TrainPanel() {
   // The right column is either the curves or the sweep matrix — the same
   // runs read two ways: over time, or across the knobs that changed.
   const [view, setView] = useState<"chart" | "matrix">("chart");
+  // The card groups start folded: 49 cards under six headings is a wall, and
+  // the headings alone already say what is on disk. What you open stays open.
+  const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set(loadJSON<string[]>("trainGroupsOpen", [])));
+  useEffect(() => saveJSON("trainGroupsOpen", [...openGroups]), [openGroups]);
+  const toggleGroup = useCallback((label: string) => {
+    setOpenGroups((g) => {
+      const n = new Set(g);
+      if (n.has(label)) n.delete(label);
+      else n.add(label);
+      return n;
+    });
+  }, []);
   const seeded = useRef(false);
 
   useEffect(() => {
@@ -161,10 +174,24 @@ export default function TrainPanel() {
               {/* Filed under the use case each run answers (brain.json `group`),
                   the same headings the /sim brain menu uses. */}
               {groupLearned(runs.map((r) => ({ name: r.name, title: r.title ?? null, group: r.group ?? null, description: null }))).map(
-                ([label, members]) => (
+                ([label, members]) => {
+                  const open = openGroups.has(label);
+                  const charted = members.filter(({ name }) => !hidden.has(name)).length;
+                  return (
                   <div key={label}>
-                    <div style={S.groupHead}>{label}</div>
-                    {members.map(({ name }) => {
+                    <button
+                      onClick={() => toggleGroup(label)}
+                      aria-expanded={open}
+                      style={S.groupHead}
+                      title={open ? "fold this group" : "unfold this group"}
+                    >
+                      <span style={{ display: "inline-block", width: 12 }}>{open ? "▾" : "▸"}</span>
+                      {label}
+                      <span style={S.groupCount}>
+                        {" "}· {members.length}{charted ? ` · ${charted} charted` : ""}
+                      </span>
+                    </button>
+                    {open && members.map(({ name }) => {
                       const r = runs.find((x) => x.name === name)!;
                       return (
                         <RunCard
@@ -178,7 +205,8 @@ export default function TrainPanel() {
                       );
                     })}
                   </div>
-                ),
+                  );
+                },
               )}
             </div>
           </section>
@@ -877,7 +905,11 @@ const S: Record<string, React.CSSProperties> = {
   cardTop: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
   swatch: { width: 11, height: 11, borderRadius: 3, cursor: "pointer", padding: 0 },
   name: { fontSize: 12.5, fontWeight: 700 },
-  groupHead: { fontSize: 9.5, color: "#9ca3af", letterSpacing: ".08em", textTransform: "uppercase", padding: "10px 2px 4px" },
+  groupHead: {
+    display: "block", width: "100%", textAlign: "left", background: "none", border: "none", cursor: "pointer",
+    font: "inherit", fontSize: 9.5, color: "#9ca3af", letterSpacing: ".08em", textTransform: "uppercase", padding: "10px 2px 4px",
+  },
+  groupCount: { color: "#6b7280", letterSpacing: 0, textTransform: "none" },
   runId: { fontSize: 10, color: "#6b7280", fontFamily: "ui-monospace, Menlo, monospace", marginLeft: 6 },
   desc: { fontSize: 10.5, color: "#9ca3af", lineHeight: 1.4, margin: "0 0 8px" },
   live: { fontSize: 9.5, color: "#6ee7b7", letterSpacing: 0.4 },
