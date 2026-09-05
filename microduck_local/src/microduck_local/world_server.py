@@ -66,9 +66,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .brain import REGISTRY, Intent, Senses
-from .brain.learned import learned_index
 from .brain import runtime as brain_runtime
 from .brain import tidy as _tidy  # noqa: F401  (registers the tidy brain)
+from .brain.learned import learned_index
 from .brain.mapping import GridSpec, OccupancyGrid
 from .brain.tether import Tether
 from .sensors import DetectorNoise, TofNoise

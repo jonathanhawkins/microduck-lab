@@ -50,8 +50,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .behaviors import (BEHAVIORS, Behavior, BehaviorEnv, is_symmetric,
-                        resolve_clip_name)
+from .behaviors import BEHAVIORS, Behavior, BehaviorEnv, is_symmetric, resolve_clip_name
 from .machine import profile, with_phase_callbacks
 from .plateau import PlateauDetector
 from .plateau import env_defaults as plateau_env_defaults
