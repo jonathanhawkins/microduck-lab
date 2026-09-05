@@ -140,8 +140,16 @@ export function BrainPanel({ client, duckId }: { client: SimClient; duckId: stri
           </div>
         ))}
       </div>
-      <div ref={hoverRef} style={{ color: DIM, fontSize: 10, marginTop: 2 }}>hover a bar</div>
-      <div ref={target} style={{ color: "#e9edf1", marginTop: 4 }} title="the target slots [65:71] and the track flags, in words" />
+      {/* Fixed line budgets: one for the hover readout, two for the target
+          sentence. Both used to size to their text, so "no target" (one
+          line) against a full hit (two) moved the gauges below up and down
+          every time the track flipped — the panel breathed. */}
+      <div ref={hoverRef} style={{ color: DIM, fontSize: 10, lineHeight: "14px", height: 14, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>hover a bar</div>
+      <div
+        ref={target}
+        style={{ color: "#e9edf1", marginTop: 4, lineHeight: "16px", height: 32, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}
+        title="the target slots [65:71] and the track flags, in words"
+      />
 
       {/* the action, one gauge per output: the value fills from zero; the tick marks its end (and the raw output, which the exported graph has already clamped) */}
       <div style={{ marginTop: 6, display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 8px", alignItems: "center" }}>
