@@ -12,6 +12,7 @@ exercises the registered endpoints (validation, HTTPExceptions and all).
 
 import json
 
+import mujoco
 import numpy as np
 import pytest
 from fastapi import HTTPException
@@ -153,6 +154,145 @@ def test_pose_does_not_disturb_a_live_duck(app):
         V.PoseReq(joints=[0.4] * 14, rootPitch=-1.0))
     assert duck.pose_payload() == before
     assert V.pose_scratch().data is not duck.env.data
+
+
+# ------------------------------------------------------- /pose balance
+
+def _balance(app, joints=None, root_pitch=0.0):
+    return _endpoint(app, "/pose", "POST")(V.PoseReq(
+        joints=list(joints if joints is not None else C.DEFAULT_POSE),
+        rootPitch=root_pitch))["balance"]
+
+
+def _posed(**deltas):
+    """DEFAULT_POSE with named joints turned by radians."""
+    joints = list(C.DEFAULT_POSE)
+    for name, rad in deltas.items():
+        joints[C.JOINT_NAMES.index(name)] += rad
+    return joints
+
+
+def _swayed(side):
+    """Both hip rolls turned together to their servo limit on `side`: the
+    rig's "sway" control at the end of its travel, the furthest hip roll alone
+    can carry the CoM toward that foot."""
+    lo_hi = 0 if side == "left" else 1
+    limits = V.pose_scratch().limits
+    joints = list(C.DEFAULT_POSE)
+    for name in ("left_hip_roll", "right_hip_roll"):
+        joints[C.JOINT_NAMES.index(name)] = float(limits[C.JOINT_NAMES.index(name)][lo_hi])
+    return joints
+
+
+def _sole_outline_mm(side):
+    """The flat of a sole as the MODEL has it: world xy of the mesh vertices
+    within SOLE_TOL of the lowest point at STAND. The tests read the pad off
+    the mesh rather than carrying its size as a number."""
+    scratch = V.pose_scratch()
+    m, d = scratch.model, scratch.data
+    scratch.solve(np.array(C.DEFAULT_POSE))
+    g = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_foot_collision")
+    mesh = m.geom_dataid[g]
+    verts = m.mesh_vert[m.mesh_vertadr[mesh]:m.mesh_vertadr[mesh] + m.mesh_vertnum[mesh]]
+    world = verts @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
+    flat = world[world[:, 2] <= world[:, 2].min() + V.SOLE_TOL]
+    return flat[:, :2] * 1000
+
+
+def test_convex_hull_and_signed_distance():
+    """The two geometry helpers, on a shape whose answer is known: a 2 x 1
+    box with a stray interior point."""
+    pts = np.array([[0, 0], [2, 0], [2, 1], [0, 1], [1, 0.5], [0, 0]], dtype=float)
+    hull = V._convex_hull(pts)
+    assert len(hull) == 4 and {tuple(h) for h in hull} == {(0, 0), (2, 0), (2, 1), (0, 1)}
+    assert V._signed_distance(np.array([1.0, 0.5]), hull) == pytest.approx(0.5)   # centre
+    assert V._signed_distance(np.array([0.2, 0.5]), hull) == pytest.approx(0.2)   # near an edge
+    assert V._signed_distance(np.array([-1.0, 0.5]), hull) == pytest.approx(-1.0)  # outside an edge
+    assert V._signed_distance(np.array([-3.0, -4.0]), hull) == pytest.approx(-5.0)  # outside a corner
+    # Two points have no inside: everything is outside a line.
+    assert V._signed_distance(np.array([1.0, 1.0]), V._convex_hull(pts[:2])) == pytest.approx(-1.0)
+
+
+def test_over_names_a_grounded_foot_the_com_is_inside():
+    foot = lambda margin, grounded=True: {"marginMm": margin, "grounded": grounded}
+    assert V._over({"left": foot(3.0), "right": foot(-40.0)}) == "left"
+    assert V._over({"left": foot(3.0), "right": foot(5.0)}) == "right"     # the deeper one
+    assert V._over({"left": foot(-0.5), "right": foot(-25.0)}) is None      # edge is not inside
+    assert V._over({"left": foot(3.0, grounded=False), "right": foot(-40.0)}) is None
+
+
+def test_pose_reports_the_com_against_both_soles(app):
+    b = _balance(app)
+    assert len(b["com"]) == 3 and np.isfinite(b["com"]).all()
+    assert set(b["feet"]) == {"left", "right"}
+    assert b["over"] in ("left", "right", None)
+    for foot in b["feet"].values():
+        assert set(foot) == {"grounded", "marginMm"}
+        assert isinstance(foot["grounded"], bool)
+
+
+def test_balance_footprint_is_the_sole_flat_not_its_bounding_box(app):
+    """The sole is a mesh with a ~5 mm fillet, and its geom_size is the
+    bounding box, ~3 mm wider than the flat on every side. Standing square
+    the CoM sits on the midline, so its margin is minus the distance from the
+    midline to the flat's inner edge, read off the mesh itself."""
+    b = _balance(app)
+    for side in ("left", "right"):
+        inner_edge = np.abs(_sole_outline_mm(side)[:, 1]).min()
+        want = -(inner_edge - abs(b["com"][1] * 1000))
+        assert b["feet"][side]["marginMm"] == pytest.approx(want, abs=0.3)
+        assert b["feet"][side]["grounded"]
+    assert b["over"] is None
+
+
+@pytest.mark.parametrize("foot", ["left", "right"])
+def test_balance_hip_sway_to_the_limit_reaches_the_edge_of_the_sole(app, foot):
+    """The measurement this panel exists for, and the answer is marginal: hip
+    roll at its servo limit brings the CoM from ~25 mm outside the stance
+    sole to within a millimetre of its edge, and no further. The bounding-box
+    draft of this called the same pose 9.5 mm INSIDE; the flat's real outline
+    is what a one-legged move has to work with. Forward kinematics lifts the
+    other foot on the way (there is no ankle roll to keep it down), and the
+    readout says so."""
+    square = _balance(app)["feet"][foot]["marginMm"]
+    b = _balance(app, _swayed(foot))
+    assert b["feet"][foot]["grounded"]
+    assert b["feet"][foot]["marginMm"] > square + 20
+    assert abs(b["feet"][foot]["marginMm"]) <= 1.0
+    other = "right" if foot == "left" else "left"
+    assert b["feet"][other]["marginMm"] < 0 and not b["feet"][other]["grounded"]
+
+
+@pytest.mark.parametrize("rad", [0.3, 0.6, 0.9])
+def test_balance_does_not_inflate_when_a_foot_turns(app, rad):
+    """A yawed foot keeps its outline. The bounding-box draft of this grew
+    the pad from 27 x 22 to 34 x 35 mm at 0.9 rad and flipped the margin from
+    -18 to +6 mm with the mass barely moved; the true outline cannot report
+    the CoM inside a sole that twisting alone never put under it."""
+    square = _balance(app)
+    turned = _balance(app, _posed(left_hip_yaw=rad, right_hip_yaw=rad))
+    for side in ("left", "right"):
+        assert turned["feet"][side]["marginMm"] < 0
+        # The feet do swing a little under the trunk as the hips yaw, so the
+        # margin moves, but by less than the box inflation was worth.
+        assert abs(turned["feet"][side]["marginMm"] - square["feet"][side]["marginMm"]) < 10
+    assert turned["over"] is None
+
+
+def test_balance_reports_a_lifted_foot_as_airborne(app):
+    b = _balance(app, _posed(right_hip_pitch=-0.8, right_knee=-0.9))
+    assert b["feet"]["left"]["grounded"]
+    assert not b["feet"]["right"]["grounded"]
+
+
+def test_balance_follows_the_posed_state_not_the_default(app):
+    """Read straight off the same posed mjData as `bodies`: a pose that moves
+    the mass must move the CoM."""
+    upright = _balance(app)
+    leaning = _balance(app, root_pitch=-0.5)
+    assert leaning["com"] != upright["com"]
+    assert leaning["feet"]["left"]["marginMm"] != \
+        upright["feet"]["left"]["marginMm"]
 
 
 # ---------------------------------------------------------------- /clips

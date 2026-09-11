@@ -2342,6 +2342,59 @@ class PoseReq(BaseModel):
     ground: bool = True
 
 
+# Sole vertices within this of the sole's lowest point, standing, are its
+# flat. The sole has a ~5 mm fillet all round: at 1 mm the flat measures
+# 45 x 34 mm, at 5 mm the whole outline is in (53 x 41 mm), and the flat is
+# what a flat floor touches.
+SOLE_TOL = 0.001
+# A foot whose lowest point is this far above the other foot's is in the air.
+GROUND_TOL = 0.005
+
+
+def _convex_hull(pts: np.ndarray) -> np.ndarray:
+    """Andrew's monotone chain on (n, 2) points: counter-clockwise, no repeated
+    endpoint. Fewer than three distinct points come back as they are."""
+    pts = np.unique(pts, axis=0)          # sorted by x, then y
+    if len(pts) < 3:
+        return pts
+
+    def turn(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    def chain(seq):
+        out: list[np.ndarray] = []
+        for p in seq:
+            while len(out) >= 2 and turn(out[-2], out[-1], p) <= 0:
+                out.pop()
+            out.append(p)
+        return out
+
+    lower, upper = chain(pts), chain(pts[::-1])
+    return np.array(lower[:-1] + upper[:-1])
+
+
+def _signed_distance(p: np.ndarray, hull: np.ndarray) -> float:
+    """Distance from `p` to the nearest edge of a counter-clockwise convex
+    polygon, positive inside. A hull of fewer than three points has no
+    inside, so the distance to it is always negative."""
+    a = hull
+    e = np.roll(hull, -1, axis=0) - a                # edge vectors a -> b
+    ap = p - a
+    inside = len(hull) >= 3 and bool(np.all(e[:, 0] * ap[:, 1] - e[:, 1] * ap[:, 0] >= 0))
+    ee = np.einsum("ij,ij->i", e, e)
+    t = np.clip(np.einsum("ij,ij->i", ap, e) / np.where(ee > 0, ee, 1.0), 0.0, 1.0)
+    best = float(np.linalg.norm(ap - t[:, None] * e, axis=1).min())
+    return best if inside else -best
+
+
+def _over(feet: dict) -> str | None:
+    """The grounded foot whose footprint holds the CoM, the deeper one if
+    both do, else None. A foot in the air cannot be stood on however well
+    the CoM lines up with it."""
+    standing = [s for s, f in feet.items() if f["grounded"] and f["marginMm"] > 0]
+    return max(standing, key=lambda s: feet[s]["marginMm"]) if standing else None
+
+
 class PoseScratch:
     """A model/data pair used ONLY to answer POST /pose.
 
@@ -2375,6 +2428,30 @@ class PoseScratch:
         # bound's conservatism cancels exactly at DEFAULT_POSE instead of
         # leaving the preview duck hovering a few mm off the floor.
         self.stand_low_z = self._lowest_z()
+        # The outline of each sole's flat, for `balance` below: the mesh
+        # vertices that touch the floor when the duck stands (the data is at
+        # STAND here), reduced to their convex hull. The sole is a MESH, not
+        # a box, and its geom_size is only the bounding box, ~3 mm wider than
+        # the flat on every side, so the footprint has to come from the
+        # vertices. The flat is planar, so however the foot is turned, the
+        # projected outline's corners are among these ~30 points; kept in
+        # the geom frame and transformed per call.
+        self.soles: dict[str, tuple[int, np.ndarray]] = {}
+        for side in ("left", "right"):
+            name = f"{side}_foot_collision"
+            g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            if g < 0:
+                raise ValueError(f"{C.SCENE_WALK_XML}: no geom named {name}")
+            if self.model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH:
+                raise ValueError(f"{name} is not a mesh; balance() reads its vertices")
+            mesh = self.model.geom_dataid[g]
+            adr, num = self.model.mesh_vertadr[mesh], self.model.mesh_vertnum[mesh]
+            verts = self.model.mesh_vert[adr:adr + num]
+            world = verts @ self.data.geom_xmat[g].reshape(3, 3).T
+            flat = np.flatnonzero(world[:, 2] <= world[:, 2].min() + SOLE_TOL)
+            hull = _convex_hull(world[flat, :2])
+            corners = [flat[np.argmin(np.abs(world[flat, :2] - h).sum(axis=1))] for h in hull]
+            self.soles[side] = (g, verts[corners].copy())
 
     def _lowest_z(self) -> float:
         """World z of the lowest point of the robot's geom AABBs (conservative
@@ -2409,6 +2486,45 @@ class PoseScratch:
                 self.mj.mj_forward(m, d)
         return [[round(float(v), 4) for v in (*d.xpos[b], *d.xquat[b])]
                 for b in range(m.nbody)]
+
+    def balance(self) -> dict:
+        """Where the CoM sits relative to each sole, for the POSED state in
+        `self.data` (call straight after `solve`).
+
+        The editor can show a pose but not whether it would STAND, which is
+        the question a one-legged movement turns on: a pistol squat needs the
+        whole-body CoM over the stance foot, and until now that measurement
+        only existed in throwaway scripts.
+
+        Per foot, `marginMm` is the signed distance from the CoM's ground
+        projection to the edge of that sole's footprint: positive inside it,
+        negative outside. The footprint is the flat of the sole projected
+        onto the world ground plane (its convex hull), so a yawed foot keeps
+        its true outline and nothing inflates. It is the footprint the foot
+        WOULD have flat on the floor: a tilted foot's real contact is smaller,
+        and the projection only ever shrinks it, never grows it. `grounded` is
+        false for a foot held clear of the floor, and `over` names the
+        grounded foot whose footprint contains the CoM, or None.
+
+        A STATIC check, no velocity, no momentum, no ankle torque: a real
+        policy holds a small negative margin routinely and a fast one ignores
+        it. Read it as "how hard is this pose to hold", never as a verdict.
+        Costs ~0.3 ms on top of the ~0.03 ms forward pass.
+        """
+        d = self.data
+        com = d.subtree_com[0]
+        soles = {}
+        for side, (g, outline) in self.soles.items():
+            world = outline @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
+            soles[side] = (float(world[:, 2].min()), _convex_hull(world[:, :2]))
+        floor = min(low for low, _ in soles.values())
+        feet = {}
+        for side, (low, hull) in soles.items():
+            feet[side] = {
+                "grounded": bool(low <= floor + GROUND_TOL),
+                "marginMm": round(_signed_distance(com[:2], hull) * 1000, 1),
+            }
+        return {"com": [round(float(v), 4) for v in com], "feet": feet, "over": _over(feet)}
 
     def meta(self) -> dict:
         """Everything the editor needs to build clamped controls and map a
@@ -2967,10 +3083,14 @@ def make_app(ducks: list[Duck]):
             pitch = _finite(req.rootPitch)
         except ValueError:
             raise HTTPException(422, "rootPitch must be a finite number")
+        scratch = pose_scratch()
+        bodies = scratch.solve(np.array(joints), pitch, req.ground)
         return {
-            "bodies": pose_scratch().solve(np.array(joints), pitch, req.ground),
+            "bodies": bodies,
             "joints": joints,       # clamped — the editor snaps its sliders to these
             "rootPitch": round(pitch, 6),
+            # Read straight after solve, off the same posed mjData.
+            "balance": scratch.balance(),
         }
 
     @app.get("/clips")
