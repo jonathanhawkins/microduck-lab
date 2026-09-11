@@ -177,6 +177,7 @@ export async function fetchJoints(): Promise<JointsMeta> {
 
 export interface PoseResult {
   bodies: number[][]; // per body [x, y, z, qw, qx, qy, qz] — /scene body order
+  balance?: Balance; // absent from a lab older than the endpoint
   joints: number[]; // clamped to the servo limits
   rootPitch: number;
 }
@@ -267,11 +268,90 @@ export interface RigSelection {
   bodies: number[];
 }
 
+/** Where the posed duck's centre of mass sits relative to each sole, from
+ *  POST /pose. `marginMm` is the signed distance from the CoM's ground
+ *  projection to the edge of that sole's footprint: positive inside it,
+ *  negative outside. `grounded` is false for a foot held clear of the floor.
+ *  A STATIC check; PoseScratch.balance in viz_server.py says what it does and
+ *  does not mean. */
+export interface FootBalance {
+  grounded: boolean;
+  marginMm: number;
+}
+export type Side = "left" | "right";
+export interface Balance {
+  com: number[];
+  feet: Record<Side, FootBalance>;
+  /** The grounded foot whose footprint holds the CoM, or null. */
+  over: Side | null;
+}
+
+const SIDES: Side[] = ["left", "right"];
+
+/** The foot the CoM is nearest to standing on: the larger margin among the
+ *  feet that are down (a foot in the air cannot be stood on, however well
+ *  the CoM lines up with it). `over` names a foot only once the CoM is
+ *  inside its footprint; this still has an answer when it is outside both. */
+export function nearestFoot(b: Balance): { side: Side; marginMm: number } {
+  const down = SIDES.filter((s) => b.feet[s].grounded);
+  const side = (down.length ? down : SIDES).reduce((a, s) =>
+    b.feet[s].marginMm > b.feet[a].marginMm ? s : a
+  );
+  return { side, marginMm: b.feet[side].marginMm };
+}
+
+/** Margins this close are the same margin: standing square the two agree to
+ *  within float dust, and naming a foot there would invent a lean. */
+const SAME_MARGIN_MM = 0.5;
+
+/** The readout beside the toggle. Millimetres, because that is the scale a
+ *  sole is on (its flat is ~45 x 34 mm). */
+export function balanceLabel(b: Balance): string {
+  if (b.over) return `${b.feet[b.over].marginMm.toFixed(1)} mm inside the ${b.over} sole`;
+  const { side, marginMm } = nearestFoot(b);
+  const other = side === "left" ? "right" : "left";
+  const bothDown = b.feet.left.grounded && b.feet.right.grounded;
+  const square = bothDown && Math.abs(b.feet.left.marginMm - b.feet.right.marginMm) <= SAME_MARGIN_MM;
+  const where = square ? "both soles" : `the ${side} sole`;
+  const air = bothDown ? "" : ` (${other} foot in the air)`;
+  return `${(-marginMm).toFixed(1)} mm outside ${where}${air}`;
+}
+
+/** True when the two would read the same on the panel, so a pose response
+ *  that changes nothing visible costs no render. */
+export function sameBalance(a: Balance | null, b: Balance | null): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.over === b.over &&
+    SIDES.every(
+      (s) => a.feet[s].grounded === b.feet[s].grounded && a.feet[s].marginMm === b.feet[s].marginMm
+    )
+  );
+}
+
+/** Green once the CoM is inside a sole, amber while it is outside: the
+ *  marker's colour is the answer at a glance and the readout is the detail.
+ *  Amber rather than red on purpose, because a negative margin is a pose that
+ *  is hard to hold statically, not a pose that is wrong. */
+export const BALANCE_IN = "#7dd87d";
+export const BALANCE_OUT = "#e8b24a";
+
+export function balanceColor(b: Balance | null): string {
+  return b?.over ? BALANCE_IN : BALANCE_OUT;
+}
+
 export interface AnimStore {
   /** Preview duck visible + interactive (the panel is open). */
   visible: boolean;
   /** Latest body poses from POST /pose — read per-frame by PoseDuck. */
   bodies: number[][] | null;
+  /** CoM vs the soles for that same pose: the editor can show a shape but
+   *  not whether it would STAND. Per-frame data like `bodies`: does not
+   *  notify. */
+  balance: Balance | null;
+  /** Draw the CoM marker in the scene. Owned (and persisted) by the panel's
+   *  ⊕ toggle, off by default so the editor's default view is unchanged. */
+  showBalance: boolean;
   /** What a 3D click/drag edits: one servo, or the rig control mapped to the
    *  clicked body part. Owned (and persisted) by the panel's mode toggle. */
   mode: AnimMode;
@@ -306,6 +386,8 @@ export interface AnimStore {
 export const animStore: AnimStore = {
   visible: false,
   bodies: null,
+  balance: null,
+  showBalance: false,
   mode: "joints",
   selected: null,
   selectedRig: null,
@@ -352,6 +434,12 @@ export function setSelectedRig(sel: RigSelection | null) {
   if (animStore.selectedRig?.id === sel?.id && animStore.selected === null) return;
   animStore.selectedRig = sel;
   animStore.selected = null;
+  animNotify();
+}
+
+export function setShowBalance(v: boolean) {
+  if (animStore.showBalance === v) return;
+  animStore.showBalance = v;
   animNotify();
 }
 

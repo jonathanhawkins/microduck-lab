@@ -21,6 +21,8 @@ import { buildBodyGeometries, type BodyGeometry } from "./Duck";
 import {
   animStore,
   animVersion,
+  BALANCE_IN,
+  BALANCE_OUT,
   PREVIEW_OFFSET,
   ROOT_SEL,
   setSelected,
@@ -73,6 +75,20 @@ const HANDLE_IDLE = new THREE.Color("#5fd0bd");
 const HANDLE_HOVER = new THREE.Color("#a9f0e4");
 const HANDLE_DRAG = new THREE.Color("#ffd166");
 
+// --- the ⊕ CoM marker: ball, plumb line, crosshair on the ground ----------
+// Inside `rootRef` the frame is MuJoCo world, Z UP (hence the locator ring at
+// z = 0.005), so the marker is built in that frame directly. It answers the
+// question the ghost cannot: not what the pose LOOKS like, but whether the
+// mass is over a foot.
+const COM_BALL_R = 0.009;
+/** Crosshair arm, half-length: about a sole's, so the cross reads against
+ *  the foot it is being judged against. */
+const CROSS_ARM = 0.024;
+/** Just off the floor, under the locator ring: co-planar would z-fight. */
+const FLOOR_Z = 0.0022;
+const COM_IN = new THREE.Color(BALANCE_IN);
+const COM_OUT = new THREE.Color(BALANCE_OUT);
+
 export function PoseDuck({ scene }: { scene: Scene }) {
   const visible = useSyncExternalStore(
     subscribeAnim,
@@ -108,10 +124,16 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     over: (e: ThreeEvent<PointerEvent>) => void;
     out: () => void;
   } | null>(null);
+  const comRef = useRef<THREE.Group>(null);
+  const comBallRef = useRef<THREE.Mesh>(null);
+  const comPlumbRef = useRef<THREE.Mesh>(null);
+  const comCrossRef = useRef<THREE.Group>(null);
+  const comMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
   const tmpP = useMemo(() => new THREE.Vector3(), []);
   const tmpQ = useMemo(() => new THREE.Quaternion(), []);
   const tmpV = useMemo(() => new THREE.Vector3(), []);
   const axisV = useMemo(() => new THREE.Vector3(), []);
+  const comV = useMemo(() => new THREE.Vector3(), []);
   const viewerDir = useMemo(() => new THREE.Vector3(), []);
 
   // --- per-frame: apply the previewed pose + selection tinting -------------
@@ -120,9 +142,11 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     // Until the first POST /pose lands, every body group still sits at the
     // group origin — a heap of parts on the floor. Stay hidden instead.
     if (rootRef.current) rootRef.current.visible = pose !== null;
+    // Fast lerp: smooths the HTTP round trip without feeling laggy. The CoM
+    // marker below rides the same alpha so it never leads the ghost it
+    // belongs to.
+    const alpha = 1 - Math.exp(-45 * Math.min(dt, 0.1));
     if (pose) {
-      // Fast lerp: smooths the HTTP round trip without feeling laggy.
-      const alpha = 1 - Math.exp(-45 * Math.min(dt, 0.1));
       pose.forEach((p, b) => {
         const grp = groupRefs.current[b];
         if (!grp) return;
@@ -155,6 +179,36 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
         );
         const c = rigDrag.current ? HANDLE_DRAG : handleHover.current ? HANDLE_HOVER : HANDLE_IDLE;
         handleMatRefs.current.forEach((m) => m?.color.copy(c));
+      }
+    }
+    // --- the ⊕ CoM marker ---------------------------------------------
+    // POST /pose delivers `balance` alongside `bodies`, so it is read here
+    // per-frame for the same reason: a slider drag must not cost a render.
+    const bal = animStore.balance;
+    const comGrp = comRef.current;
+    if (comGrp) {
+      comGrp.visible = animStore.showBalance && pose !== null && bal !== null;
+      if (comGrp.visible && bal) {
+        const [cx, cy, cz] = bal.com;
+        comV.set(cx, cy, cz);
+        const ball = comBallRef.current;
+        // Straight to the mark the first time it is shown: lerping out of the
+        // group origin would streak the ball up off the floor.
+        if (ball) {
+          if (ball.position.lengthSq() === 0) ball.position.copy(comV);
+          else ball.position.lerp(comV, alpha);
+        }
+        const at = ball?.position ?? comV;
+        if (comPlumbRef.current) {
+          comPlumbRef.current.position.set(at.x, at.y, at.z / 2);
+          // The cylinder is a unit height along its own +Y, turned to point
+          // along world Z by the rotation in the JSX; scaling it is what
+          // makes the plumb line reach exactly the floor.
+          comPlumbRef.current.scale.y = Math.max(at.z, 1e-4);
+        }
+        comCrossRef.current?.position.set(at.x, at.y, FLOOR_Z);
+        const c = bal.over ? COM_IN : COM_OUT;
+        comMatRefs.current.forEach((m) => m?.color.copy(c));
       }
     }
     const sel = animStore.selected;
@@ -435,6 +489,74 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
             ⇕ {animStore.selectedRig?.label ?? "squat"}
           </div>
         </Html>
+      </group>
+
+      {/* The ⊕ CoM marker: a ball at the centre of mass, a plumb line to the
+          floor, and a crosshair where it lands, green once that point is
+          inside a sole. renderOrder + depthTest off, because the CoM is
+          INSIDE the shell and a marker you cannot see through the duck
+          answers nothing. three.js takes groupOrder from EVERY Group it
+          descends through, so the inner group carries it again. */}
+      <group ref={comRef} visible={false} renderOrder={3}>
+        <mesh ref={comBallRef}>
+          <sphereGeometry args={[COM_BALL_R, 16, 12]} />
+          <meshBasicMaterial
+            ref={(el) => void (comMatRefs.current[0] = el)}
+            color={BALANCE_OUT}
+            transparent
+            opacity={0.9}
+            depthTest={false}
+          />
+        </mesh>
+        <mesh ref={comPlumbRef} rotation={[Math.PI / 2, 0, 0]}>
+          <cylinderGeometry args={[0.0012, 0.0012, 1, 6]} />
+          <meshBasicMaterial
+            ref={(el) => void (comMatRefs.current[1] = el)}
+            color={BALANCE_OUT}
+            transparent
+            opacity={0.5}
+            depthTest={false}
+            depthWrite={false}
+          />
+        </mesh>
+        <group ref={comCrossRef} renderOrder={3}>
+          <mesh>
+            <planeGeometry args={[CROSS_ARM * 2, 0.0018]} />
+            <meshBasicMaterial
+              ref={(el) => void (comMatRefs.current[2] = el)}
+              color={BALANCE_OUT}
+              transparent
+              opacity={0.9}
+              side={THREE.DoubleSide}
+              depthTest={false}
+              depthWrite={false}
+            />
+          </mesh>
+          <mesh>
+            <planeGeometry args={[0.0018, CROSS_ARM * 2]} />
+            <meshBasicMaterial
+              ref={(el) => void (comMatRefs.current[3] = el)}
+              color={BALANCE_OUT}
+              transparent
+              opacity={0.9}
+              side={THREE.DoubleSide}
+              depthTest={false}
+              depthWrite={false}
+            />
+          </mesh>
+          <mesh>
+            <ringGeometry args={[0.0105, 0.0125, 28]} />
+            <meshBasicMaterial
+              ref={(el) => void (comMatRefs.current[4] = el)}
+              color={BALANCE_OUT}
+              transparent
+              opacity={0.8}
+              side={THREE.DoubleSide}
+              depthTest={false}
+              depthWrite={false}
+            />
+          </mesh>
+        </group>
       </group>
 
       {/* Locator ring — the ghost is translucent and easy to lose on a busy floor. */}

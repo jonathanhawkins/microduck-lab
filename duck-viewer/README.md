@@ -111,6 +111,17 @@ the UI deliberately doesn't expose them.)
   exactly where the first servo runs out of travel, and the tooltip names it.
   Rig directions are mutually orthogonal in joint space, so controls never
   move each other's sliders, and asymmetric hand-tweaks survive a rig drag.
+  **⊕ balance** adds a centre-of-mass marker to the ghost: a ball at the CoM,
+  a plumb line, and a crosshair where that line lands on the floor, green once
+  the point is inside a sole and amber while it is outside, with the margin in
+  millimetres read out under the toggle. `POST /pose` measures it against each
+  sole's real outline (the flat of the sole mesh, projected onto the floor,
+  which stays true when a foot turns; the mesh's bounding box did not) and
+  flags a foot held off the floor, which the readout cannot be stood on. It is
+  a STATIC check (no velocity, no momentum, no ankle torque), so it answers
+  "how hard is this pose to hold", not "would the duck fall": a real policy
+  holds a small negative margin routinely. Off by default, and persisted like
+  the other panel toggles.
 - **📷 shot** (top-center, always available): one click downloads a full-res
   PNG of the current view, named after the selected duck (or `duck-lab` for a
   crowd shot) — the selection ring is hidden for the capture render, and the

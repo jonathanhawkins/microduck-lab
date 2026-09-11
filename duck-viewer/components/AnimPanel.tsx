@@ -15,8 +15,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
+  type Balance,
   animStore,
   animVersion,
+  balanceColor,
+  balanceLabel,
   clampJoint,
   clipProblem,
   defaultPose,
@@ -31,12 +34,14 @@ import {
   removeClip,
   ROOT_SEL,
   round3,
+  sameBalance,
   sampleClip,
   setAnimMeta,
   setAnimMode,
   setAnimVisible,
   setSelected,
   setSelectedRig,
+  setShowBalance,
   subscribeAnim,
   type AnimMode,
   withKey,
@@ -98,6 +103,10 @@ export function AnimPanel() {
   const [browsing, setBrowsing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [poseErr, setPoseErr] = useState<string | null>(null);
+  // CoM vs the soles for the pose on screen, for the readout row. The 3D
+  // marker reads the store per-frame instead; this state only moves while
+  // the readout is showing, and only when what it says would change.
+  const [balance, setBalance] = useState<Balance | null>(null);
 
   // 3D selection lives in the shared store (PoseDuck writes it on click).
   useSyncExternalStore(subscribeAnim, animVersion, () => 0);
@@ -163,6 +172,11 @@ export function AnimPanel() {
     const s = new PoseStreamer(
       (r) => {
         animStore.bodies = r.bodies; // read per-frame by PoseDuck, no re-render
+        const bal = r.balance ?? null;
+        animStore.balance = bal;
+        // A slider drag must not re-render the panel per step (setPoseErr
+        // below bails on identity; a fresh object here would not).
+        if (animStore.showBalance) setBalance((prev) => (sameBalance(prev, bal) ? prev : bal));
         setPoseErr(null);
       },
       (e) => setPoseErr(e)
@@ -235,6 +249,17 @@ export function AnimPanel() {
     saveJSON("animMode", mode);
     setAnimMode(mode);
   }, [mode]);
+
+  // The ⊕ CoM marker in the scene. Persisted like `mode`, and off by default:
+  // the balance read is a question you ask of a pose, not scene furniture.
+  const [showBalance, setShowMarker] = useState(() => loadJSON("animBalance", false));
+  useEffect(() => {
+    saveJSON("animBalance", showBalance);
+    setShowBalance(showBalance);
+    // The readout ignores pose responses while hidden; ask for the current
+    // pose again so it has something to say the moment it is turned on.
+    if (showBalance && open && meta) streamerRef.current?.request(poseRef.current);
+  }, [showBalance, open, meta]);
   // body → rig-control map for rig-mode picking in the scene.
   useEffect(() => {
     animStore.rigForBody = meta ? rigBodyMap(meta, rigVectors) : [];
@@ -887,6 +912,42 @@ export function AnimPanel() {
           >
             🎮 rig
           </button>
+          <div style={{ flex: 1 }} />
+          <button
+            style={{
+              ...btn,
+              ...(showBalance
+                ? { color: "#7dd87d", border: "1px solid rgba(125,216,125,0.5)", background: "#11241a" }
+                : {}),
+            }}
+            title="show where the centre of mass falls: a ball at the CoM, a plumb line, and a crosshair on the floor, green once that point is inside a sole"
+            onClick={() => setShowMarker((v) => !v)}
+          >
+            ⊕ balance
+          </button>
+        </div>
+      )}
+
+      {/* ---- balance: where the CoM lands relative to the soles ---- */}
+      {meta && showBalance && (
+        <div
+          style={{ padding: "0 12px 7px", fontSize: 10, flexShrink: 0 }}
+          title={
+            balance
+              ? `signed distance from the CoM's ground projection to each sole's footprint (positive = inside): left ${balance.feet.left.marginMm} mm${balance.feet.left.grounded ? "" : " (in the air)"}, right ${balance.feet.right.marginMm} mm${balance.feet.right.grounded ? "" : " (in the air)"}.\nA STATIC check: no velocity, no momentum, no ankle torque. It says how hard this pose is to hold, not whether the duck stands.`
+              : undefined
+          }
+        >
+          {balance ? (
+            <span style={{ color: balanceColor(balance) }}>
+              ⊕ CoM {balanceLabel(balance)}
+              <span style={{ color: "#566072" }}> · static, no momentum</span>
+            </span>
+          ) : (
+            <span style={{ color: "#8b93a3" }}>
+              {animStore.bodies ? "⊕ this lab&apos;s /pose doesn&apos;t report balance" : "⊕ …"}
+            </span>
+          )}
         </div>
       )}
 
