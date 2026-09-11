@@ -256,8 +256,11 @@ export function AnimPanel() {
   useEffect(() => {
     saveJSON("animBalance", showBalance);
     setShowBalance(showBalance);
-    // The readout ignores pose responses while hidden; ask for the current
-    // pose again so it has something to say the moment it is turned on.
+    // The readout ignores pose responses while hidden, but the store keeps
+    // the last one: seed from it so the row has something to say the moment
+    // it is turned on, then ask for the current pose again in case the
+    // store's is stale.
+    if (showBalance) setBalance(animStore.balance);
     if (showBalance && open && meta) streamerRef.current?.request(poseRef.current);
   }, [showBalance, open, meta]);
   // body → rig-control map for rig-mode picking in the scene.
@@ -920,7 +923,7 @@ export function AnimPanel() {
                 ? { color: "#7dd87d", border: "1px solid rgba(125,216,125,0.5)", background: "#11241a" }
                 : {}),
             }}
-            title="show where the centre of mass falls: a ball at the CoM, a plumb line, and a crosshair on the floor, green once that point is inside a sole"
+            title="show where the centre of mass falls: a ball at the CoM, a plumb line, and a crosshair on the floor with the soles outlined under it — green inside a sole, blue inside the two-foot stance, amber outside"
             onClick={() => setShowMarker((v) => !v)}
           >
             ⊕ balance
@@ -934,7 +937,7 @@ export function AnimPanel() {
           style={{ padding: "0 12px 7px", fontSize: 10, flexShrink: 0 }}
           title={
             balance
-              ? `signed distance from the CoM's ground projection to each sole's footprint (positive = inside): left ${balance.feet.left.marginMm} mm${balance.feet.left.grounded ? "" : " (in the air)"}, right ${balance.feet.right.marginMm} mm${balance.feet.right.grounded ? "" : " (in the air)"}.\nA STATIC check: no velocity, no momentum, no ankle torque. It says how hard this pose is to hold, not whether the duck stands.`
+              ? `signed distance from the CoM's ground projection to each sole's footprint (positive = inside): left ${balance.feet.left.marginMm} mm${balance.feet.left.grounded ? "" : " (in the air)"}, right ${balance.feet.right.marginMm} mm${balance.feet.right.grounded ? "" : " (in the air)"}; to the stance (the hull of the grounded soles): ${balance.support.marginMm} mm.\nA STATIC check: no velocity, no momentum, no ankle torque. It says how hard this pose is to hold, not whether the duck stands.`
               : undefined
           }
         >
@@ -945,7 +948,7 @@ export function AnimPanel() {
             </span>
           ) : (
             <span style={{ color: "#8b93a3" }}>
-              {animStore.bodies ? "⊕ this lab&apos;s /pose doesn&apos;t report balance" : "⊕ …"}
+              {animStore.bodies ? "⊕ this lab's /pose doesn't report balance" : "⊕ …"}
             </span>
           )}
         </div>

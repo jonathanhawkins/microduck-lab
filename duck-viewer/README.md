@@ -112,9 +112,13 @@ the UI deliberately doesn't expose them.)
   Rig directions are mutually orthogonal in joint space, so controls never
   move each other's sliders, and asymmetric hand-tweaks survive a rig drag.
   **⊕ balance** adds a centre-of-mass marker to the ghost: a ball at the CoM,
-  a plumb line, and a crosshair where that line lands on the floor, green once
-  the point is inside a sole and amber while it is outside, with the margin in
-  millimetres read out under the toggle. `POST /pose` measures it against each
+  a plumb line, and a crosshair where that line lands on the floor, with the
+  soles outlined under it and the margin in millimetres read out under the
+  toggle. Green once the point is inside a sole (a one-legged hold is on),
+  blue while it is inside the two-foot stance (the hull of the grounded soles,
+  drawn in the same colour: standing square the CoM is ~25 mm outside both
+  soles and ~16 mm inside the stance, which is why the square stance stands),
+  amber once it is outside everything. `POST /pose` measures it against each
   sole's real outline (the flat of the sole mesh, projected onto the floor,
   which stays true when a foot turns; the mesh's bounding box did not) and
   flags a foot held off the floor, which the readout cannot be stood on. It is

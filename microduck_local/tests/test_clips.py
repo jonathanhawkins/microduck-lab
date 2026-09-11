@@ -214,7 +214,8 @@ def test_convex_hull_and_signed_distance():
 
 
 def test_over_names_a_grounded_foot_the_com_is_inside():
-    foot = lambda margin, grounded=True: {"marginMm": margin, "grounded": grounded}
+    def foot(margin, grounded=True):
+        return {"marginMm": margin, "grounded": grounded}
     assert V._over({"left": foot(3.0), "right": foot(-40.0)}) == "left"
     assert V._over({"left": foot(3.0), "right": foot(5.0)}) == "right"     # the deeper one
     assert V._over({"left": foot(-0.5), "right": foot(-25.0)}) is None      # edge is not inside
@@ -227,8 +228,9 @@ def test_pose_reports_the_com_against_both_soles(app):
     assert set(b["feet"]) == {"left", "right"}
     assert b["over"] in ("left", "right", None)
     for foot in b["feet"].values():
-        assert set(foot) == {"grounded", "marginMm"}
+        assert set(foot) == {"grounded", "marginMm", "outline"}
         assert isinstance(foot["grounded"], bool)
+    assert set(b["support"]) == {"feet", "marginMm", "outline"}
 
 
 def test_balance_footprint_is_the_sole_flat_not_its_bounding_box(app):
@@ -283,6 +285,53 @@ def test_balance_reports_a_lifted_foot_as_airborne(app):
     b = _balance(app, _posed(right_hip_pitch=-0.8, right_knee=-0.9))
     assert b["feet"]["left"]["grounded"]
     assert not b["feet"]["right"]["grounded"]
+
+
+def _shoelace(outline):
+    pts = np.asarray(outline)
+    x, y = pts[:, 0], pts[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def test_balance_support_polygon_holds_the_square_stance(app):
+    """Standing square the CoM is ~25 mm outside BOTH soles and the duck does
+    not fall over: it is inside the hull of the two, which is the region a
+    body stands in statically. The per-sole read is the one-legged question;
+    the support read is whether the pose stands at all."""
+    b = _balance(app)
+    assert b["support"]["feet"] == ["left", "right"]
+    assert b["support"]["marginMm"] > 10
+    assert b["over"] is None and all(f["marginMm"] < 0 for f in b["feet"].values())
+
+
+@pytest.mark.parametrize("foot", ["left", "right"])
+def test_balance_support_is_the_stance_sole_once_the_other_lifts(app, foot):
+    b = _balance(app, _swayed(foot))
+    assert b["support"]["feet"] == [foot]
+    assert b["support"]["marginMm"] == b["feet"][foot]["marginMm"]
+    assert b["support"]["outline"] == b["feet"][foot]["outline"]
+
+
+def test_balance_outlines_are_the_polygons_the_margins_were_read_against(app):
+    """Counter-clockwise, at least a triangle, and the margin recomputed from
+    the wire outline is the margin the server reported: what the viewer
+    draws is what the number means."""
+    b = _balance(app, _posed(left_hip_yaw=0.6, right_hip_roll=0.2))
+    com = np.array(b["com"][:2])
+    for name, item in (("left", b["feet"]["left"]), ("right", b["feet"]["right"]),
+                       ("support", b["support"])):
+        outline = np.array(item["outline"])
+        assert len(outline) >= 3, name
+        assert _shoelace(outline) > 0, name              # counter-clockwise
+        want = V._signed_distance(com, outline) * 1000
+        assert item["marginMm"] == pytest.approx(want, abs=0.2), name
+    # The stance contains every grounded sole: each corner is inside or on it
+    # (the hip roll here lifts a foot, so the stance is the other sole alone).
+    stance = np.array(b["support"]["outline"])
+    assert len(b["support"]["feet"]) == 1
+    for side in b["support"]["feet"]:
+        for corner in b["feet"][side]["outline"]:
+            assert V._signed_distance(np.array(corner), stance) >= -1e-4
 
 
 def test_balance_follows_the_posed_state_not_the_default(app):

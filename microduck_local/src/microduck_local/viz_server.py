@@ -2395,6 +2395,12 @@ def _over(feet: dict) -> str | None:
     return max(standing, key=lambda s: feet[s]["marginMm"]) if standing else None
 
 
+def _outline(hull: np.ndarray) -> list[list[float]]:
+    """A hull as the wire wants it: world xy in metres, counter-clockwise,
+    the last point NOT repeated (the viewer closes the loop)."""
+    return [[round(float(x), 4), round(float(y), 4)] for x, y in hull]
+
+
 class PoseScratch:
     """A model/data pair used ONLY to answer POST /pose.
 
@@ -2506,6 +2512,19 @@ class PoseScratch:
         false for a foot held clear of the floor, and `over` names the
         grounded foot whose footprint contains the CoM, or None.
 
+        `support` is the same read against the SUPPORT POLYGON: the convex
+        hull of every grounded sole's footprint. That is the region a body
+        stands in statically, and it is what makes the square stance come
+        out right: standing square the CoM is ~25 mm outside BOTH soles and
+        ~16 mm inside the stance, which is why the duck does not fall over
+        the moment it stops walking. With one foot in the air the polygon is
+        the stance sole's outline and the two margins agree.
+
+        Every outline goes out too (`outline`, world xy in metres,
+        counter-clockwise), so the viewer can draw the footprints the
+        crosshair is being judged against instead of asking the eye to
+        imagine them under the shell.
+
         A STATIC check, no velocity, no momentum, no ankle torque: a real
         policy holds a small negative margin routinely and a fast one ignores
         it. Read it as "how hard is this pose to hold", never as a verdict.
@@ -2523,8 +2542,17 @@ class PoseScratch:
             feet[side] = {
                 "grounded": bool(low <= floor + GROUND_TOL),
                 "marginMm": round(_signed_distance(com[:2], hull) * 1000, 1),
+                "outline": _outline(hull),
             }
-        return {"com": [round(float(v), 4) for v in com], "feet": feet, "over": _over(feet)}
+        down = [side for side in soles if feet[side]["grounded"]]
+        stance = _convex_hull(np.concatenate([soles[side][1] for side in down]))
+        support = {
+            "feet": down,
+            "marginMm": round(_signed_distance(com[:2], stance) * 1000, 1),
+            "outline": _outline(stance),
+        }
+        return {"com": [round(float(v), 4) for v in com], "feet": feet,
+                "over": _over(feet), "support": support}
 
     def meta(self) -> dict:
         """Everything the editor needs to build clamped controls and map a

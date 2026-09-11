@@ -23,6 +23,8 @@ import {
   animVersion,
   BALANCE_IN,
   BALANCE_OUT,
+  BALANCE_STANCE,
+  balanceState,
   PREVIEW_OFFSET,
   ROOT_SEL,
   setSelected,
@@ -87,7 +89,45 @@ const CROSS_ARM = 0.024;
 /** Just off the floor, under the locator ring: co-planar would z-fight. */
 const FLOOR_Z = 0.0022;
 const COM_IN = new THREE.Color(BALANCE_IN);
+const COM_STANCE = new THREE.Color(BALANCE_STANCE);
 const COM_OUT = new THREE.Color(BALANCE_OUT);
+const COM_COLOR = { sole: COM_IN, stance: COM_STANCE, out: COM_OUT } as const;
+/** The sole outlines on the floor are furniture, not the answer: neutral,
+ *  and dimmer for a foot that is in the air. */
+const SOLE_LINE = "#c9d1e0";
+const SOLE_DOWN_ALPHA = 0.55;
+const SOLE_UP_ALPHA = 0.18;
+/** Room for more corners than a sole's flat has (~65); the stance hull is
+ *  never bigger than both soles' together. */
+const OUTLINE_MAX = 160;
+
+/** A closed line on the floor, updated in place from a wire outline. Line
+ *  width is 1 px on WebGL whatever is asked, so the stance loop reads by its
+ *  colour, not its weight. */
+function makeLoop(color: string, opacity: number): THREE.LineLoop {
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(OUTLINE_MAX * 3), 3));
+  geom.setDrawRange(0, 0);
+  const mat = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const loop = new THREE.LineLoop(geom, mat);
+  loop.renderOrder = 3;
+  loop.frustumCulled = false; // the draw range moves; the bounding sphere would not follow
+  return loop;
+}
+
+function fillLoop(loop: THREE.LineLoop, outline: number[][]) {
+  const pos = loop.geometry.getAttribute("position") as THREE.BufferAttribute;
+  const n = Math.min(outline.length, OUTLINE_MAX);
+  for (let i = 0; i < n; i++) pos.setXYZ(i, outline[i][0], outline[i][1], FLOOR_Z);
+  pos.needsUpdate = true;
+  loop.geometry.setDrawRange(0, n);
+}
 
 export function PoseDuck({ scene }: { scene: Scene }) {
   const visible = useSyncExternalStore(
@@ -129,6 +169,25 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
   const comPlumbRef = useRef<THREE.Mesh>(null);
   const comCrossRef = useRef<THREE.Group>(null);
   const comMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
+  // The footprints under the crosshair: each sole's outline and the stance
+  // (the hull of the grounded soles), straight from POST /pose. Built once;
+  // their vertices are rewritten per-frame like everything else here.
+  const loops = useMemo(
+    () => ({
+      left: makeLoop(SOLE_LINE, SOLE_DOWN_ALPHA),
+      right: makeLoop(SOLE_LINE, SOLE_DOWN_ALPHA),
+      stance: makeLoop(BALANCE_OUT, 0.9),
+    }),
+    []
+  );
+  useEffect(() => {
+    return () => {
+      for (const l of Object.values(loops)) {
+        l.geometry.dispose();
+        (l.material as THREE.Material).dispose();
+      }
+    };
+  }, [loops]);
   const tmpP = useMemo(() => new THREE.Vector3(), []);
   const tmpQ = useMemo(() => new THREE.Quaternion(), []);
   const tmpV = useMemo(() => new THREE.Vector3(), []);
@@ -207,8 +266,20 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
           comPlumbRef.current.scale.y = Math.max(at.z, 1e-4);
         }
         comCrossRef.current?.position.set(at.x, at.y, FLOOR_Z);
-        const c = bal.over ? COM_IN : COM_OUT;
+        const c = COM_COLOR[balanceState(bal)];
         comMatRefs.current.forEach((m) => m?.color.copy(c));
+        // The footprints. A sole's outline is what its margin was measured
+        // against; the stance's is the answer's own colour, so the eye
+        // reads "the cross is inside THAT" without the number.
+        for (const side of ["left", "right"] as const) {
+          const foot = bal.feet[side];
+          fillLoop(loops[side], foot.outline);
+          (loops[side].material as THREE.LineBasicMaterial).opacity = foot.grounded
+            ? SOLE_DOWN_ALPHA
+            : SOLE_UP_ALPHA;
+        }
+        fillLoop(loops.stance, bal.support.outline);
+        (loops.stance.material as THREE.LineBasicMaterial).color.copy(c);
       }
     }
     const sel = animStore.selected;
@@ -557,6 +628,9 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
             />
           </mesh>
         </group>
+        <primitive object={loops.left} />
+        <primitive object={loops.right} />
+        <primitive object={loops.stance} />
       </group>
 
       {/* Locator ring — the ghost is translucent and easy to lose on a busy floor. */}

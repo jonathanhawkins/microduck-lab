@@ -277,13 +277,37 @@ export interface RigSelection {
 export interface FootBalance {
   grounded: boolean;
   marginMm: number;
+  /** The sole's footprint on the floor: world xy in metres, counter-clockwise,
+   *  not closed. What the margin was measured against, so the scene can draw
+   *  it under the crosshair. */
+  outline: number[][];
 }
 export type Side = "left" | "right";
+/** The support polygon: the hull of every grounded sole. A body stands in
+ *  it statically; standing square the CoM is well inside it and well outside
+ *  both soles at once, which is why the per-sole read alone would call every
+ *  square stance a fall. */
+export interface SupportBalance {
+  feet: Side[];
+  marginMm: number;
+  outline: number[][];
+}
 export interface Balance {
   com: number[];
   feet: Record<Side, FootBalance>;
   /** The grounded foot whose footprint holds the CoM, or null. */
   over: Side | null;
+  support: SupportBalance;
+}
+
+/** The three answers the marker can give, in order of how much the pose
+ *  asks of the duck: over a single sole (a one-legged hold is on), inside the
+ *  two-foot stance (it stands, on both feet), or outside everything. */
+export type BalanceState = "sole" | "stance" | "out";
+
+export function balanceState(b: Balance): BalanceState {
+  if (b.over) return "sole";
+  return b.support.marginMm > 0 ? "stance" : "out";
 }
 
 const SIDES: Side[] = ["left", "right"];
@@ -314,6 +338,12 @@ export function balanceLabel(b: Balance): string {
   const square = bothDown && Math.abs(b.feet.left.marginMm - b.feet.right.marginMm) <= SAME_MARGIN_MM;
   const where = square ? "both soles" : `the ${side} sole`;
   const air = bothDown ? "" : ` (${other} foot in the air)`;
+  // Inside the stance but over neither sole: it stands on two feet, and the
+  // one-legged question is how far the mass has to travel to reach a sole.
+  if (bothDown && b.support.marginMm > 0) {
+    const toward = square ? "a sole" : `the ${side} sole`;
+    return `${b.support.marginMm.toFixed(1)} mm inside the stance, ${(-marginMm).toFixed(1)} mm short of ${toward}`;
+  }
   return `${(-marginMm).toFixed(1)} mm outside ${where}${air}`;
 }
 
@@ -323,21 +353,26 @@ export function sameBalance(a: Balance | null, b: Balance | null): boolean {
   if (!a || !b) return a === b;
   return (
     a.over === b.over &&
+    a.support.marginMm === b.support.marginMm &&
     SIDES.every(
       (s) => a.feet[s].grounded === b.feet[s].grounded && a.feet[s].marginMm === b.feet[s].marginMm
     )
   );
 }
 
-/** Green once the CoM is inside a sole, amber while it is outside: the
- *  marker's colour is the answer at a glance and the readout is the detail.
- *  Amber rather than red on purpose, because a negative margin is a pose that
- *  is hard to hold statically, not a pose that is wrong. */
+/** Green once the CoM is inside a sole, blue while it is inside the two-foot
+ *  stance, amber once it is outside everything: the marker's colour is the
+ *  answer at a glance and the readout is the detail. Amber rather than red
+ *  on purpose, because a negative margin is a pose that is hard to hold
+ *  statically, not a pose that is wrong. */
 export const BALANCE_IN = "#7dd87d";
+export const BALANCE_STANCE = "#6fb7f0";
 export const BALANCE_OUT = "#e8b24a";
 
 export function balanceColor(b: Balance | null): string {
-  return b?.over ? BALANCE_IN : BALANCE_OUT;
+  if (!b) return BALANCE_OUT;
+  const state = balanceState(b);
+  return state === "sole" ? BALANCE_IN : state === "stance" ? BALANCE_STANCE : BALANCE_OUT;
 }
 
 export interface AnimStore {
