@@ -23,6 +23,7 @@ import numpy as np
 
 from ..sensors.detector import DetectionFrame
 from ..sensors.tof import TofFrame
+from .graph import graph_key
 
 
 @dataclass
@@ -100,10 +101,27 @@ REGISTRY = BrainRegistry()
 def payload(brain: Brain | None, intent: Intent | None, mode: str) -> dict:
     """The frame's per-duck brain block."""
     if mode == "manual" or brain is None:
-        return {"kind": "manual" if mode == "manual" else "script", "state": mode,
+        # The graph key rides this branch too. Taking the wheel does not
+        # change which graph the duck's brain is drawn on — and dropping the
+        # key here blanked the inspector's state panel for as long as drive
+        # mode was on, which is exactly when someone is steering into the
+        # states they want to watch.
+        # `state` must name a node of the `graph` beside it, or the panel
+        # lights nothing and counts an off-chart visit: "manual" and "auto"
+        # are declared in no graph. With a brain, report the state it is
+        # actually parked in (it is not stepped while you drive, so this is
+        # the last real one); only a duck with no brain at all falls back to
+        # the mode, and it carries no graph either.
+        return {"kind": "manual" if mode == "manual" else "script",
+                "state": mode if brain is None else brain.state,
+                "graph": None if brain is None else graph_key(brain),
                 "cmd": [round(float(v), 3) for v in (intent.twist if intent else (0, 0, 0))],
                 "inputs": {}}
     out = {"kind": brain.kind, "state": brain.state,
+            # Which state graph the inspector should draw this duck on
+            # (brain/graph.py). A key, not the table: the tables go once in
+            # the world-info message, this rides every frame.
+            "graph": graph_key(brain),
             "cmd": [round(float(v), 3) for v in (intent.twist if intent else (0, 0, 0))],
             "head": [round(float(v), 3) for v in (intent.head if intent else (0, 0, 0, 0))],
             "note": intent.note if intent else "",
@@ -148,4 +166,5 @@ def age_inputs(senses: Senses, tof_max: float, det_max: float) -> dict:
     }
 
 
-__all__ = ["Brain", "BrainRegistry", "Intent", "REGISTRY", "Senses", "age_inputs", "brain_view", "payload", "np"]
+__all__ = ["Brain", "BrainRegistry", "Intent", "REGISTRY", "Senses", "age_inputs", "brain_view",
+           "graph_key", "payload", "np"]

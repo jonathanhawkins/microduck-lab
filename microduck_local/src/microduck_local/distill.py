@@ -1,5 +1,10 @@
 """Distill a shipped ONNX policy into an SB3 checkpoint we can fine-tune.
 
+Works for any body the harness knows (`--robot`, robots/spec.py). The G1's
+case is the duck's argument turned up: `walker.onnx` is a stable 29-DoF gait
+we cannot fine-tune directly, and a 29-DoF humanoid from scratch is tens of
+millions of steps. Cloning it is what makes the G1 a CPU project at all.
+
 Why this exists
 ---------------
 Local training cannot learn a stable gait at our sample budget. Measured under
@@ -45,6 +50,7 @@ from .train import RUNS_DIR
 
 def collect(teacher: str, episodes: int, cmd_lo: float, cmd_hi: float,
             seed: int = 0, gamma: float = 0.99, head_cmd_ranges: tuple | None = None,
+            robot: str = "microduck", task: str = "walk",
             ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Roll the teacher out and record (raw obs, action, discounted return).
 
@@ -69,12 +75,24 @@ def collect(teacher: str, episodes: int, cmd_lo: float, cmd_hi: float,
     """
     import onnxruntime as ort
 
-    from .walk_env import MicroduckWalkEnv
+    from .train import env_class
 
     sess = ort.InferenceSession(teacher, providers=["CPUExecutionProvider"])
     inp = sess.get_inputs()[0].name
-    env = MicroduckWalkEnv(obs_noise=True, domain_rand=True, action_delay=True,
-                           random_yaw=True, seed=seed, head_cmd_ranges=head_cmd_ranges)
+    kw = dict(obs_noise=True, domain_rand=True, action_delay=True,
+              random_yaw=True, seed=seed)
+    if robot == "microduck":
+        kw["head_cmd_ranges"] = head_cmd_ranges     # a duck command slot
+    # Cloning happens in the env the fine-tune will run, which is what makes
+    # a TASK clone possible: collected in the stand env the teacher is asked
+    # for nothing, so what gets cloned IS the idle.
+    env = env_class(robot, task)(**kw)
+    want = int(env.observation_space.shape[0])
+    shape = sess.get_inputs()[0].shape
+    if len(shape) == 2 and isinstance(shape[1], int) and int(shape[1]) != want:
+        raise SystemExit(
+            f"teacher {teacher} takes {shape[1]} obs but the {robot} env "
+            f"produces {want} — wrong --robot, or the wrong teacher")
     obs_buf: list[np.ndarray] = []
     act_buf: list[np.ndarray] = []
     ret_buf: list[np.ndarray] = []
@@ -105,7 +123,8 @@ def collect(teacher: str, episodes: int, cmd_lo: float, cmd_hi: float,
 
 def fit(obs: np.ndarray, act: np.ndarray, out: Path, epochs: int = 40,
         batch: int = 4096, lr: float = 1e-3, seed: int = 0,
-        returns: np.ndarray | None = None) -> float:
+        returns: np.ndarray | None = None, robot: str = "microduck",
+        task: str = "walk") -> float:
     """Fit a fresh SB3 policy to the teacher's actions; save a warm-start run.
 
     With `returns`, the CRITIC is fitted too, on the teacher's own discounted
@@ -124,10 +143,11 @@ def fit(obs: np.ndarray, act: np.ndarray, out: Path, epochs: int = 40,
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
     from .symmetry import SymmetryPPO
+    from .train import env_class
     from .train_behavior import LR_END, LR_START, linear_decay
-    from .walk_env import MicroduckWalkEnv
 
-    venv = DummyVecEnv([lambda: MicroduckWalkEnv(seed=seed)])
+    cls = env_class(robot, task)
+    venv = DummyVecEnv([lambda: cls(seed=seed)])
     venv = VecNormalize(venv, norm_obs=True, norm_reward=False, clip_obs=100.0)
     # Statistics from the teacher's own state distribution — this is the view
     # the student is trained on, and export_onnx bakes it back in later.
@@ -202,6 +222,21 @@ def fit(obs: np.ndarray, act: np.ndarray, out: Path, epochs: int = 40,
     out.mkdir(parents=True, exist_ok=True)
     model.save(str(out / "model"))
     venv.save(str(out / "vecnormalize.pkl"))
+    # export-walk reads this to know the graph's shape, and the lab reads it
+    # to know which body the run drives (viz_server.policy_robot).
+    meta = out / "run.json"
+    prev = {}
+    if meta.is_file():
+        try:
+            prev = json.loads(meta.read_text())
+        except ValueError:
+            prev = {}
+    prev.update({"run_name": out.name, "robot": robot, "task": task,
+                 "distilled_from": True,
+                 # an idle ignores the drive command; the lab must stop
+                 # sending one (viz_server.is_trick_duck)
+                 "pinned_command": task == "stand"})
+    meta.write_text(json.dumps(prev, indent=2))
     return loss_val
 
 
@@ -336,6 +371,13 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--head-range", default=None, metavar="nlo,nhi,hlo,hhi,ylo,yhi,rlo,rhi",
                     help="head-pose command ranges the clone is collected under (train-walk --head-range)")
+    ap.add_argument("--robot", default="microduck", choices=("microduck", "g1"),
+                    help="which body the teacher drives (default microduck); "
+                         "the G1's teacher is .cache/unitree_g1/walker.onnx")
+    ap.add_argument("--task", default="walk",
+                    help="the env to clone INSIDE (g1: walk, stand). "
+                         "`--task stand` collects the teacher under a pinned "
+                         "zero command, so the clone is the idle.")
     ap.add_argument("--no-critic", action="store_true",
                     help="clone only the actor, as before the critic fit existed "
                          "(the A/B baseline: that arm's fine-tune fell 100%% of episodes)")
@@ -344,12 +386,14 @@ def main() -> None:
     print(f"collecting from {args.teacher} ...")
     obs, act, ret = collect(args.teacher, args.episodes, args.cmd_lo, args.cmd_hi,
                             seed=args.seed,
-                            head_cmd_ranges=_head_ranges(args.head_range))
+                            head_cmd_ranges=_head_ranges(args.head_range),
+                            robot=args.robot, task=args.task)
     print(f"  {len(obs)} transitions; teacher |action| mean {np.abs(act).mean():.3f}; "
           f"return mean {ret.mean():.1f}")
     out = RUNS_DIR / args.run_name
     mse = fit(obs, act, out, epochs=args.epochs, seed=args.seed,
-              returns=None if args.no_critic else ret)
+              returns=None if args.no_critic else ret, robot=args.robot,
+              task=args.task)
     print(f"done: {out}  (final mse {mse:.5f} rad^2)")
 
 

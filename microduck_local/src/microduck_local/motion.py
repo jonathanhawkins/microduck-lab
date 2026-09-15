@@ -54,6 +54,14 @@ class Clip:
     joints: np.ndarray
     pitch: np.ndarray
     loop: bool = False
+    # Which body the clip poses: "microduck" (14 joints) or "g1" (29). A
+    # clip saved before there was a second body carries no field and is the
+    # duck's; the trainer refuses to track one on the other body.
+    robot: str = "microduck"
+
+    @property
+    def num_joints(self) -> int:
+        return int(self.joints.shape[1])
 
     @property
     def steps(self) -> int:
@@ -84,10 +92,12 @@ def load_clip(name: str, directory: Path | None = None) -> Clip:
     control rate. Format (version 1):
 
         {"version": 1, "name": ..., "duration": 1.6, "loop": false,
+         "robot": "microduck",
          "keys": [{"t": 0.0, "joints": [14 floats], "rootPitch": 0.0}, ...]}
 
     Keys are linearly interpolated in joint space; `t` is seconds from the
-    clip start and must ascend from 0.
+    clip start and must ascend from 0. `robot` (optional, the duck when
+    absent) says whose joints the keys are: a G1 clip carries 29.
     """
     path = (directory or clips_dir()) / f"{name}.json"
     data = json.loads(path.read_text())
@@ -96,18 +106,32 @@ def load_clip(name: str, directory: Path | None = None) -> Clip:
         raise ValueError(f"clip {name!r} has no keys")
     times = np.array([float(k["t"]) for k in keys])
     poses = np.array([np.asarray(k["joints"], dtype=np.float64) for k in keys])
-    if poses.shape[1] != C.NUM_JOINTS:
-        raise ValueError(f"clip {name!r}: keys must carry {C.NUM_JOINTS} joints")
+    robot = str(data.get("robot") or "microduck")
+    if robot in ("duck", ""):
+        robot = "microduck"
+    want = clip_joint_count(robot)
+    if poses.ndim != 2 or poses.shape[1] != want:
+        raise ValueError(f"clip {name!r}: keys must carry {want} joints "
+                         f"for the {robot}")
     pitches = np.array([float(k.get("rootPitch", 0.0)) for k in keys])
     duration = float(data.get("duration") or times[-1])
     n = max(int(round(duration * CONTROL_HZ)), 1)
     grid = np.arange(n) / CONTROL_HZ
     joints = np.stack([np.interp(grid, times, poses[:, j])
-                       for j in range(C.NUM_JOINTS)], axis=1)
+                       for j in range(want)], axis=1)
     pitch = np.interp(grid, times, pitches)
     return Clip(name=str(data.get("name", name)),
                 joints=joints.astype(np.float64), pitch=pitch.astype(np.float64),
-                loop=bool(data.get("loop", False)))
+                loop=bool(data.get("loop", False)), robot=robot)
+
+
+def clip_joint_count(robot: str) -> int:
+    """How many joints a clip for `robot` carries. The duck's count is the
+    contract's and needs no assets; another body's comes from its spec."""
+    if robot == "microduck":
+        return C.NUM_JOINTS
+    from .robots import spec as S
+    return S.get(robot).num_joints
 
 
 def phase_signal(step: int, total: int) -> tuple[float, float]:

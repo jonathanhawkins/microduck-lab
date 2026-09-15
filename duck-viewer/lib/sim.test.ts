@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 
 import { applyFloorClick, makePitch, makeRoom } from "@/components/SimEditor";
-import { goalDefenders, groupLearned, LEARNED_GROUPS, PITCH_TEAMS,
+import { goalDefenders, groupLearned, LEARNED_GROUPS, PITCH_TEAMS, RUG_LONG_MAX, RUG_SHORT_MAX,
+  rugSize, SIM_SPEEDS, SIM_SPEED_DEFAULT, simRate, SimClient, speedLabel, speedShortfall, stepSpeed,
   type LearnedInfo, type Scenario } from "./sim";
 
 const b = (name: string, group: string | null, title: string | null = null): LearnedInfo => ({
@@ -176,5 +177,107 @@ describe("goalDefenders: whose end is which", () => {
   it("leaves an end unpainted when two teams attack it", () => {
     const s = pitch([duck("d0", -1, 0, home), duck("d1", 1, Math.PI, away), duck("d2", 1, Math.PI, "sky")]);
     expect(goalDefenders(s)).toEqual({ left: home, right: null });
+  });
+});
+
+// The speed control's arithmetic: what [ and ] land on, and when the HUD is
+// entitled to say the lab is not keeping up.
+describe("sim speed presets", () => {
+  it("steps through the presets and stops at both ends", () => {
+    expect(SIM_SPEEDS.map((x) => stepSpeed(x, 1))).toEqual([0.5, 1, 2, 4, 8, 8]);
+    expect(SIM_SPEEDS.map((x) => stepSpeed(x, -1))).toEqual([0.25, 0.25, 0.5, 1, 2, 4]);
+  });
+
+  it("moves an off-preset speed towards the neighbour it is heading for", () => {
+    expect(stepSpeed(3, 1)).toBe(4);
+    expect(stepSpeed(3, -1)).toBe(2);
+  });
+
+  it("labels a speed the way a player would", () => {
+    expect([0.25, 1, 8].map(speedLabel)).toEqual(["0.25\u00d7", "1\u00d7", "8\u00d7"]);
+  });
+
+  it("calls a shortfall only when the lab measurably missed the ask", () => {
+    expect(speedShortfall(3.0, 4)).toBe(true);      // a 3v3 at 4x: the measured ceiling
+    expect(speedShortfall(3.9, 4)).toBe(false);     // within the RTF window's own jitter
+    expect(speedShortfall(1.0, 1)).toBe(false);
+  });
+
+  it("reads only an absent measurement as fine, not a slow one", () => {
+    // The lab reports exactly 0 until a window closes, and zeroes it on every
+    // speed change — that is the one value meaning "no number yet".
+    expect(speedShortfall(0, 4)).toBe(false);
+    expect(speedShortfall(0, 0.25)).toBe(false);
+    // An absolute floor (the first cut used rtf > 0.05) reported a frozen
+    // world as healthy at slow speeds, which is exactly where the loop's
+    // own starvation bug lived: 0.04 against an asked 0.25 is a 6x miss.
+    expect(speedShortfall(0.04, 0.25)).toBe(true);
+    expect(speedShortfall(0.24, 0.25)).toBe(false);
+  });
+});
+
+// The pose smoothers that read `simRate` are shared with the lab pages, which
+// stream at 1x and have no speed knob — so a /sim speed must not outlive the
+// socket that set it.
+describe("the shared speed store", () => {
+  it("hands the speed back when the sim socket closes", () => {
+    const orig = globalThis.WebSocket;
+    // A stub socket: SimClient only needs the constructor and close().
+    class FakeWS {
+      static OPEN = 1;
+      readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      close() {}
+      send() {}
+    }
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWS;
+    try {
+      const c = new SimClient();
+      simRate.speed = 8;                 // as a frame at 8x would leave it
+      c.close();
+      expect(simRate.speed).toBe(SIM_SPEED_DEFAULT);
+    } finally {
+      (globalThis as unknown as { WebSocket: unknown }).WebSocket = orig;
+      simRate.speed = SIM_SPEED_DEFAULT;
+    }
+  });
+});
+
+describe("rugSize", () => {
+  // The rooms the /sim page actually draws, and what a real rug is in them.
+  it("fills a big room instead of leaving a doormat", () => {
+    // follow-me / flock: 6 x 5 m of walls. The old rule capped this at
+    // 1.6 x 1.2 — a 5 x 4 ft accent rug in a 20 x 16 ft room.
+    const [w, h] = rugSize(6.0, 5.0);
+    expect(w).toBeCloseTo(3.3, 2);
+    expect(h).toBeCloseTo(2.74, 2);
+    expect(w).toBeGreaterThan(1.6);
+    expect(h).toBeGreaterThan(1.2);
+  });
+
+  it("stays proportional in a small room", () => {
+    // living-room / playroom: 3 x 2.5 m — under the caps, so it scales.
+    expect(rugSize(3.0, 2.5)).toEqual([3.0 * 0.55, 2.5 * 0.6]);
+  });
+
+  it("never outgrows a 9 x 12 ft rug, however big the room", () => {
+    expect(rugSize(40, 40)).toEqual([RUG_LONG_MAX, RUG_SHORT_MAX]);
+  });
+
+  it("lies along the room's long axis, portrait rooms included", () => {
+    const [w, h] = rugSize(5.0, 6.0);
+    expect(h).toBeGreaterThan(w);
+    expect(rugSize(5.0, 6.0)).toEqual(rugSize(6.0, 5.0).slice().reverse());
+  });
+
+  it("leaves floor showing on every side", () => {
+    for (const [rw, rh] of [[3.0, 2.5], [6.0, 5.0], [6.5, 5.5], [1.3, 1.3]] as const) {
+      const [w, h] = rugSize(rw, rh);
+      expect(w).toBeLessThan(rw);
+      expect(h).toBeLessThan(rh);
+    }
   });
 });

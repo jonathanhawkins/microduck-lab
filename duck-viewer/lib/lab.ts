@@ -25,11 +25,17 @@ export interface SceneGeom {
    *  that predate color streaming — the viewer then falls back to its old
    *  per-body palette. */
   rgba?: [number, number, number, number];
+  /** MJCF mesh asset name (e.g. head_link) — G1 visor vs body materials. */
+  name?: string;
 }
 export interface Scene {
   bodies: string[];
   meshes: SceneMesh[];
   geoms: SceneGeom[];
+  /** Multiply mesh vertices by this to get metres. The duck's scene streams
+   *  metres and omits it; the G1's streams MILLIMETRE ints (its mesh dump is
+   *  ~21 MB that way instead of ~78 MB of floats) and sets 0.001. */
+  vertScale?: number;
 }
 
 export interface DuckFrame {
@@ -40,9 +46,17 @@ export interface DuckFrame {
    *  its first snapshot, or a server predating the field). Lets selection
    *  load the duck's run into the teach panel. */
   policy?: string | null;
+  /** Which body to draw for this row ("microduck" | "g1"). Absent on servers
+   *  that predate robot selection — those rosters are all ducks. */
+  robot?: RobotId;
   falls: number;
   step: number;
   rew: number;
+  /** The mouth servo as an opening fraction, 0 shut to 1 wide — the /sim
+   *  stream carries it (world/compose.py `split_jaw`); the lab page's ducks
+   *  have no mouth joint and leave it absent. Duck.tsx opens the bill to
+   *  the wider of this and the duck's voice (lib/mouth.ts). */
+  mouth?: number;
   /** Forward speed in m/s, in the duck's HEADING frame, averaged over the
    *  last ~0.5 s of control steps (server: Duck.forward_speed). null for the
    *  one frame after an episode reset, before the window has a sample. */
@@ -72,6 +86,13 @@ export interface DuckFrame {
    *  physics, so it is streamed here rather than as a body. null/absent for
    *  every other brain. */
   ball?: number[] | null;
+  /** Where this slot stands on the lab floor, MuJoCo XY metres. The SERVER
+   *  lays the grid out (viz_server.lab_slot_offsets) because the pitch is a
+   *  property of the robot — RobotSpec.lab_spacing_m, 0.65 m for a 25 cm duck
+   *  and 1.88 m for a 1.3 m G1 — and a roster can hold both. Absent on a
+   *  server that predates it; the viewer then falls back to its own
+   *  duck-pitched grid. */
+  offset?: [number, number];
   bodies: number[][]; // per body: [x, y, z, qw, qx, qy, qz]
 }
 
@@ -190,7 +211,7 @@ export interface Frame {
 export interface Policy {
   id: string; // e.g. "pollen:alpha_stand"
   label: string; // e.g. "alpha_stand"
-  group: "pollen" | "runs" | "checkpoints";
+  group: "pollen" | "runs" | "checkpoints" | "g1";
   path: string;
   /** Newest-artifact timestamp, epoch SECONDS (run policies only) — the
    *  server sorts the "runs" group newest-first by it; the panel renders it
@@ -204,6 +225,52 @@ export interface Policy {
   /** Bytes the run dir occupies (run policies only) — shown in the delete
    *  confirmation so the user can see what a delete actually frees. */
   sizeBytes?: number;
+  /** Which body this brain drives (server: run.json). Absent on servers that
+   *  predate robot selection — everything there is a duck. */
+  robot?: RobotId;
+  /** One measured sentence about what this policy does, shown in the chip's
+   *  tooltip (server: robots/g1._SHIPPED_NOTES for the shipped G1 brains,
+   *  a run's record.json for our own runs). */
+  note?: string;
+  /** Human name for a run — e.g. "Front kick (G1) · perform “g1-front-kick”"
+   *  (server: the run's record.json, written by the trainer and by
+   *  `describe-run`). Absent on runs with no record, which is why nothing
+   *  reads it directly: every chip goes through `policyTitle`. */
+  title?: string;
+  /** True on the ONE stage of a curriculum chain that MEASURED best. It is
+   *  usually NOT the last stage — later stages are kept for comparison after
+   *  an earlier one won — so the chain's chip asks `chainPick` rather than
+   *  taking the tail. At most one stage of a chain carries it; a chain whose
+   *  stages were never compared carries none. */
+  pick?: boolean;
+}
+
+/** The chip prefix that says a policy is not a duck. Empty for the duck, so
+ *  a one-robot lab's palette reads exactly as it always has — and empty
+ *  inside a section that is already one robot ("Unitree G1 (shipped)"), where
+ *  repeating it on every chip is noise. */
+export function robotTag(robot?: RobotId | string, group?: Policy["group"]): string {
+  if (group === "g1") return "";
+  return !robot || robot === "microduck" ? "" : `${robot} · `;
+}
+
+/** What a chip SHOWS for a policy: the run's human title when the server has
+ *  a record for it, else the directory name — with the trainer's `teach-`
+ *  prefix stripped the way the chain header has always stripped it, so a
+ *  chip and the header above it can't read differently. The raw `label`/`id`
+ *  is untouched by this and stays what travels: it is the identifier
+ *  `--init-from` and the docs need, so the chips keep it in their tooltip. */
+export function policyTitle(p: Policy): string {
+  return (p.title ?? p.label).replace(/^teach-/, "");
+}
+
+/** The stage of a curriculum chain that stands for the whole trick: the one
+ *  the record marks as measured best, else the last. The tail is only the
+ *  default — a chain often keeps its later stages for comparison after an
+ *  earlier one measured better, and handing those out silently would assign
+ *  a brain nobody picked. */
+export function chainPick(stages: Policy[]): Policy {
+  return stages.find((s) => s.pick) ?? stages[stages.length - 1];
 }
 
 /** Permanently delete a training run's directory — its policy, checkpoints
@@ -290,10 +357,23 @@ export function formatBytes(n: number): string {
   return `${n} B`;
 }
 
-export async function fetchScene(): Promise<Scene> {
-  const res = await fetch(`${LAB_HTTP}/scene`);
+/** Which body a roster slot (or a palette entry) is. The lab was one robot
+ *  deep; a G1 policy is 99 obs / 29 actions and cannot run in a duck. */
+export type RobotId = "microduck" | "g1";
+
+export async function fetchScene(robot: RobotId = "microduck"): Promise<Scene> {
+  const q = robot && robot !== "microduck" ? `?robot=${encodeURIComponent(robot)}` : "";
+  const res = await fetch(`${LAB_HTTP}/scene${q}`);
   if (!res.ok) throw new Error(`scene fetch failed: ${res.status}`);
   return res.json();
+}
+
+/** Every robot present in a roster frame, deduped. The viewer loads one mesh
+ *  set per robot on the stage rather than one per duck. */
+export function robotsInFrame(ducks: { robot?: string }[]): RobotId[] {
+  const out = new Set<RobotId>();
+  for (const d of ducks) out.add(((d.robot as RobotId) || "microduck"));
+  return [...out];
 }
 
 /** True for palette ids with a training run behind them — the only ones the

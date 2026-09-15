@@ -125,6 +125,25 @@ class Team:
     turn_free: float = 0.5
     cold_s: float = 0.4
     reach: float = 0.15
+    # COST THE SIDE OF THE BALL, NOT JUST THE DISTANCE TO IT (roadmap F.2).
+    # `_cost` answers "how many seconds to REACH the ball", and the team hands
+    # the ball to whoever answers lowest. It says nothing about what that duck
+    # can DO when it arrives: a duck 0.4 m away on the goal side of the ball
+    # gets there first and can only knock it backwards, while a teammate 0.8 m
+    # away behind it would arrive able to shoot.
+    #
+    # Every other attempt at this problem made the badly-placed duck walk
+    # round, and every one of them cost about a quarter of the team's touches
+    # (36 a run -> 24-30, the one delta that resolved in any arm). This costs
+    # NOTHING: both ducks walk exactly as far as they were going to, the ball
+    # is simply assigned to the better-placed one. It is also the only version
+    # that can work without a walk-round at all.
+    #
+    # The penalty is the seconds the walk-round WOULD take if that duck took
+    # the ball: the arc from where it stands to the far side, at `behind_r`
+    # radius and `speed`. 0 = off, which is the pre-2026-09-12 board.
+    side_s: float = 0.0
+    behind_r: float = 0.30
     blind_s: float = 1.0           # not seeing the ball yourself is worth this much time
     age_rate: float = 1.0          # …and so is every second a claim has been sitting on the board
     # --- the hysteresis ----------------------------------------------------
@@ -316,6 +335,15 @@ class Team:
             # sooner the longer you aim ahead of it, and the undamped
             # iteration swings from "it is at my feet" to "it is behind me".
             lead = min(0.5 * (lead + cost), self.lead_max_s)
+        if self.side_s > 0.0 and self.half_x > 0.0:
+            # ...plus what being on the WRONG SIDE would cost this duck: the
+            # angle at the ball between it and the goal its team attacks is
+            # pi when it is squarely behind (nothing to pay) and 0 when it is
+            # between the ball and that goal (a half-circle to walk).
+            gx = self.attack_sign * self.half_x
+            ang = abs(_wrap(math.atan2(y - fix[1], x - fix[0])
+                            - math.atan2(0.0 - fix[1], gx - fix[0])))
+            cost += self.side_s * (math.pi - ang) / math.pi
         return cost + (0.0 if seen else self.blind_s)
 
     # -- what every duck reads the same way ----------------------------------
@@ -556,6 +584,8 @@ def brain_kwargs(duck_spec, world, teams: dict[str, "Team"]) -> dict:
         # a role lives (`world/scenario.py`), and idempotent — every teammate
         # writes the same values.
         team.half_x, team.attack_sign = hx, (1.0 if goal is None or goal[0] >= 0 else -1.0)
+        from .controllers import ChaseParams  # noqa: PLC0415  (the env spec is one place)
+        team.side_s = ChaseParams.from_env().team_side_s
         for x in world.scenario.ducks:
             if x.team == duck_spec.team and x.role:
                 team.jobs[x.id] = x.role

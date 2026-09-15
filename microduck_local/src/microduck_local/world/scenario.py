@@ -14,7 +14,8 @@ Format v1 (JSON, saved under microduck_local/scenarios/<name>.json):
      "goal_width": 0.7,                                # > 0 makes it a pitch
      "attacks": {"cream": "right"},                    # …and which mouth a team attacks
      "persons": [{"id": "p0", "pos": [x, y], "yaw": 0.0, "path": [[x, y], ...],
-                  "speed": 0.3, "radius": 0.2, "height": 1.0, "yield_m": 0.55}], # kinematic walkers; yield_m: stops short of a duck
+                  "speed": 0.3, "radius": 0.2, "height": 1.0, "yield_m": 0.55,
+                  "kind": "capsule"|"g1"}],  # capsule = mocap; g1 = Unitree G1 + walker.onnx
      "pickables": [{"id": "t0", "kind": "brick"|"block"|"sock", "pos": [x, y], "yaw": 0.0}],
      "basket": {"pos": [x, y], "size": [0.3, 0.3], "rim": 0.06} | null,   # the tidy target
      "collision": "all"}                                # "all" | "walk" robot MJCF ("walk": only the soles collide)
@@ -122,7 +123,14 @@ def formation_roles(n: int) -> list[str | None]:
     return ["defender"] + ["midfielder"] * (n - 2) + ["striker"]
 MAX_OBJECTS = 200
 MAX_FLOOR_M = 20.0
-MAX_WALL_HEIGHT_M = 2.0
+# 2.0 admitted every duck room (walls are 0.3 m) but not the 2.4 m ones the
+# G1 follow scene builds: a 1.32 m person walks through a 30 cm ceiling and
+# looks like a chimney, so `world_server` raises them — and the built-in then
+# failed its OWN validator the moment the G1 assets were fetched
+# (tests/test_world_server.py::test_builtin_scenarios_validate_and_list).
+# The cap exists to stop a scenario asking for a skyscraper, not to pick the
+# room height, so it clears a person-sized room with headroom.
+MAX_WALL_HEIGHT_M = 3.0
 TOF_PRESETS = ("ideal", "datasheet", "hostile")
 
 
@@ -216,6 +224,14 @@ class Person:
     # capsule's surface stops 0.35 m from the trunk. 0: walks through - see
     # the docstring for what that does to a duck.
     yield_m: float = 0.55
+    # "capsule" is the mocap walker above. "g1" attaches the Unitree G1 MJCF
+    # and drives it with the shipped walk ONNX along the same path — see
+    # robots/g1.py. Capsule stays the default so every existing scenario and
+    # test is unchanged.
+    kind: str = "capsule"
+
+
+PERSON_KINDS = ("capsule", "g1")
 
 
 # What a duck can pick up: full extents (m), mass (kg), colour. Sizes are
@@ -428,14 +444,19 @@ def validate_scenario(raw: dict) -> Scenario:
         seen.add(pid)
         path = [_vec(w, 2, f"persons[{i}].path[{k}]", -bound, bound)
                 for k, w in enumerate(q.get("path", []) or [])]
+        kind = q.get("kind", "capsule") or "capsule"
+        if kind not in PERSON_KINDS:
+            raise ScenarioError(f"persons[{i}].kind must be one of {PERSON_KINDS}")
+        g1 = kind == "g1"
         persons.append(Person(
             pid, _vec(q.get("pos", [0.0, 0.0]), 2, f"persons[{i}].pos", -bound, bound),
             _num(q.get("yaw", 0.0), f"persons[{i}].yaw", -2 * math.pi, 2 * math.pi),
             path,
             _num(q.get("speed", 0.3), f"persons[{i}].speed", 0.0, 1.5),
-            _num(q.get("radius", 0.2), f"persons[{i}].radius", 0.05, 0.5),
-            _num(q.get("height", 1.0), f"persons[{i}].height", 0.2, 2.0),
-            _num(q.get("yield_m", Person.yield_m), f"persons[{i}].yield_m", 0.0, 2.0)))
+            _num(q.get("radius", 0.25 if g1 else 0.2), f"persons[{i}].radius", 0.05, 0.5),
+            _num(q.get("height", 1.32 if g1 else 1.0), f"persons[{i}].height", 0.2, 2.0),
+            _num(q.get("yield_m", 0.80 if g1 else Person.yield_m), f"persons[{i}].yield_m", 0.0, 2.0),
+            kind))
     if len(persons) > MAX_PERSONS:
         raise ScenarioError(f"more than {MAX_PERSONS} persons")
     pickables = []

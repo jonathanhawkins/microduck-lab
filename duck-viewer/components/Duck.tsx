@@ -18,7 +18,8 @@ import { assignDrag } from "@/lib/assign";
 import { captureWantsCleanFrame } from "@/lib/record";
 import { getSelectedDuck } from "@/lib/select";
 import { getDuckLabels } from "@/lib/ui";
-import { SHELL_MATERIALS, TEAM_COLORWAYS, TRIM_MATERIALS, teamColor, type TeamName } from "@/lib/sim";
+import { duckMouths, MOUTH_TRAVEL_RAD } from "@/lib/mouth";
+import { SHELL_MATERIALS, TEAM_COLORWAYS, TRIM_MATERIALS, teamColor, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
 
 // FALLBACK body-name → color, used only against servers that predate rgba
 // streaming (whole body painted one guessed color).
@@ -82,9 +83,15 @@ export interface BodyGeometry {
  *  bodies were merged at all (duck-viewer/README.md). */
 export function buildBodyGeometries(scene: Scene, team?: string | null): BodyGeometry[] {
   const paint = teamPaint(team);
+  // Vertices arrive in metres (the duck) or in millimetre ints with a
+  // vertScale (the G1 — a 21 MB dump instead of 78 MB of floats). Scaling
+  // here rather than at the call site is what keeps a second robot from
+  // arriving 1000x too big, off camera, with nothing in the console.
+  const vs = scene.vertScale ?? 1;
   const meshGeos = scene.meshes.map((m) => {
     const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute(m.v, 3));
+    const v = vs === 1 ? m.v : m.v.map((x) => x * vs);
+    g.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
     g.setIndex(m.f);
     return g;
   });
@@ -130,6 +137,11 @@ export function Duck({
   duckId: string; // stable stream id ("d0"…, "trainee") — assignment target
 }) {
   const bodyRefs = useRef<(THREE.Group | null)[]>([]);
+  // The hinged lower bill (world/compose.py `split_jaw`): its group takes the
+  // streamed pose like every body, and its MESH takes the voice on top — a
+  // rotation about the body origin, which is the pivot, on the hinge axis.
+  const mouthIdx = useMemo(() => bodies.findIndex((b) => b.name === "mouth"), [bodies]);
+  const billRef = useRef<THREE.Mesh>(null);
   const labelRef = useRef<THREE.Group>(null);
   const labelDivRef = useRef<HTMLDivElement>(null);
   const spawnDivRef = useRef<HTMLDivElement>(null);
@@ -141,7 +153,9 @@ export function Duck({
   useFrame((_, dt) => {
     const duck = frameRef.current;
     if (!duck) return;
-    const alpha = 1 - Math.exp(-16 * Math.min(dt, 0.1));
+    // Scaled by the world's speed: the filter's lag is fixed in WALL
+    // time, the sim time a frame carries is not (lib/sim.ts POSE_SMOOTH_HZ).
+    const alpha = 1 - Math.exp(-POSE_SMOOTH_HZ * simRate.speed * Math.min(dt, 0.1));
     duck.bodies.forEach((pose, b) => {
       const grp = bodyRefs.current[b];
       if (!grp) return;
@@ -150,6 +164,14 @@ export function Duck({
       grp.position.lerp(tmpP, alpha);
       grp.quaternion.slerp(tmpQ, alpha);
     });
+    // Lip-sync: open the bill to the wider of what the servo is doing and
+    // what the voice asks, so a duck carrying a toy keeps its grip while it
+    // chirps, and a silent duck shows exactly the physics. The servo's
+    // opening is already in the streamed pose, so only the EXCESS is added.
+    if (billRef.current) {
+      const voice = duckMouths.open(duckId, performance.now() / 1000);
+      billRef.current.rotation.y = Math.max(0, voice - (duck.mouth ?? 0)) * MOUTH_TRAVEL_RAD;
+    }
     // Float the label above the trunk (body 1 = trunk_base in this model).
     const trunk = duck.bodies[1];
     if (labelRef.current && trunk) {
@@ -217,7 +239,7 @@ export function Duck({
       {bodies.map((body, b) =>
         body.geometry ? (
           <group key={b} ref={(el) => void (bodyRefs.current[b] = el)}>
-            <mesh geometry={body.geometry}>
+            <mesh geometry={body.geometry} ref={b === mouthIdx ? billRef : undefined}>
               <meshStandardMaterial vertexColors roughness={0.55} metalness={0.08} />
             </mesh>
           </group>

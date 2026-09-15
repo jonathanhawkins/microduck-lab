@@ -25,9 +25,10 @@ import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
-import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { goalDefenders, PICKABLE_COLORS, PICKABLE_SIZES, TEAM_COLORWAYS,
-  type Scenario, type SimClient, type TeamName } from "@/lib/sim";
+import { mergeGeometries, mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+import { goalDefenders, PICKABLE_COLORS, PICKABLE_SIZES, rugSize, TEAM_COLORWAYS,
+  type Scenario, type SimClient, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
+import type { Scene } from "@/lib/lab";
 
 // -- palette -----------------------------------------------------------------
 // Kept close to the page's UI accents (amber / teal) so the stage and the
@@ -593,7 +594,7 @@ export function Statics({ scenario }: { scenario: Scenario | null }) {
       </mesh>
       {rug && (
         <mesh position={[(bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2, 0.0003]}>
-          <planeGeometry args={[Math.min(roomW * 0.44, 1.6), Math.min(roomH * 0.5, 1.2)]} />
+          <planeGeometry args={rugSize(roomW, roomH)} />
           <meshStandardMaterial map={rugTexture()} roughness={1} metalness={0} envMapIntensity={0.15} />
         </mesh>
       )}
@@ -761,7 +762,91 @@ const Z_BLOB = 0.0016;
 
 /** Free objects (balls, boxes with mass, toys, persons) posed from the frame
  *  stream, plus the instanced contact blobs under them and under every duck. */
-export function Dynamics({ scenario, client }: { scenario: Scenario | null; client: SimClient }) {
+/** A G1 person: one group per body, one mesh per MJCF geom.
+ *  STL/OBJ CAD duplicates verts per face; weld those, then smooth normals
+ *  so it matches the original model instead of looking low-poly. */
+function G1Person({ id, scene, client }: { id: string; scene: Scene; client: SimClient }) {
+  const tree = useMemo(() => {
+    const meshGeos = scene.meshes.map((m) => {
+      let g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(m.v, 3));
+      g.setIndex(m.f);
+      g = mergeVertices(g, 4e-4);
+      g.computeVertexNormals();
+      return g;
+    });
+    const col = new THREE.Color();
+    const quat = new THREE.Quaternion();
+    const mat4 = new THREE.Matrix4();
+    const byBody = scene.bodies.map((_name, b) =>
+      scene.geoms
+        .filter((g) => g.body === b)
+        .map((g) => {
+          const geo = meshGeos[g.mesh].clone();
+          quat.set(g.quat[1], g.quat[2], g.quat[3], g.quat[0]);
+          mat4.compose(new THREE.Vector3(...g.pos), quat, new THREE.Vector3(1, 1, 1));
+          geo.applyMatrix4(mat4);
+          if (g.rgba) col.setRGB(g.rgba[0], g.rgba[1], g.rgba[2], THREE.SRGBColorSpace);
+          else col.set("#888888");
+          const meshName = (g.name ?? "").toLowerCase();
+          const lum = 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b;
+          const kind = /head/.test(meshName) ? "visor"
+            : /logo/.test(meshName) ? "logo"
+            : (g.mat === "black" || lum < 0.25) ? "dark"
+            : "body";
+          return { geo, color: "#" + col.getHexString(), kind };
+        }),
+    );
+    meshGeos.forEach((g) => g.dispose());
+    return byBody;
+  }, [scene]);
+  const refs = useRef<(THREE.Group | null)[]>([]);
+  const tmpP = useMemo(() => new THREE.Vector3(), []);
+  const tmpQ = useMemo(() => new THREE.Quaternion(), []);
+  useFrame((_, dt) => {
+    const o = client.frame?.objects.find((x) => x.id === id);
+    const bodies = o?.bodies;
+    if (!bodies) return;
+    const a = 1 - Math.exp(-POSE_SMOOTH_HZ * simRate.speed * Math.min(dt, 0.1));
+    bodies.forEach((pose, b) => {
+      const g = refs.current[b];
+      if (!g) return;
+      tmpP.set(pose[0], pose[1], pose[2]);
+      tmpQ.set(pose[4], pose[5], pose[6], pose[3]);
+      g.position.lerp(tmpP, a);
+      g.quaternion.slerp(tmpQ, a);
+    });
+  });
+  return (
+    <group>
+      {tree.map((parts, i) =>
+        parts.length ? (
+          <group key={scene.bodies[i]} ref={(el) => { refs.current[i] = el; }}>
+            {parts.map((p, k) => (
+              <mesh key={k} geometry={p.geo} castShadow={false} receiveShadow={false}>
+                {p.kind === "visor" ? (
+                  <meshPhysicalMaterial color={p.color} roughness={0.08} metalness={0.85}
+                    clearcoat={1} clearcoatRoughness={0.06} envMapIntensity={1.6} />
+                ) : p.kind === "logo" ? (
+                  <meshStandardMaterial color={p.color} roughness={0.55} metalness={0} envMapIntensity={0.4} />
+                ) : p.kind === "dark" ? (
+                  <meshStandardMaterial color={p.color} roughness={0.35} metalness={0.45} envMapIntensity={0.9} />
+                ) : (
+                  <meshPhysicalMaterial color="#d8d8d8" roughness={0.34} metalness={0.06}
+                    clearcoat={0.35} clearcoatRoughness={0.28} envMapIntensity={0.75} />
+                )}
+              </mesh>
+            ))}
+          </group>
+        ) : null,
+      )}
+    </group>
+  );
+}
+
+export function Dynamics({ scenario, client, g1Scene }: {
+  scenario: Scenario | null; client: SimClient; g1Scene?: Scene | null;
+}) {
   const refs = useRef(new Map<string, THREE.Group>());
   const blobs = useRef<THREE.InstancedMesh>(null);
   const tmpP = useMemo(() => new THREE.Vector3(), []);
@@ -818,7 +903,9 @@ export function Dynamics({ scenario, client }: { scenario: Scenario | null; clie
       if (im) im.count = 0;
       return;
     }
-    const a = 1 - Math.exp(-16 * Math.min(dt, 0.1));
+    // Scaled by the world's speed: the filter's lag is fixed in WALL
+    // time, the sim time a frame carries is not (lib/sim.ts POSE_SMOOTH_HZ).
+    const a = 1 - Math.exp(-POSE_SMOOTH_HZ * simRate.speed * Math.min(dt, 0.1));
     let n = 0;
     const put = (x: number, y: number, r: number, k: number) => {
       if (!im || n >= MAX_BLOBS || k <= 0.01) return;
@@ -875,7 +962,7 @@ export function Dynamics({ scenario, client }: { scenario: Scenario | null; clie
           </mesh>
         </group>
       ))}
-      {persons.map((q) => (
+      {persons.filter((q) => q.kind !== "g1").map((q) => (
         <group key={q.id} ref={setRef(q.id)}>
           {/* a capsule standing on the floor; the nose cone shows its heading */}
           <mesh rotation={[Math.PI / 2, 0, 0]}>
@@ -887,6 +974,9 @@ export function Dynamics({ scenario, client }: { scenario: Scenario | null; clie
             <meshStandardMaterial color={PERSON_NOSE} roughness={0.4} />
           </mesh>
         </group>
+      ))}
+      {g1Scene && persons.filter((q) => q.kind === "g1").map((q) => (
+        <G1Person key={q.id} id={q.id} scene={g1Scene} client={client} />
       ))}
       {scenario.balls.map((ball, i) => (
         <group key={`ball${i}`} ref={setRef(`ball${i}`)}>

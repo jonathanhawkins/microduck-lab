@@ -114,6 +114,15 @@ uv run bench-envs --ipc-floor                             # is a slow vec-step t
 uv run distill --teacher ../microduck/policies/alpha_walking.onnx --run-name my-walk
 uv run export-walk runs/my-walk
 uv run select-run runs/my-walk --behavior run --cmd 0.4 --jobs 8
+
+# a SECOND body: the Unitree G1 (see "Training another robot" below)
+uv run fetch-g1                                             # MJCF + meshes + walker.onnx (~140 MB)
+uv run bench-walk --robot g1                                # it costs ~2x the duck per step
+uv run distill --robot g1 --teacher .cache/unitree_g1/walker.onnx --run-name g1-clone
+uv run train-walk --robot g1 --envs 32 --steps 2_000_000 --init-from runs/g1-clone --run-name g1-walk
+uv run export-walk runs/g1-walk                             # obs[1,99] -> actions[1,29]
+uv run render-rollout --policy runs/g1-walk/policy.onnx --out /tmp/rr-g1 --seconds 8
+MICRODUCK_G1_WALKER=$PWD/runs/g1-walk/policy.onnx uv run duck-lab --world follow-me   # drive the /sim person with it
 ```
 
 Measured on an M5 Max: ~26k control-steps/s raw env throughput at 12 workers
@@ -734,6 +743,189 @@ caveats there because the lab pins `domain_rand=False` and steps its ducks
 serially in one frame loop; a lab launched with `MICRODUCK_ACTUATOR=bam` falls
 back to private models.
 
+## Training another robot (the Unitree G1)
+
+The harness was one body deep: `walk_env.py` resolved `trunk_base`, `floor`,
+`left_foot_collision` and the 14 names in `contract.JOINT_NAMES` by hand.
+Those lookups now come from a `RobotSpec` (`robots/spec.py`), the duck's is
+`contract.MICRODUCK`, and a second body reuses the env instead of forking it.
+The duck path is unchanged to the BIT: same rollout hash under `xml` and
+`bam`, 200 steps with noise, domain randomisation and action delay on.
+
+```bash
+uv run fetch-g1            # Lucky Robots MJCF + meshes + walker.onnx -> .cache/unitree_g1
+uv run --with pytest pytest tests/test_g1_env.py tests/test_g1_symmetry.py
+```
+
+**What the G1 is here.** 29 actuated joints, 34 kg, 1.3 m; a 99-d observation
+in the LuckyRobots layout its shipped `walker.onnx` was trained for. Keeping
+that layout verbatim buys the two things that make this tractable: the shipped
+policy is a **golden test** (it must walk in our scene, or every reward number
+measured here is noise — `tests/test_g1_env.py`), and it is a **teacher** for
+`distill`. Honesty, as AGENTS.md asks: that layout feeds base LINEAR velocity,
+which no real humanoid observes without state estimation. This is a lab
+contract for prototyping and for the `/sim` world's walking person — not a
+sim2real one, and `bam` (an XL330 identification) is refused for it.
+
+**The hands are frozen, not deleted.** The 14 finger DoFs are removed while
+the finger bodies, meshes and mass stay. Measured here, driving `walker.onnx`
+at 0.3 m/s for 30 s:
+
+| variant | nv | mass | physics ctrl steps/s | vs full | 30 s path |
+|---|---|---|---|---|---|
+| full (fingers free) | 49 | 33.99 kg | 5,271 | 1.00x | 2.97 m |
+| **hands frozen** | **35** | **33.99 kg** | **6,737** | **1.28x** | **2.96 m** |
+| hands deleted | 35 | 33.34 kg | 6,900 | 1.31x | 1.09 m |
+
+Deleting buys 0.03x more and costs 0.65 kg of forearm. Read the path column
+with the noise in mind: a **1e-6 rad** nudge on one hip moves that 30 s figure
+between 2.32 and 3.11 m, so only the deleted row is outside the band. (An
+earlier 1.76x for deleting was measured at `qpos0` in free fall, where DoF
+count dominates because there are no contacts; under load the constraint
+solver does.)
+
+**Throughput** (`uv run bench-walk --robot g1`, raw env stepping, this Mac):
+
+| envs | duck | G1 | G1 cost |
+|---|---|---|---|
+| 8 | 29.6k | 19.0k | 1.56x |
+| 16 | 40.8k | 24.5k | 1.66x |
+| 32 | 61.3k | 32.5k | 1.89x |
+
+So a G1 run costs about twice a duck run per step — and a 29-DoF humanoid
+needs far more steps than the duck's 2M from scratch, which is why the
+distil-then-fine-tune path is the one to use.
+
+**The shipped walker has a dead zone.** Commanded forward speed vs achieved,
+in this env (600 steps a command, spawned at the STAND keyframe, no noise):
+
+| cmd m/s | 0.2 | 0.3 | 0.4 | 0.5 | 0.6 | 0.8 | 1.0 |
+|---|---|---|---|---|---|---|---|
+| achieved | 0.01 | 0.01 | 0.30 | 0.43 | 0.53 | 0.73 | 0.92 |
+
+Below ~0.4 m/s it stands. That is the policy, not the env (the env's obs are
+bit-identical to a standalone driver's, and a spawn transient alone kicks it
+out of the stall at 0.3). `RobotSpec.min_forward_cmd` keeps the trainer's
+"walk forward" orders inside the regime a gait exists in; the wider range
+still samples slower commands, which is exactly what a local policy has to
+learn and the shipped one never did.
+
+**The drop's own policies.** `fetch-g1` brings four ONNX files; the palette's
+**Unitree G1 (shipped)** group lists the two that speak this robot's
+observation, and the filter reads each graph rather than a hard-coded list:
+
+| file | obs → actions | in the palette? |
+|---|---|---|
+| `walker.onnx` | 99 → 29 | yes — the gait everything else here is measured against |
+| `rotator.onnx` | 99 → 29 | yes — turns on the spot, but **falls within a second under a forward command** |
+| `croucher.onnx` | 101 → 29 | no — two observations we have no meaning for (upstream's own `run.py` loads it and never drives it) |
+| `right_reacher.onnx` | 36 → 7 | no — a right-ARM overlay that rides on the walker, not a body policy |
+
+Both listed chips carry a measured one-line description in their tooltip. A
+chip that could never be assigned is worse than no chip, which is why the
+other two stay out rather than failing on drop.
+
+**There is no "stand" policy, and none is needed.** The duck ships
+`alpha_stand` separately because its walkers drift when you stop commanding
+them; the G1's walker does not. At zero command it plants both feet and holds
+— measured over 60 s at two seeds: **1.2-1.7 cm of drift, pelvis steady at
+0.758 m, both feet down 100 % of steps, no falls**, and the same inside the
+dead zone at 0.1 m/s. Idle is just the walker with nothing asked of it.
+
+### Posing the G1 in the 🎬 panel: IK, rig controls, clips, imitation
+
+The animation editor is not duck-only any more. Its posing engine lives in
+`pose.py` and is built from a `RobotSpec` — joint groups, draggable
+effectors, rig controls and sole geometry are spec fields — so the panel's
+🦆/🤖 switch fetches `/joints?robot=g1` and the ghost on stage becomes a G1
+with its own 12 rig controls (squat, lean, swings, sway, stance, twist, toes,
+turn, bend, arms, elbows). Three ways to pose it:
+
+- **🦴 joints** — one servo per slider or 3D drag, as before.
+- **🎮 rig** — coupled macros; the G1's are measured off its MJCF hinge axes
+  and every leg coupling keeps the feet flat (`tests/test_pose.py` proves
+  each pair orthogonal and each per-leg pitch sum zero).
+- **🎯 ik** — drag a foot, a hand or the **centre of mass** and the server
+  solves the joints (`POST /ik?robot=`): damped least squares on the limb's
+  own chain, limits honoured, the other feet pinned. "Weight over the left
+  foot" is one drag of the ⊕ handle; a 0.62 m front kick that is statically
+  balanced in every frame took seven keys (`clips/g1-front-kick.json`). The
+  frame the ghost is drawn in is anchored on the grounded soles, so the
+  hips move and the feet stay when the weight shifts.
+
+Clips carry their `robot`; ⚡ train this on a G1 clip runs `g1_imitate`
+(`robots/g1_imitate.py`: the idle's every term retargeted at the clip's
+instant, plus a Cartesian foot-tracking term, phase in the command slots,
+and DeepMimic-style early termination — standing through a lift the clip
+asks for ends the episode like a fall, on a 5 → 15 → 30 cm strictness
+ladder). Measured on the front kick (`docs/roadmap.md` 13.4): a day of
+reward search topped out at a 0.10 m kick; the drawn clip trained to its own
+0.62 m apex, 8/8 seeds holding 20 s, in ~25 minutes of lab time
+(`teach-g1_imitate-g1_front_kick-25ac56-s2`). Look at a clip before
+training on it, and evaluate the result deterministically:
+
+```bash
+uv run render-clip g1-front-kick --out /tmp/rc     # FK playback: mp4 + sheet with the balance read
+uv run train-walk --robot g1 --task imitate --clip g1-front-kick --run-name g1-kick   # the CLI form; use the panel
+MICRODUCK_G1_IMITATE_LOOSE=1 uv run python scripts/eval_imitate.py runs/<run>/policy.onnx g1-front-kick --seeds 8
+```
+
+### Teaching the G1 in the panel (`g1_stand`, the idle)
+
+The 🎓 teach panel trains another body too: a G1 roster is offered G1 tasks
+(`behaviors/g1_tasks.py`), the job launches `train-walk --robot g1 --task …`
+instead of `train_behavior`, and because that trainer now writes
+`progress.jsonl` + `live.onnx` the job card, the reward bars and the 🎓
+trainee work exactly as they do for a duck trick.
+
+`stand still` is a two-stage curriculum, warm-started from a clone of the
+shipped walker's zero-command behaviour (`distill --robot g1 --task stand`):
+
+| stage | steps | what it buys |
+|---|---|---|
+| hold still | 700k | standing at full height with nothing asked of it |
+| ignore being driven | 500k | half the episodes ask it to walk; it is paid for staying put |
+
+Measured on the finished chain (deterministic, 60 s an episode):
+
+| condition | shipped walker at zero cmd | trained idle |
+|---|---|---|
+| pinned command, 3 seeds | 60 s, 1.2-1.7 cm drift | **60 s, 2.3-4.3 cm, 0 falls** |
+| **driven at 0.9 m/s** | walks away | **60 s, 2.3 cm — ignores it** |
+| sensor noise + DR | — | 8.5 s (the open weakness) |
+
+**Three things went wrong on the way, and each cost a run.** They are the
+reason the recipe looks the way it does:
+
+1. **A warm start's observation normalizer eats the policy it started from.**
+   VecNormalize keeps adapting; a clone from a narrow distribution (standing
+   still) starts falling, the falls widen the running statistics, the same
+   weights then read different inputs, and it falls more. 0.2-2.1 s at three
+   learning rates. Frozen: 60 s. `--init-from` now freezes by default
+   (`--live-obs-norm` restores the old behaviour).
+2. **The twist command must not be normalized at all.** Frozen statistics
+   from a pinned-zero clone give those slots variance 1e-8, so the first real
+   0.9 arrives as ~6400 and clips — stage 2 collapsed from ep_len 68 to 14.
+   Re-estimating them with the sampler's true mean/var moved ZERO off zero
+   and collapsed it differently (0.4 s). The command is a bounded physical
+   quantity: mean 0 / var 1, and zero still maps to zero, so a policy trained
+   before the switch is unaffected by it.
+3. **The duck's action-rate ramp destroys a standing task.** It climbs
+   0.1 → 1.0 over a run because a walking policy earns enough to outrun it.
+   The idle does not, and this robot sums it over 29 joints: past weight 0.4
+   every positive term collapsed toward zero, the penalty reached -116, and
+   the rendered policy hinged at the waist and dived in 0.84 s — going limp
+   is the cheapest way to stop changing your actions. Pinned at 0.1 for the
+   stand task; the duck's ramp is untouched.
+
+**In the lab.** Roster slots carry their robot, `GET /policies` tags every run
+with the body it was trained on (from its `run.json`), `GET /scene?robot=g1`
+serves the G1's meshes, assigning a G1 policy moves that slot to a G1, and a
+policy whose observation width does not match the body it lands on is refused
+instead of stepped. The 🎓 teach panel still refuses a non-duck trainee: the
+trick recipes name duck joints, duck feet and the 61-obs command slots, so a
+second body needs its own recipe library before it can learn tricks.
+
 ## World mode: rooms, sensors, brains (the viewer's `/sim` page)
 
 The roster above gives every duck a private env. **World mode** composes a
@@ -777,10 +969,23 @@ depth matrix and emits only a twist, the same `robot.move` the real robot
 takes — and it drives every ToF-equipped duck in auto mode; press **P** on
 the page to take the wheel yourself.
 
+The world runs at the wall clock by default and **`POST /world/speed
+{"x": 0.25..8}`** (or `[` / `]` on the page) changes that — fast-forward to
+the part worth watching, slow down to see a fall land. The multiplier buys
+SIM TIME, not bandwidth: the socket keeps its 25 frames a second at every
+speed and a fast world just jumps further between them (on `playroom`,
+1 duck: 25.0 frames/s and ~105 kB/s at each of 1x, 2x and 8x — the rate is
+per duck, so a 6-duck `pitch-3v3` is ~795 kB/s at every speed alike). The ceiling is what the scene costs on the
+box — one 20 ms tick buys one step, and a step measures 0.2-0.7 ms in a
+room against 6.6 ms on a 3v3 pitch, so a room reaches 8x and a 3v3 tops out
+near 3x. Over the ceiling nothing fails: the loop runs flat out and the
+frame's `rtf` reports what it managed, which is what the page shows in
+amber beside the speed you asked for.
+
 Scenarios are JSON in `scenarios/` (`world/scenario.py` is the contract and
 validator; `make_room(seed)` generates one). `GET/PUT/DELETE /scenarios/{n}`,
-`POST /world/load`, `POST /world/noise` and the `/ws/sim` socket are
-documented in `world_server.py`. Invariants worth knowing: a one-duck world
+`POST /world/load`, `POST /world/noise`, `POST /world/speed` and the
+`/ws/sim` socket are documented in `world_server.py`. Invariants worth knowing: a one-duck world
 reproduces `MicroduckWalkEnv` step for step (`tests/test_arena.py`), and the
 world never runs rewards or domain randomization — reflex training keeps its
 own env.
@@ -1007,9 +1212,14 @@ its current intent live.
   ```bash
   uv run train-brain --run-name follow-v4 --envs 12 --steps 2_000_000 --variety \
       --title "Follower v4" --description "v3 recipe to 2M with variety"   # ~15 min; the /train page shows the title, not the name
-  uv run describe-brain p-n256-s31 --title ... --description ...   # name a run after the fact; write the FINDING in once it resolves
+  uv run describe-brain p-n256-s31 --title ... --description ...   # name a BRAIN after the fact; write the FINDING in once it resolves
+  uv run describe-run teach-g1_imitate-... --title "Front kick (G1)" --note "8/8 hold 20 s, apex 0.62 m" --pick
+                                                                   # name a WALK/TASK run: title + measured note on the palette chip,
+                                                                   # --pick marks the stage of a chain the ▶ and ⤓ buttons should use
+  uv run describe-run <old-run> --backfill                         # title + description derived from the run's own run.json
   uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24   # vs `--brain follow`
   uv run eval-brain --brain learned:follow-v4 --preset hostile --episodes 24 --jobs 0   # …on every core
+  uv run fetch-g1                           # Unitree G1 MJCF + walker.onnx (~140 MB); follow-me then leads with a walking G1 instead of the capsule
   uv run duck-lab --world follow-me         # the duck starts on learned:follow-v4; swap to "follow" (the rule brain) in the inspector to compare
   # …and watch the run live at http://localhost:63317/train (duck-viewer)
   ```
@@ -2426,6 +2636,14 @@ What is real and what is a model here, so nobody mistakes one for the other:
   the beak closes, the nearest toy within 4 cm of the mouth tip is welded to
   the jaw with probability falling from 1 at zero error to 0 at the edge.
   Release drops the weld. Contact-based grasping is roadmap 12.2's later step.
+- **The beak really opens, and it is only a picture** (`world.compose.split_jaw`,
+  roadmap 12.13): the duck has a 15th servo — the mouth, Dynamixel id 32,
+  −5°…+30°, absent from the 61-obs / 14-action contract on the robot as it is
+  here — and it drives a hinged bill that reaches open, shuts on the grab as
+  far as the toy allows, and opens again to drop. But only the VISUAL geom
+  moves. The bill has no mass and no contacts; its collision twin never left
+  the head. So the beak that *looks* like it closes on a toy is not what holds
+  it — the weld above is — and nothing the bill appears to touch is touched.
 - **The ground pick is the shipped skill**: `alpha_ground_pick.onnx` runs one
   cycle as a hard swap of the reflex tier, exactly as the robot does, and the
   beak closes at the phase where the tip bottoms out (measured: 2 cm up,

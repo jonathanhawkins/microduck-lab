@@ -204,7 +204,7 @@ def select(ball, candidates: list[tuple[float, str]], model: KickModel, pitch: P
            models: dict[str, KickModel] | None = None, shoot: float = 0.0,
            mates: list[tuple[float, float]] | None = None, pass_reach: float = 0.4,
            pass_bonus: float = 0.0, obstacles=None, obs_r: float = 0.15,
-           chooser=None) -> Verdict | None:
+           chooser=None, safest: bool = False) -> Verdict | None:
     """The best of `candidates` (line, action). Mellmann's two-step rule:
     discard anything with more than `t_own` of its samples in our own net,
     then take the most likely to score, ties (within one sample) broken by
@@ -234,7 +234,16 @@ def select(ball, candidates: list[tuple[float, str]], model: KickModel, pitch: P
                 for u, act in candidates]
     safe = [v for v in verdicts if v.p_own <= t_own]
     if not safe:
-        return None
+        if not safest:
+            return None
+        # NOTHING PASSES THE FILTER. Returning None hands the decision back to
+        # the caller, which keeps `aim_mode`'s clamp line - a line that was
+        # never own-goal-checked at all. Near our own mouth, which is the only
+        # place this happens, that is the worst moment to stop checking. With
+        # `safest` the fan's LEAST BAD line is taken instead: still risky, but
+        # it is the minimum of a set the clamp's line is a member of.
+        floor = min(v.p_own for v in verdicts)
+        return _best([v for v in verdicts if v.p_own <= floor + 1e-12], n, pitch)
     if chooser is not None:
         return chooser(ball, pitch, safe)
     pushes = [v for v in safe if v.foot == PUSH]

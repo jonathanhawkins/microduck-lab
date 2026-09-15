@@ -178,6 +178,16 @@ def main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     renderer = mujoco.Renderer(w.model, height=args.height, width=args.width)
+    # What to DRAW. MuJoCo's default geomgroup is [1,1,1,0,0,0], and the toys
+    # are group 4 (`world.compose.PICKABLE_GROUP`, so the detector's
+    # line-of-sight looks THROUGH them) - so every playroom clip ever recorded
+    # showed a duck tidying an empty room, basket and all, with the six toys
+    # invisible. Draw scenery (0), the hinged bill (1), the robot's visual
+    # meshes (2) and the toys (4); leave the collision pads (3) off, they sit
+    # on top of the visuals.
+    opt = mujoco.MjvOption()
+    for g, on in enumerate((1, 1, 1, 0, 1, 0)):
+        opt.geomgroup[g] = on
     cam, follow = make_camera(args.camera, sc)
     cmd = np.zeros(3, np.float32)
 
@@ -228,7 +238,7 @@ def main() -> None:
         if follow is not None:
             p = w.ducks[follow].trunk_pos(w.data)
             cam.lookat[:] = (p[0], p[1], LOOKAT_Z)
-        renderer.update_scene(w.data, cam)
+        renderer.update_scene(w.data, cam, opt)
         frames.append(renderer.render().copy())
         s = score_line(w, st)
         caps.append([f"t {w.t:5.1f}s" + (" " + s if s else "")]     # <= 35 columns

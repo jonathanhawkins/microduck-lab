@@ -2,6 +2,7 @@
 
     uv run eval-walk runs/<run>/policy.onnx [--episodes 20]
     uv run eval-run  runs/<run>/policy.onnx [--cmd 0.4 --episodes 20]
+    uv run eval-walk runs/g1-walk/policy.onnx --robot g1     # another body
 
 Reports what rollouts actually show (fall rate, tracking error, episode length)
 — the numbers to look at before claiming anything works. Also runs the shipped
@@ -33,6 +34,10 @@ def main() -> None:
                     help="Pin twist vx (run eval). Default 0.4 for --behavior run")
     ap.add_argument("--actuator", default=None, choices=("xml", "bam"),
                     help="Override actuator; run defaults to bam")
+    ap.add_argument("--robot", default=None, choices=("microduck", "g1"),
+                    help="which body the policy drives; default: read from the "
+                         "run's run.json next to the .onnx. Behaviors are duck "
+                         "recipes and are refused for another body.")
     ap.add_argument("--push", action="store_true",
                     help="Shove the base every 3-6 s (the training env's pushes, "
                          "2026-09-06). Off here by default so eval numbers stay "
@@ -43,12 +48,27 @@ def main() -> None:
     if os.path.basename(sys.argv[0]) == "eval-run" and not args.behavior:
         args.behavior = "run"
 
+    # WHICH BODY, resolved before anything is written: MICRODUCK_RUN_CMD below
+    # is process-wide, and an argument error that sets it on the way out leaves
+    # the knob armed for whatever runs next (it did, in the test suite).
+    from pathlib import Path as _Path
+
+    from .export_onnx import run_robot
+    robot = args.robot or run_robot(_Path(args.onnx_path).parent)
+    if robot != "microduck" and args.behavior:
+        raise SystemExit(
+            f"--behavior is a Microduck reward recipe; {robot} has none yet")
+
     if args.behavior == "run" and args.cmd is None:
         args.cmd = 0.4
     if args.behavior == "run" and args.cmd is not None:
         os.environ["MICRODUCK_RUN_CMD"] = str(args.cmd)
 
-    if args.behavior:
+    if robot != "microduck":
+        from .train import env_class
+        kw = dict(seed=args.seed, push_robot=args.push)
+        env = env_class(robot)(**kw)
+    elif args.behavior:
         from .behaviors import BEHAVIORS, BehaviorEnv
         b = BEHAVIORS[args.behavior]
         kw = dict(obs_noise=True, domain_rand=True, action_delay=True,

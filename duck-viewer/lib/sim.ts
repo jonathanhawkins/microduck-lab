@@ -1,10 +1,26 @@
 // Types + client for the lab's WORLD mode (microduck_local/world_server.py):
 // the /sim page's backend. Same lab host as lib/lab.ts, second socket.
 
+import type { BrainGraphInfo } from "./braingraph";
 import type { BrainView } from "./brainview";
 import { LAB_HTTP } from "@/lib/lab";
 
 export const SIM_WS = LAB_HTTP.replace(/^http/, "ws") + "/ws/sim";
+
+/** Visual scene for a G1 person (same shape as GET /scene). null if unfetched. */
+export async function fetchG1Scene(): Promise<import("./lab").Scene | null> {
+  const r = await fetch(`${LAB_HTTP}/scene/g1`);
+  if (!r.ok) return null;
+  const sc = await r.json() as import("./lab").Scene & { vertScale?: number };
+  const scale = sc.vertScale ?? 1;
+  if (scale !== 1) {
+    for (const m of sc.meshes) {
+      const v = m.v;
+      for (let i = 0; i < v.length; i++) v[i] *= scale;
+    }
+  }
+  return sc;
+}
 
 export type TofPreset = "ideal" | "datasheet" | "hostile";
 export const TOF_PRESETS: TofPreset[] = ["ideal", "datasheet", "hostile"];
@@ -91,7 +107,10 @@ export function teamColor(team: string | null | undefined): string | null {
 export function teamSwatch(team: string | null | undefined, fallback = "#555"): string {
   return teamColor(team) ?? fallback;
 }
-export interface ScenarioPerson { id: string; pos: [number, number]; yaw: number; path: [number, number][]; speed: number; radius: number; height: number }
+export interface ScenarioPerson {
+  id: string; pos: [number, number]; yaw: number; path: [number, number][];
+  speed: number; radius: number; height: number; kind?: "capsule" | "g1";
+}
 export interface ScenarioPickable { id: string; kind: "brick" | "block" | "sock"; pos: [number, number]; yaw: number }
 export interface ScenarioBasket { pos: [number, number]; size: [number, number]; rim: number }
 export const PICKABLE_SIZES: Record<string, [number, number, number]> = {
@@ -124,6 +143,23 @@ export interface Scenario {
 }
 export interface ScenarioListing { name: string; builtin: boolean; ducks: number; objects: number; modified: number | null }
 
+/** THE RUG (SimStage draws it on every walled room that is not a pitch).
+ *  A /sim room is drawn at HUMAN scale — 0.8 m plank tiles, eight boards to a
+ *  tile, a 1.32 m G1 walking through it — so the rug is sized the way a real
+ *  area rug is, not the way a 25 cm duck would see it: a little over half the
+ *  room each way, capped at a 9 x 12 ft rug (2.74 x 3.66 m), the largest size
+ *  sold off the roll. The caps are what matter — the old ones (1.6 x 1.2) are
+ *  a 5 x 4 ft accent rug, which reads as a doormat in the middle of the 6 x 5 m
+ *  follow-me / flock rooms. Returned [x, y]: the long side lies along the
+ *  room's long axis, so a portrait room gets a portrait rug. */
+export const RUG_LONG_MAX = 3.66;
+export const RUG_SHORT_MAX = 2.74;
+export function rugSize(roomW: number, roomH: number): [number, number] {
+  const long = Math.min(Math.max(roomW, roomH) * 0.55, RUG_LONG_MAX);
+  const short = Math.min(Math.min(roomW, roomH) * 0.6, RUG_SHORT_MAX);
+  return roomW >= roomH ? [long, short] : [short, long];
+}
+
 /** Which goal MOUTH each team attacks, decided the way the World decides it
  *  (world/arena.py `World.goal_for`): the scenario's declaration when it
  *  carries one, else the mouth that team's ducks are spawned facing. "right"
@@ -153,6 +189,67 @@ export function goalDefenders(scenario: Scenario | null): { left: string | null;
     return attackers.length === 1 ? attackers[0] : null;
   };
   return { left: defender("left"), right: defender("right") };
+}
+
+/** Wall-clock speed presets for the world, mirroring SPEED_CHOICES in
+ *  world_server.py. Slow motion is the same knob from the other end: at
+ *  0.25x the lab steps the sim once every fourth wall tick, which is how
+ *  you watch a fall or a kick land. */
+export const SIM_SPEEDS = [0.25, 0.5, 1, 2, 4, 8] as const;
+
+export const SIM_SPEED_DEFAULT = 1;
+
+/** The world's current wall-clock speed, republished on every frame.
+ *
+ *  A module store rather than a prop because its consumers are the per-frame
+ *  pose smoothers inside `useFrame` (Duck.tsx, SimStage.tsx), which would
+ *  otherwise need it threaded through every duck and every object. Read it
+ *  inside the frame callback, never during render.
+ *
+ *  Those renderers are shared with the LAB pages, which stream at 1x and have
+ *  no speed knob, so this has to be handed back: `SimClient.close()` restores
+ *  it, and a socket that drops without closing is covered by the reconnect
+ *  writing the live value again. */
+export const simRate = { speed: SIM_SPEED_DEFAULT };
+
+/** Base rate of the renderers' pose smoothing, in wall Hz (tau = 62 ms).
+ *
+ *  It is MULTIPLIED by `simRate.speed`, because the filter's lag is fixed in
+ *  WALL time while the sim time a frame carries is not. Left unscaled, 8x
+ *  put half a second of world behind the picture and attenuated the ~1.5 Hz
+ *  sim gait (arriving at ~12 Hz of wall) against a 2.5 Hz corner, so the
+ *  ducks glided with barely-moving legs; and 0.25x converged inside two
+ *  frames and then held, rendering slow motion as 12.5 Hz stepping — the
+ *  one case the speed knob exists to make watchable. */
+export const POSE_SMOOTH_HZ = 16;
+
+/** Label a speed the way a video player would: 1x, 0.25x, 2x. */
+export function speedLabel(x: number): string {
+  return `${Number(x.toFixed(2))}\u00d7`;
+}
+
+/** The [ and ] keys step through SIM_SPEEDS and stop at the ends — they do
+ *  not wrap, because a key-repeat off 8x landing back on 0.25x is a trap.
+ *  An off-preset speed (someone POSTed 3) steps to the neighbour it is
+ *  heading towards rather than snapping backwards. */
+export function stepSpeed(current: number, dir: -1 | 1): number {
+  const xs = SIM_SPEEDS;
+  if (dir > 0) return xs.find((x) => x > current + 1e-9) ?? xs[xs.length - 1];
+  return [...xs].reverse().find((x) => x < current - 1e-9) ?? xs[0];
+}
+
+/** Is the lab keeping the promise? True when the measured RTF has fallen
+ *  meaningfully short of what was asked — a 3v3 at 4x runs about 3. The
+ *  slack absorbs the RTF's own one-second window jitter.
+ *
+ *  The "no measurement yet" guard is `rtf > 0`, not an absolute floor: the
+ *  lab reports exactly 0 until a window closes, and it zeroes the window on
+ *  every speed change for that reason. An absolute floor would have to be
+ *  small enough not to swallow a genuine stall at 0.25x — at which a world
+ *  managing 0.04x is a 6x shortfall, and any floor above it reports a frozen
+ *  world as healthy. */
+export function speedShortfall(rtf: number, asked: number): boolean {
+  return rtf > 0 && rtf < asked * 0.85;
 }
 
 export interface TofPayload {
@@ -292,10 +389,23 @@ export interface SimDuck {
   odomEst?: [number, number, number];
   skill: string | null;
   beak: "open" | "closed";
+  /** The 15th servo as an opening fraction, 0 shut to 1 wide. `beak` above is
+   *  the GRASP state; this is how far the bill actually is. Optional: a server
+   *  older than the hinged jaw does not send it. */
+  mouth?: number;
+  /** The duck's OWN brain, from the registry — unlike `brain.kind` below,
+   *  which reports who is steering this tick and so reads "manual" for every
+   *  duck while a drive command is held. Anything that must survive taking
+   *  the wheel (the state graph's trace identity) keys on this. */
+  brainKind?: string | null;
   /** Who is steering this duck this tick: a brain from the lab's registry
    *  (auto mode), the demo script (blind ducks), or you (manual). */
   brain: {
     kind: string; state: string; cmd: [number, number, number]; head?: number[]; note?: string; beak?: string | null; skill?: string | null;
+    /** Which declared state graph this duck's brain is drawn on
+     *  (brain/graph.py). A key into WorldInfo.graphs; null for a brain
+     *  nothing is declared for. */
+    graph?: string | null;
     inputs: BrainInputs & { tidy?: { picked: number; delivered: number; givenUp: string[] } };
     /** A learned brain's last decision — what the network saw and said (runtime.brain_view). */
     view?: BrainView;
@@ -304,7 +414,14 @@ export interface SimDuck {
   bodies: number[][];
   sensors: { tof?: TofPayload; det?: DetPayload } | null;
 }
-export interface SimObject { id: string; kind: "ball" | "box" | "person" | "toy"; pose: number[]; possessed?: boolean; toy?: string; held?: string | null; inBasket?: boolean }
+export interface SimObject {
+  id: string; kind: "ball" | "box" | "person" | "toy"; pose: number[];
+  possessed?: boolean; toy?: string; held?: string | null; inBasket?: boolean;
+  /** "g1" when this person is a Unitree G1, not the mocap capsule. */
+  robot?: string;
+  /** G1 body poses in GET /scene/g1 order, when robot is set. */
+  bodies?: number[][];
+}
 export interface TidyScore { total: number; inBasket: number; held: string[] }
 export interface SimFrame {
   t: number;
@@ -339,6 +456,10 @@ export interface SimFrame {
       Record<string, number | null>>>) | null;
   /** Brain round-trip latency applied to every intent (roadmap 12.10), ms; 0 = onboard. */
   tetherMs?: number;
+  /** Wall-clock speed the world was ASKED to run at. What it managed is
+   *  `rtf` — the two part company once the scene costs more than its 20 ms
+   *  tick (a 3v3 pitch stops climbing near 3x), and the HUD says so. */
+  simSpeed?: number;
   /** Occupancy maps per duck, in each duck's ODOMETRY frame (brain-layer output, ~2 Hz; null on the other frames). */
   maps: Record<string, OccupancyMap> | null;
 }
@@ -366,6 +487,9 @@ export interface WorldInfo {
   /** The learned brains again, with what people read: the inspector's menu
    *  files them by group and shows the title; `learned:<name>` stays the value. */
   learned?: LearnedInfo[];
+  /** The state graphs, keyed by the per-duck `brain.graph`. Static tables —
+   *  they ride this message once, never the frame. */
+  graphs?: Record<string, BrainGraphInfo>;
 }
 
 export interface LearnedInfo {
@@ -581,6 +705,7 @@ export class SimClient {
       if (this.ws !== ws) return;
       const frame: SimFrame = JSON.parse(ev.data);
       this.live = frame;
+      simRate.speed = frame.simSpeed ?? 1;
       this.bytes += ev.data.length;
       this.lastFrameAt = Date.now();
       if (frame.events?.length) {
@@ -615,10 +740,16 @@ export class SimClient {
   sendBrain(duck: string, kind: string) { this.send({ brain: { duck, kind } }); }
   sendPossess(person: string | null) { this.send({ possess: person }); }
   sendHead(duck: string, apply: boolean) { this.send({ head: { duck, apply } }); }
+  sendSpeed(x: number) { this.send({ speed: x }); }
   close() {
     this.closed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws?.close();
+    // Hand the speed back. `simRate` is a module store and `Duck`/`SimStage`
+    // are shared with the lab pages, which have no speed knob — leaving 8x
+    // behind meant a client-side nav from /sim to / rendered the lab with
+    // its pose smoothing effectively off until a full reload.
+    simRate.speed = SIM_SPEED_DEFAULT;
   }
 }
 

@@ -25,9 +25,19 @@ import numpy as np
 
 # Geom groups a range sensor "sees": 0 = scenery (floor, walls, objects),
 # 2 = the robot's visual meshes (upstream puts the shells there), 3 = the
-# collision pads, 4 = toys (`world.compose.PICKABLE_GROUP`). Group 1/5 are
-# left for sensor-only proxies later.
+# collision pads, 4 = toys (`world.compose.PICKABLE_GROUP`). Group 5 is left
+# for sensor-only proxies later.
 DEFAULT_GROUPS: tuple[int, ...] = (0, 2, 3, 4)
+
+# Group 1: geometry that RENDERS but is never sensed - by a range sensor here
+# or by the detector, which occludes on everything else. It exists because a
+# sensor's self-exclusion is its MOUNT BODY only (below), so a visual part
+# that moves off the mount body starts blocking the sensor that is bolted to
+# it. The hinged bill (`world.compose.split_jaw`) is the case: it used to be
+# a geom of `jaw_soft`, the very body the ToF and the head camera mount on,
+# and the duck's downward rays began hitting its own beak the moment it got
+# its own body. Its sensed twin is the collision geom, still on `jaw_soft`.
+UNSENSED_GROUP = 1
 
 
 @dataclass

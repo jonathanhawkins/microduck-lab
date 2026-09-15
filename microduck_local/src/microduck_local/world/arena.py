@@ -32,7 +32,7 @@ import numpy as np
 from .. import contract as C
 from ..sensors import Detector, DetectorNoise, DetectorSpec, Target, TofNoise, TofSensor
 from ..walk_env import MicroduckWalkEnv
-from .compose import DuckAddress, compose, spawn_duck
+from .compose import DuckAddress, compose, mouth_frac_for_gape, mouth_target, spawn_duck
 from .scenario import PICKABLE_KINDS, Person, Scenario
 
 # The shipped ground-pick cycle (upstream microduck_ground_pick_env_cfg.py):
@@ -45,6 +45,10 @@ from .scenario import PICKABLE_KINDS, Person, Scenario
 GROUND_PICK_PERIOD_S = 4.0
 GROUND_PICK_CLOSE_PHI = 0.38
 GROUND_PICK_END_PHI = 0.7
+# How long the beak stays open after a drop (World._mouth). Long enough to read
+# at 50 Hz in the viewer; the release itself is instant - it deactivates the
+# weld, and a massless bill moving afterwards cannot push the toy.
+MOUTH_DROP_S = 0.6
 # The shipped kicks (ball_kick_left / ball_kick_right) run as a WINDOW, not a
 # phase: the robot hands the reflex tier to the kick network for
 # `kick_duration` (0.5 s in robotd's control.rs) with an all-zero command,
@@ -153,6 +157,11 @@ class WorldDuck:
     # skill cycle the reflex tier is running instead of the walker.
     holding: str | None = None
     beak_closed: bool = False
+    # The 15th servo, as an opening fraction: 0 shut, 1 wide (World._mouth).
+    # It is NOT in the obs contract and no policy writes it - on the robot the
+    # mouth is the app's, driven by `RobotMouth`, and here it is the world's.
+    mouth: float = 0.0
+    mouth_open_until: float = 0.0
     # Dead-reckoned pose the brain gets (World.odom): the truth plus OdomNoise.
     odom_preset: str = "ideal"
     odom_noise: OdomNoise = field(default_factory=OdomNoise)
@@ -250,16 +259,30 @@ class WorldDuck:
 
 
 class WorldPerson:
-    """A mocap capsule walking its waypoints at a set speed, or driven by a
-    possessing human (`cmd` = [vx, vy, wz] in its own heading frame)."""
+    """A person the ducks can follow: a mocap capsule, or a Unitree G1.
+
+    Capsule: infinite-mass mocap, slid along waypoints. G1: the Lucky Robots
+    MJCF attached under this id's prefix, driven by walker.onnx with the same
+    waypoint twist as a command. Detector class stays "person" either way.
+    """
 
     def __init__(self, model: mujoco.MjModel, spec: Person):
         self.spec = spec
         self.id = spec.id
-        self.body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, spec.id)
-        self.mocap = int(model.body_mocapid[self.body])
+        self.robot = None
+        if spec.kind == "g1":
+            from ..robots.g1 import G1Walker
+            self.robot = G1Walker(model, spec.id)
+            self.body = self.robot.pelvis
+            self.mocap = -1
+        else:
+            self.body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, spec.id)
+            self.mocap = int(model.body_mocapid[self.body])
         self.x, self.y, self.yaw = spec.pos[0], spec.pos[1], spec.yaw
         self.wp = 0
+        # A private copy: G1 yield used to `pop` spec.path until one point
+        # remained, then the robot stood still for the rest of the session.
+        self.route = list(spec.path)
         self.cmd: np.ndarray | None = None      # possessed: heading-frame twist
         self.possessed = False
         self.waiting = 0.0                       # s stood behind a duck in the way (polite walkers)
@@ -269,14 +292,29 @@ class WorldPerson:
     def reset(self, data: mujoco.MjData) -> None:
         self.x, self.y, self.yaw = self.spec.pos[0], self.spec.pos[1], self.spec.yaw
         self.wp = 0
+        self.route = list(self.spec.path)
         self.cmd = None
         self.waiting = 0.0
         self.yields = 0
-        self.write(data)
+        if self.robot is not None:
+            self.robot.spawn(data, self.x, self.y, self.yaw)
+        else:
+            self.write(data)
 
     def write(self, data: mujoco.MjData) -> None:
+        if self.mocap < 0:
+            return
         data.mocap_pos[self.mocap] = [self.x, self.y, self.spec.height / 2]
         data.mocap_quat[self.mocap] = [np.cos(self.yaw / 2), 0.0, 0.0, np.sin(self.yaw / 2)]
+
+    def sync(self, data: mujoco.MjData) -> None:
+        """Read the G1 pelvis out of physics after mj_step. Capsules no-op."""
+        if self.robot is None:
+            return
+        self.x, self.y, self.yaw = self.robot.pose(data)
+
+    def fallen(self, data: mujoco.MjData) -> bool:
+        return bool(self.robot is not None and self.robot.fallen(data))
 
     def blocked_by(self, blockers, target_yaw: float) -> bool:
         """A polite walker's rule: something (a duck's trunk) inside
@@ -292,6 +330,9 @@ class WorldPerson:
         return False
 
     def step(self, data: mujoco.MjData, dt: float, blockers=()) -> None:
+        if self.robot is not None:
+            self._step_g1(data, dt, blockers)
+            return
         if self.possessed and self.cmd is not None:
             vx, vy, wz = (float(v) for v in self.cmd)
             self.yaw += wz * dt
@@ -336,11 +377,63 @@ class WorldPerson:
                 self.y += step * np.sin(self.yaw)
         self.write(data)
 
-    def payload(self) -> dict:
-        return {"id": self.id, "kind": "person", "waiting": self.waiting > 0,
-                "pose": [round(self.x, 4), round(self.y, 4), round(self.spec.height / 2, 4),
-                         round(float(np.cos(self.yaw / 2)), 4), 0.0, 0.0, round(float(np.sin(self.yaw / 2)), 4)],
-                "possessed": self.possessed}
+    def _step_g1(self, data: mujoco.MjData, dt: float, blockers) -> None:
+        """Waypoint / possess twist → G1 walk policy. Pose comes from physics."""
+        vx = vy = wz = 0.0
+        if self.possessed and self.cmd is not None:
+            vx, vy, wz = (float(v) for v in self.cmd)
+        elif self.route and self.spec.speed > 0:
+            tx, ty = self.route[self.wp]
+            dx, dy = tx - self.x, ty - self.y
+            dist = float(np.hypot(dx, dy))
+            if dist < 0.25:
+                self.wp = (self.wp + 1) % len(self.route)
+            else:
+                target_yaw = float(np.arctan2(dy, dx))
+                err = float(np.arctan2(np.sin(target_yaw - self.yaw),
+                                       np.cos(target_yaw - self.yaw)))
+                wz = float(np.clip(err / max(dt, 1e-3), -1.0, 1.0))
+                turning = abs(err) > 0.8
+                blocked = self.spec.yield_m > 0 and (
+                    self.blocked_by(blockers, target_yaw) or self.blocked_by(blockers, self.yaw))
+                if blocked:
+                    self.waiting += dt
+                    self.yields += 1 if self.waiting == dt else 0
+                    # Do NOT pop waypoints. A follower that stands at the G1's
+                    # feet used to erase the whole tour, then the G1 idled.
+                else:
+                    self.waiting = 0.0
+                if not turning and not blocked:
+                    vx = float(self.spec.speed)
+                elif blocked and self.waiting > self.WAIT_S:
+                    # Duck has been in the way long enough — walk anyway at
+                    # half speed rather than freeze the scene.
+                    vx = float(self.spec.speed) * 0.5
+        assert self.robot is not None
+        self.robot.cmd[:] = (vx, vy, wz)
+        self.robot.control(data)
+
+    def payload(self, data: mujoco.MjData | None = None) -> dict:
+        # Pose: capsule centre, or G1 pelvis. Viewer uses this for the
+        # capsule fallback and the contact blob.
+        if self.robot is None or data is None:
+            pose = [round(self.x, 4), round(self.y, 4), round(self.spec.height / 2, 4),
+                    round(float(np.cos(self.yaw / 2)), 4), 0.0, 0.0,
+                    round(float(np.sin(self.yaw / 2)), 4)]
+            bodies = None
+        else:
+            bodies = self.robot.bodies_payload(data, self.robot.scene_bodies)
+            pose = bodies[1] if len(bodies) > 1 else [
+                round(self.x, 4), round(self.y, 4), 0.79,
+                round(float(np.cos(self.yaw / 2)), 4), 0.0, 0.0,
+                round(float(np.sin(self.yaw / 2)), 4)]
+        out = {"id": self.id, "kind": "person", "waiting": self.waiting > 0,
+               "pose": pose, "possessed": self.possessed}
+        if self.spec.kind != "capsule":
+            out["robot"] = self.spec.kind
+        if bodies is not None:
+            out["bodies"] = bodies
+        return out
 
 
 class World:
@@ -564,7 +657,12 @@ class World:
             s = self.duck_bodies[d.id]
             self._geom_owner[(self.model.geom_bodyid >= s.start) & (self.model.geom_bodyid < s.stop)] = k
         for k, p in enumerate(self.persons.values()):
-            self._geom_owner[self.model.geom_bodyid == p.body] = len(self._owner_duck) + k
+            owner = len(self._owner_duck) + k
+            if p.robot is not None:
+                for b in p.robot.body_ids:
+                    self._geom_owner[self.model.geom_bodyid == b] = owner
+            else:
+                self._geom_owner[self.model.geom_bodyid == p.body] = owner
         # Dynamic objects (free bodies that are not ducks): streamed each frame.
         self.objects: list[tuple[str, str, int]] = []
         for j in range(self.model.njnt):
@@ -647,6 +745,12 @@ class World:
         d._hold_yaw = None
         d.episodes += 1
         self.release(d)
+        # …and the beak deadline goes with it. `release()` only re-arms this
+        # when something was actually held, so a duck that dropped a toy at
+        # t=182 kept `mouth_open_until = 182.9` through `World.reset()` — the
+        # clock then restarts at 0 and `_mouth` holds the bill wide open for
+        # the next 182 seconds of the new run.
+        d.mouth_open_until = 0.0          # the field's own "shut" value, not a second sentinel
         d.skill = None
         d.skill_infer = None
         self._set_gain_ratio(d, 1.0)
@@ -955,9 +1059,37 @@ class World:
         toy = d.holding
         if toy is None:
             return None
+        # Arm the drop-open window only for a release that released SOMETHING.
+        # Spawning calls this on every duck to clear its hands, and arming it
+        # up here left every duck in a fresh world gaping for MOUTH_DROP_S.
+        d.mouth_open_until = self.t + MOUTH_DROP_S
         self.data.eq_active[self._eq_id(d, toy)] = 0
         d.holding = None
         return toy
+
+    def _mouth(self, d: WorldDuck) -> None:
+        """Drive the 15th servo. The beak reaches open, snaps shut on the
+        grab - as far as the toy in it allows - and opens again to drop.
+
+        This is the whole of mouth control, as it is on the robot: the 14
+        actions a policy returns are scattered around this joint, never onto
+        it (`duck-control`'s MOUTH_INDEX), so nothing here can disturb a
+        gait."""
+        if d.holding is not None:
+            # A 40 mm block is wider than the 36 mm gape, so the bill goes
+            # AROUND it rather than closing through it; a 10 mm brick nearly
+            # shuts. `grasp` is an attachment either way (roadmap 12.2).
+            kind = self.pickable_kind.get(d.holding)
+            want = 1.0 if kind is None else mouth_frac_for_gape(min(PICKABLE_KINDS[kind]["size"]))
+        elif d.skill == "ground_pick" and not d.beak_closed:
+            want = 1.0                       # reaching: open on the way down
+        elif self.t < d.mouth_open_until:
+            want = 1.0                       # just dropped one
+        else:
+            want = 0.0                       # at rest a duck's beak is shut
+        d.mouth = want
+        if d.adr.mouth_act >= 0:
+            self.data.ctrl[d.adr.mouth_act] = mouth_target(want)
 
     def _set_gain_ratio(self, d: WorldDuck, ratio: float) -> None:
         """Scale this duck's position-actuator Kp (gain and the matching
@@ -1356,6 +1488,7 @@ class World:
             raw = np.asarray((skill or (self.getup_infer if down else d.infer))(obs), np.float32)
             d.last_action = raw.copy()
             data.ctrl[d.adr.actuators] = C.DEFAULT_POSE + raw.clip(-4.0, 4.0)
+            self._mouth(d)
         blockers = [tuple(d.trunk_pos(data)[:2]) for d in self.ducks.values()] if any(
             p.spec.yield_m > 0 for p in self.persons.values()) else ()
         for p in self.persons.values():
@@ -1374,6 +1507,12 @@ class World:
         mujoco.mj_comPos(m, data)
         mujoco.mj_comVel(m, data)
         mujoco.mj_sensorVel(m, data)
+        for p in self.persons.values():
+            p.sync(data)
+            if p.fallen(data):
+                p.reset(data)
+                mujoco.mj_forward(m, data)
+                p.sync(data)
         self.t += C.CTRL_DT
         self.tick += 1
         self._stamp_bumps(pairs)
@@ -1461,7 +1600,7 @@ class World:
         return out or None
 
     def persons_payload(self) -> list[dict]:
-        return [p.payload() for p in self.persons.values()]
+        return [p.payload(self.data) for p in self.persons.values()]
 
     def possess(self, person_id: str | None) -> None:
         """Hand one person to a human (None releases all). A possessed person

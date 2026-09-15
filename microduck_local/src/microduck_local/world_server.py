@@ -15,6 +15,8 @@ HTTP:
   POST /world/load {"scenario": name}      compose + swap (a second or so;
                                the loop keeps streaming the old world meanwhile)
   POST /world/noise {"duck": id, "preset": "ideal"|"datasheet"|"hostile"}
+  POST /world/speed {"x": 0.25..8}         run the world that many times wall
+                               speed (SPEED_CHOICES); `rtf` says what it got
   GET  /replay/ring?last=N     the last N frames the loop broadcast (a ring of
                                RING_S seconds at 25 Hz, kept whether or not a
                                browser is attached) — the page's scrub bar
@@ -23,11 +25,15 @@ HTTP:
   GET  /recordings/{name}      the frames of one recording (JSON array)
   DELETE /recordings/{name}
 
-WS /ws/sim — 25 Hz frames:
-  {t, tick, rtf, perf: {stepMs, sensorMs}, scenario, cmd, mode, events,
+WS /ws/sim — 25 Hz frames. Speed does not change the frame RATE, only the
+sim time between frames: a world at 4x jumps further per frame, it does not
+send more of them. (A scene that saturates the box does drop frames — a 3v3
+at 8x measured ~17 a second — because the loop is late, not because it is
+fast.)
+  {t, tick, rtf, simSpeed, perf: {stepMs, sensorMs}, scenario, cmd, mode, events,
    ducks: [{id, name, policy, falls, step, rew, speed, cmdSpeed, steerable,
             brain: {kind, state, cmd, head, note, inputs: {tof: {age, stale}, det: {age, stale, n}, target?}},
-            bodies: [[x,y,z,qw,qx,qy,qz] × 16] (world first, as GET /scene lists bodies),
+            bodies: [[x,y,z,qw,qx,qy,qz] × 17] (world first, as GET /scene lists bodies),
             sensors: {tof: {t, mm[64], age}, det: {t, age, items: [{cls, name, bearing, elevation, width, range, conf}]}} | null}],
    objects: [{id, kind: "ball"|"box"|"person", pose, possessed?}], possessed: person id | null}
 accepts:
@@ -40,6 +46,7 @@ accepts:
   {"brain": {"duck": id, "kind": "wander"|"follow"|"script"}}   swap a duck's brain
   {"possess": person id | null}   your cmd drives that person (ducks stay on their brains)
   {"head": {"duck": id, "apply": bool}}   let a brain's gaze intent reach the walker's command block
+  {"speed": 0.25..8}      wall-clock speed of the world (same as POST /world/speed)
 
 Scenario files live in microduck_local/scenarios/ (MICRODUCK_SCENARIOS_DIR
 relocates it). Built-ins are generated in code so a fresh checkout has
@@ -51,12 +58,13 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import math
 import os
 import re
 import time
 import traceback
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -68,6 +76,7 @@ from pydantic import BaseModel
 from .brain import REGISTRY, Intent, Senses
 from .brain import runtime as brain_runtime
 from .brain import tidy as _tidy  # noqa: F401  (registers the tidy brain)
+from .brain.graph import payload as graph_payload
 from .brain.learned import learned_index
 from .brain.mapping import GridSpec, OccupancyGrid
 from .brain.tether import Tether
@@ -107,8 +116,35 @@ PITCH_GETUP_POLICY = "pollen:alpha_stand"
 TICK_HZ = 50
 SEND_EVERY = 2
 MAP_EVERY = 12               # occupancy maps ride every 12th frame (~2 Hz): 3–4 kB each per duck
+# How fast the world runs against the wall clock. The multiplier is a
+# SIM-TIME BUDGET, not a faster wall clock: one 20 ms wall tick buys `speed`
+# ticks of sim and the wire keeps its 25 Hz, so 4x is four steps between
+# frames (a bigger jump each frame) and 0.5x is a step every other tick.
+# Everything inside the sim already lives on `World.t` — the sensors, the
+# tether, the throw-in and get-up clocks, every brain — so none of it can
+# tell. Only the manual-drive hold (OVERRIDE_HOLD_S) stays on the wall,
+# where the hand that set it is.
+# The ceiling is what the loop body costs: measured here at 0.2–0.7 ms a
+# tick for a room and 6.6 ms for a 3v3 pitch, against a 20 ms budget. So 8x
+# is real in a room and a 3v3 tops out near 3x. Asking for more is not an
+# error — the loop runs flat out and the frame's `rtf` says what it got.
+SPEED_CHOICES = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+SPEED_MIN, SPEED_MAX = SPEED_CHOICES[0], SPEED_CHOICES[-1]
+# A loop that fell behind must not BANK the lost wall time, or it would
+# sprint to burn the debt the moment the scene got cheap again.
+MAX_LAG_S = 0.25
+RTF_WINDOW_S = 1.0           # wall seconds the measured speed is averaged over
+# …and a batch of sim ticks must come back to the wire. Left unbounded, 8x on
+# a 3v3 runs eight ~7 ms steps before it looks at the socket again, and the
+# browser gets 10 frames a second: a fast-forward nobody can watch. Capping
+# the batch at its own wall slot is not a trade — measured over repeats on
+# pitch-3v3, it buys 17 fps against 10 at 8x and changes the achieved speed
+# at 2x, 4x and 8x by less than the run-to-run spread.
+STEP_BUDGET_S = 1.0 / TICK_HZ
 OVERRIDE_HOLD_S = 6.0
-RING_S = 120.0                       # the scrub bar reaches this far back
+RING_S = 120.0                       # the scrub bar reaches this far back at 1x
+                                     # (frames in which the world MOVED, so a slow
+                                     #  world does not pad it with repeats)
 RING_FRAMES = int(RING_S * TICK_HZ / SEND_EVERY)
 RECORDING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 DEFAULT_POLICY = "pollen:alpha_walking"
@@ -121,6 +157,44 @@ DEMO_SCRIPT: list[tuple[float, tuple[float, float, float]]] = [
 ]
 
 Infer = Callable[[np.ndarray], np.ndarray]
+
+
+@dataclass(frozen=True)
+class Composed:
+    """A world and everything derived from it, built off to one side.
+
+    `compose()` fills this from a worker thread and `install()` publishes it
+    in one block. Keeping them apart is what stops the running loop seeing a
+    new brain set against the old world for the tick that a load takes.
+    """
+    world: World
+    scenario: Scenario
+    brains: dict
+    teams: dict
+    maps: dict
+    goal_seq: int
+    out_seq: int
+
+
+def clamp_speed(x: float) -> float:
+    """Any number the page or a script sends, brought into SPEED_CHOICES'
+    range. Values between the presets are allowed — the presets are what the
+    UI offers, not what the loop can run.
+
+    Junk is REFUSED rather than clamped, and always as ValueError so a caller
+    has one thing to catch. NaN is the reason: every comparison against it is
+    False, so `max(SPEED_MIN, min(nan, SPEED_MAX))` quietly returns SPEED_MIN
+    — a bad value would read back as a deliberate request for quarter speed.
+    An integer too large for a float (400 digits of JSON) raises OverflowError
+    out of `float()`, which is the same class of mistake, so it arrives the
+    same way instead of escaping and tearing down the socket."""
+    try:
+        x = float(x)
+    except OverflowError as e:
+        raise ValueError(f"speed out of range: {e}") from e
+    if not math.isfinite(x):
+        raise ValueError(f"speed must be a finite number, got {x!r}")
+    return float(max(SPEED_MIN, min(x, SPEED_MAX)))
 
 
 def recordings_dir() -> Path:
@@ -137,6 +211,14 @@ def scenarios_dir() -> Path:
 
 # -- built-in scenarios -------------------------------------------------------
 
+def _g1_person_kw() -> dict:
+    """Follow scenes use the Unitree G1 when its MJCF+ONNX have been fetched."""
+    from .robots.g1 import g1_ready
+    if g1_ready():
+        return {"kind": "g1", "height": 1.32, "radius": 0.25, "yield_m": 0.45}
+    return {}
+
+
 def builtin_scenarios() -> dict[str, Scenario]:
     empty = Scenario(
         name="empty-floor", floor=(6.0, 6.0),
@@ -151,10 +233,14 @@ def builtin_scenarios() -> dict[str, Scenario]:
     for d in room.ducks:
         d.policy = DEFAULT_POLICY
     fx, fy = 3.0, 2.5
+    g1_kw = _g1_person_kw()
+    # Duck rooms are 30 cm walls. A 1.32 m G1 walks through that ceiling and
+    # looks like a chimney; raise the walls when the G1 is the person.
+    wall_h = 2.4 if g1_kw else 0.3
     follow = Scenario(
         name="follow-me", floor=(6.5, 5.5),
-        walls=[Wall((-fx, -fy), (fx, -fy)), Wall((fx, -fy), (fx, fy)),
-               Wall((fx, fy), (-fx, fy)), Wall((-fx, fy), (-fx, -fy))],
+        walls=[Wall((-fx, -fy), (fx, -fy), wall_h), Wall((fx, -fy), (fx, fy), wall_h),
+               Wall((fx, fy), (-fx, fy), wall_h), Wall((-fx, fy), (-fx, -fy), wall_h)],
         # The shipped follower, not the rule brain: the scene exists to watch
         # a brain follow a person, and this is the brain that goes on the
         # robot (README "the follow pick"; swap to "follow" in the inspector
@@ -162,7 +248,8 @@ def builtin_scenarios() -> dict[str, Scenario]:
         # fallback below runs the duck on "script" and says so in events.
         ducks=[Duck("d0", (0.0, 0.0, 0.0), DEFAULT_POLICY, "datasheet", "datasheet", "learned:follow-v4")],
         persons=[Person("p0", (1.2, 0.0), 1.57,
-                        path=[(1.2, 1.2), (-1.2, 1.2), (-1.2, -1.2), (1.2, -1.2)], speed=0.25)])
+                        path=[(1.2, 1.2), (-1.2, 1.2), (-1.2, -1.2), (1.2, -1.2)],
+                        speed=0.5 if g1_kw else 0.25, **g1_kw)])
     playroom = make_playroom(seed=0, n=6, name="playroom")
     playroom.ducks[0].policy = DEFAULT_POLICY
     pitch = make_pitch(name="pitch", cove=PITCH_COVE, corner=PITCH_CORNER)
@@ -234,6 +321,12 @@ class WorldState:
         # this long after the senses it came from. 0 = onboard.
         self.tether_ms = 0.0
         self._tether_queue: dict[str, Tether] = {}
+        # Wall-clock speed of the world, and the fractional tick carried
+        # between wall ticks so 0.25x steps once every fourth of them.
+        self.speed = 1.0
+        self._step_credit = 0.0
+        self._ring_tick = -1         # world tick of the last frame kept for the scrub bar
+        self._rtf_dirty = False      # a speed change restarts the rtf window
         self.task: asyncio.Task | None = None
         # Auto mode: each duck runs a brain from the registry (brain/runtime.py);
         # a blind duck gets the script. Intents are remembered for the frame.
@@ -271,10 +364,12 @@ class WorldState:
             self.events.append(f"{policy_id}: {type(e).__name__} — duck will stand")
             return None
 
-    def build(self, scenario: Scenario, seed: int | None = None) -> World:
-        """Blocking: compose + policies. Call from a thread. `seed` pins the
-        world's RNG (record-world replays a scenario headlessly with it);
-        the lab itself leaves it to the scenario."""
+    def compose(self, scenario: Scenario, seed: int | None = None) -> Composed:
+        """Blocking: the world, its policies, its brains and its boards, built
+        WITHOUT touching `self`. Call from a thread; hand the result to
+        `install()` on the loop. `seed` pins the world's RNG (record-world
+        replays a scenario headlessly with it); the lab leaves it to the
+        scenario."""
         infer = {}
         for d in scenario.ducks:
             f = self.infer_for(d.policy)
@@ -290,30 +385,61 @@ class WorldState:
             getup = self.infer_for(PITCH_GETUP_POLICY)
             if getup is not None:
                 world.getup_infer, world.getup_s = getup, PITCH_GETUP_S
-        self.brains = {}
-        self.teams = {}
-        self.goal_seq = world.goal_seq
-        self.out_seq = world.ball_out_seq     # a new world starts its throw-in count over too
+        # `build` runs in a worker thread (POST /world/load) while world_loop
+        # is still driving the OLD world, so nothing here may be published
+        # half-finished: the loop iterates `self.brains` every tick, and
+        # filling it in place raced `throw_in_brains`/`kickoff_brains` into
+        # "dictionary changed size during iteration" — raised inside the loop,
+        # which has no handler, so /sim stopped streaming until a restart.
+        # Build into LOCALS and hand them back for the caller to install in
+        # one go — `install()`. Nothing here touches `self`, so the running
+        # loop cannot see any of the new world's state against the old world.
+        brains: dict[str, object] = {}
+        teams: dict = {}                 # …the NEW world's boards, not the live ones
         for sd in scenario.ducks:
             kind = sd.brain or ("wander" if sd.tof is not None else "script")
             try:
-                self.brains[sd.id] = self.make_brain(kind, sd, world)
+                brains[sd.id] = self.make_brain(kind, sd, world, teams)
             except ValueError as e:
                 self.events.append(f"{sd.id}: {e}; using script")
-                self.brains[sd.id] = REGISTRY.make("script")
-        self.intents = {}
+                brains[sd.id] = REGISTRY.make("script")
         # Room mapping (roadmap 4.x first step): an occupancy grid per duck
         # in ITS odometry frame, from its ToF frames — never from the sim.
         fx, fy = scenario.floor
-        self.maps = {sd.id: OccupancyGrid(GridSpec(size=(fx + 1.0, fy + 1.0)))
-                     for sd in scenario.ducks if sd.tof is not None}
-        return world
+        maps = {sd.id: OccupancyGrid(GridSpec(size=(fx + 1.0, fy + 1.0)))
+                for sd in scenario.ducks if sd.tof is not None}
+        return Composed(world=world, scenario=scenario, brains=brains, teams=teams,
+                        maps=maps, goal_seq=world.goal_seq, out_seq=world.ball_out_seq)
 
-    def make_brain(self, kind: str, sd, world):
-        """A brain for one duck; on a pitch a `chase` gets its goal and team."""
+    def install(self, c: Composed) -> World:
+        """Make a composed world the live one. Every field the loop reads is
+        rebound here with no await in between, so a tick sees either the whole
+        old world or the whole new one — never a new brain set against an old
+        world, which fired phantom throw-ins and folded the new room's
+        occupancy grids with the previous room's ToF frames."""
+        self.world, self.scenario = c.world, c.scenario
+        self.goal_seq, self.out_seq = c.goal_seq, c.out_seq
+        self.teams, self.brains, self.maps = c.teams, c.brains, c.maps
+        self.intents = {}
+        self.restart()                   # the new world starts its clock at zero
+        return c.world
+
+    def build(self, scenario: Scenario, seed: int | None = None) -> World:
+        """Compose AND install, for the synchronous callers (preload,
+        record-world) that have no loop running to race with."""
+        return self.install(self.compose(scenario, seed=seed))
+
+    def make_brain(self, kind: str, sd, world, teams: dict | None = None):
+        """A brain for one duck; on a pitch a `chase` gets its goal and team.
+
+        `teams` is the blackboard registry the duck JOINS — `brain_kwargs`
+        does a `setdefault` into it, so it is an out-parameter as much as an
+        in-one. A live swap passes None and joins the running boards; a world
+        under construction passes its own dict, so the old world's boards are
+        neither read nor written from the worker thread."""
         from .brain.team import brain_kwargs
         spec = replace(sd, brain=kind)
-        return REGISTRY.make(kind, **brain_kwargs(spec, world, self.teams))
+        return REGISTRY.make(kind, **brain_kwargs(spec, world, self.teams if teams is None else teams))
 
     def new_metrics(self):
         """The pitch's continuous metrics for the world just built, or None.
@@ -330,8 +456,7 @@ class WorldState:
     def preload(self, name: str, seed: int | None = None) -> None:
         """Build a world before serving (the CLI's --world). Blocking."""
         sc = resolve_scenario(name)
-        self.world, self.scenario = self.build(sc, seed=seed), sc
-        self.metrics = self.new_metrics()
+        self.build(sc, seed=seed)        # installs, including the metrics
         print(f"[sim] world {sc.name}: {len(sc.ducks)} ducks", flush=True)
 
     def payload(self) -> dict:
@@ -346,6 +471,11 @@ class WorldState:
             # inspector's menu can file 49 runs under six headings instead of
             # listing p-batch-s14 next to p-batch-s13.
             "learned": learned_index(),
+            # The state graphs the inspector draws (brain/graph.py): nodes
+            # and what each one means, for every brain kind. Static, so it
+            # rides the world-info message and never the frame — the frame
+            # carries only which graph a duck is on, and its state.
+            "graphs": graph_payload(),
         }
 
     def senses_for(self, d) -> Senses:
@@ -427,6 +557,92 @@ class WorldState:
         self.brains[duck_id] = self.make_brain(kind, sd, w) if sd is not None else REGISTRY.make(kind)
         self.events.append(f"{duck_id} brain → {kind}")
 
+    def override_hold_s(self) -> float:
+        """How long a manual command holds, in WALL seconds — scaled so its
+        cost in SIM seconds does not.
+
+        `drive()` skips `brain.step()` outright while the override stands, so
+        the hold is not just "your twist persists": it is "no brain runs".
+        At a flat 6 wall seconds that was 6 sim seconds at 1x and 48 at 8x —
+        16% of a 300 s pitch run with every Chase suspended, and a 48 s jump
+        in `senses.t` handed to each brain on resume.
+
+        The hold is therefore bounded by BOTH clocks: never more than
+        OVERRIDE_HOLD_S of wall time (or slow motion would leave you unable
+        to hand the ducks back for half a minute) and never more than
+        OVERRIDE_HOLD_S of sim time (or fast-forward would suspend the
+        brains for most of a match). Above 1x the wall bound is the loose
+        one, below 1x the sim bound is — so the cost is
+        `min(OVERRIDE_HOLD_S, OVERRIDE_HOLD_S * speed)` sim seconds.
+        """
+        return OVERRIDE_HOLD_S / max(self.speed, 1.0)
+
+    def restart(self) -> None:
+        """Everything keyed to the world's clock, dropped because that clock
+        just went back to zero. Each of these outlived a reset:
+
+        - `metrics` has no reset() and `PitchMetrics.row()` scales by
+          `60 / w.t`, so one frame after R a carried-over 12 s of possession
+          printed as ~7e11 per minute against a 0-0 scoreboard.
+        - `_tether_queue` holds senses and intents stamped in the OLD clock.
+          They are due hundreds of seconds in the future, so nothing ever
+          pops: every brain keeps being handed the pre-reset frame (whose
+          negative age reads as FRESH) and the pre-reset intent.
+        - `ring` is the scrub bar's history. Kept across a reset it makes
+          `/replay/save` write two runs under one header, with `t` jumping
+          backwards in the middle and a span computed across the seam.
+        """
+        self.metrics = self.new_metrics()
+        self._tether_queue.clear()
+        self.ring.clear()
+        self._ring_tick = -1
+        # The team blackboards keep deadlines in the clock that just moved:
+        # a board holding `_kick_until = 133` from a goal at t=120 still
+        # answers `waits(t)` true after a reset puts t back to 0, so the
+        # scoring side stands off for the next two sim minutes of the new run.
+        for tm in self.teams.values():
+            tm.reset()
+        # …and the occupancy grids are drawn in a room that may not be there
+        # any more. (The websocket reset also clears these; a second reset of
+        # a freshly-built grid costs nothing and means /world/load cannot
+        # forget.)
+        for g in self.maps.values():
+            g.reset()
+        # Resync the sequence counters with the world we are now on. Stale
+        # ones fire a phantom throw-in or kickoff on the first tick after the
+        # clock moves: World.reset() zeroes ball_out_seq but not goal_seq.
+        w = self.world
+        if w is not None:
+            self.goal_seq, self.out_seq = w.goal_seq, w.ball_out_seq
+
+    def set_speed(self, x: float) -> float:
+        """Run the world faster or slower than the wall clock. Sticky across
+        a restart and a new scenario, exactly like the tether — it is a knob
+        on the bench, not a property of the world."""
+        was, self.speed = self.speed, clamp_speed(x)
+        if self.speed == was:
+            # A no-op — and it MUST stay one. A held `[` re-sends the same
+            # speed every ~30 ms; 0.25x needs four wall ticks (80 ms) of
+            # credit to buy a single step, so zeroing the credit here stopped
+            # the world dead for as long as the key was down.
+            return self.speed
+        self._step_credit = 0.0
+        # Re-price a hold that is already running. The deadline was set in
+        # wall time at the OLD speed, so leaving it alone let a change after
+        # the keypress restore exactly what override_hold_s() bounds: tap W
+        # at 1x then go to 8x and the remaining ~6 wall seconds became 48 sim
+        # seconds with every brain suspended.
+        now = time.monotonic()
+        if self.override_until > now:
+            left = (self.override_until - now) * max(was, 1.0) / max(self.speed, 1.0)
+            self.override_until = now + min(left, self.override_hold_s())
+        # The rtf window spans the change, so it now measures neither speed.
+        # Drop it: a world with no measurement reports 0, which is what the
+        # page reads as "no number yet" rather than as a shortfall.
+        self.rtf, self._rtf_dirty = 0.0, True
+        self.events.append(f"speed {self.speed:g}x")
+        return self.speed
+
     def frame(self, cmd: np.ndarray, mode: str) -> dict:
         w = self.world
         ducks = []
@@ -437,8 +653,11 @@ class WorldState:
                     "brain": self.brain_payload(d, mode),
                     "headApplied": d.id in self.head_cmds or bool(getattr(self.brains.get(d.id), "wants_head", False)),
                     # Body 0 is the WORLD in the viewer's scene (GET /scene),
-                    # so a duck's 15 bodies ride behind one identity pose and
-                    # the same Duck renderer works on both pages.
+                    # so a duck's 16 bodies ride behind one identity pose and
+                    # the same Duck renderer works on both pages. 16, not 15:
+                    # `split_jaw` hangs the hinged `mouth` body off the head in
+                    # BOTH models, and this list is mapped onto /scene's
+                    # positionally (tests/test_arena.py locks the order).
                     "bodies": [[0, 0, 0, 1, 0, 0, 0]] + w.duck_pose(d.id),
                     "sensors": tof_payload(w, d),
                 })
@@ -459,6 +678,9 @@ class WorldState:
                        if (w and w.soccer_score()) else None),
             "maps": ({k: g.payload() for k, g in self.maps.items()} if (w and self.send_maps) else None),
             "tetherMs": self.tether_ms,
+            # What was ASKED for. What the box managed is `rtf` above — on a
+            # 3v3 pitch the two part company above 3x, and the page says so.
+            "simSpeed": self.speed,
             "possessed": next((p.id for p in w.persons.values() if p.possessed), None) if w else None,
         }
 
@@ -488,6 +710,10 @@ def duck_info(w: World, d, brains: dict | None = None) -> dict:
         "odomEst": [round(float(v), 3) for v in d.odom_est],
         "skill": d.skill,
         "beak": "closed" if d.beak_closed else "open",
+        # The 15th servo as the robot takes it: an opening fraction, 0 shut to
+        # 1 wide. `beak` above is the GRASP state (is it holding), which is a
+        # different question from how far the bill is actually open.
+        "mouth": round(float(d.mouth), 3),
     }
 
 
@@ -538,6 +764,10 @@ class LoadReq(BaseModel):
 
 class TetherReq(BaseModel):
     ms: float = 0.0
+
+
+class SpeedReq(BaseModel):
+    x: float = 1.0
 
 
 class NoiseReq(BaseModel):
@@ -603,6 +833,14 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
     def get_world() -> dict:
         return st.payload()
 
+    @app.get("/scene/g1")
+    def get_g1_scene() -> dict:
+        """Visual meshes for a G1 person — same shape as GET /scene, different robot."""
+        from .robots.g1 import g1_ready, visual_scene
+        if not g1_ready():
+            raise HTTPException(404, "G1 assets missing — run `uv run fetch-g1`")
+        return visual_scene()
+
     @app.post("/world/load")
     async def load_world(req: LoadReq) -> dict:
         if st.loading:
@@ -610,20 +848,19 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
         sc = resolve_scenario(req.scenario)
         st.loading = True
         try:
-            world = await asyncio.to_thread(st.build, sc)
+            composed = await asyncio.to_thread(st.compose, sc)
         except Exception as e:
             st.events.append(f"load failed: {type(e).__name__}: {e}")
             raise HTTPException(500, f"could not build {req.scenario!r}: {e}") from e
         finally:
             st.loading = False
-        st.world, st.scenario = world, sc
-        st.metrics = st.new_metrics()
         st.script_t = 0.0
+        st.install(composed)     # one block, no await inside: the loop never straddles it
         st.events.append(f"loaded {sc.name}: {len(sc.ducks)} ducks")
         return st.payload()
 
     @app.post("/world/tether")
-    def set_tether(req: TetherReq) -> dict:
+    async def set_tether(req: TetherReq) -> dict:
         """Roadmap 12.10: run every brain 'over a tether' with this much
         senses→intent round-trip latency (0 = onboard). Watch what a laptop
         brain over Wi-Fi does to a pick, live."""
@@ -631,6 +868,16 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
         st._tether_queue.clear()
         st.events.append(f"tether {st.tether_ms:.0f} ms" if st.tether_ms else "brains onboard (no tether)")
         return {"tetherMs": st.tether_ms}
+
+    @app.post("/world/speed")
+    async def set_speed(req: SpeedReq) -> dict:
+        """Run the world faster or slower than the wall clock. Clamped to
+        SPEED_CHOICES' range; what the box ACTUALLY managed is the frame's
+        `rtf`, which on a 3v3 pitch stops climbing around 3x."""
+        try:
+            return {"simSpeed": st.set_speed(req.x)}
+        except (ValueError, OverflowError) as e:
+            raise HTTPException(422, str(e)) from e
 
     @app.post("/world/noise")
     def set_noise(req: NoiseReq) -> dict:
@@ -742,7 +989,7 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                 if "cmd" in msg:
                     st.override = np.clip(np.array(msg["cmd"], np.float32),
                                           [-0.9, -0.3, -1.0], [0.9, 0.3, 1.0])
-                    st.override_until = time.monotonic() + OVERRIDE_HOLD_S
+                    st.override_until = time.monotonic() + st.override_hold_s()
                 if msg.get("reset") and st.world is not None:
                     st.world.reset()
                     for g in st.maps.values():
@@ -753,12 +1000,18 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                         b.reset()
                     st.intents.clear()
                     st.script_t = 0.0
+                    st.restart()
                 if "assign" in msg and st.world is not None:
                     a = msg["assign"]
                     asyncio.create_task(do_assign(str(a.get("duck")), str(a.get("policy"))))
                 if "tether" in msg:
                     st.tether_ms = float(max(0.0, min(float(msg["tether"] or 0.0), 2000.0)))
                     st._tether_queue.clear()
+                if "speed" in msg:
+                    try:
+                        st.set_speed(float(msg["speed"]))
+                    except (TypeError, ValueError, OverflowError):
+                        st.events.append(f"speed ignored: {msg['speed']!r}")
                 if "noise" in msg and st.world is not None:
                     n = msg["noise"]
                     try:
@@ -807,10 +1060,26 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
         window_t0, window_sim = next_t, 0.0
         while True:
             now = time.monotonic()
-            cmd, mode = st.current_cmd(now)
-            st.script_t += 1.0 / TICK_HZ
-            w = st.world
-            if w is not None:
+            cmd, mode = st.current_cmd(now)     # …and again per step below, so
+            w = st.world                        # a 0.25x tick that steps none still has one
+            # Spend the wall tick's sim-time budget (SPEED_CHOICES): `speed`
+            # sim ticks at 4x, one every fourth wall tick at 0.25x. Capped at
+            # one tick of the top speed, so a loop that fell behind catches
+            # up rather than sprinting.
+            st._step_credit = min(st._step_credit + st.speed, SPEED_MAX)
+            budget_end = now + STEP_BUDGET_S
+            while st._step_credit >= 1.0:
+                st._step_credit -= 1.0
+                # Per STEP, not per wall tick: the demo script lives on
+                # `script_t`, so sampling it once a tick would hand all four
+                # of a 4x batch the command belonging to the first. That is
+                # the only thing that could have made the world come out
+                # differently at speed, and tests/test_world_server.py
+                # pins that it does not.
+                cmd, mode = st.current_cmd(now)
+                st.script_t += 1.0 / TICK_HZ
+                if w is None:
+                    continue
                 st.drive(cmd, mode)
                 w.step()
                 if st.metrics is not None:
@@ -821,10 +1090,23 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                     d = w.ducks.get(did)
                     if d is not None and d.tof is not None:
                         grid.update(d.tof.last, w.odom(d))
+                # Out of wall slot with ticks still owed: keep the credit (it
+                # is capped, so the debt cannot grow) and go serve the socket.
+                if st._step_credit >= 1.0 and time.monotonic() >= budget_end:
+                    break
             tick += 1
-            if tick % TICK_HZ == 0:
-                wall = now - window_t0
-                st.rtf = window_sim / wall if wall > 0 else 0.0
+            # The rtf window is a wall SECOND, measured as one — not
+            # `tick % TICK_HZ`, which is only a second while the loop keeps
+            # its schedule, and at 8x on a heavy scene it does not. A speed
+            # change throws the window away rather than reporting a figure
+            # averaged across both speeds; until the next one closes `rtf`
+            # stays 0, which is what the page reads as "no measurement yet"
+            # instead of as a shortfall.
+            if st._rtf_dirty:
+                st._rtf_dirty = False
+                window_t0, window_sim = now, 0.0
+            elif now - window_t0 >= RTF_WINDOW_S:
+                st.rtf = window_sim / (now - window_t0)
                 window_t0, window_sim = now, 0.0
             if tick % SEND_EVERY == 0:
                 t_enc = time.perf_counter()
@@ -833,7 +1115,13 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                 if w is not None:                      # what the loop spends on the wire, not the sim
                     w.perf["encodeMs"] += 0.05 * ((time.perf_counter() - t_enc) * 1e3 - w.perf.get("encodeMs", 0.0))
                 st.events.clear()
-                if w is not None:            # a ring of "no world" frames is nothing to save (and a race in the tests)
+                # A ring of "no world" frames is nothing to save (and a race
+                # in the tests) — and neither is a ring of the SAME world:
+                # below 0.5x the sim steps less often than the loop sends, so
+                # half the frames repeat a world that has not moved and would
+                # otherwise dilute the scrub bar's two minutes with padding.
+                if w is not None and w.tick != st._ring_tick:
+                    st._ring_tick = w.tick
                     st.ring.append(frame)
                 dead = []
                 for c in list(st.clients):
@@ -843,7 +1131,11 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
                         dead.append(c)
                 for c in dead:
                     st.clients.discard(c)
-            next_t += 1.0 / TICK_HZ
+            # Pace against the wall, but never bank a debt: at 4x on a 3v3
+            # the body costs more than the 20 ms it is given, and a loop that
+            # kept the arrears would run flat out for as long again once the
+            # scene got cheap.
+            next_t = max(next_t + 1.0 / TICK_HZ, time.monotonic() - MAX_LAG_S)
             await asyncio.sleep(max(0.0, next_t - time.monotonic()))
 
     def start() -> None:

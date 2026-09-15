@@ -66,6 +66,29 @@ class Behavior:
     description: str       # what the duck will learn, one sentence
     how_it_learns: str     # 2-3 plain sentences for the explainer card
     keywords: tuple[str, ...]
+    # --- which body, and who trains it -------------------------------------
+    # Everything else in this package is a MICRODUCK reward recipe: duck
+    # joints, duck feet, the 61-obs command slots. Another body's tasks are
+    # env subclasses (robots/g1_env.py) run by a different trainer, and they
+    # register HERE anyway so the teach panel, the job card, the live
+    # snapshots and the 🎓 trainee all work exactly as they do for a trick.
+    # `robot` filters what a roster can be asked to learn; `trainer` is the
+    # argv TrainingJob launches instead of `train_behavior` (None = the duck's).
+    robot: str = "microduck"
+    trainer: tuple[str, ...] | None = None
+
+    @property
+    def task(self) -> str:
+        """The `--task` this recipe's trainer runs, read off `trainer`.
+
+        The 🎓 trainee previews this env, so deriving it from the id spelling
+        instead ("…_stand" -> stand, anything else -> walk) silently showed a
+        WALK preview for the squat task while the trainer squatted.
+        """
+        argv = list(self.trainer or ())
+        if "--task" in argv:
+            return argv[argv.index("--task") + 1]
+        return "walk"
     terms: tuple[RewardTerm, ...] = field(default=())
     default_steps: int = 2_000_000
     success_metric: str = ""
@@ -664,7 +687,12 @@ def _register(b: Behavior) -> None:
 
 
 
-def match_behavior(text: str) -> Behavior | None:
+def for_robot(robot: str = "microduck") -> list[Behavior]:
+    """Everything `robot` can be asked to learn, in registry order."""
+    return [b for b in BEHAVIORS.values() if b.robot == (robot or "microduck")]
+
+
+def match_behavior(text: str, robot: str = "microduck") -> Behavior | None:
     """Cheap keyword matcher from a chat message to a behavior.
 
     A bare behavior id ("imitate", "one_leg") matches exactly, before any
@@ -673,11 +701,11 @@ def match_behavior(text: str) -> Behavior | None:
     imitation run is titled after its clip, `Perform “backflip”`, and
     scored as prose that text reaches the floor-roll recipe instead."""
     key = text.strip().lower()
-    if key in BEHAVIORS:
+    if key in BEHAVIORS and BEHAVIORS[key].robot == (robot or "microduck"):
         return BEHAVIORS[key]
     t = " " + text.lower().replace("1", "one").strip() + " "
     best, best_score = None, 0.0
-    for b in BEHAVIORS.values():
+    for b in for_robot(robot):
         # Score by how much of the message a keyword actually explains, so a
         # SPECIFIC phrase outranks a generic substring of itself: "jump
         # backflip" must reach the jumping flip, not the floor roll that owns

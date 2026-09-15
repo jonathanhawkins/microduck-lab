@@ -15,6 +15,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  chainPick,
+  policyTitle,
+  robotTag,
   deleteRun,
   fetchPolicies,
   formatBytes,
@@ -36,6 +39,9 @@ const GROUPS: { key: Policy["group"]; title: string }[] = [
   { key: "runs", title: "Our runs" },
   { key: "checkpoints", title: "Checkpoints" },
   { key: "pollen", title: "Pollen (shipped)" },
+  // Renders only when the G1 assets have been fetched (`uv run fetch-g1`):
+  // an empty group draws nothing, so a duck-only lab looks unchanged.
+  { key: "g1", title: "Unitree G1 (shipped)" },
 ];
 
 const DRAG_THRESHOLD_PX = 5; // less movement than this counts as a click
@@ -103,9 +109,9 @@ function Chip({
   onDouble,
 }: {
   policy: Policy;
-  /** Chip text override (stage chips show "s2"); drag ghost, toasts and
-   *  tooltips keep the full policy.label so nothing ambiguous ships over
-   *  the wire. */
+  /** Chip text override (stage chips show "s2"); without one the chip shows
+   *  the run's human title. Drag ghost, toasts and tooltips keep the full
+   *  policy.label so nothing ambiguous ships over the wire. */
   display?: string;
   armed: boolean;
   /** Warm-tinted styling for the chain-level "whole trick" chip, so it
@@ -127,10 +133,20 @@ function Chip({
     <button
       type="button"
       title={
-        title ??
-        (armed
-          ? `armed — click a duck to assign ${policy.label}, or empty floor to spawn`
-          : `drag onto a duck to assign — double-click (or drop on empty floor) to spawn — click to arm: ${policy.label}`)
+        // `title=""` still means NO native tooltip: that chip's explainer is
+        // the styled <Tip> around it, and a second box over it reads as a bug.
+        title === ""
+          ? ""
+          : // The raw run name leads, then the server's own measured one-liner
+            // when it has one: the chip face shows a human title now, and the
+            // directory name is the identifier a user needs for `--init-from`
+            // and for the docs, so hover has to keep handing it over. What a
+            // shipped policy actually DOES is the other thing worth reading.
+            `${policy.label}${policy.note ? ` — ${policy.note}` : ""}\n` +
+            (title ??
+              (armed
+                ? `armed — click a duck to assign ${policy.label}, or empty floor to spawn`
+                : `drag onto a duck to assign — double-click (or drop on empty floor) to spawn — click to arm: ${policy.label}`))
       }
       onPointerDown={onDown}
       onPointerMove={onMove}
@@ -162,7 +178,8 @@ function Chip({
         whiteSpace: "nowrap",
       }}
     >
-      {display ?? policy.label}
+      {robotTag(policy.robot, policy.group)}
+      {display ?? policyTitle(policy)}
     </button>
   );
 }
@@ -1131,17 +1148,33 @@ export function PolicyPanel({
                           />
                         </div>
                       );
-                    // The chain-level "whole trick" chip assigns the FINAL
-                    // stage's policy — each stage fine-tunes the same network,
-                    // so the last one carries the entire curriculum — flagged
-                    // showcase so the duck's env rehearses the whole trick arc
-                    // instead of only a standing start. Ghost/toast label is
-                    // the chain's name (✨), matching the server's roster label.
+                    // The chain-level chip assigns ONE stage's policy —
+                    // normally the final one (each stage fine-tunes the same
+                    // network, so the last carries the entire curriculum),
+                    // but a record that names a measured-best stage wins over
+                    // that default. Flagged showcase either way, so the duck's
+                    // env rehearses the whole trick arc instead of only a
+                    // standing start. Ghost/toast label is the chain's name
+                    // (✨), matching the server's roster label.
                     const last = row.stages[row.stages.length - 1];
+                    const picked = chainPick(row.stages);
+                    // A pick that isn't the tail has to SAY so on the chip:
+                    // silently handing out a different brain than "the whole
+                    // trick" promises is how a user ends up comparing two
+                    // things they think are one.
+                    const earlyPick = picked !== last;
                     const whole: Policy = {
-                      ...last,
+                      ...picked,
                       label: `${row.chain.replace(/^teach-/, "")} ✨`,
                     };
+                    // The stages of a chain share a title in practice, so the
+                    // header speaks for the family: the picked stage's title,
+                    // else the tail's, else any stage that has one. The raw
+                    // chain prefix stays in the tooltip — it is what the run
+                    // dirs on disk are named after.
+                    const chainName = row.chain.replace(/^teach-/, "");
+                    const chainTitle =
+                      picked.title ?? last.title ?? row.stages.find((p) => p.title)?.title;
                     return (
                       <div
                         key={row.chain}
@@ -1159,6 +1192,9 @@ export function PolicyPanel({
                           }}
                         >
                           <span
+                            title={
+                              chainTitle ? `${chainTitle}\n${row.chain}` : row.chain
+                            }
                             style={{
                               minWidth: 0,
                               overflow: "hidden",
@@ -1166,19 +1202,25 @@ export function PolicyPanel({
                               whiteSpace: "nowrap",
                             }}
                           >
-                            {row.chain.replace(/^teach-/, "")}
+                            {chainTitle ?? chainName}
                           </span>
                           <span style={{ color: "#8b93a3", fontSize: 9, flexShrink: 0 }}>
                             {row.stages.length} stages · {relTime(row.newest)}
                           </span>
                           <span style={{ flex: 1 }} />
-                          {/* ⤓ downloads the FINAL stage's brain — each stage
-                              fine-tunes the same network, so the last one IS
-                              the whole trick. */}
+                          {/* ⤓ downloads the stage the ▶ chip assigns — the
+                              picked one when something measured a stage best,
+                              else the final one (each stage fine-tunes the
+                              same network, so the last IS the whole trick).
+                              Handing over a different brain from the one the
+                              row plays is the same "which do I use?" confusion
+                              the pick exists to end. */}
                           <DownloadBtn
                             show={hoverRow === row.chain}
-                            run={last.label}
-                            label={`${row.chain.replace(/^teach-/, "")} (final stage)`}
+                            run={picked.label}
+                            label={`${row.chain.replace(/^teach-/, "")} (${
+                              earlyPick ? `best stage, s${picked.stage}` : "final stage"
+                            })`}
                             onFocus={() => setHoverRow(row.chain)}
                             onBlur={() => setHoverRow((h) => (h === row.chain ? null : h))}
                           />
@@ -1203,20 +1245,32 @@ export function PolicyPanel({
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
                           <Tip
                             tip={
-                              <>
-                                each stage trains the same brain — the final stage
-                                carries all of it. ▶ assigns that finished policy in
-                                showcase mode: the duck rehearses spawns across the
-                                whole trick arc, so every section gets performed.
-                              </>
+                              earlyPick ? (
+                                <>
+                                  stage {picked.stage} is the one that measured best,
+                                  so ▶ assigns THAT brain, not the last stage — the
+                                  later stages are kept for comparison. Showcase
+                                  mode: the duck rehearses spawns across the whole
+                                  trick arc, so every section gets performed.
+                                </>
+                              ) : (
+                                <>
+                                  each stage trains the same brain — the final stage
+                                  carries all of it. ▶ assigns that finished policy in
+                                  showcase mode: the duck rehearses spawns across the
+                                  whole trick arc, so every section gets performed.
+                                </>
+                              )
                             }
                           >
                             <Chip
                               policy={whole}
-                              display="▶ whole trick"
+                              display={
+                                earlyPick ? `▶ best stage (s${picked.stage})` : "▶ whole trick"
+                              }
                               accent
                               title=""
-                              armed={chipArmed(last.id, true)}
+                              armed={chipArmed(picked.id, true)}
                               onDown={chipDown(whole, true)}
                               onMove={chipMove}
                               onUp={chipUp(whole, true)}
@@ -1224,10 +1278,14 @@ export function PolicyPanel({
                             />
                           </Tip>
                           {row.stages.map((p) => (
+                            // ★ + the chain chip's own warm tint on the stage
+                            // the record picked, so the row shows WHICH stage
+                            // the ▶ above hands out without a hover.
                             <Chip
                               key={p.id}
                               policy={p}
-                              display={`s${p.stage}`}
+                              display={p.pick ? `★ s${p.stage}` : `s${p.stage}`}
+                              accent={p.pick}
                               armed={chipArmed(p.id)}
                               onDown={chipDown(p)}
                               onMove={chipMove}

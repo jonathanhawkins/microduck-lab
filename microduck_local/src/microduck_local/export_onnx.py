@@ -10,6 +10,11 @@ unnormalized observations at deployment and silently misbehaves.
 Output graph: input "obs" float32 [1, 61] -> output "actions" float32 [1, 14],
 the same names/shapes as the shipped alpha policies, so the file drops into
 microduck_rl/scripts/infer_policy.py --new-cmd-obs unchanged.
+
+A run trained on another body (`train-walk --robot g1`) exports at THAT
+robot's dimensions — read from the run's own `run.json`, so the shape can
+never be guessed wrong — and the G1's file drops into the /sim world's
+`G1Walker` in place of the shipped `walker.onnx`.
 """
 
 from __future__ import annotations
@@ -22,7 +27,17 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 
-from . import contract as C
+
+def run_robot(run_dir: Path) -> str:
+    """Which body this run was trained on, from its own run.json."""
+    meta = run_dir / "run.json"
+    if meta.is_file():
+        import json
+        try:
+            return str(json.loads(meta.read_text()).get("robot") or "microduck")
+        except (ValueError, OSError):
+            pass
+    return "microduck"
 
 
 class OnnxWalkPolicy(torch.nn.Module):
@@ -41,7 +56,7 @@ class OnnxWalkPolicy(torch.nn.Module):
 
 
 def export(run_dir: Path, out_path: Path, model_path: Path | None = None,
-           vn_path: Path | None = None) -> Path:
+           vn_path: Path | None = None, robot: str | None = None) -> Path:
     """Bake the normalizer into an ONNX policy.
 
     Defaults to the run's final `model.zip` + `vecnormalize.pkl`. The explicit
@@ -58,8 +73,22 @@ def export(run_dir: Path, out_path: Path, model_path: Path | None = None,
         model.policy, vn.obs_rms.mean, vn.obs_rms.var, vn.clip_obs
     ).eval()
 
+    # Dimensions come from the ROBOT this run trained on, and are then
+    # cross-checked against the checkpoint itself: a mismatch here means the
+    # run.json and the weights disagree, and exporting the wrong shape would
+    # hand someone a policy that loads and does nothing sane.
+    from .robots import spec as spec_mod
+    rspec = spec_mod.get(robot or run_robot(Path(run_dir)))
+    obs_dim, act_dim = rspec.obs_dim, rspec.num_actions
+    ckpt_obs = int(model.policy.observation_space.shape[0])
+    ckpt_act = int(model.policy.action_space.shape[0])
+    if (ckpt_obs, ckpt_act) != (obs_dim, act_dim):
+        raise ValueError(
+            f"{run_dir}: run.json says robot={rspec.id} ({obs_dim} obs / "
+            f"{act_dim} actions) but the checkpoint is {ckpt_obs} / {ckpt_act}")
+
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    dummy = torch.zeros(1, C.OBS_DIM, dtype=torch.float32)
+    dummy = torch.zeros(1, obs_dim, dtype=torch.float32)
     torch.onnx.export(
         wrapper, (dummy,), str(out_path),
         input_names=["obs"], output_names=["actions"],
@@ -71,7 +100,7 @@ def export(run_dir: Path, out_path: Path, model_path: Path | None = None,
     sess = ort.InferenceSession(str(out_path))
     rng = np.random.default_rng(0)
     for _ in range(5):
-        obs = rng.normal(0, 1, (1, C.OBS_DIM)).astype(np.float32)
+        obs = rng.normal(0, 1, (1, obs_dim)).astype(np.float32)
         with torch.no_grad():
             want = wrapper(torch.tensor(obs)).numpy()
         got = sess.run(["actions"], {"obs": obs})[0]
@@ -83,12 +112,22 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("-o", "--out", type=Path, default=None)
+    ap.add_argument("--robot", default=None, choices=("microduck", "g1"),
+                    help="override the robot recorded in the run's run.json")
     args = ap.parse_args()
     out = args.out or (args.run_dir / "policy.onnx")
-    export(args.run_dir, out)
-    print(f"exported {out} (obs[1,{C.OBS_DIM}] -> actions[1,{C.NUM_JOINTS}], normalizer baked)")
-    print("try it: cd ../microduck_rl && uv run scripts/infer_policy.py "
-          f"--walking {out.resolve()} --new-cmd-obs")
+    robot = args.robot or run_robot(args.run_dir)
+    export(args.run_dir, out, robot=robot)
+    from .robots import spec as spec_mod
+    rspec = spec_mod.get(robot)
+    print(f"exported {out} (obs[1,{rspec.obs_dim}] -> "
+          f"actions[1,{rspec.num_actions}], normalizer baked, robot={rspec.id})")
+    if rspec.id == "microduck":
+        print("try it: cd ../microduck_rl && uv run scripts/infer_policy.py "
+              f"--walking {out.resolve()} --new-cmd-obs")
+    else:
+        print("try it: uv run duck-lab --world follow-me  # the /sim person, "
+              f"or MICRODUCK_G1_WALKER={out.resolve()}")
 
 
 if __name__ == "__main__":

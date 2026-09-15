@@ -30,6 +30,8 @@ from dataclasses import dataclass, fields, replace
 import mujoco
 import numpy as np
 
+from .ray import UNSENSED_GROUP
+
 DETECT_CLASSES = ("duck", "person", "ball", "marker", "toy", "basket", "post")
 
 # THE CALIBRATION REFERENCE, NOT THE ROBOT'S CAMERA — the distinction matters
@@ -542,9 +544,12 @@ class Detector:
         self._pending: deque[tuple[float, DetectionFrame]] = deque()
         self.last: DetectionFrame | None = None
         # Everything occludes except toys (group 4, see world/compose.py):
-        # a held toy sits right in front of the lens.
+        # a held toy sits right in front of the lens - and except the
+        # render-only group, which is where the hinged bill lives. The camera
+        # mounts on `jaw_soft` and cannot be blocked by its own beak.
         self._geomgroup = np.ones(6, dtype=np.uint8)
         self._geomgroup[4] = 0
+        self._geomgroup[UNSENSED_GROUP] = 0
 
     # -- geometry ----------------------------------------------------------
     @staticmethod

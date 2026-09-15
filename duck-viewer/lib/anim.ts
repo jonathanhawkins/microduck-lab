@@ -7,14 +7,19 @@
 // clip at 50 Hz and rewards the policy for tracking it) — see viz_server.py's
 // docstring. Anything here that touches `Clip` must keep that shape.
 
-import { LAB_HTTP } from "./lab";
+import { LAB_HTTP, type RobotId } from "./lab";
+// Type-only, so the rig ↔ anim import pair is erased at build time: the rig
+// controls a lab serves have exactly the shape lib/rig.ts's constant does.
+import type { RigControl } from "./rig";
+
+export type { RobotId };
 
 // ---------------------------------------------------------------- joint meta
 
 export interface JointMeta {
   index: number;
   name: string;
-  group: string; // "left leg" | "head + neck" | "right leg"
+  group: string; // the duck: "left leg" | "head + neck" | "right leg"; the G1 adds waist + arms
   min: number; // MJCF jnt_range — the servo's real travel
   max: number;
   default: number; // DEFAULT_POSE
@@ -24,19 +29,56 @@ export interface JointMeta {
   pos: [number, number, number]; // hinge anchor, BODY frame
 }
 
+/** A point the IK can be asked to put somewhere: a sole, a hand, the head. */
+export interface EffectorMeta {
+  id: string;
+  label: string;
+  kind: "foot" | "hand" | "head";
+  body: number; // /scene body index the point rides on
+  bodyName: string;
+  point: [number, number, number]; // BODY frame
+  /** Joint indices the solver may move for this effector — its own limb. */
+  chain: number[];
+}
+
+/** One row of GET /robots: a body the editor can pose. `ready` is false
+ *  for a G1 whose assets are not fetched on this lab (`uv run fetch-g1`). */
+export interface RobotInfo {
+  id: RobotId;
+  title: string;
+  numJoints: number;
+  ready: boolean;
+}
+
 export interface JointsMeta {
   joints: JointMeta[];
   bodies: string[];
   trunkBody: number;
   rootPitchRange: [number, number];
   rootPitchSign: string;
+  /** Which body this metadata describes. A lab older than the robot switch
+   *  serves none of these; `fetchJoints` fills them in as the duck's. */
+  robot: RobotId;
+  title: string;
+  numJoints: number;
+  /** Ordered section labels for the joint list. */
+  groups: string[];
+  /** Standing height of the trunk body, metres. */
+  standHeight: number;
+  /** This body's size against the duck (a measured width ratio, 1.0 for the
+   *  duck, 2.89 for the G1): every metre-sized gizmo constant scales by it. */
+  sizeScale: number;
+  effectors: EffectorMeta[];
+  /** The body's own rig controls. Absent from an older lab — lib/rig.ts's
+   *  `rigControlsFor` falls back to the duck's constant then. */
+  rig?: RigControl[];
 }
 
 // ------------------------------------------------------------------ the clip
 
 export interface Key {
   t: number; // seconds from clip start, ascending, first key at 0
-  joints: number[]; // 14 ABSOLUTE radians, JOINT_NAMES order
+  joints: number[]; // the robot's joint count of ABSOLUTE radians, joint_names order
   /** Intended trunk pitch, radians. NEGATIVE = lean back (the trunk's
    *  projected gravity acquires -x) — the server documents and tests this. */
   rootPitch: number;
@@ -48,6 +90,15 @@ export interface Clip {
   duration: number; // seconds
   loop: boolean;
   keys: Key[];
+  /** The body the clip poses. Absent = the duck (every clip saved before
+   *  there was a second body); the server validates the joint count against
+   *  it and /teach routes the run to that body. */
+  robot?: RobotId;
+}
+
+/** The body a clip poses — the duck when it predates the field. */
+export function clipRobot(clip: Clip): RobotId {
+  return clip.robot ?? "microduck";
 }
 
 /** A clip as it comes back from the server listing (mtime added). */
@@ -58,15 +109,18 @@ export interface Pose {
   rootPitch: number;
 }
 
+/** The duck's joint count — the fallback before any metadata has arrived.
+ *  Everywhere a pose is built for a KNOWN robot uses `meta.numJoints`. */
 export const NUM_JOINTS = 14;
 /** `selected` sentinel for the trunk: it carries rootPitch, not a servo. */
 export const ROOT_SEL = -1;
 
+export function zeroPose(numJoints = NUM_JOINTS): Pose {
+  return { joints: new Array(numJoints).fill(0), rootPitch: 0 };
+}
+
 export function defaultPose(meta: JointsMeta | null): Pose {
-  return {
-    joints: meta ? meta.joints.map((j) => j.default) : new Array(NUM_JOINTS).fill(0),
-    rootPitch: 0,
-  };
+  return meta ? { joints: meta.joints.map((j) => j.default), rootPitch: 0 } : zeroPose();
 }
 
 export function newClip(meta: JointsMeta | null, name = "untitled"): Clip {
@@ -77,6 +131,7 @@ export function newClip(meta: JointsMeta | null, name = "untitled"): Clip {
     duration: 1.2,
     loop: false,
     keys: [{ t: 0, joints: p.joints, rootPitch: p.rootPitch }],
+    robot: meta?.robot ?? "microduck",
   };
 }
 
@@ -89,9 +144,10 @@ export function clampJoint(meta: JointsMeta | null, i: number, v: number): numbe
 /** Linear interpolation in joint space — exactly what the RL resampler does,
  *  so what the timeline shows is what the reward will track. Before the first
  *  key / after the last, the pose is held (no extrapolation). */
-export function sampleClip(clip: Clip, t: number): Pose {
+export function sampleClip(clip: Clip, t: number, numJoints = NUM_JOINTS): Pose {
   const keys = clip.keys;
-  if (!keys.length) return { joints: new Array(NUM_JOINTS).fill(0), rootPitch: 0 };
+  // A keyless clip cannot say how many joints it has — the caller can.
+  if (!keys.length) return zeroPose(numJoints);
   // Looping wraps into [0, duration) and blends the last key back to the
   // first across the tail, so a cycle reads continuously while scrubbing.
   let time = t;
@@ -128,10 +184,16 @@ export function keyAt(clip: Clip, t: number, eps = 0.008): number {
   return clip.keys.findIndex((k) => Math.abs(k.t - t) <= eps);
 }
 
-/** Insert/replace a key at `t`, keeping `keys` sorted and t=0 anchored. */
+/** Insert/replace a key at `t`, keeping `keys` sorted and t=0 anchored. A
+ *  key found within `keyAt`'s tolerance keeps ITS time: the playhead parked
+ *  4 ms past the anchor is still editing the anchor, not moving it. */
 export function withKey(clip: Clip, t: number, pose: Pose): Clip {
   const at = keyAt(clip, t);
-  const key: Key = { t: round3(t), joints: [...pose.joints], rootPitch: pose.rootPitch };
+  const key: Key = {
+    t: at >= 0 ? clip.keys[at].t : round3(t),
+    joints: [...pose.joints],
+    rootPitch: pose.rootPitch,
+  };
   const keys = at >= 0 ? clip.keys.map((k, i) => (i === at ? key : k)) : [...clip.keys, key];
   keys.sort((a, b) => a.t - b.t);
   return { ...clip, keys };
@@ -171,8 +233,40 @@ async function jsonOrThrow(res: Response) {
   return res.json();
 }
 
-export async function fetchJoints(): Promise<JointsMeta> {
-  return jsonOrThrow(await fetch(`${LAB_HTTP}/joints`));
+/** `?robot=<id>` — omitted for the duck, so a lab older than the robot
+ *  switch (which knows no query) still answers. Same rule as fetchScene. */
+function robotQuery(robot: RobotId): string {
+  return robot && robot !== "microduck" ? `?robot=${encodeURIComponent(robot)}` : "";
+}
+
+/** Every body the lab can pose. A lab older than the switch has no
+ *  /robots: that reads as the duck alone, which is what it can do. */
+export async function fetchRobots(): Promise<RobotInfo[]> {
+  const data = await jsonOrThrow(await fetch(`${LAB_HTTP}/robots`));
+  return (data.robots ?? []) as RobotInfo[];
+}
+
+/** Fill in what an older lab's /joints does not say, as the duck's values,
+ *  so every consumer can read the fields without guarding each one. */
+export function normalizeMeta(raw: Partial<JointsMeta> & Pick<JointsMeta, "joints" | "bodies" | "trunkBody" | "rootPitchRange" | "rootPitchSign">, robot: RobotId): JointsMeta {
+  const groups =
+    raw.groups && raw.groups.length
+      ? raw.groups
+      : raw.joints.reduce<string[]>((acc, j) => (acc.includes(j.group) ? acc : [...acc, j.group]), []);
+  return {
+    ...raw,
+    robot: raw.robot ?? robot,
+    title: raw.title ?? (robot === "microduck" ? "Microduck" : robot),
+    numJoints: raw.numJoints ?? raw.joints.length,
+    groups,
+    standHeight: raw.standHeight ?? 0,
+    sizeScale: raw.sizeScale ?? 1,
+    effectors: raw.effectors ?? [],
+  };
+}
+
+export async function fetchJoints(robot: RobotId = "microduck"): Promise<JointsMeta> {
+  return normalizeMeta(await jsonOrThrow(await fetch(`${LAB_HTTP}/joints${robotQuery(robot)}`)), robot);
 }
 
 export interface PoseResult {
@@ -180,14 +274,71 @@ export interface PoseResult {
   balance?: Balance; // absent from a lab older than the endpoint
   joints: number[]; // clamped to the servo limits
   rootPitch: number;
+  /** Which body answered — absent from a lab older than the robot switch. */
+  robot?: RobotId;
+  /** World position of every draggable point for THIS pose, same frame as
+   *  `bodies` — the IK handles. Absent from a lab older than /ik. */
+  effectors?: Record<string, [number, number, number]>;
 }
 
-export async function fetchPose(pose: Pose, signal?: AbortSignal): Promise<PoseResult> {
+export interface IkTarget {
+  pos: [number, number, number];
+  /** Hold the body as level as it stands (a foot flat). The server defaults
+   *  it on for feet. */
+  level?: boolean;
+  weight?: number;
+}
+export type IkTargets = Record<string, IkTarget>;
+
+export interface IkInfo {
+  iterations: number;
+  converged: boolean;
+  /** How far short of its target each effector ended, metres. */
+  residual: Record<string, number>;
+  /** The effectors the server held where they were. */
+  pins: string[];
+}
+
+/** POST /ik's answer: a /pose answer for THE SOLVED JOINTS, plus the solve. */
+export type IkResult = PoseResult & { ik: IkInfo };
+
+export function isIkResult(r: PoseResult | IkResult): r is IkResult {
+  return "ik" in r && r.ik != null;
+}
+
+export async function fetchPose(pose: Pose, robot: RobotId = "microduck", signal?: AbortSignal): Promise<PoseResult> {
   return jsonOrThrow(
-    await fetch(`${LAB_HTTP}/pose`, {
+    await fetch(`${LAB_HTTP}/pose${robotQuery(robot)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ joints: pose.joints, rootPitch: pose.rootPitch }),
+      signal,
+    })
+  );
+}
+
+/** Inverse kinematics for a dragged effector: the pose that puts each target
+ *  where it was asked. `pins` omitted = the server pins every foot that is
+ *  not a target (the planted foot stays put while the other is dragged).
+ *  Targets are in the frame /pose reports bodies in; an unreachable one is
+ *  answered with the closest pose and a nonzero residual, never an error. */
+export async function fetchIk(
+  pose: Pose,
+  targets: IkTargets,
+  robot: RobotId = "microduck",
+  pins?: string[],
+  signal?: AbortSignal
+): Promise<IkResult> {
+  return jsonOrThrow(
+    await fetch(`${LAB_HTTP}/ik${robotQuery(robot)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        joints: pose.joints,
+        rootPitch: pose.rootPitch,
+        targets,
+        ...(pins ? { pins } : {}),
+      }),
       signal,
     })
   );
@@ -218,36 +369,69 @@ export async function removeClip(name: string): Promise<void> {
   );
 }
 
-/** POST /pose with at most ONE request in flight and always a trailing send,
- *  so a slider drag stays responsive instead of queueing a backlog (the
- *  server answers in ~0.2 ms; the round trip is the only real cost). */
+/** What the streamer has queued: a plain preview, or an IK solve. */
+type StreamJob =
+  | { kind: "pose"; pose: Pose; robot: RobotId }
+  | { kind: "ik"; pose: Pose; targets: IkTargets; pins?: string[]; robot: RobotId };
+
+/** POST /pose (or /ik) with at most ONE request in flight and always a
+ *  trailing send, so a slider or handle drag stays responsive instead of
+ *  queueing a backlog (the server answers in ~0.2 ms for FK, ~1 ms for IK;
+ *  the round trip is the only real cost). The newest request of EITHER kind
+ *  wins the trailing slot. An IK answer carries the SOLVED joints — the
+ *  callback tells them apart with `isIkResult` and adopts those.
+ *
+ *  Every job remembers the robot it was sent for, and an answer for a body
+ *  the streamer has since been switched away from is dropped: a duck's 17
+ *  body poses landing on the G1's 45 groups would draw a heap of parts. */
 export class PoseStreamer {
   private inflight = false;
-  private pending: Pose | null = null;
+  private pending: StreamJob | null = null;
   private closed = false;
+  private robot: RobotId = "microduck";
 
-  constructor(private onPose: (r: PoseResult) => void, private onError?: (e: string) => void) {}
+  constructor(
+    private onPose: (r: PoseResult | IkResult) => void,
+    private onError?: (e: string) => void
+  ) {}
+
+  /** Which body the next requests are for. */
+  setRobot(robot: RobotId) {
+    this.robot = robot;
+  }
 
   request(pose: Pose) {
-    this.pending = { joints: [...pose.joints], rootPitch: pose.rootPitch };
+    this.pending = { kind: "pose", pose: copyPose(pose), robot: this.robot };
+    this.pump();
+  }
+
+  requestIk(pose: Pose, targets: IkTargets, pins?: string[]) {
+    this.pending = { kind: "ik", pose: copyPose(pose), targets, pins, robot: this.robot };
     this.pump();
   }
 
   private pump() {
     if (this.closed || this.inflight || !this.pending) return;
-    const pose = this.pending;
+    const job = this.pending;
     this.pending = null;
     this.inflight = true;
-    fetchPose(pose)
+    const req =
+      job.kind === "ik"
+        ? fetchIk(job.pose, job.targets, job.robot, job.pins)
+        : fetchPose(job.pose, job.robot);
+    req
       .then((r) => {
-        if (!this.closed) this.onPose(r);
+        if (this.closed) return;
+        // A lab older than the switch names no robot: it is the duck's.
+        if ((r.robot ?? "microduck") !== this.robot || job.robot !== this.robot) return;
+        this.onPose(r);
       })
       .catch((e) => {
         if (!this.closed) this.onError?.(String(e?.message ?? e));
       })
       .finally(() => {
         this.inflight = false;
-        this.pump(); // trailing edge: the latest pose always lands
+        this.pump(); // trailing edge: the latest request always lands
       });
   }
 
@@ -256,9 +440,13 @@ export class PoseStreamer {
   }
 }
 
+function copyPose(pose: Pose): Pose {
+  return { joints: [...pose.joints], rootPitch: pose.rootPitch };
+}
+
 // ----------------------------------------------------------- the shared store
 
-export type AnimMode = "joints" | "rig";
+export type AnimMode = "joints" | "rig" | "ik";
 
 /** The rig selection PoseDuck needs for highlighting/labeling — a mirror of
  *  lib/rig.ts's RigBodyPick essentials, kept here to avoid an import cycle. */
@@ -376,10 +564,29 @@ export function balanceColor(b: Balance | null): string {
 }
 
 export interface AnimStore {
-  /** Preview duck visible + interactive (the panel is open). */
+  /** Preview robot visible + interactive (the panel is open). */
   visible: boolean;
+  /** Which body the editor is posing — PoseDuck draws this one. Set with
+   *  the metadata (`setAnimMeta`), which notifies. */
+  robot: RobotId;
+  /** This body's size against the duck (JointsMeta.sizeScale): every
+   *  metre-sized gizmo constant in the scene is multiplied by it. */
+  sizeScale: number;
   /** Latest body poses from POST /pose — read per-frame by PoseDuck. */
   bodies: number[][] | null;
+  /** Where every IK handle sits for that same pose, effector id → MuJoCo
+   *  xyz in the ghost group's frame. Per-frame data like `bodies`: does not
+   *  notify. */
+  effectors: Record<string, number[]> | null;
+  /** The IK handle a click picked, or null. Mutually exclusive with the
+   *  joint and rig selections. */
+  selectedEffector: string | null;
+  /** How far short of its target each effector ended on the last /ik
+   *  answer, metres — a handle past 1 cm (× sizeScale) turns amber. */
+  ikResidual: Record<string, number>;
+  /** Registered by the panel: a 3D handle drag asks the solver to put the
+   *  effector at `pos` (ghost-group frame, the frame /pose reports in). */
+  applyIkDrag: ((id: string, pos: [number, number, number]) => void) | null;
   /** CoM vs the soles for that same pose: the editor can show a shape but
    *  not whether it would STAND. Per-frame data like `bodies`: does not
    *  notify. */
@@ -420,7 +627,13 @@ export interface AnimStore {
 
 export const animStore: AnimStore = {
   visible: false,
+  robot: "microduck",
+  sizeScale: 1,
   bodies: null,
+  effectors: null,
+  selectedEffector: null,
+  ikResidual: {},
+  applyIkDrag: null,
   balance: null,
   showBalance: false,
   mode: "joints",
@@ -459,16 +672,26 @@ export function animVersion() {
 }
 
 export function setSelected(sel: number | null) {
-  if (animStore.selected === sel && animStore.selectedRig === null) return;
+  if (animStore.selected === sel && animStore.selectedRig === null && animStore.selectedEffector === null) return;
   animStore.selected = sel;
-  animStore.selectedRig = null; // one selection at a time — joint XOR rig
+  animStore.selectedRig = null; // one selection at a time — joint XOR rig XOR effector
+  animStore.selectedEffector = null;
   animNotify();
 }
 
 export function setSelectedRig(sel: RigSelection | null) {
-  if (animStore.selectedRig?.id === sel?.id && animStore.selected === null) return;
+  if (animStore.selectedRig?.id === sel?.id && animStore.selected === null && animStore.selectedEffector === null) return;
   animStore.selectedRig = sel;
   animStore.selected = null;
+  animStore.selectedEffector = null;
+  animNotify();
+}
+
+export function setSelectedEffector(id: string | null) {
+  if (animStore.selectedEffector === id && animStore.selected === null && animStore.selectedRig === null) return;
+  animStore.selectedEffector = id;
+  animStore.selected = null;
+  animStore.selectedRig = null;
   animNotify();
 }
 
@@ -491,7 +714,22 @@ export function setAnimVisible(v: boolean) {
 }
 
 export function setAnimMeta(meta: JointsMeta) {
+  // A different body: everything measured on the old one is meaningless on
+  // it (its pose list is the wrong length for the new groups), and nothing
+  // is selected on a robot that has just arrived.
+  if (meta.robot !== animStore.robot || meta.bodies.length !== animStore.meta?.bodies.length) {
+    animStore.bodies = null;
+    animStore.balance = null;
+    animStore.effectors = null;
+    animStore.ikResidual = {};
+    animStore.selected = null;
+    animStore.selectedRig = null;
+    animStore.selectedEffector = null;
+    animStore.hoveredBody = null;
+  }
   animStore.meta = meta;
+  animStore.robot = meta.robot;
+  animStore.sizeScale = meta.sizeScale;
   const map: (number | null)[] = new Array(meta.bodies.length).fill(null);
   for (const j of meta.joints) map[j.body] = j.index;
   map[meta.trunkBody] = ROOT_SEL; // clicking the body itself edits root pitch
@@ -499,6 +737,22 @@ export function setAnimMeta(meta: JointsMeta) {
   animNotify();
 }
 
-/** Where the preview duck stands, in MuJoCo XY. Clear of the lab grid, which
- *  starts at y = 0 and grows toward +y (see Viewer's gridOffsets). */
-export const PREVIEW_OFFSET: [number, number] = [0, -1.05];
+/** The effector an IK-mode click on a body part picks: the one whose chain
+ *  the body's joint is on (a shin → that foot), else the one riding the body
+ *  itself (the jaw → the head). Null for a part no effector can move. */
+export function effectorForBody(meta: JointsMeta, body: number): EffectorMeta | null {
+  const joint = meta.joints.find((j) => j.body === body)?.index;
+  if (joint != null) {
+    const onChain = meta.effectors.find((e) => e.chain.includes(joint));
+    if (onChain) return onChain;
+  }
+  return meta.effectors.find((e) => e.body === body) ?? null;
+}
+
+/** Where the preview robot stands, in MuJoCo XY. Clear of the lab grid,
+ *  which starts at y = 0 and grows toward +y (see Viewer's gridOffsets): the
+ *  duck at [0, -1.05], a bigger body proportionally further out so its
+ *  locator ring and feet clear the grid too. */
+export function previewOffset(sizeScale: number): [number, number] {
+  return [0, -1.05 * Math.max(1, sizeScale)];
+}

@@ -364,6 +364,8 @@ def test_lab_state_round_trip(fake_popen, monkeypatch, tmp_path):
     assert data["ducks"][0] == {"id": "d0", "label": "alpha_walking",
                                 "policy": None,
                                 "onnxPath": "/policies/alpha_walking.onnx",
+                                # which body this roster slot is (robots/spec.py)
+                                "robot": "microduck",
                                 "showcase": False}
     assert data["ducks"][1]["policy"] == "pollen:alpha_stand"
 
@@ -1444,7 +1446,10 @@ def test_teach_text_is_the_behavior_id(fake_popen, monkeypatch, tmp_path):
     assert not out["matched"] and "nope" in out["message"]
 
     # Every other card id round-trips too — the panel special-cases nothing.
-    for b in B.BEHAVIORS.values():
+    # Scoped to the DUCK: the registry also carries another body's tasks
+    # (behaviors/g1_tasks.py), and this app's roster is a duck one, so a G1
+    # id correctly matches nothing here.
+    for b in B.for_robot("microduck"):
         out = asyncio.run(teach(V.TeachReq(text=b.id)))
         assert out["matched"] and out["job"]["behavior"]["id"] == b.id, b.id
         asyncio.run(stop())

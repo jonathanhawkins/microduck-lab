@@ -150,7 +150,9 @@ import time
 import traceback
 import uuid
 from collections import deque
+from collections.abc import Sequence
 from contextlib import asynccontextmanager, nullcontext
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -174,7 +176,16 @@ from pydantic import BaseModel
 from . import behaviors as behaviors_mod
 from . import contract as C
 from . import motion as motion_mod
+from . import run_record
 from .brain.learned import brains_dir
+from .pose import (  # noqa: F401 — the private names are re-exports for tests
+    IkTarget,
+    PoseScratch,
+    _convex_hull,
+    _over,
+    _signed_distance,
+    pose_scratch,
+)
 from .train import RUNS_DIR
 from .walk_env import MicroduckWalkEnv, shared_model_scope
 from .world_server import mount_world
@@ -306,6 +317,22 @@ DEMO_SCRIPT = [
 ]
 
 
+def _zero_infer_for(robot: str = "microduck"):
+    """A do-nothing brain of the right width — the 🎓 trainee runs this until
+    the first snapshot lands. `_zero_infer` emitted 14 floats for every body,
+    which a 29-joint robot's env rejects outright."""
+    if robot in (None, "", "microduck"):
+        return _zero_infer
+    from .robots import spec as _spec
+    n = _spec.get(robot).num_actions
+    zeros = np.zeros(n, dtype=np.float32)
+
+    def infer(obs: np.ndarray) -> np.ndarray:
+        return zeros
+    infer.obs_dim = _spec.get(robot).obs_dim
+    return infer
+
+
 def _zero_infer(obs: np.ndarray) -> np.ndarray:
     return np.zeros(14, dtype=np.float32)
 
@@ -315,10 +342,14 @@ class Duck:
 
     def __init__(self, duck_id: str, label: str, infer, seed: int,
                  policy_id: str | None = None, onnx_path: str | None = None,
-                 env_kwargs: dict | None = None):
+                 env_kwargs: dict | None = None, robot: str = "microduck"):
         self.id = duck_id
         self.label = label
-        self.infer = infer  # (obs[61]) -> action[14]
+        # WHICH BODY. The lab was one robot deep; a roster entry now says
+        # which, so a 99-obs G1 policy can never be stepped in a 61-obs duck
+        # env (it would load, run, and produce nonsense).
+        self.robot = robot or "microduck"
+        self.infer = infer  # (obs[obs_dim]) -> action[num_joints]
         self.env_kwargs = dict(env_kwargs or {})
         # Brain provenance, for lab-state.json: a palette id, an .onnx path,
         # or neither (a zero-infer trainee before its first snapshot).
@@ -402,6 +433,15 @@ class Duck:
         scope = (nullcontext() if actuator == "bam"
                  else shared_model_scope(exclusive=False))
         with scope:
+            if self.robot != "microduck":
+                # Another body: its own env class (99-obs G1, robots/g1_env).
+                # `task` picks WHICH — the idle previews in the stand env, so
+                # the trainee mirrors what the trainer is practising.
+                from .train import env_class
+                kw.pop("actuator", None)
+                kw["actuator_force"] = "xml"
+                task = kw.pop("task", "walk")
+                return env_class(self.robot, task)(**common, **kw)
             if behavior_id:
                 return behaviors_mod.BehaviorEnv(
                     behavior_id, standing_spawns=standing, **common, **kw)
@@ -416,7 +456,8 @@ class Duck:
         # DEPLOYED behavior now: driving forward with no explicit turn command
         # closes the loop on measured yaw. An explicit turn command wins.
         if tw[0] > 0.05 and abs(float(tw[2])) < 1e-6:
-            q = self.env.data.qpos[3:7]
+            rq = getattr(self.env, "_root_qpos", 0)
+            q = self.env.data.qpos[rq + 3:rq + 7]
             yaw = float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]),
                                    1 - 2 * (q[2] ** 2 + q[3] ** 2)))
             # Hold the heading the duck HAS when the straight segment begins —
@@ -432,8 +473,23 @@ class Duck:
         else:
             self._hold_yaw = None   # turns/sidesteps release the hold
         self.env.twist_cmd[:] = tw
-        self.env.head_cmd[:] = 0.0
-        self.env.body_cmd[:] = 0.0
+        if self.robot == "microduck":
+            self.env.head_cmd[:] = 0.0
+            self.env.body_cmd[:] = 0.0
+
+    def set_robot(self, robot: str) -> None:
+        """Move this roster slot to another body.
+
+        Clears the rebuild memo: `rebuild_env` returns early when the kwargs
+        are unchanged, and a robot swap usually carries the SAME kwargs — so
+        without this the slot kept the old body's env and the new policy's
+        observations went into the wrong robot.
+        """
+        robot = robot or "microduck"
+        if robot == self.robot:
+            return
+        self.robot = robot
+        self.env_kwargs = {"__robot_swap__": robot}   # force the next rebuild
 
     def rebuild_env(self, env_kwargs: dict) -> None:
         """Recreate the sim with different physics (scene/termination) — needed
@@ -454,6 +510,7 @@ class Duck:
         # have — and because the guard above compares against that memo, every
         # retry with the same kwargs then returned instantly without rebuilding.
         want = dict(env_kwargs)
+        want.pop("__robot_swap__", None)   # set_robot's rebuild trigger
         env = self._make_env(seed, kwargs=want)
         self.env_kwargs = want
         self.env = env
@@ -643,15 +700,71 @@ class Duck:
         return round(mean, 3) if math.isfinite(mean) else None
 
     def pose_payload(self) -> list[list[float]]:
+        """One pose per body of `GET /scene`, IN ITS ORDER.
+
+        The viewer zips this list against the scene's bodies positionally, so
+        the two have to be the same shape. They stopped being so when the
+        hinged `mouth` was inserted mid-list (scene index 11): this env is the
+        un-split walk model and has 16 bodies where the scene has 17, which
+        drew the bill at the bearing's pose, put the whole right leg one link
+        late, and left `ankle_right` at the origin because nothing ever wrote
+        it. So emit in SCENE order and look each body up by NAME; a body the
+        walk model does not have rides its scene parent, which is where the
+        bill actually hangs."""
         d, m = self.env.data, self.env.model
         out = []
-        for b in range(m.nbody):
+        mapping = (_scene_to_env(m) if self.robot == "microduck"
+                   else _robot_scene_to_env(m, self.robot))
+        for env_b, parent_b in mapping:
+            b = env_b if env_b >= 0 else parent_b
             p, q = d.xpos[b], d.xquat[b]
             out.append([round(float(v), 4) for v in (*p, *q)])
         return out
 
 
 # ------------------------------------------------------------ policy loading
+
+@lru_cache(maxsize=4)
+def _scene_to_env(model) -> tuple[tuple[int, int], ...]:
+    """For each body of `GET /scene`, in scene order: (index of the body of
+    the same name in `model`, or -1; index of its scene PARENT resolved the
+    same way). Cached per model — the scene's body list is static."""
+    from .world.compose import scene_model
+
+    sm = scene_model()
+    by_name = {model.body(b).name: b for b in range(model.nbody)}
+    out: list[tuple[int, int]] = []
+    for b in range(sm.nbody):
+        own = by_name.get(sm.body(b).name, -1)
+        par = by_name.get(sm.body(int(sm.body_parentid[b])).name, 0)
+        out.append((own, par))
+    return tuple(out)
+
+
+@lru_cache(maxsize=4)
+def _robot_scene_to_env(model, robot: str) -> tuple[tuple[int, int], ...]:
+    """`_scene_to_env` for a body that is not the duck.
+
+    Same contract: one (own, parent) pair per body of `GET /scene?robot=<id>`,
+    IN THAT ORDER, resolved by NAME. The viewer zips the streamed poses
+    against the scene's body list positionally, so a robot whose training
+    scene and visual scene were compiled from different files (they are —
+    the visual one has no floor) must still line up name by name.
+    """
+    if robot != "g1":
+        raise KeyError(f"no visual scene for robot {robot!r}")
+    from .robots.g1 import visual_scene
+
+    names = visual_scene()["bodies"]
+    by_name = {model.body(b).name: b for b in range(model.nbody)}
+    out: list[tuple[int, int]] = []
+    for name in names:
+        own = by_name.get(name, -1)
+        # The parent of an unknown body is the world (index 0): a body the
+        # env does not have rides the root rather than sitting at the origin.
+        out.append((own, 0))
+    return tuple(out)
+
 
 def _onnx_infer(path: Path):
     import onnxruntime as ort
@@ -668,6 +781,11 @@ def _onnx_infer(path: Path):
 
     def infer(obs: np.ndarray) -> np.ndarray:
         return sess.run(None, {in_name: obs[None]})[0][0].astype(np.float32)
+    # What this brain expects to be fed. The roster can hold two bodies now,
+    # and a policy stepped in the wrong one runs happily on garbage.
+    shape = sess.get_inputs()[0].shape
+    if len(shape) == 2 and isinstance(shape[1], int):
+        infer.obs_dim = int(shape[1])
     return infer
 
 
@@ -687,6 +805,7 @@ def _checkpoint_infer(zip_path: Path, vecnorm_path: Path):
     def infer(obs: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             return wrapper(torch.tensor(obs[None])).numpy()[0].astype(np.float32)
+    infer.obs_dim = int(model.policy.observation_space.shape[0])
     return infer
 
 
@@ -721,6 +840,20 @@ def _run_size(run: Path) -> int:
 _CHAIN_RE = re.compile(r"^(teach-.+)-s(\d+)$")
 
 
+def policy_robot(path: str | Path | None) -> str:
+    """Which body a policy drives: the run's own run.json, else the duck.
+
+    The palette shows both robots' runs; a chip that lands on the wrong
+    body would load happily and behave like noise (99 obs read as 61).
+    """
+    if not path:
+        return "microduck"
+    p = Path(path)
+    d = p if p.is_dir() else p.parent
+    from .export_onnx import run_robot
+    return run_robot(d)
+
+
 def discover_policies() -> list[dict]:
     """Everything assignable, grouped for the palette. Run entries carry
     `mtime` (epoch seconds, see _run_mtime) and are sorted newest-first —
@@ -733,7 +866,23 @@ def discover_policies() -> list[dict]:
     if POLICIES_DIR.exists():
         for p in sorted(POLICIES_DIR.glob("*.onnx")):
             out.append({"id": f"pollen:{p.stem}", "label": p.stem,
-                        "group": "pollen", "path": str(p)})
+                        "group": "pollen", "path": str(p),
+                        "robot": "microduck"})
+    # The G1's own shipped drop (`uv run fetch-g1`). Only the ones that speak
+    # this robot's observation are listed — `shipped_policies` reads each
+    # graph, so a 101-obs croucher or a 36-obs arm overlay stays out of the
+    # palette instead of becoming a chip that can never be assigned. Empty,
+    # and the group disappears, on a machine that never fetched the assets.
+    try:
+        from .robots.g1 import shipped_policies
+        for e in shipped_policies():
+            if not e["usable"]:
+                continue
+            out.append({"id": f"g1:{e['name']}", "label": e["name"],
+                        "group": "g1", "path": e["path"], "robot": "g1",
+                        "note": e.get("note", "")})
+    except Exception as exc:                        # assets missing / unreadable
+        print(f"[lab] no G1 policies in the palette: {type(exc).__name__}: {exc}")
     run_entries: list[dict] = []
     ckpt_entries: list[dict] = []
     if RUNS_DIR.exists():
@@ -744,8 +893,22 @@ def discover_policies() -> list[dict]:
             if (run / "policy.onnx").exists():
                 entry = {"id": f"run:{run.name}", "label": run.name,
                          "group": "runs", "path": str(run / "policy.onnx"),
+                         "robot": policy_robot(run),
                          "mtime": _run_mtime(run),
                          "sizeBytes": _run_size(run)}
+                # What a PERSON reads (run_record.py): the chip's title, the
+                # measured sentence behind it, and the ★ on the stage of a
+                # chain worth using. Absent for a run nobody has described —
+                # the panel falls back to the directory name, as it always
+                # did. `label` stays the run NAME whatever the title says:
+                # it is the identifier --init-from and the docs address.
+                label = run_record.read_label(run)
+                if label.get("title"):
+                    entry["title"] = str(label["title"])
+                if label.get("note"):
+                    entry["note"] = str(label["note"])
+                if label.get("pick"):
+                    entry["pick"] = True
                 m = _CHAIN_RE.match(run.name)
                 if m:
                     entry["chain"] = m.group(1)
@@ -758,7 +921,8 @@ def discover_policies() -> list[dict]:
                 if vn.exists():
                     label = f"{run.name}@{int(steps) // 1000}k"
                     ckpt_entries.append({"id": f"ckpt:{label}", "label": label,
-                                         "group": "checkpoints", "path": str(z)})
+                                         "group": "checkpoints", "path": str(z),
+                                         "robot": policy_robot(run)})
     return out + run_entries + ckpt_entries
 
 
@@ -892,23 +1056,26 @@ def _same_run_dir(p: Path) -> bool:
 def build_ducks(args) -> list[Duck]:
     ducks: list[Duck] = []
 
-    def add(label, infer, policy_id=None, onnx_path=None):
+    def add(label, infer, policy_id=None, onnx_path=None, robot=None):
         ducks.append(Duck(f"d{len(ducks)}", label, infer, seed=len(ducks),
-                          policy_id=policy_id, onnx_path=onnx_path))
+                          policy_id=policy_id, onnx_path=onnx_path,
+                          robot=robot or policy_robot(onnx_path)))
 
     if args.checkpoints:
         run = Path(args.checkpoints)
         zips = sorted(run.glob("checkpoints/model_*_steps.zip"),
                       key=lambda p: int(p.stem.split("_")[1]))
+        robot = policy_robot(run)
         for z in zips:
             steps = z.stem.split("_")[1]
             vn = z.parent / f"model_vecnormalize_{steps}_steps.pkl"
             if vn.exists():
                 label = f"{run.name}@{int(steps) // 1000}k"
-                add(label, _checkpoint_infer(z, vn), policy_id=f"ckpt:{label}")
+                add(label, _checkpoint_infer(z, vn), policy_id=f"ckpt:{label}",
+                    robot=robot)
         if (run / "policy.onnx").exists():
             add(f"{run.name}@final", _onnx_infer(run / "policy.onnx"),
-                onnx_path=str(run / "policy.onnx"))
+                onnx_path=str(run / "policy.onnx"), robot=robot)
 
     for spec in args.policies:
         p = Path(spec)
@@ -1262,6 +1429,29 @@ class TrainingJob:
         return {**self.extra_env, **self._stage_env}
 
     def _launch(self, init_from: Path | None) -> subprocess.Popen:
+        if self.behavior.trainer:
+            # Another body's task: its own trainer, same artifacts. train.py
+            # writes progress.jsonl + live.onnx exactly as train_behavior
+            # does, which is what makes the job watchable in the panel.
+            cmd = [sys.executable, *self.behavior.trainer,
+                   "--run-name", self.run_name, "--envs", str(self.envs),
+                   "--steps", str(self.total_steps)]
+            if self.snap_steps:
+                cmd += ["--snap-steps", str(self.snap_steps)]
+            if init_from is not None:
+                cmd += ["--init-from", str(init_from)]
+            log = open(self.dir / "train.log", "a")
+            # …including the STAGE's knobs: a task curriculum steers its
+            # trainer exactly as a trick's does, through the environment.
+            return subprocess.Popen(
+                cmd, stdout=log, stderr=subprocess.STDOUT,
+                cwd=str(Path(__file__).resolve().parents[2]),
+                # MICRODUCK_RUN_TITLE: the trainer writes the run's record
+                # (run_record.py) and cannot know what the LAB called this
+                # job — "Perform “g1-front-kick”" is the name the person
+                # watching it saw, so it is the name the palette should keep.
+                env={**os.environ, "MICRODUCK_RUN_TITLE": self.display_title(),
+                     **self.extra_env, **self._stage_env})
         cmd = [sys.executable, "-m", "microduck_local.train_behavior",
                self.behavior.id, "--run-name", self.run_name,
                "--envs", str(self.envs), "--steps", str(self.total_steps)]
@@ -1740,6 +1930,7 @@ def save_lab_state(ducks: list[Duck]) -> None:
     state = {"version": 1, "ducks": [
         {"id": d.id, "label": d.label, "policy": d.policy_id,
          "onnxPath": d.onnx_path,
+         "robot": getattr(d, "robot", "microduck"),
          # getattr: tests build rosters from bare namespaces without the flag
          "showcase": bool(getattr(d, "showcase", False))}
         for d in ducks
@@ -1779,6 +1970,7 @@ def restore_ducks(path: Path) -> list[Duck]:
         duck = Duck(str(entry["id"]), str(entry["label"]), infer, seed=i,
                     policy_id=entry.get("policy"),
                     onnx_path=entry.get("onnxPath"),
+                    robot=str(entry.get("robot") or policy_robot(run_path)),
                     env_kwargs=(skw if skw is not None
                                 else env_kwargs_for_policy_path(run_path)))
         duck.showcase = skw is not None
@@ -1910,12 +2102,26 @@ def run_clip(run: Path) -> str | None:
 _DISPLAY_TITLE_RE = re.compile(r"\s*perform\s+[“\"](.+?)[”\"]\s*$", re.IGNORECASE)
 
 
-def match_teach_text(text: str) -> tuple["behaviors_mod.Behavior | None", str | None]:
-    """(behavior, clip-implied-by-the-text) for a /teach message."""
+def match_teach_text(text: str, robot: str = "microduck"
+                     ) -> tuple["behaviors_mod.Behavior | None", str | None]:
+    """(behavior, clip-implied-by-the-text) for a /teach message.
+
+    Matching is scoped to the ROBOT the roster is teaching: the duck's trick
+    recipes and another body's tasks live in one registry, and neither can be
+    trained on the other's geometry."""
     m = _DISPLAY_TITLE_RE.match(text)
-    if m and "imitate" in behaviors_mod.BEHAVIORS:
-        return behaviors_mod.BEHAVIORS["imitate"], m.group(1)
-    return behaviors_mod.match_behavior(text), None
+    if m:
+        b = imitation_behavior(robot)
+        if b is not None:
+            return b, m.group(1)
+    return behaviors_mod.match_behavior(text, robot), None
+
+
+def imitation_behavior(robot: str = "microduck"):
+    """The recipe that tracks a saved clip on `robot`: the duck's `imitate`,
+    another body's `<robot>_imitate` task. None if that body has none."""
+    bid = "imitate" if robot == "microduck" else f"{robot}_imitate"
+    return behaviors_mod.BEHAVIORS.get(bid)
 
 
 class LabState:
@@ -2028,6 +2234,22 @@ def trainee_env_kwargs(b, stage_env: dict[str, str] | None = None) -> dict:
     visually indistinguishable from a plain standing start, and a watcher
     concluded the mirroring was broken outright. The preview is a viewport;
     the stage inspector states the trainer's true percentages."""
+    if getattr(b, "robot", "microduck") != "microduck":
+        # Another body's task is an ENV, not a spawn-knob recipe: the preview
+        # is simply that env, and the trainer's own knobs (command mix) are
+        # its defaults. `task` is read by Duck._make_env.
+        kw = {"task": b.task,
+              "max_episode_s": float(getattr(b, "episode_s", 10.0))}
+        # An imitation task tracks the SAME clip the trainer was handed, and
+        # is judged at the same strictness rung (robots/g1_imitate).
+        if (stage_env or {}).get("MICRODUCK_CLIP"):
+            kw["clip_name"] = stage_env["MICRODUCK_CLIP"]
+        if (stage_env or {}).get("MICRODUCK_G1_LIFT_MIN"):
+            try:
+                kw["lift_min_got"] = float(stage_env["MICRODUCK_G1_LIFT_MIN"])
+            except ValueError:
+                pass
+        return kw
     overrides = dict(stage_env or {})
     probs_env = overrides.get("MICRODUCK_SPAWN_FAMILY_PROBS")
     if probs_env:
@@ -2266,6 +2488,73 @@ def next_duck_slot(ducks: list[Duck]) -> int:
     return n
 
 
+# ----------------------------------------------------------- stage layout
+#
+# One slot's pitch is a property of its ROBOT, not of the lab. The viewer used
+# to lay the grid out itself on a single 0.65 m constant, which is the duck's:
+# six G1 helpers plus a trainee (a 1.3 m humanoid is 0.53 m wide) landed 0.12 m
+# apart and interpenetrated into one unreadable clump. The layout moved here so
+# there is ONE definition and it can read each robot's spec.
+
+_LAB_SPACING: dict[str, float] = {}
+
+
+def lab_spacing_m(robot: str | None) -> float:
+    """`RobotSpec.lab_spacing_m` for a roster row's robot, in metres.
+
+    Falls back to the duck's pitch for a body this process cannot resolve (a
+    lab-state row naming a robot whose assets have since been removed): a
+    layout number must never be able to stop the 50 Hz loop.
+    """
+    key = robot or "microduck"
+    hit = _LAB_SPACING.get(key)
+    if hit is not None:
+        return hit
+    from .robots import spec as _spec
+    try:
+        val = float(_spec.get(key).lab_spacing_m)
+    except Exception:
+        return float(_spec.RobotSpec.lab_spacing_m)   # the dataclass default
+    _LAB_SPACING[key] = val                           # cache successes only
+    return val
+
+
+def lab_slot_offsets(robots: Sequence[str | None]) -> list[tuple[float, float]]:
+    """Where each roster slot stands on the lab floor, in MuJoCo XY metres.
+
+    The same square grid the viewer has always drawn — columns across x,
+    centred on the row the first slots occupy, rows growing toward +y — with
+    one change: a column's half-pitch is the widest half-pitch IN that column
+    and a row's is the widest in that row, instead of one duck-sized constant
+    everywhere. So the gap between two neighbours is always at least what the
+    larger of the two asks for, and a MIXED roster spaces a duck from a duck by
+    the duck's pitch while the G1 beside them gets its own.
+
+    For a roster of one robot this is arithmetically the old expression, to the
+    bit: the duck's layout is unchanged (tests/test_lab_robots.py pins it
+    against values taken from the viewer's own function before the change).
+    """
+    n = len(robots)
+    if n == 0:
+        return []
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    half = [lab_spacing_m(r) / 2.0 for r in robots]
+    col_half = [max(half[i] for i in range(n) if i % cols == c)
+                for c in range(cols)]
+    row_half = [max(half[i] for i in range(n) if i // cols == r)
+                for r in range(rows)]
+    xs = [0.0] * cols
+    for c in range(1, cols):
+        xs[c] = xs[c - 1] + col_half[c - 1] + col_half[c]
+    ys = [0.0] * rows
+    for r in range(1, rows):
+        ys[r] = ys[r - 1] + row_half[r - 1] + row_half[r]
+    # Centred on the columns the FIRST row occupies, exactly as the viewer was.
+    span = xs[min(n, cols) - 1] - xs[0]
+    return [(xs[i % cols] - span / 2.0, ys[i // cols]) for i in range(n)]
+
+
 def spawn_duck_error(st: LabState, policy_id: str | None) -> str | None:
     """Why {"spawn_duck": ...} can't be honored (None = go)."""
     if not policy_id:
@@ -2280,12 +2569,20 @@ def extract_scene() -> dict:
     (jenga-stacker's extract_visual_scene, deduplicated by mesh id)."""
     import mujoco
 
-    m = mujoco.MjModel.from_xml_path(str(C.SCENE_WALK_XML))
+    from .world.compose import MOUTH_GROUP, scene_model
+
+    # NOT `from_xml_path(SCENE_WALK_XML)`: the viewer draws every duck from
+    # this one scene, and the world stream indexes its body list positionally,
+    # so this model has to carry the hinged `mouth` body too.
+    m = scene_model()
     mesh_ids: dict[int, int] = {}
     meshes: list[dict] = []
     geoms: list[dict] = []
     for i in range(m.ngeom):
-        if m.geom_type[i] != mujoco.mjtGeom.mjGEOM_MESH or m.geom_group[i] != 2:
+        # Group 2 is where the upstream export puts the visual shells; the
+        # hinged bill sits in MOUTH_GROUP so no range sensor sees it, and the
+        # viewer has to ask for it by name.
+        if m.geom_type[i] != mujoco.mjtGeom.mjGEOM_MESH or m.geom_group[i] not in (2, MOUTH_GROUP):
             continue
         mid = int(m.geom_dataid[i])
         if mid not in mesh_ids:
@@ -2342,266 +2639,47 @@ class PoseReq(BaseModel):
     ground: bool = True
 
 
-# Sole vertices within this of the sole's lowest point, standing, are its
-# flat. The sole has a ~5 mm fillet all round: at 1 mm the flat measures
-# 45 x 34 mm, at 5 mm the whole outline is in (53 x 41 mm), and the flat is
-# what a flat floor touches.
-SOLE_TOL = 0.001
-# A foot whose lowest point is this far above the other foot's is in the air.
-GROUND_TOL = 0.005
+# The posing engine itself — forward kinematics, the balance read and the IK
+# solve — lives in pose.py, one scratch model per ROBOT (the G1 has an editor
+# too); it is imported at the top with the other modules, and the helper
+# names the tests grew up on are re-exported from there.
+SOLE_TOL = C.MICRODUCK.sole_tol
+GROUND_TOL = C.MICRODUCK.ground_tol
 
 
-def _convex_hull(pts: np.ndarray) -> np.ndarray:
-    """Andrew's monotone chain on (n, 2) points: counter-clockwise, no repeated
-    endpoint. Fewer than three distinct points come back as they are."""
-    pts = np.unique(pts, axis=0)          # sorted by x, then y
-    if len(pts) < 3:
-        return pts
-
-    def turn(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-    def chain(seq):
-        out: list[np.ndarray] = []
-        for p in seq:
-            while len(out) >= 2 and turn(out[-2], out[-1], p) <= 0:
-                out.pop()
-            out.append(p)
-        return out
-
-    lower, upper = chain(pts), chain(pts[::-1])
-    return np.array(lower[:-1] + upper[:-1])
+class IkTargetReq(BaseModel):
+    pos: list[float]
+    # Hold the effector level (a foot flat on the floor); default for feet.
+    level: bool | None = None
+    weight: float = 1.0
 
 
-def _signed_distance(p: np.ndarray, hull: np.ndarray) -> float:
-    """Distance from `p` to the nearest edge of a counter-clockwise convex
-    polygon, positive inside. A hull of fewer than three points has no
-    inside, so the distance to it is always negative."""
-    a = hull
-    e = np.roll(hull, -1, axis=0) - a                # edge vectors a -> b
-    ap = p - a
-    inside = len(hull) >= 3 and bool(np.all(e[:, 0] * ap[:, 1] - e[:, 1] * ap[:, 0] >= 0))
-    ee = np.einsum("ij,ij->i", e, e)
-    t = np.clip(np.einsum("ij,ij->i", ap, e) / np.where(ee > 0, ee, 1.0), 0.0, 1.0)
-    best = float(np.linalg.norm(ap - t[:, None] * e, axis=1).min())
-    return best if inside else -best
+class IkReq(BaseModel):
+    """POST /ik — drag a foot or a hand: joints that put each named effector
+    at its target, every OTHER foot pinned where the input pose has it."""
+    joints: list[float]
+    rootPitch: float = 0.0
+    ground: bool = True
+    targets: dict[str, IkTargetReq]
+    # Effector ids to hold at their current world position while the targets
+    # are reached. None = every foot that is not itself a target.
+    pins: list[str] | None = None
 
 
-def _over(feet: dict) -> str | None:
-    """The grounded foot whose footprint holds the CoM, the deeper one if
-    both do, else None. A foot in the air cannot be stood on however well
-    the CoM lines up with it."""
-    standing = [s for s, f in feet.items() if f["grounded"] and f["marginMm"] > 0]
-    return max(standing, key=lambda s: feet[s]["marginMm"]) if standing else None
+def robot_of(robot: str | None) -> str:
+    """The robot id a `?robot=` query names — the duck when it names none."""
+    return "microduck" if not robot or robot in ("duck", "microduck") else robot
 
 
-def _outline(hull: np.ndarray) -> list[list[float]]:
-    """A hull as the wire wants it: world xy in metres, counter-clockwise,
-    the last point NOT repeated (the viewer closes the loop)."""
-    return [[round(float(x), 4), round(float(y), 4)] for x, y in hull]
-
-
-class PoseScratch:
-    """A model/data pair used ONLY to answer POST /pose.
-
-    Deliberately NOT any live duck's env: the editor previews an arbitrary
-    authored pose on every slider tick, and writing qpos into a duck mid-episode
-    would corrupt the very rollout the viewer is streaming. One extra MjData on
-    a 16-body model costs nothing, and mj_forward here measures ~0.03 ms.
-    """
-
-    def __init__(self) -> None:
-        import mujoco
-
-        self.mj = mujoco
-        self.model = mujoco.MjModel.from_xml_path(str(C.SCENE_WALK_XML))
-        self.data = mujoco.MjData(self.model)
-        self.joint_qpos_adr = np.array(
-            [self.model.joint(n).qposadr[0] for n in C.JOINT_NAMES])
-        self.limits = np.array(
-            [self.model.jnt_range[self.model.joint(n).id] for n in C.JOINT_NAMES],
-            dtype=np.float64)
-        # Geoms that can touch the floor, for the grounding offset below —
-        # world-body geoms (the floor plane itself) are not part of the robot.
-        self.robot_geoms = np.array(
-            [g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] != 0])
-        # Root pose of the STAND keyframe: the preview duck stands where the
-        # keyframe puts it, so an authored pose reads against the same ground.
-        mujoco.mj_resetDataKeyframe(self.model, self.data, self.model.key("STAND").id)
-        mujoco.mj_forward(self.model, self.data)
-        self.base_qpos = self.data.qpos.copy()
-        # Grounding is measured RELATIVE to the standing pose, so the AABB
-        # bound's conservatism cancels exactly at DEFAULT_POSE instead of
-        # leaving the preview duck hovering a few mm off the floor.
-        self.stand_low_z = self._lowest_z()
-        # The outline of each sole's flat, for `balance` below: the mesh
-        # vertices that touch the floor when the duck stands (the data is at
-        # STAND here), reduced to their convex hull. The sole is a MESH, not
-        # a box, and its geom_size is only the bounding box, ~3 mm wider than
-        # the flat on every side, so the footprint has to come from the
-        # vertices. The flat is planar, so however the foot is turned, the
-        # projected outline's corners are among these ~30 points; kept in
-        # the geom frame and transformed per call.
-        self.soles: dict[str, tuple[int, np.ndarray]] = {}
-        for side in ("left", "right"):
-            name = f"{side}_foot_collision"
-            g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
-            if g < 0:
-                raise ValueError(f"{C.SCENE_WALK_XML}: no geom named {name}")
-            if self.model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH:
-                raise ValueError(f"{name} is not a mesh; balance() reads its vertices")
-            mesh = self.model.geom_dataid[g]
-            adr, num = self.model.mesh_vertadr[mesh], self.model.mesh_vertnum[mesh]
-            verts = self.model.mesh_vert[adr:adr + num]
-            world = verts @ self.data.geom_xmat[g].reshape(3, 3).T
-            flat = np.flatnonzero(world[:, 2] <= world[:, 2].min() + SOLE_TOL)
-            hull = _convex_hull(world[flat, :2])
-            corners = [flat[np.argmin(np.abs(world[flat, :2] - h).sum(axis=1))] for h in hull]
-            self.soles[side] = (g, verts[corners].copy())
-
-    def _lowest_z(self) -> float:
-        """World z of the lowest point of the robot's geom AABBs (conservative
-        — see stand_low_z for why that is fine)."""
-        m, d = self.model, self.data
-        g = self.robot_geoms
-        rot = d.geom_xmat[g].reshape(-1, 3, 3)
-        aabb = m.geom_aabb[g]                       # [cx cy cz hx hy hz], geom frame
-        zrow = rot[:, 2, :]                         # world-z row of each geom's basis
-        centers = d.geom_xpos[g, 2] + np.einsum("ij,ij->i", zrow, aabb[:, :3])
-        extents = np.einsum("ij,ij->i", np.abs(zrow), aabb[:, 3:])
-        return float(np.min(centers - extents))
-
-    def clamp(self, joints: np.ndarray) -> np.ndarray:
-        return np.clip(joints, self.limits[:, 0], self.limits[:, 1])
-
-    def solve(self, joints: np.ndarray, root_pitch: float = 0.0,
-              ground: bool = True) -> list[list[float]]:
-        """Forward kinematics for an authored pose → the WS frame's body payload."""
-        m, d = self.model, self.data
-        d.qpos[:] = self.base_qpos
-        d.qvel[:] = 0.0
-        d.qpos[self.joint_qpos_adr] = joints
-        half = float(root_pitch) / 2.0
-        # Rotation about +Y (wxyz) — the sign convention documented above.
-        d.qpos[3:7] = [np.cos(half), 0.0, np.sin(half), 0.0]
-        self.mj.mj_forward(m, d)
-        if ground:
-            drop = self._lowest_z() - self.stand_low_z
-            if abs(drop) > 1e-6:
-                d.qpos[2] -= drop
-                self.mj.mj_forward(m, d)
-        return [[round(float(v), 4) for v in (*d.xpos[b], *d.xquat[b])]
-                for b in range(m.nbody)]
-
-    def balance(self) -> dict:
-        """Where the CoM sits relative to each sole, for the POSED state in
-        `self.data` (call straight after `solve`).
-
-        The editor can show a pose but not whether it would STAND, which is
-        the question a one-legged movement turns on: a pistol squat needs the
-        whole-body CoM over the stance foot, and until now that measurement
-        only existed in throwaway scripts.
-
-        Per foot, `marginMm` is the signed distance from the CoM's ground
-        projection to the edge of that sole's footprint: positive inside it,
-        negative outside. The footprint is the flat of the sole projected
-        onto the world ground plane (its convex hull), so a yawed foot keeps
-        its true outline and nothing inflates. It is the footprint the foot
-        WOULD have flat on the floor: a tilted foot's real contact is smaller,
-        and the projection only ever shrinks it, never grows it. `grounded` is
-        false for a foot held clear of the floor, and `over` names the
-        grounded foot whose footprint contains the CoM, or None.
-
-        `support` is the same read against the SUPPORT POLYGON: the convex
-        hull of every grounded sole's footprint. That is the region a body
-        stands in statically, and it is what makes the square stance come
-        out right: standing square the CoM is ~25 mm outside BOTH soles and
-        ~16 mm inside the stance, which is why the duck does not fall over
-        the moment it stops walking. With one foot in the air the polygon is
-        the stance sole's outline and the two margins agree.
-
-        Every outline goes out too (`outline`, world xy in metres,
-        counter-clockwise), so the viewer can draw the footprints the
-        crosshair is being judged against instead of asking the eye to
-        imagine them under the shell.
-
-        A STATIC check, no velocity, no momentum, no ankle torque: a real
-        policy holds a small negative margin routinely and a fast one ignores
-        it. Read it as "how hard is this pose to hold", never as a verdict.
-        Costs ~0.3 ms on top of the ~0.03 ms forward pass.
-        """
-        d = self.data
-        com = d.subtree_com[0]
-        soles = {}
-        for side, (g, outline) in self.soles.items():
-            world = outline @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
-            soles[side] = (float(world[:, 2].min()), _convex_hull(world[:, :2]))
-        floor = min(low for low, _ in soles.values())
-        feet = {}
-        for side, (low, hull) in soles.items():
-            feet[side] = {
-                "grounded": bool(low <= floor + GROUND_TOL),
-                "marginMm": round(_signed_distance(com[:2], hull) * 1000, 1),
-                "outline": _outline(hull),
-            }
-        down = [side for side in soles if feet[side]["grounded"]]
-        stance = _convex_hull(np.concatenate([soles[side][1] for side in down]))
-        support = {
-            "feet": down,
-            "marginMm": round(_signed_distance(com[:2], stance) * 1000, 1),
-            "outline": _outline(stance),
-        }
-        return {"com": [round(float(v), 4) for v in com], "feet": feet,
-                "over": _over(feet), "support": support}
-
-    def meta(self) -> dict:
-        """Everything the editor needs to build clamped controls and map a
-        clicked body back to the joint that moves it."""
-        m = self.model
-        groups = ("left leg",) * 5 + ("head + neck",) * 4 + ("right leg",) * 5
-        joints = []
-        for i, name in enumerate(C.JOINT_NAMES):
-            j = m.joint(name)
-            body = int(m.jnt_bodyid[j.id])
-            joints.append({
-                "index": i,
-                "name": name,
-                "group": groups[i],
-                "min": round(float(self.limits[i, 0]), 6),
-                "max": round(float(self.limits[i, 1]), 6),
-                "default": round(float(C.DEFAULT_POSE[i]), 6),
-                "body": body,
-                "bodyName": m.body(body).name,
-                # Hinge axis and anchor in the BODY frame — the viewer turns a
-                # screen drag into a joint delta with these.
-                "axis": [round(float(v), 6) for v in m.jnt_axis[j.id]],
-                "pos": [round(float(v), 6) for v in m.jnt_pos[j.id]],
-            })
-        return {
-            "joints": joints,
-            "bodies": [m.body(b).name for b in range(m.nbody)],
-            "trunkBody": int(self.mj.mj_name2id(
-                m, self.mj.mjtObj.mjOBJ_BODY, "trunk_base")),
-            # An EDITOR hint, not a validation bound: a flip is a continuous
-            # rotation, so a clip may legitimately carry a full turn (the
-            # backflip recipe runs to ±2π) and the clip contract never clamps
-            # rootPitch. Two turns of slider travel covers either direction.
-            "rootPitchRange": [-round(float(2 * np.pi), 6), round(float(2 * np.pi), 6)],
-            # Restated here so a client never has to guess (docs own the why).
-            "rootPitchSign": "negative = lean back (gravity gains -x in trunk frame)",
-        }
-
-
-_pose_scratch: PoseScratch | None = None
-
-
-def pose_scratch() -> PoseScratch:
-    """Lazily built singleton — the editor is optional, so a lab that never
-    opens it never pays for the extra model."""
-    global _pose_scratch
-    if _pose_scratch is None:
-        _pose_scratch = PoseScratch()
-    return _pose_scratch
+def scratch_for(robot: str | None) -> PoseScratch:
+    """pose_scratch(), with a missing body reported as a 404 rather than a
+    500 (the G1's assets are optional — `uv run fetch-g1`)."""
+    try:
+        return pose_scratch(robot_of(robot))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(404, f"{robot_of(robot)} assets missing — {e}")
 
 
 def clips_dir() -> Path:
@@ -2619,17 +2697,20 @@ def _finite(x) -> float:
     return v
 
 
-def clean_joints(raw) -> list[float]:
-    """14 finite floats in JOINT_NAMES order, CLAMPED to the MJCF limits.
+def clean_joints(raw, robot: str = "microduck") -> list[float]:
+    """The robot's joint count of finite floats in joint_names order, CLAMPED
+    to the MJCF limits (14 for the duck, 29 for the G1).
 
     Clamping rather than rejecting: an out-of-range angle is unreachable on the
     real servo, so the honest fix is the nearest reachable one — and the caller
     gets the clamped values back so its UI can show what actually happened."""
-    if not isinstance(raw, (list, tuple)) or len(raw) != C.NUM_JOINTS:
-        raise ValueError(f"joints must be {C.NUM_JOINTS} numbers, "
+    scratch = pose_scratch(robot_of(robot))
+    n = scratch.spec.num_joints
+    if not isinstance(raw, (list, tuple)) or len(raw) != n:
+        raise ValueError(f"joints must be {n} numbers for the {scratch.spec.id}, "
                          f"got {len(raw) if hasattr(raw, '__len__') else type(raw).__name__}")
     vals = np.array([_finite(v) for v in raw], dtype=np.float64)
-    return [round(float(v), 6) for v in pose_scratch().clamp(vals)]
+    return [round(float(v), 6) for v in scratch.clamp(vals)]
 
 
 def clean_clip(name: str, raw: dict) -> dict:
@@ -2637,9 +2718,20 @@ def clean_clip(name: str, raw: dict) -> dict:
 
     Rejects anything the RL resampler could silently misread (missing t=0,
     out-of-order keys, a duration that would truncate the last key); clamps
-    only what has one obvious right answer (joint angles → servo limits)."""
+    only what has one obvious right answer (joint angles → servo limits).
+
+    `robot` names the body the clip poses (absent = the duck, so every clip
+    saved before there was a second body still reads); the joint count and
+    limits are that body's, and the trainer refuses a clip for another."""
     if not isinstance(raw, dict):
         raise ValueError("clip must be an object")
+    robot = robot_of(raw.get("robot") or None)
+    try:
+        pose_scratch(robot)
+    except KeyError:
+        raise ValueError(f"unknown robot {robot!r}")
+    except FileNotFoundError:
+        raise ValueError(f"{robot} assets missing — `uv run fetch-g1`")
     keys_raw = raw.get("keys")
     if not isinstance(keys_raw, list) or not keys_raw:
         raise ValueError("clip needs at least one key")
@@ -2663,7 +2755,7 @@ def clean_clip(name: str, raw: dict) -> dict:
         prev_t = t
         keys.append({
             "t": t,
-            "joints": clean_joints(k.get("joints")),
+            "joints": clean_joints(k.get("joints"), robot),
             "rootPitch": round(_finite(k.get("rootPitch", 0.0) or 0.0), 6),
         })
     duration = round(_finite(raw.get("duration", keys[-1]["t"])), 6)
@@ -2677,10 +2769,21 @@ def clean_clip(name: str, raw: dict) -> dict:
     return {
         "version": CLIP_VERSION,
         "name": name,
+        "robot": robot,
         "duration": duration,
         "loop": bool(raw.get("loop", False)),
         "keys": keys,
     }
+
+
+def clip_robot(name: str) -> str:
+    """Which body a saved clip poses (the duck when the file predates the
+    field). Missing/unreadable clips read as the duck: the caller checks
+    existence separately and reports that instead."""
+    try:
+        return robot_of(json.loads(clip_path(name).read_text()).get("robot") or None)
+    except (OSError, ValueError):
+        return "microduck"
 
 
 def clip_path(name: str) -> Path:
@@ -2776,13 +2879,20 @@ def convert_capture(src: Path, base: str) -> dict:
     mp4, gif = d / f"{base}.mp4", d / f"{base}.gif"
     # h264 yuv420p rejects odd dimensions and browser canvases often are —
     # the same trap render_rollout hit; crop-to-even instead of failing.
+    # …and the ducks' voices, when the take carried them (the /sim page's
+    # 🔊 quacks put an opus track in the upload). `-c:a aac` is inert on a
+    # silent take, so there is no branch here.
     _ffmpeg("-i", str(src), "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart", str(mp4))
     # gif from the cleaned mp4: two-pass palette at a README-friendly width.
     # (Plain palettegen/paletteuse only — imageio-ffmpeg's bundled binary is
     # an older build without stat_mode/diff_mode.)
-    _ffmpeg("-i", str(mp4), "-filter_complex",
+    # -an: a gif has no soundtrack. The bundled build maps only the filter's
+    # output and ignores the mp4's aac either way (checked both ways on this
+    # binary) — this says so rather than resting on a default.
+    _ffmpeg("-i", str(mp4), "-an", "-filter_complex",
             f"[0:v] fps=15,scale={CAPTURE_GIF_WIDTH}:-1:flags=lanczos,"
             "split [a][b];[a] palettegen [p];"
             "[b][p] paletteuse=dither=bayer:bayer_scale=5",
@@ -2834,6 +2944,9 @@ def make_app(ducks: list[Duck]):
     st = LabState(ducks)
     stats = StatsSampler()
     st.stats = stats.sample(None)  # frames carry the full stats shape from #1
+    # Ducks apply_snapshot has already refused to re-brain, so the reason is
+    # said once instead of at every snapshot. Cleared when a new job starts.
+    snapshot_skipped: set[str] = set()
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -2899,8 +3012,20 @@ def make_app(ducks: list[Duck]):
     world = mount_world(app, load_infer=load_policy_infer, origin_allowed=origin_allowed)
 
     @app.get("/scene")
-    def get_scene() -> dict:
-        return scene
+    def get_scene(robot: str = "microduck") -> dict:
+        """Visual meshes for a body in the roster.
+
+        The duck's scene is precompiled at startup; another robot's is built
+        on demand and cached (the G1's mesh dump is ~21 MB of millimetre
+        ints — see robots/g1.extract_visual_scene)."""
+        if robot in ("", "microduck", "duck"):
+            return scene
+        if robot == "g1":
+            from .robots.g1 import g1_ready, visual_scene
+            if not g1_ready():
+                raise HTTPException(404, "G1 assets missing — run `uv run fetch-g1`")
+            return visual_scene()
+        raise HTTPException(404, f"unknown robot {robot!r}")
 
     @app.get("/policies")
     def get_policies() -> dict:
@@ -3097,28 +3222,101 @@ def make_app(ducks: list[Duck]):
 
     # ------------------------------------------------ 🎬 animation authoring
 
+    @app.get("/robots")
+    def get_robots() -> dict:
+        """Every body the editor can pose: the duck always, the G1 once its
+        assets are fetched (`ready`), so the panel can offer a body switch
+        without the viewer knowing what is installed."""
+        from .robots import spec as S
+        from .robots.g1 import g1_ready
+        out = []
+        for rid, spec in S.registry().items():
+            out.append({"id": rid, "title": spec.title or rid,
+                        "numJoints": spec.num_joints,
+                        "ready": True if rid == "microduck" else bool(g1_ready())})
+        if not any(r["id"] == "g1" for r in out):
+            out.append({"id": "g1", "title": "Unitree G1", "numJoints": 29,
+                        "ready": False})
+        return {"robots": out}
+
     @app.get("/joints")
-    def get_joints() -> dict:
-        return pose_scratch().meta()
+    def get_joints(robot: str = "microduck") -> dict:
+        return scratch_for(robot).meta()
 
     @app.post("/pose")
-    def post_pose(req: PoseReq) -> dict:
+    def post_pose(req: PoseReq, robot: str = "microduck") -> dict:
+        scratch = scratch_for(robot)
         try:
-            joints = clean_joints(req.joints)
+            joints = clean_joints(req.joints, scratch.spec.id)
         except ValueError as e:
             raise HTTPException(422, str(e))
         try:
             pitch = _finite(req.rootPitch)
         except ValueError:
             raise HTTPException(422, "rootPitch must be a finite number")
-        scratch = pose_scratch()
         bodies = scratch.solve(np.array(joints), pitch, req.ground)
         return {
+            "robot": scratch.spec.id,
             "bodies": bodies,
             "joints": joints,       # clamped — the editor snaps its sliders to these
             "rootPitch": round(pitch, 6),
             # Read straight after solve, off the same posed mjData.
             "balance": scratch.balance(),
+            # Where each draggable point is for THIS pose — the IK handles.
+            "effectors": scratch.effector_positions(),
+        }
+
+    @app.post("/ik")
+    def post_ik(req: IkReq, robot: str = "microduck") -> dict:
+        """Inverse kinematics for a dragged foot or hand: the /pose answer
+        for the joints that put every target where it was asked, with the
+        other feet held on the spot. Targets are in the frame /pose reports
+        bodies in. `ik.residual` says, per effector, how far short the limb
+        fell (metres) — an unreachable target is answered with the closest
+        pose, never an error."""
+        scratch = scratch_for(robot)
+        try:
+            joints = clean_joints(req.joints, scratch.spec.id)
+            pitch = _finite(req.rootPitch)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        targets = {}
+        for eid, t in req.targets.items():
+            if eid not in scratch.effectors:
+                raise HTTPException(422, f"no effector named {eid!r} on the "
+                                         f"{scratch.spec.id} (have "
+                                         f"{sorted(scratch.effectors)})")
+            if len(t.pos) != 3:
+                raise HTTPException(422, f"target {eid!r}: pos must be [x, y, z]")
+            try:
+                pos = tuple(_finite(v) for v in t.pos)
+            except ValueError:
+                raise HTTPException(422, f"target {eid!r}: pos must be finite")
+            level = (scratch.effectors[eid]["kind"] == "foot"
+                     if t.level is None else bool(t.level))
+            targets[eid] = IkTarget(pos=pos, level=level,
+                                    weight=float(np.clip(t.weight, 0.05, 20.0)))
+        if req.pins is None:
+            pins = tuple(eid for eid, e in scratch.effectors.items()
+                         if e["kind"] == "foot" and eid not in targets)
+        else:
+            bad = [p for p in req.pins if p not in scratch.effectors]
+            if bad:
+                raise HTTPException(422, f"no effector named {bad[0]!r}")
+            pins = tuple(req.pins)
+        res = scratch.solve_ik(np.array(joints), pitch, targets, pins=pins,
+                               ground=req.ground)
+        out_joints = [round(float(v), 6) for v in res.joints]
+        bodies = scratch.solve(np.array(out_joints), pitch, req.ground)
+        return {
+            "robot": scratch.spec.id,
+            "bodies": bodies,
+            "joints": out_joints,
+            "rootPitch": round(pitch, 6),
+            "balance": scratch.balance(),
+            "effectors": scratch.effector_positions(),
+            "ik": {"iterations": res.iterations, "converged": res.converged,
+                   "residual": res.residual, "pins": list(pins)},
         }
 
     @app.get("/clips")
@@ -3251,14 +3449,35 @@ def make_app(ducks: list[Duck]):
             return {"matched": False,
                     "message": f"behaviors.py didn't load: {e}"}
         _TRICK_DUCK_CACHE.clear()   # verdicts derive from the reloaded recipes
-        b, title_clip = match_teach_text(req.text)
+        # WHICH BODY is being taught. The trainee's own robot wins (it is the
+        # duck the panel is watching); otherwise the roster decides, so a lab
+        # holding only a G1 offers G1 tasks without anyone selecting anything.
+        # Duck recipes name duck joints, duck feet and the 61-obs command
+        # slots — they are not portable, so the registry is filtered rather
+        # than the trainer being asked to cope.
+        trainee = st.trainee()
+        robots = {getattr(d, "robot", "microduck") for d in st.ducks
+                  if d.id != "trainee"}
+        robot = (getattr(trainee, "robot", None)
+                 or (robots.pop() if len(robots) == 1 else "microduck"))
+        # A clip names its own body. "⚡ train this" on a G1 clip is a G1
+        # task whatever the roster is standing on — the job rebuilds the
+        # trainee onto the clip's body, as it does for any other task.
+        if req.clip:
+            try:
+                if clip_path(req.clip).exists():
+                    robot = clip_robot(req.clip)
+            except ValueError:
+                pass
+        b, title_clip = match_teach_text(req.text, robot)
         if b is None:
+            what = ("trick" if robot == "microduck" else f"{robot} task")
             return {"matched": False,
-                    "message": "I don't know that trick yet. I can teach these — "
-                               "new tricks need a reward recipe added to the "
+                    "message": f"I don't know that {what} yet. I can teach these — "
+                               "new ones need a recipe added to the "
                                "behaviors/ package:",
                     "behaviors": [behaviors_mod.behavior_card(x)
-                                  for x in behaviors_mod.BEHAVIORS.values()]}
+                                  for x in behaviors_mod.for_robot(robot)]}
         # The clip rides MICRODUCK_CLIP into the trainer AND (via stage_env)
         # into the preview envs, where motion.load_clip joins it straight onto
         # clips_dir() — so it gets the same restrictive validation every clip
@@ -3276,6 +3495,10 @@ def make_app(ducks: list[Duck]):
         # The recipe's default clip is the last resort, never a silent swap
         # away from the motion a finished run was built around.
         clip = req.clip or title_clip or (run_clip(init_from) if init_from else None)
+        if not clip and b is imitation_behavior(robot) and not getattr(b, "clip_name", None):
+            return {"matched": False,
+                    "message": f"“{b.title}” needs a clip to copy — open one in "
+                               "the 🎬 animate panel and press ⚡ train this."}
         if clip:
             try:
                 if not clip_path(clip).exists():
@@ -3284,6 +3507,15 @@ def make_app(ducks: list[Duck]):
                                        "save it in the 🎬 animate panel first."}
             except ValueError as e:
                 return {"matched": False, "message": str(e)}
+            # The recipe and the clip must pose the same body: a duck recipe
+            # resamples 14 joints and would raise inside every worker on a
+            # 29-joint clip, with nothing in the panel saying why.
+            body = clip_robot(clip)
+            if body != getattr(b, "robot", "microduck"):
+                return {"matched": False,
+                        "message": f"“{clip}” is a {body} clip and “{b.title}” "
+                                   f"trains the {getattr(b, 'robot', 'microduck')} "
+                                   "— pick the clip's own body in the 🎬 panel."}
         # startStage: begin the chain partway, warm-started from the newest
         # existing prev-stage run. Refused (with the reason) rather than
         # silently reinterpreted when it can't mean anything — the panel
@@ -3360,6 +3592,7 @@ def make_app(ducks: list[Duck]):
             budget=budget,
             stage_budgets=stage_budgets,
         )
+        snapshot_skipped.clear()   # a new run, a new set of bodies to refuse
         entry = {"weights": st.job.weights,
                  "stageWeights": prev_sticky["stageWeights"],
                  # job.budget is None while TEACH_STEPS_OVERRIDE shrinks the
@@ -3383,13 +3616,24 @@ def make_app(ducks: list[Duck]):
         # The trainee previews what training practices: the behavior env with
         # the ACTIVE stage's spawn knobs (see requirement A / _spawn_knob).
         ekw = trainee_env_kwargs(b, st.job.stage_env())
+        zero = _zero_infer_for(b.robot)
         if st.trainee() is None:
-            st.ducks.append(Duck("trainee", label, _zero_infer, seed=97,
-                                 onnx_path=live, env_kwargs=ekw))
+            st.ducks.append(Duck("trainee", label, zero, seed=97,
+                                 onnx_path=live, env_kwargs=ekw, robot=b.robot))
         else:
+            st.trainee().set_robot(b.robot)
             st.trainee().rebuild_env(ekw)
-            st.trainee().swap_policy(label, _zero_infer, onnx_path=live)
+            st.trainee().swap_policy(label, zero, onnx_path=live)
+        # Helpers are clones of the trainee, so they follow it to the job's
+        # BODY exactly as it does — set_robot, rebuild, re-brain. This used
+        # to skip every helper unless the job was a duck's ("rebuilding a
+        # duck helper into a G1 env would step its 14-action brain in a
+        # 29-joint robot"), which is true of a rebuild ALONE; swapping the
+        # brain in the same breath is what makes it safe. Skipping left a
+        # 61-obs helper on the roster of a 99-obs run — stepping the previous
+        # job's ONNX, and first in line for that run's snapshots.
         for h in helper_ducks(st.ducks):
+            h.set_robot(b.robot)
             h.rebuild_env(ekw)  # helpers mirror the stage from step one too
             # ...and the BRAIN too, like the trainee above. Rebuilding only
             # the env left every helper stepping the PREVIOUS job's ONNX
@@ -3400,7 +3644,7 @@ def make_app(ducks: list[Duck]):
             # label forever, so passing the trainee's would rename every helper
             # to "🎓 <trick> (untrained)" permanently and erase the 🤝 identity
             # that tells them apart in the roster.
-            h.swap_policy(h.label, _zero_infer, onnx_path=live)
+            h.swap_policy(h.label, zero, onnx_path=live)
         st.events.append(f"Training started: {b.emoji} {b.title}")
         sp = st.job.stage_payload()
         if sp:  # curriculum chain: name the opening stage right away
@@ -3408,6 +3652,39 @@ def make_app(ducks: list[Duck]):
                 f"Training stage {sp['idx']}/{sp['count']} — {sp['label']}")
         save_lab_state(st.ducks)
         return {"matched": True, "job": st.job.payload()}
+
+    @app.get("/teach/status")
+    def teach_status() -> dict:
+        """Is a job running, and how far along? The AUTHORITATIVE answer.
+
+        The lab owns the trainer subprocess, so it is the only thing that
+        knows — `TrainingJob._poll` reads `proc.poll()`. Anything outside had
+        no way to ask, so scripts (and agents) fell back to grepping the
+        process table, which is unreliable in a way that bites silently: a
+        `pgrep -f "microduck_local.train "` matches the very shell running the
+        pgrep, and `pgrep -f "Python.*microduck_local"` matches THIS server,
+        whose venv path contains the string. Both report "a trainer is
+        running" forever, and a wait loop built on either never ends.
+
+        Poll this instead: `running` is the one field a waiter needs.
+        """
+        j = st.job
+        if j is None:
+            return {"running": False, "status": "idle", "job": None}
+        prog = j.progress or {}
+        return {
+            "running": j.status == "training",
+            "status": j.status,          # training | done | stopped | failed
+            "job": {
+                "behavior": j.behavior.id,
+                "title": j.display_title(),
+                "runName": j.run_name,
+                "stage": j.stage_idx + 1 if j.stages else None,
+                "stages": len(j.stages) or None,
+                "steps": prog.get("steps"),
+                "total": prog.get("total"),
+            },
+        }
 
     @app.post("/teach/stop")
     async def teach_stop() -> dict:
@@ -3613,23 +3890,44 @@ def make_app(ducks: list[Duck]):
             return
         entry = next((p for p in discover_policies() if p["id"] == policy_id), None)
         path = entry["path"] if entry else None
+        want_robot = (entry or {}).get("robot") or policy_robot(path)
+        if want_robot != duck.robot:
+            duck.set_robot(want_robot)
+            st.events.append(f"{duck_id} is now a {want_robot}")
         # Showcase = the "whole trick" assign: rehearse spawns across the
         # whole trick arc (final-stage knobs). Quietly a plain assign when
         # the policy has no curriculum behind it — the flag can't mean
         # anything there, and refusing would make the chip feel broken.
         skw = showcase_env_kwargs(path) if showcase else None
+        run_name = policy_id.split(":", 1)[-1]
         if skw is None:
-            label = policy_id.split(":", 1)[-1]
+            # What the ROSTER ROW reads: the run's own title when it has one
+            # (run_record.py). That column was a list of
+            # `teach-…-<hash>-sN` strings, which is where "which one of these
+            # is the good one?" started — and the answer was on disk. The
+            # identifier is unchanged (`policy_id`), and the event line below
+            # still names it, so the log stays greppable.
+            label = (entry or {}).get("title") or run_name
             duck.rebuild_env(env_kwargs_for_policy_path(path))
         else:
             label = showcase_label(policy_id, bool(skw.get("spotter")))
             duck.rebuild_env(skw)
         duck.showcase = skw is not None
+        # The obs the policy wants vs the obs this body produces. A 99-d G1
+        # brain in a 61-d duck env used to load, run and emit nonsense.
+        want_obs = getattr(infer, "obs_dim", None)
+        have_obs = int(duck.env.observation_space.shape[0])
+        if want_obs is not None and int(want_obs) != have_obs:
+            st.events.append(
+                f"assign failed: {policy_id} wants {want_obs} obs, "
+                f"{duck_id} ({duck.robot}) produces {have_obs}")
+            return
         duck.swap_policy(label, infer, policy_id=policy_id)
         ho = handoff_for(path) if skw is not None else None
         duck.handoff_infer, duck.handoff_label = ho if ho else (None, None)
         duck.handed = False
-        st.events.append(f"{duck_id} now runs {label}")
+        st.events.append(f"{duck_id} now runs {label}"
+                         + (f" ({run_name})" if label != run_name else ""))
         save_lab_state(st.ducks)
 
     async def do_spawn_helper() -> None:
@@ -3638,9 +3936,17 @@ def make_app(ducks: list[Duck]):
             st.events.append(f"spawn_helper ignored: {err}")
             return
         st.scaling = True
+        n = next_helper_slot(st.ducks)
         try:
             job = st.job
-            n = next_helper_slot(st.ducks)
+            # WHICH BODY — the job's, same as the 🎓 trainee's. A helper is a
+            # clone of the trainee, and without this it was built as a duck
+            # whatever was being taught: for a G1 task `trainee_env_kwargs`
+            # returns the env's `task=`, which only `_make_env`'s non-duck
+            # branch pops, so MicroduckWalkEnv got an unexpected keyword and
+            # raised — inside an asyncio task nobody awaits. The + button did
+            # nothing at all and said nothing, which is how it was reported.
+            robot = getattr(job.behavior, "robot", "microduck") or "microduck"
             live = job.dir / "live.onnx"
             try:
                 infer = await asyncio.to_thread(_onnx_infer, live)
@@ -3648,15 +3954,28 @@ def make_app(ducks: list[Duck]):
             except Exception:
                 # The guard saw model.zip so live.onnx should exist; if a write
                 # races us, the helper idles until the next snapshot lands.
-                infer, onnx_path = _zero_infer, None
+                # _zero_infer_for, not _zero_infer: the latter emits 14 floats
+                # for every body and a 29-joint env rejects that outright.
+                infer, onnx_path = _zero_infer_for(robot), None
             # Same stage-mirrored preview env as the trainee: helpers rehearse
             # the same run, and a helper standing calmly next to a trainee
             # dropped mid-roll reads as "the helpers didn't get the fixes"
             # (it did to the user who spotted exactly that).
-            st.ducks.append(Duck(f"helper{n}", f"🤝 helper {n}", infer,
-                                 seed=100 + n, onnx_path=onnx_path,
-                                 env_kwargs=trainee_env_kwargs(
-                                     job.behavior, job.stage_env())))
+            helper = Duck(f"helper{n}", f"🤝 helper {n}", infer,
+                          seed=100 + n, onnx_path=onnx_path, robot=robot,
+                          env_kwargs=trainee_env_kwargs(
+                              job.behavior, job.stage_env()))
+            # The same width guard do_assign/do_spawn_duck carry: a mismatch
+            # is a message, not an ONNX raise inside the 50 Hz loop — which
+            # stops the loop for every duck, not just this one.
+            want_obs = getattr(infer, "obs_dim", None)
+            have_obs = int(helper.env.observation_space.shape[0])
+            if want_obs is not None and int(want_obs) != have_obs:
+                st.events.append(
+                    f"helper {n} not spawned: the run's brain wants "
+                    f"{want_obs} obs, a {robot} produces {have_obs}")
+                return
+            st.ducks.append(helper)
             save_lab_state(st.ducks)
             # Visual only — do NOT job.scale(). A warm restart would stall
             # training for seconds and, with ENVS_PER_HELPER=0, would not
@@ -3665,6 +3984,11 @@ def make_app(ducks: list[Duck]):
             st.events.append(
                 f"helper {n} joined — watching the same brain "
                 f"({job.envs} train envs)")
+        except Exception as e:
+            # LOUD, always. This coroutine runs under create_task with nobody
+            # awaiting it, so anything raised here used to vanish: the user
+            # pressed + and the lab did nothing and reported nothing.
+            st.events.append(f"helper {n} not spawned: {type(e).__name__}: {e}")
         finally:
             st.scaling = False
 
@@ -3704,16 +4028,35 @@ def make_app(ducks: list[Duck]):
         skw = showcase_env_kwargs(path) if showcase else None
         label = (showcase_label(policy_id, bool(skw.get("spotter"))) if skw is not None
                  else policy_id.split(":", 1)[-1])
+        # WHICH BODY. Without this a 99-obs G1 brain landed in a 61-obs duck
+        # env and the ONNX session raised inside the 50 Hz loop — which is
+        # FATAL: the loop stops and the lab streams no frames at all (the
+        # viewer goes blank, not "one bad duck").
+        robot = (entry or {}).get("robot") or policy_robot(path)
         duck = Duck(f"d{n}", label, infer, seed=37 + n,
-                    policy_id=policy_id,
+                    policy_id=policy_id, robot=robot,
                     env_kwargs=(skw if skw is not None
                                 else env_kwargs_for_policy_path(path)))
+        want_obs = getattr(infer, "obs_dim", None)
+        have_obs = int(duck.env.observation_space.shape[0])
+        if want_obs is not None and int(want_obs) != have_obs:
+            st.events.append(
+                f"spawn failed: {policy_id} wants {want_obs} obs, a {robot} "
+                f"produces {have_obs}")
+            return
         duck.showcase = skw is not None
         ho = handoff_for(path) if skw is not None else None
         duck.handoff_infer, duck.handoff_label = ho if ho else (None, None)
         st.ducks.append(duck)
         save_lab_state(st.ducks)
         st.events.append(f"spawned d{n} running {label}")
+
+    # The roster mutations the WebSocket drives, reachable without a socket:
+    # the same handlers, so a test exercises what the viewer actually calls
+    # (see app.state.lab above).
+    app.state.do_assign = do_assign
+    app.state.do_spawn_duck = do_spawn_duck
+    app.state.do_spawn_helper = do_spawn_helper
 
     async def apply_snapshot() -> None:
         job = st.job
@@ -3732,7 +4075,25 @@ def make_app(ducks: list[Duck]):
         # would make the trainee's label appear to rewind at each handoff.
         steps, _ = job.overall_progress()
         live = str(job.dir / "live.onnx")
+        want_obs = getattr(infer, "obs_dim", None)
         for d in targets:
+            # WIDTH FIRST. This fanned the run's brain onto every id starting
+            # with "helper" unconditionally; a 99-obs snapshot handed to a
+            # 61-obs duck raises inside the 50 Hz loop, which is FATAL — the
+            # lab streams nothing and the viewer goes blank with no error
+            # anywhere. Helpers follow the job's body now (see /teach), so
+            # this should never fire; it costs one compare and it is the
+            # difference between one parked duck and a dead lab.
+            have_obs = int(d.env.observation_space.shape[0])
+            if want_obs is not None and int(want_obs) != have_obs:
+                if d.id not in snapshot_skipped:
+                    # Once per duck per job: this runs at every snapshot, and
+                    # a line per snapshot would bury the rest of the chat.
+                    snapshot_skipped.add(d.id)
+                    st.events.append(
+                        f"{d.id} ({d.robot}) is not following this run — it "
+                        f"produces {have_obs} obs, the brain wants {want_obs}")
+                continue
             # display_title(), not behavior.title: an imitation run is about a
             # SPECIFIC authored clip, and the launch label already says so —
             # rebuilding from the generic recipe name here quietly renamed the
@@ -3741,6 +4102,10 @@ def make_app(ducks: list[Duck]):
                      if d.id == "trainee" else d.label)
             d.swap_policy(label, infer, onnx_path=live)
         st.events.append(f"Trainee updated to {steps // 1000}k steps")
+
+    # Driven by the lab loop rather than the socket, but exposed for the same
+    # reason: a test has to be able to run the real snapshot fan-out.
+    app.state.apply_snapshot = apply_snapshot
 
     def current_cmd(now: float) -> tuple[np.ndarray, str]:
         if st.override is not None and now < st.override_until:
@@ -3773,6 +4138,7 @@ def make_app(ducks: list[Duck]):
                 for d in st.ducks:
                     d.reset()
             training = bool(st.job and st.job.status == "training")
+            doomed: list[Duck] = []
             for d in st.ducks:
                 # Trick policies (trainee/helpers, and anything assigned from a
                 # teach-* run) trained on zero twist commands — drive commands
@@ -3794,7 +4160,26 @@ def make_app(ducks: list[Duck]):
                 if (training and d.id.startswith("helper")
                         and (tick & 1)):
                     continue
-                d.tick()
+                try:
+                    d.tick()
+                except Exception as e:
+                    # ONE duck must never take the lab down. A brain whose
+                    # observation width does not match its body raises here
+                    # (ONNX: "Got: 61 Expected: 99"), and before this the
+                    # exception propagated out of the 50 Hz loop: the loop
+                    # stopped, the socket went quiet and the viewer showed an
+                    # empty stage with no explanation anywhere. Park the duck
+                    # instead and say so.
+                    st.events.append(
+                        f"{d.id} stopped: {type(e).__name__}: {e}"[:200])
+                    print(f"[lab] {d.id} raised in tick(), removing it: {e}")
+                    doomed.append(d)
+            for d in doomed:
+                if d in st.ducks:
+                    st.ducks.remove(d)
+            if doomed:
+                save_lab_state(st.ducks)
+                doomed.clear()
             tick += 1
             if tick % 50 == 0:  # ~1 Hz: training poll + system stats
                 if st.job:
@@ -3831,6 +4216,11 @@ def make_app(ducks: list[Duck]):
                             f"training {st.job.status} — saved as {st.job.run_name}")
                 st.stats = stats.sample(st.job)
             if tick % SEND_EVERY == 0 and st.clients:
+                # Stage layout, once per frame — every slot pitched by its own
+                # robot. The viewer draws what this says and only falls back to
+                # its own duck-pitched grid for a server that predates it.
+                slots = lab_slot_offsets(
+                    [getattr(d, "robot", "microduck") for d in st.ducks])
                 frame = json.dumps({
                     "cmd": [round(float(v), 3) for v in cmd],
                     "mode": mode,
@@ -3840,6 +4230,12 @@ def make_app(ducks: list[Duck]):
                     "ducks": [{
                         "id": d.id,
                         "name": d.label,
+                        # Where this slot stands on the floor, MuJoCo XY m.
+                        "offset": [round(v, 4) for v in slots[i]],
+                        # Which body the viewer should draw for this row
+                        # ("microduck" | "g1"); the meshes come from
+                        # GET /scene?robot=<id>.
+                        "robot": getattr(d, "robot", "microduck"),
                         # Brain provenance ("run:<name>", "ckpt:…", "pollen:…",
                         # or null) — lets the viewer load a selected duck's
                         # run into the teach panel (POST /teach/load).
@@ -3867,7 +4263,7 @@ def make_app(ducks: list[Duck]):
                         # the viewer can draw what the duck is looking for.
                         "ball": behaviors_mod.ball_marker_payload(d.env),
                         "bodies": d.pose_payload(),
-                    } for d in st.ducks],
+                    } for i, d in enumerate(st.ducks)],
                 })
                 st.events.clear()  # one-shot toasts: deliver once, then drop
                 dead = []

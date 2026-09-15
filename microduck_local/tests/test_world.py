@@ -34,12 +34,20 @@ def test_single_duck_world_matches_the_walk_contract():
     m = compose(Scenario(name="one", ducks=[Duck("d0", (0, 0, 0))]))
     adr = DuckAddress.resolve(m, "d0")
     ref = mujoco.MjModel.from_xml_path(str(C.SCENE_WALK_XML))
-    # Same joint count, same contract order, same actuator order, same limits.
-    assert m.nq == ref.nq and m.nv == ref.nv and m.nu == ref.nu
+    # Same contract order, same actuator order, same limits - and ONE more
+    # DOF and actuator than upstream's walk scene, the mouth, which no policy
+    # writes (`split_jaw`; the robot's own 15th servo).
+    assert (m.nq, m.nv, m.nu) == (ref.nq + 1, ref.nv + 1, ref.nu + 1)
+    assert m.joint("d0/mouth").id >= 0 and m.actuator("d0/mouth").id >= 0
+    assert adr.mouth_act not in set(adr.actuators.tolist())
     for k, name in enumerate(C.JOINT_NAMES):
         j = m.joint("d0/" + name)
         r = ref.joint(name)
-        assert int(j.qposadr[0]) == int(r.qposadr[0]) == adr.joint_qpos[k]
+        # Addresses are the COMPOSED model's, not upstream's: the mouth is a
+        # child of `jaw_soft`, so it takes a qpos slot in the middle of the
+        # chain and every joint after it (the right leg) shifts up one.
+        # Nothing indexes these by hand - `DuckAddress` resolves by name.
+        assert int(j.qposadr[0]) == adr.joint_qpos[k]
         np.testing.assert_allclose(j.range, r.range)
         assert m.actuator("d0/" + name).trnid[0] == j.id
     assert m.opt.timestep == C.PHYSICS_DT
@@ -99,8 +107,9 @@ def test_three_ducks_and_objects_step_in_one_model():
     for i, a in enumerate(adrs):
         spawn_duck(m, d, a, 0.0, 0.5 * i, 0.0)
     mujoco.mj_forward(m, d)
-    # 3 free ducks + 1 free box + 1 ball: 5 freejoints + 42 hinges.
-    assert m.nq == 5 * 7 + 3 * 14 and m.nu == 3 * 14
+    # 3 free ducks + 1 free box + 1 ball: 5 freejoints + 45 hinges (each duck
+    # is the 14 contract joints plus its mouth).
+    assert m.nq == 5 * 7 + 3 * 15 and m.nu == 3 * 15
     # Distinct, non-overlapping addresses.
     qs = np.concatenate([a.joint_qpos for a in adrs])
     assert len(set(qs.tolist())) == 42

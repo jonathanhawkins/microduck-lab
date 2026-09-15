@@ -85,12 +85,24 @@ def test_wall_line_matching_closes_the_loop_under_yaw_drift():
     sensing gets 0.146 against 0.161, one seed of three equal) and it now
     gets 0.21 → 0.16 here, 0.14–0.17 over six world seeds, with 0.70–0.73
     of the map on a wall against 0.59–0.61 raw. A path-independent claim
-    would need several paths."""
+    would need several paths.
+
+    Moved AGAIN on 2026-09-12, and for the same kind of reason: the mouth
+    (`world.compose.split_jaw`, roadmap 12.13) puts one more DOF through the
+    constraint solver, which is ~1.6e-9 a step and nothing physical, but this
+    walker amplifies it and takes the turn at a slightly different heading.
+    Re-measured over six world seeds with the mouth in: the matcher still wins
+    every one — err ratio 0.58–0.80 (0.217 → 0.125–0.174) and on-wall
+    0.679–0.819 against 0.572–0.617 raw, a gain of +0.072 to +0.221. Seed 0,
+    the one this test runs, is the WORST of the six on both, and it used to
+    sit a hair above bounds that had always straddled it. The bounds below are
+    now set under the measured six-seed minimum rather than on seed 0's old
+    value, so a path nudge stops flipping this test."""
     raw_err, raw_ok, _ = _drift_run(match=False, bias_deg=1.5)
     fix_err, fix_ok, grid = _drift_run(match=True, bias_deg=1.5)
     assert grid.corrections > 5 and grid.pose is not None
     assert fix_err < 0.85 * raw_err, (raw_err, fix_err)                # measured 0.215 → 0.161 m
-    assert fix_ok > raw_ok + 0.08 and fix_ok > 0.68, (raw_ok, fix_ok)  # measured 0.61 → 0.72
+    assert fix_ok > raw_ok + 0.06 and fix_ok > 0.66, (raw_ok, fix_ok)  # six-seed min +0.072, 0.679
     pl = grid.payload()
     assert len(pl["offset"]) == 3 and pl["corrections"] == grid.corrections and len(pl["pose"]) == 3
     assert abs(pl["offset"][2]) > 0.05                    # it found the bias

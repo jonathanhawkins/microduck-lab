@@ -21,6 +21,7 @@ from typing import ClassVar
 
 import numpy as np
 
+from ..contract import CTRL_DT
 from .gait import TURN_KICK, GaitWatch, back_up, clip_wz, max_wz, turn
 from .intercept import Interceptor
 from .runtime import REGISTRY, Intent, Senses, age_inputs
@@ -1072,6 +1073,15 @@ class ChaseParams:
     # 0.10 admits the edge lines the clamp itself would take and refuses
     # everything that puts a fifth or more of kicks in our own net.
     kick_select_t_own: float = 0.10
+    # ...and what to do when NOTHING passes that filter. Today `select`
+    # returns None and `_plan` keeps the clamp's line - a line the own-goal
+    # filter never looked at. That happens only near our own mouth, which is
+    # precisely where it matters: the table above says a ball 0.4 m off our
+    # own line puts 44-51% of kicks in our net at +-20 deg and 66% straight
+    # on. With this the fan's LEAST BAD line is taken instead - the minimum
+    # of a set the clamp's own line belongs to, so it is never worse than
+    # the fallback it replaces.
+    kick_select_safest: bool = False
     # The kick's own WHIFF rate in the model (a whiffed sample leaves the
     # ball where it is): 50-61% measured on this floor, 18-23% on the old
     # one. Without it the roll-out assumes every swing connects and rates
@@ -2063,8 +2073,380 @@ class ChaseParams:
     # +0.015 v +0.038 flat). Falls 0-2 everywhere. The shipped brain on the
     # cove touches a board ball 207 times an arm where the flat gym said 66:
     # the board problem the push was for is mostly the flat gym's.
-    board_push: float = 0.0
+    #
+    # AND THEN IT WAS MEASURED ON THE WRONG METRIC ALL ALONG (2026-09-12).
+    # Everything above judges the push as an ATTACKING tool - advance a
+    # touch, whiff, kicks - where the kick beats it, so it shipped off. It
+    # is a DEFENSIVE tool, and on our own line it is the only thing that
+    # touches the actual failure.
+    #
+    # `scripts/owngoal_gym.py` puts the ball just off OUR OWN line with the
+    # duck coming from up-pitch - the stance that makes own goals - and asks
+    # only whether the ball ends in our net. The shipped brain concedes in
+    # 14.4% of episodes, and the composition is the finding:
+    #
+    #   own goals WALKED in  92%          own goals KICKED in  8%
+    #
+    # The duck bumps the ball over its own line with its BODY. `aim_mode`'s
+    # clamp, `kick_select`'s own-goal filter and `kick_select_t_own` all act
+    # on the 8%: tightening the tolerance to 0.02 and to 0.0 is a dead null
+    # (+1.2 points, MDE 8.3, 320 episodes an arm), exactly as that split
+    # predicts. `board_push` acts on the 92%, because `_board_line` on our
+    # own end board clears the ball SIDEWAYS toward the corner rather than
+    # letting the walk carry it at the mouth.
+    #
+    # | arm | own goals | | ball advance |
+    # |---|---|---|---|
+    # | shipped | 14.4 % | | 0.130 |
+    # | **board_push 0.25** | **9.3 %** | **-5.1, MDE 3.6, RESOLVED (-35 %)** | 0.072 |
+    #
+    # Pooled over 2560 episodes across a discovery and a FRESH block, better
+    # on 14 of 16 fresh seeds, and the whole reduction is in the walked-in
+    # category. A third block (seeds 200-211) shows a clean dose-response:
+    # 0.40 reaches 8.3% (-6.5, RESOLVED) for more of the advance.
+    #
+    # AND IT IS FREE IN A MATCH, which nothing else in this item managed:
+    # 2v2 over 12 paired seeds at 0.25, every metric null and every one
+    # trending the right way - ballAdvance +0.086, possession +0.56, crowd
+    # +0.024, kickCount +0.08, spread -0.24. At 0.40 they are null too but
+    # all trend negative (kickCount -1.17, 3 of 12), so 0.25 is the pick.
+    #
+    # SHIPS ON at 0.40 with the F.2 pack (`chase_behind`, `approach_keepout`,
+    # `chase_behind_upto`). 0.25 was the match-null pick on its own; 0.40 is
+    # the dose that, combined with the approach bias gated to our third, cut
+    # own goals 14.4% -> 0.9% with no measured match cost.
+    board_push: float = 0.40
     board_push_tilt: float = math.radians(45.0)
+    # GET BEHIND THE BALL BEFORE TOUCHING IT (roadmap Track 4 s6 F.2).
+    #
+    # The shipped planner never asks for it. `aim_max` caps how far round the
+    # ball a line-up may go, so a duck standing BETWEEN the ball and the goal
+    # it attacks is offered only the best line inside a 60 deg window of its
+    # own line of sight - measured on a parked ball, a spot 97 deg round
+    # (beside the ball, not behind it) for a kick 96 deg off the goal, square
+    # across the pitch. "Behind" is 180 deg. The duck then arrives 0.10 m from
+    # the ball (inside `duck_touch` 0.22) FROM THE WRONG SIDE, and the arrival
+    # itself is the contact: over 6 seeds x 300 s of the lab's pitch-2v2, 84%
+    # of all ball-moving touches are bodies rather than kicks, and the 28% of
+    # them made from up-pitch send the ball backwards 81% of the time (median
+    # -0.091 m against +0.148 m for a touch from behind).
+    #
+    # `aim_mode="goal"` already walks round (143 deg, kick 24 deg off goal)
+    # and ships off because it measured worse - half the kicks, signed
+    # progress -0.26 (p=0.012) - and the reason is visible in the same
+    # geometry: it is the one arm whose straight servo line CROSSES the ball
+    # (closest approach 0.05 m at 82-88% of the way in), so the duck arcs
+    # round in contact and shoves the ball backwards as it goes. The target
+    # rule and the path have to land together or the first re-earns that.
+    #
+    # `behind_ball` is the target half: metres behind the ball, on the
+    # ball-to-goal line, to STAGE at when the best kick this stance allows
+    # would lose ground. A staging spot, not a kick spot - it sits outside
+    # `duck_touch`, so arriving there cannot move the ball - in its own mode
+    # ("around"), which neither settles nor swings: reaching it drops the
+    # spot and the next tick lays a real kick line from the good side.
+    # Self-releasing, because the test is on the OUTCOME (`behind_ball_cos`,
+    # the cosine of the kick's true exit line against the goal direction,
+    # exit angle included) and not on where the duck stands: the moment the
+    # clamp can offer a line that gains ground, the plan takes the kick.
+    # 0 = off, which is the pre-2026-09-11 brain.
+    behind_ball: float = 0.0
+    # How bad a kick has to be to be worth walking round for: the cosine of
+    # its exit line against the goal direction. The default is cos(`aim_max`)
+    # = 0.5, so the rule reads "if the clamp cannot get the ball within its
+    # own 60 deg window of the goal, go round instead" - one constant, not
+    # two. Measured on a parked ball at 10 deg steps, it stages the 7 stances
+    # of 36 spanning -30..+30 deg either side of the goal line and leaves a
+    # worst standing kick of 56 deg off; at 0.0 ("never actually lose
+    # ground") only the single worst stance stages and an 86 deg kick is
+    # still allowed, and at 0.7 it stages 10 of 36 (-40..+50).
+    behind_ball_cos: float = 0.5
+    # THE COMMITMENT. Without these the rule decides afresh every tick and
+    # never actually walks anywhere: measured over 180 s of the lab's
+    # pitch-2v2, 32 `around` spells, ZERO arrivals, median spell 0.08 s -
+    # four ticks - and the duck never closer than 0.50 m to a spot it must
+    # reach within 0.06 m. Two things end a spell and neither is the walk
+    # failing: 21 of 32 the plan simply flipped back to "kick", because the
+    # trigger reads `kick_select`, a 30-rollout MONTE CARLO sampler whose
+    # answer is not the same twice - asked 30 times about one frozen stance
+    # it said "go round" 1 time with the selector on and 30 with it off; and
+    # 11 of 32 `avoid` fired, which outranks `lineup` in `PRIORITY` and drops
+    # the spot, and walking round a ball in a crowd is exactly the manoeuvre
+    # that passes near another duck.
+    #
+    # So the walk-round is LATCHED: the trigger is read once, and from then
+    # on the staging spot is re-laid against wherever the ball now is until
+    # the duck is behind it (`behind_ball_done`, the angle at the ball
+    # between the duck and the goal - 2.1 rad is 120 deg, generously short of
+    # squarely behind so the last stretch is not paid for) or the budget runs
+    # out (`behind_ball_s`). The latch lives beside `spot` and not in it, so
+    # an `avoid` that drops the spot PAUSES the walk instead of cancelling it
+    # - which is what `avoid` is for, and it keeps its veto over the body.
+    behind_ball_s: float = 6.0
+    behind_ball_done: float = 2.1
+    # How far the staging spot may SLIDE along the arc when the boards will
+    # not take the ideal one, and in what steps. A wall is a reason to stand
+    # somewhere else behind the ball, not a reason to stop wanting to be
+    # behind it: with the spot fixed, "staging spot in a board" released 6 of
+    # 8 walk-rounds at 1v1 and 4 of 10 at 2v2. 1.05 rad is 60 deg either way,
+    # so the slid spot is never worse than 120 deg round - which is exactly
+    # `behind_ball_done`, so a duck that reaches a slid spot has satisfied
+    # the release test by construction.
+    #
+    # MEASURED AND IT SHIPS OFF (0 = the ideal spot or nothing), which is the
+    # arm every number below was taken on. At 1.05 rad in 0.26 rad steps the
+    # slide makes the duck COMMIT to balls it then cannot finish with:
+    # walk-rounds ending behind the ball 5 of 10 -> 4 of 15 at 2v2 and 1 of 2
+    # -> 0 of 8 at 3v3, attempts up (10 -> 15, 2 -> 8) because the trigger no
+    # longer declines a ball whose ideal spot is unreachable. Giving up on ONE
+    # POINT is not the same mistake as giving up on the OBJECTIVE, and this
+    # knob was built by confusing them: a staging spot inside a board is often
+    # a ball that should not be walked round at all.
+    behind_ball_arc: float = 0.0
+    behind_ball_step: float = 0.26
+    # THE COST GATE. Walking round is cheap FAR from the ball and dear near
+    # it: at 1.5 m out, aiming at the far side instead of the near one is a
+    # few degrees of approach; at 0.4 m it is a 180 deg orbit at walking pace
+    # with the ball sitting dead throughout. The first cut had no notion of
+    # this and committed to orbits it could not afford - which is what put a
+    # third of the run on a dead ball. Only TAKE the commitment while the
+    # ball is at least this far away (0 = at any range); the latch is what
+    # carries it through the close-in part, so a walk begun at 1.2 m still
+    # finishes.
+    behind_ball_far: float = 0.0
+    # APPROACH FROM THE RIGHT SIDE INSTEAD OF ORBITING WHEN YOU GET THERE.
+    # Measured: `_plan` is only ever called at a ball range of 0.39-0.62 m
+    # (median 0.47, max 0.80), because `lineup_range` is 0.6 and outside it
+    # the `chase` branch steers at `ball.bearing` - straight at the ball. So
+    # the duck runs at the ball and only starts thinking about which side to
+    # be on once it is already there, at which point every fix is a 180 deg
+    # orbit at walking pace with the ball sitting dead. Nothing downstream of
+    # `_plan` can be cheap, because the decision is made too late.
+    #
+    # This moves it earlier and makes it free: while CHASING (outside
+    # `lineup_range`, where no kick is planned yet) steer at a point this far
+    # behind the ball on the ball-to-goal line instead of at the ball. At
+    # 1.5 m that is about 11 deg of extra turn and no detour worth the name;
+    # by the time the duck is inside `lineup_range` it is already on the side
+    # it wanted, and `_plan`'s ordinary near-side spot IS the good one. No
+    # orbit, no commitment, no dead ball - the geometry is paid for during a
+    # walk the duck was making anyway. 0 = off (steer at the ball).
+    #
+    # MEASURED 2026-09-12 and IT WORKS, on the case it is for. The instrument
+    # is `wrongside_gym.py`'s: one duck, one still ball, the duck started on
+    # the GOAL SIDE of it, one episode per placement — the stance every other
+    # arm in this item was built for, at 60 episodes a minute instead of the
+    # nine wrong-side touches a 240 s match yields. With
+    # `chase_behind=0.40, approach_keepout=0.20`:
+    #
+    # | block                | ball advance a 10 s episode |        |
+    # |----------------------|------------------|--------------------|
+    # | discovery, seeds 0-7 | 0.025 -> 0.123 m | +0.098 (MDE 0.094) |
+    # | FRESH, seeds 100-107 | 0.044 -> 0.164 m | +0.121 RESOLVED    |
+    # | pooled, 960 episodes | 0.034 -> 0.143 m | +0.109 RESOLVED    |
+    #
+    # ...a 4.2x improvement that REPLICATES ON A FRESH BLOCK, which nothing
+    # else tried for this problem has done. Backward touches 40.0 -> 33.3 %
+    # and kicks an episode 0.281 -> 0.335 move with it, neither resolved.
+    #
+    # AND IT IS FREE WHERE IT DOES NOT APPLY, but only because the offset is
+    # SCALED by how wrong the side is (see the chase branch). Unscaled it
+    # fired on good approaches too and measured harm on `kick_gym`'s own
+    # right-side placement: swings 211 -> 166 and whiff 5 -> 12 % (p=0.016).
+    # Scaled, the same battery is swings 211 -> 211 and whiff 5 -> 9 %,
+    # verdict null (p=0.178).
+    #
+    # AT MATCH LEVEL IT IS A WASH, AND THAT IS A DILUTION, NOT A REFUTATION:
+    # only about a quarter of match touches are made from the wrong side, so
+    # a 4x on that quarter is inside the noise of 12 paired seeds. 2v2:
+    # total ball advance a run 4.25 -> 4.46 (flat), advance a touch 0.117 ->
+    # 0.153 (7/12), backward 31.3 -> 21.2 % (7/12), and TOUCHES 36.0 -> 29.1,
+    # the one resolved delta and a cost. The cost is a crowd effect: at 1v1
+    # it falls to -4.75 and stops resolving, with every other column positive
+    # (advance a run +0.53, backward -7.5, 6 of 8 seeds).
+    #
+    # SHIPS ON at 0.40 with the F.2 pack. Alone it is a wash in a match
+    # (dilution: only a quarter of touches are from the wrong side); gated
+    # to our third by `chase_behind_upto=-0.5` it is the approach half of
+    # the own-goal cut, and general play never pays.
+    chase_behind: float = 0.40
+    # ...and only for the duck the board has made the ATTACKER. The match
+    # cost of the chase bias is crowd (2v2, +0.160, resolved) and possession
+    # (3v3, -4.6 s/min, resolved) while the gym win is large and replicated,
+    # and the obvious suspect is the SUPPORTERS: a duck that is not going for
+    # the ball has no business doing approach geometry on it, and three ducks
+    # all arcing toward the same point is a pile-up by construction. With
+    # this on, a supporter chases the ball exactly as it always did.
+    #
+    # DEAD KNOB - it changes NOTHING, and the reason is in `PRIORITY`:
+    # `support` sits ahead of `seen`, so a duck in the support role takes the
+    # support branch and never reaches the chase branch at all. Only the
+    # attacker ever runs it, gate or no gate. Proven rather than argued: on
+    # 12 paired 2v2 seeds the gated and ungated arms return byte-identical
+    # crowd, ballAdvance, possession, kickCount, kicksBack and spread.
+    #
+    # Kept, documented, and DEFAULT OFF so nobody measures it again. It also
+    # retracts a claim made earlier the same day - that gating fixed the 3v3
+    # crowd cost. That comparison was a different roster AND a different
+    # config, not a test of this gate.
+    chase_behind_attacker: bool = False
+    # ...and the part of the pitch the bias applies on, in ATTACK coordinates
+    # (-1 our own goal line, +1 theirs). The own goals it is for happen in
+    # OUR half only, but the bias fires everywhere, so general play pays for
+    # a defensive fix: with `board_push` the pair buys crowd +0.100 at 0.25
+    # and possession -2.94 at 0.40, both resolved over 12 paired 2v2 seeds.
+    # +1.0 = everywhere, which is what every arm above was measured with;
+    # 0.0 = our own half only; -0.5 = our defensive THIRD, and that is the
+    # one that works.
+    #
+    # THE FINAL CONFIGURATION (2026-09-12). With
+    #   board_push=0.40, chase_behind=0.40, approach_keepout=0.20,
+    #   chase_behind_upto=-0.5
+    # own goals in the stance that makes them (`scripts/owngoal_gym.py`) go
+    # 14.4% -> 0.9%: -13.5, MDE 3.2, RESOLVED, -94% relative, pooled over
+    # 1000 episodes across TWO fresh blocks (seeds 900-909 -95%, seeds
+    # 1000-1011 -93%, neither a discovery block). The walked-in category -
+    # which is 92% of all own goals - goes 13.5% -> 0.9%, and kicked-in goes
+    # to zero.
+    #
+    # AND IT COSTS NOTHING MEASURABLE. 12 paired 2v2 seeds, every metric
+    # null: possession -0.98, crowd -0.028 (better), ballAdvance +0.007,
+    # kickCount -1.25, kicksBack -0.167, spread -0.166.
+    #
+    # The gate is what makes it free, and the dose-response says why. The
+    # same pair with the bias applied EVERYWHERE costs possession -2.94
+    # (resolved); applied over our own HALF it costs kickCount -2.33
+    # (resolved); over our defensive THIRD it costs nothing, because the own
+    # goals all happen there and general play never sees the bias at all.
+    # A defensive fix should be paid for in the defensive third.
+    # SHIPS ON at -0.5 with the F.2 pack: the bias is a no-op in the
+    # attacking two-thirds, which is what keeps match possession flat.
+    chase_behind_upto: float = -0.5
+    # Carried to the team board (`Team.side_s`, brain/team.py) by
+    # `brain_kwargs`, so one MICRODUCK_CHASE spec drives the whole A/B.
+    # It is a TEAM knob - it changes who is sent for the ball, not what
+    # any duck does - and it is here only so a battery can set it.
+    team_side_s: float = 0.0
+    # COST THE WALK-ROUND WITH THE SAME MACHINERY THAT COSTS THE KICKS
+    # (roadmap F.2). `kick_select` already forward-simulates every candidate
+    # line 30 times and ranks them by what actually happens to the ball. The
+    # walk-round was the one action nobody costed: `behind_ball_cos` asks
+    # only whether the kick available NOW is bad, never what going round is
+    # worth or what it costs, so the duck committed to orbits it could not
+    # afford. With this > 0 the trigger instead scores both:
+    #
+    #   now   = the selector's own best verdict from where the duck stands
+    #   after = the best verdict from BEHIND the ball, on the goal line
+    #   score = p_goal * `behind_ball_goal_w` + value   (Mellmann's two keys,
+    #           collapsed into one number so they can be traded off)
+    #
+    # ...and goes round only when `score(after) - score(now)` beats this
+    # knob times the SECONDS the walk takes (the arc round to the far side
+    # at `behind_ball` radius, at `speed`). So the rule is dear when the
+    # duck is near and badly placed and cheap when it is nearly there, which
+    # is the economics the first cut had no way to express. 0 = off, and
+    # then `behind_ball_cos` is the trigger as before.
+    behind_ball_rate: float = 0.0
+    behind_ball_goal_w: float = 3.0   # potential units a certain goal is worth (the field spans about -1..+2)
+    # ...and the path half: keep this far off the ball while walking to a
+    # spot. The straight servo line is the only route today and there is a
+    # keep-out for every other duck's body (`duck_keepout`) and none for the
+    # ball. Above 0 the walk to a kick, push or staging spot that would pass
+    # nearer the ball than its own TARGET does is bent round a tangent of
+    # this circle instead, on the side the duck is already on (the shorter
+    # way, and `duel_side`'s rule: the far side steers the walk across the
+    # ball). The effective radius is `min(approach_keepout, |target - ball|)`
+    # so the target is always on or outside the circle and the arrival is
+    # never fenced off from itself - a kick spot 0.10 m from the ball keeps
+    # its own 0.10 m, which is still enough to stop the line-up cutting the
+    # corner through it. 0 = off (the straight line).
+    #
+    # MEASURED (2026-09-11), 4 arms x 6 PAIRED seeds x 300 s of the lab's
+    # pitch-2v2 (formation + cove + get-up), classifying every ball-moving
+    # touch as a kick or a body and reading its 1 s outcome. BOTH SHIP OFF:
+    # nothing here resolves as a win at this size, and the one delta that
+    # does clear the 6-seed MDE is a COST.
+    #
+    # | arm                          | backward | up-pitch | advance/touch | touches |
+    # |------------------------------|---------:|---------:|--------------:|--------:|
+    # | shipped                      |   32.5 % |   27.4 % |      0.121 m  |    46.7 |
+    # | behind 0.35, keepout 0.30    |   22.9 % |   23.5 % |      0.178 m  |  *37.2  |
+    # | behind 0.30, keepout 0.25    |   24.7 % |   23.2 % |      0.174 m  |    41.8 |
+    # | behind 0.35, keepout 0.20, cos 0.3 | 28.4 % | 27.7 % |  0.126 m  |    39.3 |
+    #
+    # (* the only paired delta past the MDE: -9.5 touches a run, worse on 5
+    # of 6 seeds. Advance per touch is +0.058 m, better on 5 of 6 — the right
+    # sign, consistently, but just UNDER its own MDE of 0.067, so suggestive
+    # and not a result.)
+    #
+    # Three readings worth keeping. (1) The walk-round buys the better touch
+    # by taking FEWER touches, which is the same bill `aim_mode="goal"` paid
+    # — the path fix reduces it, it does not remove it. (2) The THRESHOLD is
+    # the lever and the RADIUS is the cost: slackening `behind_ball_cos` to
+    # 0.3 throws the whole gain away (+0.005 m) while a smaller keep-out
+    # keeps it (+0.054) and halves the touch bill (-4.8, no longer resolved),
+    # so this would be the arm to take further. (3) Own goals over the arms
+    # were 4 / 6 / 1 / 5 and MEAN NOTHING: item 1.5 puts `ownGoals` at ~347
+    # seeds to resolve.
+    #
+    # AND THEN THE ARM TURNED OUT NOT TO DO THE THING. Instrumented over
+    # 180 s of the same pitch: 32 `around` spells, **0 arrivals**, and the
+    # closest the duck ever came to a staging spot it must reach within
+    # 0.06 m was 0.50 m. A spell lasts about a quarter of a second - the mode
+    # flips on, the duck takes a step, the plan reverts to "kick" - because
+    # the trigger is read fresh every tick against a stance that is changing
+    # under it and a tracked ball that jitters across the threshold. The
+    # walk-round never happens, so "+0.058 m a touch" is SELECTION (bad
+    # touches declined) and not correction (good touches won), and the dead
+    # ball says the same: >20 s spells 10 -> 19, 248 s -> 538 s of the 1800
+    # played. Two hypotheses refuted on the way: `lineup_s` is not the
+    # blocker (timeouts 7 -> 6, none from `around`) and the boards are not
+    # (the body-clear fallback fires as designed).
+    #
+    # THE LATCH WAS BUILT (`behind_ball_s`, `behind_ball_done`) AND IT FIXED
+    # THE MECHANISM: counted over the LATCH's lifetime, which is the right
+    # unit because `avoid` chops one walk into several spot-spells, 10
+    # walk-rounds of which 5 END BEHIND THE BALL, median final angle at the
+    # ball 125 deg, closest approach to the staging spot 0.06 m - against
+    # 0 of 32, 56 deg and 0.50 m without it. The duck really does walk round
+    # now, about half the times it tries.
+    #
+    # AND IT STILL DOES NOT PAY. Same 6 paired seeds, shipped / unlatched /
+    # latched: backward touches 32.1 / 25.1 / 27.8 %, touches from up-pitch
+    # 27.5 / 23.5 / **30.6** %, advance a touch 0.123 / 0.167 / 0.148 m,
+    # touches a run 46.7 / 41.8 / 42.0, dead spells over 20 s 10 / 19 / 21
+    # totalling 248 / 538 / **599** s of the 1800 played. NOTHING clears the
+    # 6-seed MDE, and the latched arm is WORSE than the unlatched one on
+    # every column it was supposed to win: making the walk-round actually
+    # happen raised the share of touches made from up-pitch ABOVE the
+    # shipped brain's and put a third of the run on a dead ball.
+    #
+    # The likely mechanism, stated as the hypothesis it is: a duck walking
+    # round the ball TRANSITS the up-pitch region, and a 0.25 m keep-out is
+    # not wide enough to stop the body clipping the ball on the way past, so
+    # the manoeuvre manufactures the very touches it exists to prevent. If
+    # this is picked up again, test that first (a wider keep-out, or a
+    # walk-round that goes the way that never crosses up-pitch) - do not
+    # start from the outcome battery.
+    #
+    # AND THEN THE CHEAP INSTRUMENT KILLED IT OUTRIGHT. `wrongside_gym.py`
+    # (one duck, one still ball, the duck started on the goal side) ran 400
+    # episodes of `behind_ball=0.30, approach_keepout=0.25`: the duck moved
+    # the ball in **0 of 400**, took **0 kicks**, and advanced it 0.000 m,
+    # against 92 %, 0.250 and 0.012 m for the shipped brain - three resolved
+    # deltas, all catastrophic. Left alone with a ball it cannot lose, the
+    # walk-round does not kick at all. Nothing in a 240 s match makes that
+    # visible, because there a teammate or an opponent always takes over.
+    #
+    # `behind_ball` stays 0 and should not be revived: the rule is correct,
+    # it is committed to, it completes about half the time it starts, and
+    # given a ball to itself it never gets round to kicking it. What DID
+    # work is upstream of all of it - `chase_behind`, which fixes the side
+    # during the walk-in the duck was making anyway.
+    # `approach_keepout` SHIPS ON at 0.20 with the F.2 pack: the collinear
+    # run-in `chase_behind` cannot bend on its own (the behind-point sits
+    # on the ball-to-goal line) is the case the keep-out exists for.
+    approach_keepout: float = 0.20
     # The other duck's BODY (measured over 4 traced runs: 5 of 7 falls had the
     # other duck 3–9 cm away and this one turning in place — search, blocked
     # or lining up — the walker tips over when it turns against a body it
@@ -2791,7 +3173,11 @@ class Chase:
         self._bump_t = -1e9                                  # last contact
         self._bump_t0 = -1e9                                 # onset of the current contact episode
         self.last = (0.0, 0.0, 0.0)
-        self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"
+        self.spot: tuple[float, float, str | None, float, str] | None = None   # x, y, foot, heading, "kick"|"push"|"around"
+        self._spot_ball: tuple[float, float] | None = None      # the ball that spot was laid against (approach_keepout)
+        self._around: tuple[float, float, float] | None = None  # (ball x, y, t) the walk-round is committed to
+        self._around_cool = -1e9   # no re-commit before this time: a budget that was SPENT
+        self._keep_side = 0.0      # remembered way round the ball (see _keep_off)
         self.lined = False                      # stage two of the line-up: on the line, walking straight in
         self.t_state = 0.0
         self._yield_t0 = -9.0
@@ -2941,6 +3327,7 @@ class Chase:
         x, y, yaw = odom
         bx, by = self._ball_xy(odom, ball)
         los = yaw + ball.bearing
+        self._spot_ball = (bx, by)
         if p.spot_lead > 0 and self._senses is not None and ball.vel_hits >= 2:
             # Where it will be when we arrive: the walk at `speed`, capped so
             # a bad velocity cannot throw the spot across the pitch.
@@ -2948,6 +3335,7 @@ class Chase:
             pred = ball.predict(self._senses.t + eta, p.ball_decel)
             if pred is not None:
                 bx, by = pred
+                self._spot_ball = (bx, by)
         if p.board_push > 0.0 and self.bounds is not None \
                 and min(self.bounds[0] - abs(bx), self.bounds[1] - abs(by)) < p.board_push:
             bp = self._board_push(bx, by)                    # the board push (12g): a walk along the wall, not a swing
@@ -2983,6 +3371,52 @@ class Chase:
             foot = self.spot[2]                                   # hysteresis: nearly on the line, keep the foot
         if foot_sel is not None:
             foot = foot_sel                                       # kick_select chose the foot for its exit angle
+        if p.behind_ball > 0.0 and self.goal is not None and self._around is not None:
+            # ALREADY COMMITTED. Do not ask the trigger again - it is a
+            # sampler, and re-asking is what stopped the duck ever arriving.
+            # Re-lay the staging spot against the ball's CURRENT place, so a
+            # ball that drifts is still walked behind, and discharge the
+            # commitment on the geometry (we are behind it now) or the clock.
+            t_now = self._senses.t if self._senses is not None else self._around[2]
+            gu = math.atan2(self.goal[1] - by, self.goal[0] - bx)
+            behind = abs(_wrap(math.atan2(y - by, x - bx) - gu)) >= p.behind_ball_done
+            if behind:
+                self._around = None          # arrived: the trigger is free to fire again
+            elif t_now - self._around[2] > p.behind_ball_s:
+                # SPENT. Dropping the latch here used to fall straight into
+                # the trigger block below, which re-took it with a fresh
+                # timestamp on the same tick — so the budget never expired and
+                # the walk-round it was written to bound was still unbounded
+                # (probed: mode "around" at t=0, 1.5 and 60 s alike). Hold the
+                # trigger off for as long again, so the duck plays the ball
+                # where it lies before it may commit to another walk-round.
+                self._around = None
+                self._around_cool = t_now + p.behind_ball_s
+            else:
+                spot = self._behind_spot(bx, by, gu)
+                if spot is not None:
+                    return spot[0], spot[1], None, gu, "around"
+                self._around = None          # the whole arc is blocked: a real corner
+        if (p.behind_ball > 0.0 and self.goal is not None and self._around is None
+                and (self._senses.t if self._senses is not None else 0.0) >= self._around_cool
+                and ball.range >= p.behind_ball_far):
+            # Would the best kick this stance allows actually gain ground?
+            # Judged on where the ball LEAVES (`_kick_heading`: the aim line
+            # plus the measured foot exit angle), not on the aim line, because
+            # the exit angle is worth 24-29 deg and the clamp's edge line is
+            # exactly where that decides the sign.
+            gu = math.atan2(self.goal[1] - by, self.goal[0] - bx)
+            want = (self._worth_going_round(odom, bx, by, gu) if p.behind_ball_rate > 0.0
+                    else math.cos(_wrap(self._kick_heading(foot, u) - gu)) < p.behind_ball_cos)
+            if want:
+                spot = self._behind_spot(bx, by, gu)
+                if spot is not None:
+                    # Go round first, and COMMIT to it. Only a corner where
+                    # the WHOLE arc is blocked falls through to the old plan
+                    # rather than standing still: a bad touch beats no touch
+                    # there, and nothing is committed to.
+                    self._around = (bx, by, self._senses.t if self._senses is not None else 0.0)
+                    return spot[0], spot[1], None, gu, "around"
         side = -p.kick_side if foot == "kick_left" else p.kick_side     # stand to the ball's other side
         # The body heading that sends the kick along u (the map's deflection
         # is in the body frame, so the spot is laid out in that heading too).
@@ -3128,19 +3562,217 @@ class Chase:
                                    self._own_goal(odom), odom, self.duck_id,
                                    self.team.mates(self.duck_id, t) if self.team is not None else [])
 
-    def _servo(self, odom, target, cold, stop: float, slow_in: float = 0.2) -> tuple[float, float, float, float]:
+    def _worth_going_round(self, odom, bx: float, by: float, gu: float) -> bool:
+        """Is walking round worth what it costs? `kick_select`'s own rollouts
+        on both sides of the trade — the verdict it just gave from here, and
+        the verdict from behind the ball on the goal line — with the walk's
+        seconds priced at `behind_ball_rate`. See the knob for the algebra.
+
+        False (do not go round) whenever the selector was not consulted or
+        gave nothing: without a verdict there is no trade to evaluate, and
+        the old `behind_ball_cos` test has already had its say."""
+        from .kickselect import KickModel, Pitch, evaluate  # noqa: PLC0415
+
+        p = self.p
+        now = self.last_select
+        if now is None or self.bounds is None or self.goal is None:
+            return False
+        if self._kick_rng is None:
+            import zlib  # noqa: PLC0415
+            self._kick_rng = np.random.default_rng(zlib.crc32(self.duck_id.encode() or b"duck"))
+        model = KickModel(speed=p.kick_speed, speed_sd=p.kick_select_v_sd, dir_sd=p.kick_select_dir_sd,
+                          decel=max(p.ball_decel, 0.02), exit_left=p.kick_exit_left,
+                          exit_right=p.kick_exit_right, p_whiff=p.kick_select_p_whiff)
+        pitch = Pitch(self.bounds[0], self.bounds[1], self.goal_w, 1.0 if self.goal[0] >= 0 else -1.0)
+        after = [evaluate((bx, by), gu, foot, model, pitch, self._kick_rng, p.kick_select_n)
+                 for foot in ("kick_left", "kick_right")]
+        after = [v for v in after if v.p_own <= p.kick_select_t_own]
+        if not after:
+            return False                       # from behind it is STILL an own-goal risk: not worth the walk
+        def score(v) -> float:
+            return v.p_goal * p.behind_ball_goal_w + v.value
+        gain = max(score(v) for v in after) - score(now)
+        # The walk: the arc from where the duck stands round to the far side.
+        arc = abs(_wrap(math.atan2(odom[1] - by, odom[0] - bx) - _wrap(gu + math.pi)))
+        secs = arc * p.behind_ball / max(p.speed, 1e-3)
+        return gain > p.behind_ball_rate * secs
+
+    def _behind_spot(self, bx: float, by: float, gu: float) -> tuple[float, float, float] | None:
+        """Where to stage for a walk-round: `behind_ball` from the ball, as
+        near the far side of the ball-to-goal line as the BOARDS allow.
+
+        The ideal is squarely behind (180 deg round from `gu`). When the body
+        cannot stand there the spot SLIDES along the arc — +-`behind_ball_arc`
+        in `behind_ball_step` steps, nearer offsets first — instead of the
+        objective being abandoned, which is what the first cut did: measured
+        over 180 s a side, "staging spot in a board" released 6 of 8
+        walk-rounds on the 1v1 pitch (1.50 x 1.25 m playable) and 4 of 10 on
+        the 2v2, and every one of those was a duck giving up on getting
+        behind the ball because ONE point happened to be unreachable.
+
+        Returns (x, y, angle round from `gu`) or None when the whole arc is
+        blocked — a genuine corner, where the old plan is the better answer.
+        """
+        p = self.p
+        lim = p.behind_ball_arc
+        step = max(p.behind_ball_step, 1e-3)
+        offs = [0.0]
+        k = 1
+        while k * step <= lim + 1e-9:
+            offs += [k * step, -k * step]
+            k += 1
+        for off in offs:
+            a = _wrap(gu + math.pi + off)                  # 180 deg round, then slid
+            x, y = bx + p.behind_ball * math.cos(a), by + p.behind_ball * math.sin(a)
+            if self._spot_body_clear(x, y):
+                return x, y, abs(_wrap(a - gu))
+        return None
+
+    def _keep_off(self, odom, target, ball, r: float) -> tuple[float, float]:
+        """`target`, bent round `ball` when the straight line to it would pass
+        NEARER the ball than the target itself does (`approach_keepout`).
+
+        The effective radius is `min(r, |target - ball|)`: the target is then
+        always on or outside the circle, so the keep-out can never fence the
+        duck off from where it is going - a kick spot 0.10 m from the ball
+        keeps its own 0.10 m, which still stops the walk cutting the corner
+        through the ball to reach it.
+
+        The waypoint is the TANGENT from where the duck stands to that
+        circle, taken on the side the target already lies - the shorter way
+        round, and the one `duel_side` measured: a rule that sends the duck
+        the far way steers the walk across the ball instead of round it.
+        Inside the circle already, the waypoint is straight out."""
+        px, py = float(odom[0]), float(odom[1])
+        bx, by = float(ball[0]), float(ball[1])
+        dx, dy = target[0] - px, target[1] - py
+        r = min(r, math.hypot(target[0] - bx, target[1] - by))
+        if r <= 1e-6:
+            return target
+        l2 = dx * dx + dy * dy
+        if l2 < 1e-9:
+            return target
+        f = min(1.0, max(0.0, ((bx - px) * dx + (by - py) * dy) / l2))
+        if math.hypot(bx - (px + f * dx), by - (py + f * dy)) >= r - 1e-9:
+            return target                                   # the line is already clear of it
+        d = math.hypot(bx - px, by - py)
+        if d <= r:
+            a = math.atan2(py - by, px - bx) if d > 1e-6 else math.atan2(dy, dx)
+            return bx + r * math.cos(a), by + r * math.sin(a)
+        base = math.atan2(by - py, bx - px)
+        # Which way round. The cross product says which side the target lies,
+        # but it is ZERO when duck, ball and target are collinear - which is
+        # exactly the stance `behind_ball` stages for, so a 2 mm jitter in the
+        # tracked ball flipped the side (and swung the servo ~60 deg) every
+        # tick and the duck weaved in place instead of walking round. Inside
+        # that band both ways are equal in length, so break the tie on the way
+        # the duck is ALREADY turned, which does not jitter.
+        cross = (bx - px) * dy - (by - py) * dx
+        scale = math.hypot(bx - px, by - py) * math.hypot(dx, dy)
+        if abs(cross) > 1e-2 * max(scale, 1e-9):
+            side = 1.0 if cross > 0.0 else -1.0     # the target is plainly one side
+        else:
+            # Collinear, so both ways round are the same length and no
+            # instantaneous rule can be stable: every quantity here (the
+            # bearing to the ball included) turns on the ball's own lateral
+            # position, which is what jitters. So HOLD the side already being
+            # walked, and let a clear cross be the only thing that re-decides.
+            side = self._keep_side or (1.0 if _wrap(base - float(odom[2])) < 0.0 else -1.0)
+        self._keep_side = side
+        a = base + side * math.asin(min(r / d, 1.0))
+        t = math.sqrt(max(d * d - r * r, 0.0))
+        return px + t * math.cos(a), py + t * math.sin(a)
+
+    def _servo(self, odom, target, cold, stop: float, slow_in: float = 0.2,
+               avoid: tuple[float, float] | None = None, avoid_r: float = 0.0) -> tuple[float, float, float, float]:
         """(vx, wz, dist, bearing) toward a point: turn in place first when
-        it is well off the nose, walk with steering otherwise, stop inside."""
+        it is well off the nose, walk with steering otherwise, stop inside.
+
+        `dist` AND the returned `bearing` are always to the TARGET, never to a
+        keep-out waypoint - the caller stops and settles on those numbers, and
+        a duck that thought it had arrived because a waypoint was close would
+        swing at a ball it is still half a metre from. The waypoint steers the
+        wheels (`steer` below) and nothing else: the two-stage back-off asks
+        "is the pre-spot behind me with the ball at my feet?", and handed a
+        waypoint bearing it answered about the detour instead - skipping the
+        back-off on a stance that needed it, and firing one on a line-up that
+        was fine, every tick, which is a retreat loop rather than a one-off."""
         p = self.p
         dx, dy = target[0] - odom[0], target[1] - odom[1]
         dist = math.hypot(dx, dy)
         bearing = _wrap(math.atan2(dy, dx) - odom[2])
+        sx, sy = dx, dy
+        if avoid is not None and avoid_r > 0.0:
+            way = self._keep_off(odom, target, avoid, avoid_r)
+            sx, sy = way[0] - odom[0], way[1] - odom[1]
+        steer = _wrap(math.atan2(sy, sx) - odom[2])
         if dist <= stop:
             return 0.0, 0.0, dist, bearing
-        if abs(bearing) > 0.5 and dist > 0.08:
-            vx, _, wz = turn(bearing, cold)
+        if abs(steer) > 0.5 and dist > 0.08:
+            vx, _, wz = turn(steer, cold)
             return vx, wz, dist, bearing
-        return (0.25 if dist < slow_in else p.speed), clip_wz(p.k_turn * bearing), dist, bearing
+        return (0.25 if dist < slow_in else p.speed), clip_wz(p.k_turn * steer), dist, bearing
+
+    def chase_aim(self, odom, bx: float, by: float, bearing: float) -> float:
+        """Where to AIM the chase: the ball, or a point `chase_behind` behind
+        it on the ball-to-goal line, so the run-in arrives on the side the
+        kick wants. The gaze and every range test stay on the BALL - only the
+        steering moves. Returns `bearing` unchanged when the bias is off or
+        does not apply to this duck.
+
+        Public and taking a ball POSITION so a test can call the running code
+        instead of restating it: the mirror that used to stand in for this in
+        `tests/test_behind_ball.py` had already drifted, missing both the
+        attacker gate and the `cos` scaling below - the very terms whose
+        absence is recorded here as measured harm.
+        """
+        p = self.p
+        if not (p.chase_behind > 0.0 and self.goal is not None
+                and not (p.chase_behind_attacker and self.role != "attack")):
+            return bearing
+        if p.chase_behind_upto < 1.0 and self._attack_x(bx) > p.chase_behind_upto:
+            return bearing                     # up-pitch of the gate: ordinary chase
+        gu = math.atan2(self.goal[1] - by, self.goal[0] - bx)
+        # SCALED BY HOW WRONG THE SIDE ACTUALLY IS: the full offset when the
+        # duck is between the ball and the goal, nothing at all when it is
+        # already behind it. Unscaled, the bias fired on every approach
+        # including the good ones and MEASURED HARM there - one duck, one
+        # ball, the kick gym's own right-side placement, 8 seeds x 30
+        # episodes: swings 211 -> 166 and whiff 5% -> 12% (p = 0.016). A duck
+        # already on the right side is steered off a line-up it had.
+        ang = abs(_wrap(math.atan2(odom[1] - by, odom[0] - bx) - gu))
+        back = p.chase_behind * 0.5 * (1.0 + math.cos(ang))
+        ax = bx - back * math.cos(gu)
+        ay = by - back * math.sin(gu)
+        if p.approach_keepout > 0.0:
+            # A duck that is already up-pitch aims at a point on the FAR side
+            # of the ball, so the run-in crosses it. Same tangent router as
+            # the line-up's.
+            ax, ay = self._keep_off(odom, (ax, ay), (bx, by), p.approach_keepout)
+        return _wrap(math.atan2(ay - odom[1], ax - odom[0]) - odom[2])
+
+    def _lineup_wrong_side(self, odom, ball) -> bool:
+        """Would a kick line-up from here be a run-in from the goal side of
+        the ball, in the third `chase_behind` is allowed to act?
+
+        That is the stance that walks own goals in: the duck is between the
+        ball and the goal it attacks, close enough that `_plan` is about to
+        lay a kick spot 0.10 m from the ball, and the arrival is the contact.
+        `chase_behind` is supposed to have already put the duck on the far
+        side before line-up starts; this keeps line-up from firing first.
+
+        False (line up as usual) when the bias is off, off a pitch, up-pitch
+        of `chase_behind_upto`, or the duck is already behind the ball.
+        """
+        p = self.p
+        if not (p.chase_behind > 0.0 and self.goal is not None and self.bounds is not None):
+            return False
+        bx, by = self._ball_xy(odom, ball)
+        if p.chase_behind_upto < 1.0 and self._attack_x(bx) > p.chase_behind_upto:
+            return False
+        gu = math.atan2(self.goal[1] - by, self.goal[0] - bx)
+        ang = abs(_wrap(math.atan2(odom[1] - by, odom[0] - bx) - gu))
+        return math.cos(ang) > 0.0
 
     def _on_the_line(self, odom, spot, u: float, heading_err: float) -> bool:
         """Is the duck already where stage one is trying to put it — on the
@@ -3458,6 +4090,12 @@ class Chase:
                 if abs(duck_rb[1]) < 0.5:
                     vx = 0.0
             self.state = "avoid"
+            if self._around is not None:
+                # An `avoid` PAUSES a committed walk-round, it does not spend
+                # it: the budget is for walking, and 7 of the first 14
+                # walk-rounds died because standing off a teammate ate it.
+                # The veto over the body is untouched - only the clock moves.
+                self._around = (self._around[0], self._around[1], self._around[2] + CTRL_DT)
         elif block_at is not None:
             # Leave the play and get in the way. Not a line-up: the servo
             # faces where it WALKS, and only once it is on the line does the
@@ -3526,7 +4164,8 @@ class Chase:
                 # Stage one: the pre-spot behind the kick spot on the line;
                 # square up there, where a turn in place cannot touch the ball.
                 px, py = sx - p.approach_back * math.cos(u), sy - p.approach_back * math.sin(u)
-                vx, wz, pdist, bearing = self._servo(odom, (px, py), cold, p.approach_tol)
+                vx, wz, pdist, bearing = self._servo(odom, (px, py), cold, p.approach_tol,
+                                                     avoid=self._spot_ball, avoid_r=p.approach_keepout)
                 ball_rng = math.hypot(sx + p.kick_ahead * math.cos(u) - odom[0], sy + p.kick_ahead * math.sin(u) - odom[1])
                 if abs(bearing) > 1.8 and ball_rng < p.backoff_range and pdist > p.approach_tol + 0.02:
                     # The pre-spot is behind us with the ball at our feet:
@@ -3544,8 +4183,11 @@ class Chase:
                     vx, _, wz = turn(heading_err, cold)
                 dist = pdist + p.approach_back if self.spot is not None else 9.0   # nowhere near the spot yet
             else:
-                tol = p.push_tol if (mode == "push" and p.push_tol > 0.0) else p.lineup_tol   # a push's own tolerance
-                vx, wz, dist, bearing = self._servo(odom, (sx, sy), cold, tol)
+                # A staging spot ("around") is reached, not settled on: it
+                # borrows the push's looser tolerance rather than a kick's.
+                tol = p.push_tol if (mode in ("push", "around") and p.push_tol > 0.0) else p.lineup_tol
+                vx, wz, dist, bearing = self._servo(odom, (sx, sy), cold, tol,
+                                                    avoid=self._spot_ball, avoid_r=p.approach_keepout)
                 if p.lineup_square > 0.0 and mode == "kick" and not p.two_stage and self.state != "settle" \
                         and tol < dist <= p.lineup_square:
                     # The last centimetres (`lineup_square`): square to the
@@ -3588,12 +4230,36 @@ class Chase:
             # square-up and the settle at the tolerance (measured: 22 s
             # standing at the spot, no kick).
             settling = self.state == "settle"
-            tol = p.push_tol if (mode == "push" and p.push_tol > 0.0) else p.lineup_tol
+            tol = p.push_tol if (mode in ("push", "around") and p.push_tol > 0.0) else p.lineup_tol
             on_spot = dist <= tol + (0.03 if settling else 0.0)
             aim = p.push_aim_tol if (mode == "push" and p.push_aim_tol > 0.0) else p.aim_tol   # a push's own aim
             squared = abs(heading_err) <= aim + (0.15 if settling else 0.0)
             if self.spot is None:
                 pass                                            # backing off (above)
+            elif mode == "around":
+                # In position behind the ball: drop the staging spot so the
+                # next tick lays a real kick line from the good side. Before
+                # that it is a plain walk - no square-up (the heading it will
+                # want is not known until the line is laid) and no settle.
+                if on_spot:
+                    self.spot = None
+                    self._around = None                     # the walk-round is done with
+                    self.state = "chase"
+                    self.t_state = t
+                elif self.state == "lineup" and t - self.t_state > p.lineup_s:
+                    # A staging spot gets the SAME give-up as a kick line-up.
+                    # This arm sits above the general `lineup_s` branch in the
+                    # chain, so without its own copy an `around` walk owned
+                    # the tick and nothing timed it out: a spot the duck could
+                    # not close on (a teammate standing there, a spot inside
+                    # the board clearance) held it until an unrelated branch
+                    # happened to break in. The latch goes with the spot, on
+                    # cooldown, so the next tick does not simply re-commit.
+                    self.spot = None
+                    self._around = None
+                    self._around_cool = t + p.behind_ball_s
+                    self.state = "search"
+                    vx, _, wz = turn(1.0, cold)
             elif on_spot and not squared and mode == "kick" and p.two_stage:
                 # On the spot but off the heading: a turn in place here is a
                 # turn against the ball (traced: 14 s of it). Back off and
@@ -3673,21 +4339,38 @@ class Chase:
             self.last_bearing = ball.bearing
             if fresh:
                 self.last_seen_t = t
+            take_lineup = False
             if fresh and ball.range < p.lineup_range and abs(ball.bearing) < 0.5:
-                self.spot = self._plan(odom, ball)
-                self.lined = False
-                self.state = "lineup"
-                self.t_state = t
-                vx, wz = p.speed, clip_wz(p.k_turn * ball.bearing)
-                gaze_at = ball.range
-            elif abs(ball.bearing) > p.turn_first:
-                vx, _, wz = turn(ball.bearing, cold)
-                self.state = "turn"
-            else:
-                vx, wz = p.speed, clip_wz(p.k_turn * ball.bearing)
-                self.state = "chase"
-                if fresh and ball.range < p.head_range:
+                planned = self._plan(odom, ball)
+                # A kick from the wrong side in our third is the own-goal
+                # stance: refuse it and keep the chase-behind / keep-out
+                # approach. A board push (or any non-kick plan) still lines
+                # up — `_plan` already chose that over a swing.
+                if planned[4] != "kick" or not self._lineup_wrong_side(odom, ball):
+                    take_lineup = True
+                    self.spot = planned
+                    self.lined = False
+                    self.state = "lineup"
+                    self.t_state = t
+                    vx, wz = p.speed, clip_wz(p.k_turn * ball.bearing)
                     gaze_at = ball.range
+            if not take_lineup:
+                # Where to AIM the chase: the ball, or a point `chase_behind`
+                # behind it on the ball-to-goal line, so the run-in arrives on
+                # the side the kick wants. The gaze and every range test stay
+                # on the BALL - only the steering moves.
+                aim = ball.bearing
+                if p.chase_behind > 0.0 and self.goal is not None:
+                    bx, by = self._ball_xy(odom, ball)
+                    aim = self.chase_aim(odom, bx, by, ball.bearing)
+                if abs(aim) > p.turn_first:
+                    vx, _, wz = turn(aim, cold)
+                    self.state = "turn"
+                else:
+                    vx, wz = p.speed, clip_wz(p.k_turn * aim)
+                    self.state = "chase"
+                    if fresh and ball.range < p.head_range:
+                        gaze_at = ball.range
         elif hunting:
             if self.predicted is not None and p.predict_steer:  # the line bends to where the ball is going
                 self._hunt_u = math.atan2(self.predicted[1] - odom[1], self.predicted[0] - odom[0])
@@ -4212,6 +4895,7 @@ class Chase:
             self._kick_choice = Chooser.load(p.kick_select_learned)
         chooser = None if self._kick_choice is None else self._kick_choice.bind(odom, los, self.goal)
         v = select((bx, by), lines, model, pitch, self._kick_rng, n=p.kick_select_n, t_own=p.kick_select_t_own,
+                   safest=p.kick_select_safest,
                    models=models, shoot=p.kick_select_shoot if p.kick_select_push else 0.0,
                    mates=mates_xy, pass_reach=p.pass_reach, pass_bonus=p.pass_bonus if p.kick_select_pass else 0.0,
                    obstacles=opps, obs_r=p.kick_select_obs_r, chooser=chooser)

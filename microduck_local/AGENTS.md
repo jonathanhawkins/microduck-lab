@@ -37,6 +37,24 @@ does; this file covers how not to fool yourself.
 - Tests in `tests/` are contract locks, including a regression test that the
   shipped `alpha_walking.onnx` survives upright in this env. Run
   `uv run --with pytest pytest tests/` before and after your change.
+- **A second robot is a `RobotSpec`, never a fork of `walk_env`**
+  (`robots/spec.py`). The env resolves its body by NAME from the spec —
+  base body, gyro sensor, floor, foot pads, stand keyframe, joints, default
+  pose, action scale. Two rules hold when you add one:
+  1. the duck path stays bit-identical (hash a 200-step rollout under `xml`
+     and `bam` against the previous code — `tests/test_robot_spec.py` pins
+     the ids and names the spec resolves to);
+  2. a name the model does not have RAISES at construction. It used to come
+     back as id -1, and a mistyped foot pad then paid no air-time reward
+     with nothing anywhere saying so.
+  The duck's 61/14 contract is not negotiable for the DUCK; another body has
+  its own layout, and the one thing that must never happen is a policy
+  stepped in a body whose observation width differs from its input.
+- **The G1 is a lab contract, not a sim2real one.** Its 99-d layout carries
+  base LINEAR velocity, which no real humanoid observes without state
+  estimation. Prototype and demo with it; never present a G1 policy trained
+  here as deployable. `bam` is refused for it (an XL330 identification does
+  not describe a 34 kg humanoid's actuators).
 
 ## Reward design rules
 
@@ -78,6 +96,45 @@ does; this file covers how not to fool yourself.
 - **No jackpots.** Dense, bounded shaping beats sparse windfalls; a term a
   policy can spike once and farm will get farmed. (Inherited from upstream
   `microduck_rl/AGENTS.md`, which is worth reading in full.)
+- **Subclassing a task: RETARGET a term, never switch it off — and check it
+  is not FLAT where the policy starts.** This is the most repeated mistake in
+  this repo: five retrains in one day (2026-09-14, the G1 squat and karate
+  strikes). When a new task inherits a reward, the reasoning "this term now
+  pays for the wrong thing, so weight 0" feels obviously right and is almost
+  always wrong. An objection to a term's TARGET is not an objection to the
+  term; zeroing it deletes the only description of that aspect of the task and
+  leaves a proxy that FAILURE also satisfies. Measured:
+  - `W_POSE = 0` on the squat ("a squat is precisely not the default pose"):
+    nothing then priced the configuration, only "be 20 cm lower" — and the
+    cheapest way to drop a pelvis 20 cm is to pitch forward over the ankles.
+    2 of 3 seeds ended face-down while the height term paid 5.42 of 6.0.
+  - `W_HEIGHT = 0` on the punch ("a strike is not defined by pelvis height"):
+    nothing paid to stay up, so it sagged from 0.735 m to 0.48 and tripped its
+    own fall floor on 5/5 seeds.
+  The second form is a term left ON at a width that is flat where the policy
+  actually is, which is the same bug wearing a number: `STRIKE_STD2 = 0.35`
+  paid a STANDING robot 0.00 of 6, so the punch abandoned the pose entirely
+  (27° mean joint error); the idle's `HEIGHT_STD2 = 0.004` is e^-14 at the
+  0.24 m sag that really happened, so there was no gradient back up.
+  Two questions before you commit a weight or a width. **What else satisfies
+  the terms that remain?** If collapsing, folding or sagging does, the term
+  you are zeroing is load-bearing and needs a new target. **What does this
+  term pay at the policy's STARTING state, and at the failure state I am
+  trying to price out?** Print both numbers; a term that pays ~0 at both is
+  decoration. A retarget is usually a one-line hook (`pose_target_rel()`,
+  `target_height()`) whose base returns the old behaviour, so the original
+  task is provably unchanged.
+- **A pose that meets every number can still be wrong to look at, and that
+  needs its own term.** The first squat that held its height, uprightness and
+  foot contacts for 60 s on 5/5 seeds did it with its back twisted 30° and one
+  arm folded onto its thigh, because `pose` spread ONE Gaussian over all 29
+  joints at std2 4.0 — ~1.05 rad² of upper-body error still paid 0.77 of it.
+  A separate tight `carriage` term (waist + arms, std2 0.25) fixed it in one
+  retrain and made the HEIGHT more accurate too. Score the joints that decide
+  how it *looks* separately from the ones it *balances* with, and never let
+  the two sets overlap: on the punch, `carriage` covered exactly the punching
+  joints and paid 0.00 at the target, i.e. it was charging the robot for
+  striking.
 - Composable extras belong in the **term catalog** in `behaviors/core.py`
   (`head_up`, `flat_feet`, `calm_body`, `smooth_torque`, …) so the viewer's
   teach panel can offer them as sliders. A trick that "looks wrong" usually
@@ -108,6 +165,98 @@ does; this file covers how not to fool yourself.
   so a stage tuning that works has to earn its way back as a term or a
   physics knob before it can ship.
 
+- **When no reward can find the motion, DRAW it.** Six reward formulations
+  and four start points all converged the G1's kick to ~0.1 m (roadmap
+  13.3); the same kick posed in the 🎬 editor with the IK solver was 0.62 m
+  high and balanced in every frame in twenty milliseconds of solves, and
+  `imitate` / `g1_imitate` turns it into a tracking problem. The rule from
+  the duck's backflip holds for every body: choreography is authored, RL
+  solves the physics. The editor works for any `RobotSpec` (`pose.py`:
+  `/joints?robot=`, `/pose`, `/ik`, `render-clip`), so "the G1 has no
+  animation tools" is no longer a reason to grind on weights.
+- **The IK solver has to respect the root trap too.** The pelvis is the free
+  joint. Two feet pinned with the root held is a CLOSED chain — a "weight
+  over the left foot" request stalled 6 mm short, served by the arms — so
+  `solve_ik` frees the root's translation whenever the goals span more than
+  one limb, and the editor draws in a frame anchored on the grounded soles
+  (the feet stay, the hips move). And a soft constraint at equal weight with
+  a hard one is a trade: a pinned foot's `level` row against its ankle-roll
+  stop SLID the foot 5 cm to buy back tilt. Position is the promise; level
+  is a 0.2-weight preference, and a joint on its stop has its column
+  dropped.
+
+## Launch training through the LAB, never straight from the CLI
+
+**A run started with a bare `uv run train-*` is invisible.** The human who
+asked for it cannot watch it, cannot see the reward breakdown move, cannot
+stop it, and finds out how it went only when you report — which means they are
+trusting your summary of a thing they were never shown. Start it through the
+lab instead:
+
+```bash
+curl -s -X POST http://127.0.0.1:8788/teach \
+     -H 'Content-Type: application/json' -d '{"text": "do a squat"}'
+```
+
+The lab then runs the recipe's whole curriculum, streams `progress.jsonl` into
+the teach card, loads each `live.onnx` snapshot onto the 🎓 trainee on stage,
+and the viewer at `http://localhost:63317` shows the robot practising, live,
+while the numbers move. That is the point: **the human watching the stage
+catches things the reward curves do not.** Every diagnosis in Track 13 started
+that way — an idle "getting worse and going into weird positions", a squat
+that met every number with its back twisted, a kick that held one leg when it
+had been asked to recover.
+
+If the backend is holding stale code, restart it (it does not hot-reload the
+env modules) and then POST:
+
+```bash
+bash .claude/skills/restart-servers/restart.sh
+```
+
+### "Has the trainer finished?" — ask the lab, never the process table
+
+```bash
+curl -s localhost:8788/teach/status      # {"running": bool, "status": ..., "job": {...}}
+```
+
+`GET /teach/status` is the authoritative answer, because the lab owns the
+subprocess (`TrainingJob._poll` reads `proc.poll()`). A finished `train-*` run
+also closes `progress.jsonl` with a terminal `{"done": true}` line, which
+answers the same question from the artifact alone with no server running.
+
+**Do not `pgrep` for it.** Measured on this machine, both obvious patterns are
+wrong in the same silent direction — they report a trainer forever, so a wait
+loop never ends:
+
+| pattern | what it ALSO matches |
+|---|---|
+| `pgrep -f "microduck_local.train "` | the shell running the pgrep — its own command line contains the pattern |
+| `pgrep -f "Python.*microduck_local"` | **duck-lab itself**, whose venv path is `…/microduck_local/.venv/bin/duck-lab` |
+
+This is the general rule from "Verify filters against the complement" applied
+to processes: check what a filter MATCHES THAT IT SHOULD NOT, not just that it
+finds the thing you had in mind. A wait loop that cannot terminate looks
+exactly like a slow training run, which is why this cost a session's worth of
+confusion before anyone noticed.
+
+```bash
+# correct: poll the owner
+until [ "$(curl -s localhost:8788/teach/status \
+           | python3 -c 'import json,sys;print(json.load(sys.stdin)["running"])')" = "False" ]
+do sleep 30; done
+```
+
+The CLI trainers are for BATTERIES and A/Bs — paired-seed comparisons, sweeps,
+anything whose output is a number rather than a behaviour. Use
+`MICRODUCK_RUNS_DIR` for those so scratch runs stay out of the palette. If a
+task has no recipe yet, add one (`behaviors/`, and `Behavior.trainer` for a
+non-duck body) rather than reaching for the CLI: the recipe is what makes it
+watchable, teachable and re-runnable by the person who asked.
+
+This has been got wrong repeatedly — four CLI runs in one sitting before the
+user asked, a second time, why they could not see any of it.
+
 ## Every run is a record: name it, describe it, file it
 
 A board of 49 runs called `p-batch-s14`, `p-de-s11`, `z1` and `mix` could
@@ -136,6 +285,36 @@ warns when the title is missing — or after, with
 seeds share a title (`p-n256-s31..36` are one experiment); the seed is
 already in the name. Never launch a sweep with bare codes: ten seconds per
 launch against an hour of forensic annotation after the fact.
+
+### A WALK or TASK run says it in `record.json` — and the chain names its pick
+
+`brain.json` is the navigation brains'. Everything trained by `train-walk` /
+`train.py` (every duck walker, every G1 task) carries `runs/<name>/record.json`
+instead — same idea, smaller file, and the lab's POLICY PALETTE is what reads
+it: `title` on the chip, `note` in its tooltip, `pick` on the one stage worth
+using. `train.py` writes the facts automatically (task, body, clip, warm-start
+parent, curriculum rung); `describe-run` writes the rest.
+
+**`pick` is the field that matters, and only a measurement may set it.** A
+curriculum chain's `▶` button and its `⤓` download used to hand over the FINAL
+stage, on the assumption that the last stage carries the whole trick. That is
+false whenever a ladder steps one rung too far: in the G1 kick chain the final
+stage over-shot the clip by half and survived 3 seeds in 8, while the stage
+before it held 8 in 8 — and the palette pointed at the wrong one, with nothing
+on screen to tell them apart. The pick is what a measured stage looks like from
+the outside; setting it clears the flag on its siblings, because two picks is
+the same "which do I use?" question it exists to end.
+
+```bash
+uv run python scripts/eval_imitate.py runs/<run>/policy.onnx <clip> --seeds 8 --record --pick
+uv run describe-run <run> --title "Front kick (G1)" --note "8/8 hold 20 s, apex 0.62 m" --pick
+uv run describe-run <old-run> --backfill      # title/description from its own run.json
+```
+
+**Where a number is quoted decides whether it is read.** The kick chain's
+measurements existed in a chat log and in `docs/roadmap.md` the whole time; the
+person looking at the palette saw five hashes. A finding that never reaches the
+artifact has not been reported — write it into the record as well as the doc.
 
 ## How much can the benchmark actually resolve? (read before any A/B)
 
@@ -1114,6 +1293,16 @@ number). Rules that follow, on any shared or virtualized machine:
   the ORDERING of the arms is the transferable part.
 
 ## Sim2real honesty
+
+A SECOND ROBOT raises the same question one level up. The Unitree G1 here is
+the Lucky Robots MJCF plus its shipped `walker.onnx`, trained by someone else
+against a 99-d observation that includes base linear velocity — a privileged
+quantity a real humanoid only gets from a state estimator. Nothing in this
+repo identifies that robot's actuators, and its hands are frozen. So: it is a
+body to prototype behaviours and to populate the `/sim` world with, and a
+policy trained on it here is a lab artifact. If it ever needs to leave the
+lab, it leaves through Unitree's own stack, the way a duck policy leaves
+through `microduck_rl`.
 
 This harness is for prototyping with minutes-long feedback loops. Even under
 `actuator="bam"` — `train-walk`'s default since the 2026-09-06 audit — it is

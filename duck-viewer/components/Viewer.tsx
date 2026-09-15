@@ -10,7 +10,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
-import { duckRowKeys, LabClient, fetchScene, type DuckFrame, type Scene } from "@/lib/lab";
+import {
+  duckRowKeys,
+  LabClient,
+  fetchScene,
+  robotsInFrame,
+  type DuckFrame,
+  type RobotId,
+  type Scene,
+} from "@/lib/lab";
 import { assignDrag, nearestDuck, type AssignTarget } from "@/lib/assign";
 import {
   cameraKeyDown,
@@ -33,6 +41,11 @@ import { RecordPanel } from "./RecordPanel";
 import { CaptureCanvas, Snapshotter } from "./Capture";
 import { PoseDuck } from "./PoseDuck";
 
+/** FALLBACK layout only — one duck-sized pitch for the whole roster. The
+ *  server sends each slot its own offset now (DuckFrame.offset), because the
+ *  pitch belongs to the robot: this 0.65 m is the duck's, and six 1.3 m G1
+ *  helpers laid out on it stood inside each other. Kept for a server that
+ *  predates the field. */
 function gridOffsets(n: number, spacing = 0.65): [number, number][] {
   const cols = Math.ceil(Math.sqrt(n));
   return Array.from({ length: n }, (_, i) => [
@@ -41,13 +54,57 @@ function gridOffsets(n: number, spacing = 0.65): [number, number][] {
   ]);
 }
 
-function Ducks({ scene, client }: { scene: Scene; client: LabClient }) {
+/** Slot positions for one frame: the server's per-robot layout where it sends
+ *  one, the duck-pitched grid where it does not. */
+function frameOffsets(ducks: Pick<DuckFrame, "offset">[]): [number, number][] {
+  const grid = gridOffsets(ducks.length);
+  return ducks.map((d, i) => d.offset ?? grid[i]);
+}
+
+function Ducks({
+  scene,
+  scenes,
+  client,
+}: {
+  scene: Scene;
+  /** Mesh sets by robot id. The duck's is always present; another body's
+   *  arrives once a roster row says it is that robot (GET /scene?robot=). */
+  scenes: Partial<Record<RobotId, Scene>>;
+  client: LabClient;
+}) {
   const bodies = useMemo(() => buildBodyGeometries(scene), [scene]);
+  // One geometry set per robot on the stage, built once — not per duck. The
+  // duck's is built here as well as above: `bodies` still backs any row whose
+  // mesh set has not arrived yet (and every server that predates robot
+  // selection, where no row carries one).
+  const bodiesByRobot = useMemo(() => {
+    const out: Partial<Record<RobotId, ReturnType<typeof buildBodyGeometries>>> = {};
+    for (const [id, s] of Object.entries(scenes)) {
+      if (!s) continue;
+      try {
+        out[id as RobotId] = buildBodyGeometries(s);
+      } catch (e) {
+        // A mesh set that fails to build must not take the stage with it:
+        // this runs during render, so an uncaught throw here would unmount
+        // the whole Canvas — every duck AND the floor — over one robot.
+        console.error(`[viewer] ${id} meshes failed to build`, e);
+      }
+    }
+    return out;
+  }, [scenes]);
   // Roster keyed by the STABLE stream id — a policy assign renames a duck,
   // which must update its label without remounting (and re-lerping) it.
   // (`key` is the id dedup-qualified by duckRowKeys: a roster with duplicate
   // ids — seen with legacy lab-state restores — must not collide React keys.)
-  const [roster, setRoster] = useState<{ id: string; name: string; key: string }[]>([]);
+  const [roster, setRoster] = useState<
+    {
+      id: string;
+      name: string;
+      key: string;
+      robot: RobotId;
+      offset: [number, number];
+    }[]
+  >([]);
   const rosterSig = useRef("");
   const duckRefs = useRef(new Map<string, React.MutableRefObject<DuckFrame | null>>());
 
@@ -55,11 +112,25 @@ function Ducks({ scene, client }: { scene: Scene; client: LabClient }) {
   useFrame(() => {
     const f = client.frame;
     if (!f) return;
-    const sig = f.ducks.map((d) => `${d.id}\t${d.name}`).join("\n");
+    // The robot is part of the signature: a slot that changes body must
+    // re-render with the other mesh set, and the name alone need not change.
+    const sig = f.ducks.map((d) => `${d.id}\t${d.name}\t${d.robot ?? ""}`).join("\n");
     if (sig !== rosterSig.current) {
       rosterSig.current = sig;
       const keys = duckRowKeys(f.ducks);
-      setRoster(f.ducks.map((d, i) => ({ id: d.id, name: d.name, key: keys[i] })));
+      // Offsets ride in the roster state, not a per-frame recompute: the
+      // layout can only change when the roster does, and every input to it
+      // (the row count and every row's robot) is in the signature above.
+      const offs = frameOffsets(f.ducks);
+      setRoster(
+        f.ducks.map((d, i) => ({
+          id: d.id,
+          name: d.name,
+          key: keys[i],
+          robot: (d.robot as RobotId) || "microduck",
+          offset: offs[i],
+        })),
+      );
       // A removed duck must not stay "selected" — the Delete key would then
       // fire remove_duck at a ghost id forever.
       const sel = getSelectedDuck();
@@ -71,22 +142,29 @@ function Ducks({ scene, client }: { scene: Scene; client: LabClient }) {
     });
   });
 
-  const offsets = gridOffsets(roster.length);
   return (
     <>
-      {roster.map((d, i) => {
+      {roster.map((d) => {
         let ref = duckRefs.current.get(d.id);
         if (!ref) {
           ref = { current: null };
           duckRefs.current.set(d.id, ref);
         }
+        // A row whose mesh set has NOT arrived yet draws nothing at all.
+        // Falling back to the duck's meshes drew a G1 as a scatter of duck
+        // parts at humanoid joint positions — the poses are streamed in that
+        // robot's own body order, so the wrong set is not a rough
+        // approximation, it is debris. The duck itself always has its scene
+        // (it is fetched at mount), so only another body can wait.
+        const geo = d.robot === "microduck" ? bodies : bodiesByRobot[d.robot];
+        if (!geo) return null;
         return (
           <Duck
-            key={d.key}
+            key={`${d.key}:${d.robot}`}
             duckId={d.id}
-            bodies={bodies}
+            bodies={geo}
             frameRef={ref}
-            offset={offsets[i]}
+            offset={d.offset}
             label={d.name}
           />
         );
@@ -193,7 +271,7 @@ function RecordCamera({ client }: { client: LabClient }) {
     const idx = f ? f.ducks.findIndex((d) => d.id === cap.duckId) : -1;
     const trunk = idx >= 0 ? f!.ducks[idx].bodies[1] : undefined;
     if (!f || !trunk) return; // duck vanished mid-take — hold the last shot
-    const off = gridOffsets(f.ducks.length)[idx];
+    const off = frameOffsets(f.ducks)[idx];
     // MuJoCo (x, y, z) → three world (x, z, -y), plus the duck's grid offset.
     aim.set(trunk[0] + off[0], trunk[2] + 0.02, -(trunk[1] + off[1]));
 
@@ -250,7 +328,7 @@ function AssignTargets({ client }: { client: LabClient }) {
       assignDrag.hoverDuck = null;
       return;
     }
-    const offsets = gridOffsets(f.ducks.length);
+    const offsets = frameOffsets(f.ducks);
     const rect = gl.domElement.getBoundingClientRect();
     const targets: AssignTarget[] = f.ducks.map((d, i) => {
       const t = d.bodies[1] ?? [0, 0, 0];
@@ -275,6 +353,8 @@ function AssignTargets({ client }: { client: LabClient }) {
 
 export default function Viewer() {
   const [scene, setScene] = useState<Scene | null>(null);
+  // Mesh sets for every robot the roster is currently showing.
+  const [scenes, setScenes] = useState<Partial<Record<RobotId, Scene>>>({});
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Read once on mount (this component is ssr:false, so storage is available).
@@ -284,6 +364,54 @@ export default function Viewer() {
   // Two-finger horizontal swipe → the same lateral truck as A/D.
   useTruckSwipe(rootRef);
 
+  // Load a robot's mesh set the first time a roster row says it is that
+  // robot. Polled off the client's own frame (1 Hz) rather than subscribed:
+  // the frame is a mutable ref read per-frame inside the Canvas, and a
+  // React subscription to it would re-render the whole stage at 50 Hz.
+  //
+  // Mounted ONCE, with its bookkeeping in refs. Keyed on `scenes` instead,
+  // every arriving scene tore the effect down and re-ran it — and a G1 fetch
+  // in flight at that moment (21 MB, ~2.5 s) resolved into a dead closure and
+  // was thrown away. The stage then drew a G1 with the duck's meshes.
+  const loadedScenes = useRef(new Set<string>());
+  const pendingScenes = useRef(new Set<string>());
+  const sceneFailures = useRef(new Map<string, number>());
+  useEffect(() => {
+    let stopped = false;
+    const tick = () => {
+      const f = clientRef.current?.frame;
+      if (!f) return;
+      for (const robot of robotsInFrame(f.ducks)) {
+        // A server without that robot's assets answers 404 every time; retry
+        // a few times (a lab restart mid-session is the case worth covering)
+        // and then stop, rather than polling a 404 once a second forever.
+        if (
+          loadedScenes.current.has(robot) ||
+          pendingScenes.current.has(robot) ||
+          (sceneFailures.current.get(robot) ?? 0) >= 5
+        ) {
+          continue;
+        }
+        pendingScenes.current.add(robot);
+        fetchScene(robot)
+          .then((s) => {
+            loadedScenes.current.add(robot);
+            if (!stopped) setScenes((prev) => ({ ...prev, [robot]: s }));
+          })
+          .catch(() => {
+            sceneFailures.current.set(robot, (sceneFailures.current.get(robot) ?? 0) + 1);
+            pendingScenes.current.delete(robot);   // retry on the next tick
+          });
+      }
+    };
+    const id = setInterval(tick, 1000);
+    tick();
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, []);
+
   useEffect(() => {
     const client = new LabClient(setConnected);
     clientRef.current = client;
@@ -291,6 +419,7 @@ export default function Viewer() {
       fetchScene()
         .then((s) => {
           setScene(s);
+          setScenes((prev) => ({ ...prev, microduck: s }));
           setError(null);
         })
         .catch(() => {
@@ -467,7 +596,7 @@ export default function Viewer() {
         {/* MuJoCo Z-up world */}
         <group rotation={[-Math.PI / 2, 0, 0]}>
           {scene && clientRef.current && (
-            <Ducks scene={scene} client={clientRef.current} />
+            <Ducks scene={scene} scenes={scenes} client={clientRef.current} />
           )}
           {/* 🎬 editor's ghost duck — server-side FK only, no env, no stream */}
           {scene && <PoseDuck scene={scene} />}

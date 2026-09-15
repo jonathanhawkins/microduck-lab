@@ -155,6 +155,10 @@ the UI deliberately doesn't expose them.)
   same ⬇ mp4 / ⬇ gif links. The footage is the WebGL canvas only (no panels,
   labels or scrub bar); for a clip WITH per-duck state, falls and score burned
   in, run `uv run record-world <scenario>` in `microduck_local/` instead.
+  With 🔊 quacks on, the ducks' voices go into the take as an opus track and
+  come out as aac in the mp4 (the gif is silent, as gifs are) — which is the
+  only way to get them into a file, since `record-world` renders headless in
+  MuJoCo and never sees the browser's audio.
 - **helpers**: ＋ on the training row spawns a 🤝 helper duck — another
   viewer of the same live policy. Helpers do **not** add trainer workers
   (that *lowered* steps/s while the lab was open). ✕ removes it.
@@ -212,8 +216,42 @@ each duck senses:
 - **Inspector** (right): the selected duck's heatmap painted straight off the
   stream, frame age (amber when stale), a noise preset select (`ideal` /
   `datasheet` / `hostile`, applied live), and which brain is steering it.
-- **Panels go where you put them.** The inspector and the head-camera
-  inset drag by their title strip and remember where they were left
+- **States** (`G`): the selected duck's brain as a graph — every state it
+  could be in, grouped by what it is *for* (find the ball / go to it / hit
+  it / stay safe / team duties), the one it is in now lit, the ones it has
+  reached this run bright, and the rest dim. Hover a chip for what the duck
+  does there and how long it has spent there. Under it, the last dozen
+  states as a breadcrumb. **Drag the corner grip to resize it** — chips,
+  names and arcs all scale together (0.7x–2.6x, remembered; double-click the
+  grip for the default). The grip sits on whichever bottom corner actually
+  moves as the panel grows, and past the window height the drawing scrolls
+  inside rather than carrying its own title bar off the top of the screen.
+
+  Arcs are *masked out* of the chips and the group headings, not merely
+  drawn under them: z-order alone still left a 2 px curve crossing 9 px
+  heading text, which wins however the painting order reads. A move is
+  therefore drawn only in the gaps between rows — which is where it is
+  legible anyway.
+
+  The nodes are declared by the lab (`brain/graph.py`, shipped once in the
+  world-info message and pinned to the code by `tests/test_brain_graph.py`,
+  which walks each brain class's AST for every string it can assign to
+  `self.state`). **The edges are not declared anywhere** — none of these
+  brains is a written-down state machine; `Chase` sets `self.state` from
+  twenty-odd places in one long `step`. So an arc is drawn the first time
+  this duck actually makes that move, thickens as it repeats, and fades as
+  it goes stale. What you are watching is this run's trajectory, not a spec.
+
+  Three things it shows that the text readout does not: a duck stuck in a
+  two-node loop is a pair of fat arcs long before it is obvious in the 3-D
+  view (a 2v2 supporter oscillating `support ↔ retreat` is the usual one);
+  a permanently dim chip is a state this scenario never reaches (`block`
+  needs a keeper, `duel` needs an opponent); and switching the duck to a
+  learned brain collapses the whole picture to two chips read off one slot
+  of the observation, which is the most honest thing this page says about
+  the difference between the two kinds of brain.
+- **Panels go where you put them.** The inspector, the state graph and the
+  head-camera inset drag by their title strip and remember where they were left
   (localStorage, clamped back into view on resize); double-click the strip
   to re-dock. Untouched, they sit at their designed spots below.
 - **Cam** (`V`): top-left, under the top bar (under the pitch scoreboard on
@@ -240,6 +278,19 @@ each duck senses:
 - **Drive** (`P`, then WASD/arrows, Q/E strafe): every duck takes your twist
   for 6 s after the last key; otherwise ToF-equipped ducks wander on the
   lab's `Wander` brain and blind ducks follow a demo script. `R` restarts.
+- **Speed** (`[` and `]`, or the menu in the top bar): run the world at
+  0.25x–8x of the wall clock. Fast-forward to reach the part worth watching;
+  slow down to see a fall or a kick land. It is a sim-time budget, not a
+  faster clock — the wire keeps its 25 frames a second and a fast world
+  simply jumps further between them, so the bandwidth does not move
+  (`playroom`, 1 duck: 25.0 frames/s and ~105 kB/s at each of 1x, 2x and 8x;
+  a 6-duck `pitch-3v3` sits at ~795 kB/s, equally flat).
+  What a scene actually reaches is what its physics costs: a room runs 8x
+  with room to spare, a 3v3 pitch costs ~7 ms of its 20 ms tick and tops out
+  near 3x. Asking for more is not an error — the loop runs flat out and the
+  **RTF turns amber and reads `3.04/8x`**, the measured speed against the
+  one you asked for. The lab owns the setting (`POST /world/speed`), so a
+  second tab follows along.
 - **The camera flies exactly as on the lab page** — same keys, same
   **two-finger horizontal swipe** to slide laterally (the shared
   `components/useTruckSwipe.ts`; drive mode takes WASD away from the camera
@@ -279,6 +330,33 @@ each duck senses:
   what it believes the room is, from its ToF frames and its own odometry
   (amber occupied, teal free). Switch its `odom` preset in the inspector to
   `datasheet` or `hostile` and watch the map smear like a real robot's.
+- **🔊 quacks** (top bar, `Shift+M`): the ducks talk. A follower chirps
+  while it has its person in sight, coos when it is in the distance band and
+  standing, asks a rising *where did you go* while it has lost them, and
+  gives a two-note "there you are" when it finds them again after a real
+  absence (1.5 s — the detector drops single frames constantly, and a
+  fanfare on every dropped frame is just noise). Every duck has its own
+  pitch off its id, and each utterance wobbles a few percent so a flock does
+  not sound like one loop. **Only followers have anything to say**: the
+  `follow` and learned-follower state graphs (`lib/quack.ts` maps graph +
+  state → voice), so a soccer battery or a tidy room left running is silent.
+  No assets — it is a triangle with a sine an octave up, a 7 Hz trill on the
+  held notes and a rounding lowpass, ~8 nodes a voice (`lib/quackaudio.ts`);
+  the reference is a duckling's peep, and the first version, a sawtooth
+  through a sweeping bandpass, was a fair mallard and came back as "cuter". The toggle persists, a
+  paused or scrubbed world is silent, and the voices ride into 🎥 takes as
+  an audio track when they are on. **The bill moves with the voice**: the
+  hinged `mouth` body the lab already streams (world/compose.py `split_jaw`)
+  gets a viewer-side rotation on its mesh, timed off the same note table
+  the sound is rendered from (`lib/mouth.ts` — opens in 30 ms, hangs open
+  through the note, eases shut 70 ms after it; a reunion is three flaps).
+  It opens to the WIDER of the voice and the real servo's `mouth` fraction,
+  so a duck carrying a toy keeps its grip while it chirps and a silent duck
+  shows exactly the physics. **Mute is the sound only** — the scheduler and
+  the bills keep going, so a muted room still shows the ducks talking rather
+  than reading as if they had stopped. Viewer-side on purpose: a round trip through
+  the lab's servo would put the bill ~150 ms behind a 140 ms chirp, and
+  this way a 🎥 take records mouth and sound in step.
 - **Perf** (top bar): the lab's cost per 20 ms tick as physics+policies +
   sensors + frame encode, next to RTF and kB/s.
 - **Pitch score** (top-left, `pitch` / `pitch-2v2` / `pitch-3v3`): goals per
