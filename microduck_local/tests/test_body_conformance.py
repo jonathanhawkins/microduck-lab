@@ -12,7 +12,7 @@ So this file is the definition: every case is parameterised over the
 registry, and **a body is supported when this file is green for it**. What it
 pins, and the mistake each case prevents, is in the individual docstrings.
 
-**Three rosters, because a body is not always a walker.** MARS is a wheeled
+**Four rosters, because a body is not always a walker.** MARS is a wheeled
 base with an arm: it has no feet, no gyro and no fall height, and its action
 vector (6 joint targets + a base twist) is not its joint vector. Holding it
 to the walker's cases would mean inventing those fields, which is the
@@ -26,6 +26,12 @@ architecture-scale version of the mistake `AGENTS.md` warns about most. So:
              the shipped-idle hold, the open-loop topple, the exporter
     WHEELED  `kind == "wheeled"` — it holds its arm where it was put, and
              a planar base neither sinks nor drifts
+    GENERIC  `kind == "generic"` — nothing beyond ROBOTS, and that IS the
+             claim: a level-0 body (`docs/mars-roadmap.md` §7.1, an MJCF and
+             an id) has declared no feet, no base link and no servo, so
+             there is no hold to hold it to. Its own file is
+             `tests/test_mjcf_body.py`; what makes it a body is that the
+             ROBOTS cases above pass for it unchanged.
 
 A case in the generic set must be answerable by a body with no feet. That is
 the whole discipline of the split: `num_actions >= num_joints` generically,
@@ -65,14 +71,18 @@ import pytest
 from microduck_local import contract as C
 from microduck_local.robots import registry as R
 from microduck_local.robots import spec as S
+from microduck_local.robots.body import (
+    LAB_PITCH_RATIO,
+    widest_horizontal_extent_m,
+)
 from microduck_local.robots.spec import RobotSpec
 from microduck_local.train import env_class
 
-# The lab's stage pitch per body is this ratio on the body's measured width:
-# 0.65 m of floor for a duck measured 0.1845 m across (robots/spec.py's own
-# comment on `lab_spacing_m`). Six 1.3 m G1s inside each other is what a
+# The lab's stage pitch per body is `LAB_PITCH_RATIO` on the body's measured
+# width: 0.65 m of floor for a duck measured 0.1845 m across (imported from
+# `robots/body.py`, where the field it describes lives and where `MjcfBody`
+# reads it to measure its own). Six 1.3 m G1s inside each other is what a
 # single duck-sized constant looked like.
-LAB_PITCH_RATIO = 3.52
 # Contacts during a 2 s hold, MEASURED on this Mac: 5 at the peak for the
 # duck (2 foot pads on a plane), 28 for the G1 (14 foot capsules), 6 for
 # MARS (2 wheels + the chassis box, all resting on z = 0). The ceiling is a
@@ -152,6 +162,9 @@ ROBOTS = _params()
 WALKERS = _params(lambda b: isinstance(b, RobotSpec))
 #: Wheeled bodies: a base that cannot pitch and an arm instead of a gait.
 WHEELED = _params(lambda b: b.kind == "wheeled")
+#: Level-0 bodies read straight out of an MJCF (`robots/mjcf_body.py`): no
+#: declared feet, no base link, no servo, so no hold case of their own.
+GENERIC = _params(lambda b: b.kind == "generic")
 
 
 def test_every_body_is_on_exactly_one_of_the_kind_rosters():
@@ -160,16 +173,30 @@ def test_every_body_is_on_exactly_one_of_the_kind_rosters():
     A `kind` nobody wrote a case for would silently drop that body from
     every hold check in this file — it would still be "green", by being
     untested, which is exactly the shape of a toothless suite. So: every
-    registry id is a walker or a wheeled body, and none is both.
+    registry id is a walker, a wheeled body or a generic one, and none is
+    two of them.
+
+    `generic` is the one kind with no case set beyond the ROBOTS ones, and
+    that is a statement rather than a gap: a body at level 0 of
+    `docs/mars-roadmap.md` §7.1 has declared an MJCF and an id and nothing
+    else, so there is no name to check, no servo to hold it with and no
+    policy to hold it. What a hold case would need — feet and a fall height,
+    or a planar base and a PD — is exactly what level 1 asks somebody to
+    declare. Adding one here would mean inventing it.
     """
     def ids(params):
         return {p.values[0] for p in params}
 
-    assert ids(WALKERS) | ids(WHEELED) == ids(ROBOTS), (
+    assert ids(WALKERS) | ids(WHEELED) | ids(GENERIC) == ids(ROBOTS), (
         f"bodies on no kind roster: "
-        f"{ids(ROBOTS) - ids(WALKERS) - ids(WHEELED)} — add a case set for "
-        "their kind, or say here why the generic cases are enough")
+        f"{ids(ROBOTS) - ids(WALKERS) - ids(WHEELED) - ids(GENERIC)} — add a "
+        "case set for their kind, or say here why the generic cases are "
+        "enough")
     assert not (ids(WALKERS) & ids(WHEELED)), "a body claims two kinds"
+    assert not (ids(GENERIC) & (ids(WALKERS) | ids(WHEELED))), (
+        "a body is both generic and a kind with measured physics — "
+        "`generic` means nothing about this body's dynamics is measured "
+        "here, so it cannot also be a walker or a wheeled base")
 
 
 @lru_cache(maxsize=4)
@@ -908,26 +935,20 @@ def test_two_bodies_in_one_model_need_the_prefix(robot):
 def _widest_horizontal_extent_m(robot_id: str) -> float:
     """Widest HORIZONTAL extent of the whole body at its spawn keyframe, m.
 
-    The geom AABBs in world axes — what must not overlap on the stage.
-    `tests/test_lab_robots.py` measures the same thing by hand for the duck
-    and the G1; here it is re-derived for whatever is in the registry.
+    The geom AABBs in world axes — what must not overlap on the stage. The
+    loop itself is `robots/body.widest_horizontal_extent_m` now: it was
+    written out here and again in `tests/test_lab_robots.py`, and
+    `MjcfBody` needs it a third time to MEASURE a stranger's robot at
+    construction instead of being handed a number. A measurement duplicated
+    three ways is one that can disagree with itself, so there is one copy and
+    this re-derives the registry's declared pitch from it.
     """
     body = S.get(robot_id)
     model = _model(robot_id)
     data = mujoco.MjData(model)
     mujoco.mj_resetDataKeyframe(model, data, model.key(body.stand_keyframe).id)
     mujoco.mj_forward(model, data)
-    lo = np.full(3, np.inf)
-    hi = np.full(3, -np.inf)
-    for g in range(model.ngeom):
-        if model.geom_bodyid[g] == 0:            # world geoms (the floor plane)
-            continue
-        rot = data.geom_xmat[g].reshape(3, 3)
-        centre = data.geom_xpos[g] + rot @ model.geom_aabb[g, :3]
-        ext = np.abs(rot) @ model.geom_aabb[g, 3:]
-        lo = np.minimum(lo, centre - ext)
-        hi = np.maximum(hi, centre + ext)
-    return float(max(hi[0] - lo[0], hi[1] - lo[1]))
+    return widest_horizontal_extent_m(model, data)
 
 
 @pytest.mark.parametrize("robot", ROBOTS)
@@ -1085,6 +1106,22 @@ def _visual_scene(robot_id: str) -> tuple[dict, int]:
     if robot_id == "mars":
         from microduck_local.robots import mars
         return scene, int(mars.robot_spec().compile().nmesh)
+    body = S.get(robot_id)
+    if getattr(body, "kind", "") == "generic":
+        # A level-0 body's model is its own MJCF, so the count comes off that
+        # — but NOT as `nmesh`, and this is a measurement, not a shortcut.
+        # `nmesh` counts every mesh the model loaded, and MEASURED on
+        # Menagerie's `trs_so_arm100` five of its eighteen are COLLISION-only
+        # meshes (`Fixed_Jaw_Collision_1`, three `Moving_Jaw_Collision_*`):
+        # the viewer must not draw those, so a dump of 13 against an `nmesh`
+        # of 18 is correct and `nmesh` is the wrong yardstick. The right one
+        # is how many distinct meshes the VISUAL group references, counted
+        # here off the model rather than asked of the dump.
+        model = body.robot_model()
+        return scene, len({
+            int(model.geom_dataid[g]) for g in range(model.ngeom)
+            if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH
+            and int(model.geom_group[g]) == body.visual_group})
     raise AssertionError(f"no nmesh source for {robot_id!r} — see _visual_scene")
 
 

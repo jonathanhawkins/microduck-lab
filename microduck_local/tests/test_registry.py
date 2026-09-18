@@ -384,9 +384,19 @@ def test_ids_lists_a_known_body_whether_or_not_it_loads(monkeypatch):
     """`--robot g1` on a fresh checkout has always been ACCEPTED and then
     answered with the command that fetches it. An argparse "invalid choice"
     would be a worse answer, so the choices must not depend on the download —
-    and `ids()` must therefore read the DECLARATION, not the loaded body."""
+    and `ids()` must therefore read the DECLARATION, not the loaded body.
+
+    The three built-ins LEAD the list, in their declared order, and the
+    assertion is a prefix rather than an equality because a fourth source
+    exists now: a discovered body (`menagerie:<name>`, `robots/menagerie.py`)
+    follows whatever is in this machine's cache. That is the opposite
+    property to the one under test here — a discovered id is only listed once
+    it HAS been downloaded — so it cannot be enumerated and must not be able
+    to break this case.
+    """
     monkeypatch.setattr(R, "_load_builtin", lambda b: None)
-    assert R.ids() == ("microduck", "g1", "mars")
+    assert R.ids()[:3] == ("microduck", "g1", "mars")
+    assert all(":" in i for i in R.ids()[3:]), R.ids()
     assert T.parse_args(["--robot", "g1"]).robot == "g1"
 
 

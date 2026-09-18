@@ -7,7 +7,7 @@ tree per robot and silently forgets a site: the `/robots` endpoint still has
 to hand-patch an absent G1 back into its own list because `registry()` had
 dropped it.
 
-Three ways a body gets in:
+Four ways a body gets in:
 
 1. **Built in** — `_BUILTINS`, below. Declared as (id, module, attribute) so
    `ids()` can name a body whose assets are NOT fetched. That matters for the
@@ -19,6 +19,13 @@ Three ways a body gets in:
    factory (`docs/mars-roadmap.md` §7.2 item 1). Somebody else's robot is then
    a package, not a fork of this repo.
 3. **At runtime** — `register(body)`, for a test or a notebook.
+4. **DISCOVERED in a cache** — `_NAMESPACES`, and today that is MuJoCo
+   Menagerie's 71 models (`robots/menagerie.py`). The first three all require
+   somebody to WRITE the body down; a catalogue cannot, because a table of 71
+   entries is exactly the maintenance the generic seam exists to remove. So a
+   namespace's bodies are whatever its cache holds, found by scanning it, and
+   an id from a namespace that has never been fetched is still answered — by
+   `get()` raising with `uv run fetch-robot menagerie:<name>`.
 
 A plugin may NOT shadow a built-in id. The duck's 61-obs contract and the
 G1's assets are what the goldens and the deployment path are measured against;
@@ -67,6 +74,105 @@ _BUILTINS: tuple[_Builtin, ...] = (
     _Builtin(id="mars", module=".mars", attr="MARS",
              setup_hint="uv run fetch-robot mars"),
 )
+
+#: Id namespaces whose bodies are DISCOVERED from a cache: `{prefix: module}`,
+#: the module relative to `microduck_local.robots`. A namespace module answers
+#: three calls — `ids()` (cheap, no model compiled), `registry()` (the built
+#: bodies, absences printed) and `fetch(name)` — and `fetch_robot.py` routes
+#: `fetch-robot <prefix>:<name>` to the last of those, because at that moment
+#: there is no body yet to ask for its own download.
+#:
+#: A namespaced id can never collide with a built-in or a plugin: the prefix
+#: and the colon are not legal in the others, which is why the ids carry one.
+_NAMESPACES: dict[str, str] = {"menagerie": ".menagerie"}
+
+
+def namespace_of(body_id: str) -> str:
+    """The discovery namespace `body_id` belongs to, or "".
+
+    One definition of "this id is a catalogue's", read by `setup_hint`, by
+    `get`'s error and by `fetch_robot.py`'s routing branch.
+    """
+    prefix = str(body_id).split(":", 1)[0]
+    return prefix if ":" in str(body_id) and prefix in _NAMESPACES else ""
+
+
+def namespace_module(prefix: str):
+    """The module behind a namespace prefix. Raises `KeyError` if unknown."""
+    return importlib.import_module(_NAMESPACES[prefix], __package__)
+
+
+def _load_namespaces() -> dict[str, Body]:
+    """Every body every namespace's cache holds right now.
+
+    NOT memoised, unlike the entry-point scan: what is installed cannot change
+    inside a process, but what is DOWNLOADED can — `fetch-robot` and the
+    lab's ⤓ button both add a body mid-process, and a cached listing would
+    hide it until a restart. The cost is a directory scan; the expensive part
+    (compiling the model, measuring its stage pitch) is memoised inside the
+    namespace module.
+
+    MEASURED with a Go2 and an SO-ARM100 in the cache, in a FRESH interpreter
+    each time (a warm one is dominated by the built-ins' own import and hides
+    this), two samples each:
+
+        eager   first registry()  629 / 672 ms   warm 0.19 ms   2 models built
+        lazy    first registry()  334 / 351 ms   warm 0.65 ms   0 models built
+
+    Building a discovered body compiles its MJCF twice and measures its stage
+    pitch: **~155 ms per model**, so the eager version put 310 ms on
+    whichever call happened to be first with two in the cache, and would put
+    ~3.1 s there with twenty. The ~340 ms that remains is the BUILT-INS
+    (importing `g1` and `mars`, now including `mars_env` and the `mars_reach`
+    recipe, and resolving the G1's own lazy spec) and is unchanged by any of
+    this — it is also why the floor moved from 225 ms when this was first
+    measured: a built-in growing an env is exactly the cost a catalogue must
+    not multiply. The warm call goes the other way by half a millisecond,
+    which is the directory scan and two manifest reads that let a
+    `fetch-robot` in another terminal show up without a restart.
+
+    **The conformance gate had to move for that to be true, and this is the
+    one subtlety worth stating.** `conforms()` sees through a lazy proxy
+    (`robots/body.py`: it asks `hasattr`, which `__getattr__` answers, where
+    `isinstance` would say no) — but *seeing through* it means RESOLVING it,
+    so calling it here would have compiled every model and bought nothing. A
+    proxy is recognised by `_resolve` on its CLASS, which is a lookup that
+    does not go through `__getattr__`, and its conformance is checked on the
+    real body inside `_resolve()` instead. A namespace that yields a plain
+    body is still gated here exactly as before.
+    """
+    out: dict[str, Body] = {}
+    for prefix, module in _NAMESPACES.items():
+        try:
+            found = namespace_module(prefix).registry()
+        except Exception as exc:              # a broken cache / import error
+            _report(f"[robots] namespace {prefix!r} unavailable: "
+                    f"{type(exc).__name__}: {exc}")
+            continue
+        for body_id, body in found.items():
+            if hasattr(type(body), "_resolve"):      # a lazy body: see above
+                out[str(body_id)] = body
+                continue
+            missing = conforms(body)
+            if missing:
+                _report(f"[robots] {body_id} skipped: not a Body — missing "
+                        f"{', '.join(missing)}")
+                continue
+            out[str(body_id)] = body
+    return out
+
+
+def _namespace_ids() -> tuple[str, ...]:
+    """The ids every namespace's cache holds, without building any body."""
+    out: list[str] = []
+    for prefix in _NAMESPACES:
+        try:
+            out.extend(str(i) for i in namespace_module(prefix).ids())
+        except Exception as exc:
+            _report(f"[robots] namespace {prefix!r} could not be listed: "
+                    f"{type(exc).__name__}: {exc}")
+    return tuple(out)
+
 
 # Bodies handed in by `register()`. Module state on purpose: a plugin
 # registering at import time and a test registering in a fixture want the same
@@ -188,6 +294,8 @@ def registry() -> dict[str, Body]:
             out[b.id] = body
     for body_id, body in _load_entry_points().items():
         out.setdefault(body_id, body)
+    for body_id, body in _load_namespaces().items():
+        out.setdefault(body_id, body)
     for body_id, body in _EXTRA.items():
         out[body_id] = body
     return out
@@ -200,9 +308,16 @@ def ids() -> tuple[str, ...]:
     whose assets are absent: `--robot g1` on a fresh checkout has always been
     accepted and then answered with the command that fetches it, and an
     argparse "invalid choice" would be a worse answer.
+
+    The BUILT-INS come first and in their declared order, because that order
+    is what every menu and every `choices=` shows and the duck is the default.
+    A discovered body (`menagerie:<name>`) follows: it is only in this list at
+    all once its assets are in the cache, so unlike a built-in it never names
+    a download that has not happened.
     """
     out = [b.id for b in _BUILTINS]
-    for body_id in list(_load_entry_points()) + list(_EXTRA):
+    for body_id in (list(_load_entry_points()) + list(_namespace_ids())
+                    + list(_EXTRA)):
         if body_id not in out:
             out.append(body_id)
     return tuple(out)
@@ -213,10 +328,24 @@ def setup_hint(body_id: str) -> str:
 
     Answerable for a body that is NOT loadable, which is the only time it is
     needed — so it reads the declaration, not the body.
+
+    A namespaced id is answerable even though nothing knows whether that
+    model EXISTS: `menagerie:wombat` is offered `uv run fetch-robot
+    menagerie:wombat`, which then fails with Menagerie's own "no model
+    directory 'wombat'". That is the right division — a catalogue of 71 models
+    cannot be enumerated here without a network call, and "try the download"
+    is a better answer than "no such robot" for the 71 that are real.
     """
     for b in _BUILTINS:
         if b.id == body_id:
             return b.setup_hint
+    prefix = namespace_of(body_id)
+    if prefix:
+        try:
+            return str(namespace_module(prefix).setup_hint(
+                str(body_id).split(":", 1)[1]))
+        except Exception:
+            return f"uv run fetch-robot {body_id}"
     body = _EXTRA.get(body_id)
     if body is not None:
         try:

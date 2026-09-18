@@ -1003,6 +1003,99 @@ a Menagerie body arrives at 0 and climbs only when someone needs it to.
 **Settles:** `uv run fetch-robot menagerie:unitree_go2` puts a Go2 on the
 stage, posable, with **0 lines** of Go2-specific code in this repo.
 
+**ANSWERED (2026-09-18, Phase 7a — `robots/mjcf_body.py`,
+`robots/menagerie.py`).** Two Menagerie models were fetched at
+`8161bba264d7` and both pass the conformance suite's ten generic cases
+untouched:
+
+| | joints | keyframe | measured width | stage pitch | contract | licence line |
+|---|---|---|---|---|---|---|
+| `menagerie:unitree_go2` | 12 | `home` | 0.7536 m | 2.653 m | `mjcf-menagerie:unitree_go2-36-v0` | Unitree Robotics' own, NOT Apache |
+| `menagerie:trs_so_arm100` | 6 | `home` | 0.3305 m | 1.163 m | `mjcf-menagerie:trs_so_arm100-18-v0` | Apache License |
+
+The settling number holds, and is now an enforced test rather than a
+one-off `grep`: `tests/test_menagerie.test_no_line_of_code_in_src_knows_what
+_a_go2_is` tokenises `src/`, drops every string and comment, and asserts
+zero mentions. A plain `grep -ric "go2\|so_arm100" src/` counts **27** (16 in
+`robots/menagerie.py`, 5 in `fetch_robot.py`, 4 in `robots/mjcf_body.py`, 2
+in `robots/registry.py`), and all 27 are prose — module docstrings, `#:`
+field comments and `fetch-robot`'s own help text, where
+`menagerie:unitree_go2` is the example somebody types and the Go2 is the
+model a MEASURED note names. None is a branch, a constant, a dict key or an
+import, which is what the tokenised count states and the plain one cannot.
+(The plain count moves whenever a docstring is edited; the tokenised one is
+the claim, and it is a test.)
+
+Four things the phase measured that the row above assumed:
+
+* **A `kind` of its own, `generic`.** A Menagerie quadruped is mechanically
+  a walker and would fail every walker case (no declared feet, no gyro
+  name, no fall height). Claiming `legged` for it would be the inherited-term
+  mistake at architecture scale, so level 0 is its own kind and the
+  conformance suite gained a fourth roster that runs the ROBOTS cases and
+  no other. It climbs when someone declares the names, not when a string is
+  edited.
+* **The shipped `scene.xml` works as it is** — for both models, first try,
+  with no re-rooting: it lives in the cache beside `assets/`, so its
+  relative `<include>` and `meshdir` resolve. A generated scene is the
+  fallback (no scene, or one MuJoCo refuses) and the body records which it
+  got. What DOES need rewriting is the robot spec's asset directories, which
+  `MjSpec.from_file` keeps relative and `to_xml()` writes straight back out:
+  a generated scene under `.cache` then dies with `Error opening file
+  'assets/...'`.
+* **`nmesh` is the wrong yardstick** for "the viewer got every mesh". It
+  holds for the Go2 (16 == 16) and not for the arm: five of its eighteen
+  meshes are collision-only, in group 3, and must not be drawn — so 13
+  against 18 is correct. The right count is the distinct meshes the VISUAL
+  group references, and that group is itself read off the model
+  (`contype == 0`) rather than assumed to be 2, because MuJoCo's URDF
+  importer emits 1 and MARS is already proof of it.
+* **The duck is the sharper test than either of them**, and it is offline.
+  `MjcfBody` on `robot_walk.xml` + `scene_walk.xml` recovers
+  `contract.JOINT_NAMES` exactly (order included, free root excluded),
+  `DEFAULT_POSE` to **4e-5** and the 0.65 m stage pitch to **0.07 %**. The
+  4e-5 is the file's own precision — upstream's STAND keyframe is
+  `DEFAULT_POSE` rounded to five decimals — so the plan's 1e-6 was not
+  reachable. Two other corrections fell out: the duck's keyframes live in
+  its SCENE (`robot_walk.xml` has `nkey == 0`) and its FIRST keyframe is
+  INIT, 0.458 rad from the default pose, which is why the reader prefers
+  `home` / `HOME` / `STAND` by name before falling back to the first; and
+  `g1.g1_xml()` (nq 50) cannot be paired with `g1.g1_scene_xml()` (nq 36,
+  fingers frozen) — that refusal is a test.
+
+**A catalogue has to be cheap to HAVE, not just to use.** Building a
+discovered body compiles its MJCF twice and measures its stage pitch, and
+`registry()` runs per roster change and per policy load in the lab. MEASURED
+in a fresh interpreter with both models in the cache:
+
+```
+eager   first registry()  629 / 672 ms   warm 0.19 ms   2 models built
+lazy    first registry()  334 / 351 ms   warm 0.65 ms   0 models built
+```
+
+**~155 ms per model** — 310 ms on whichever call happened to be first with
+two fetched, ~3.1 s with twenty. So a namespace yields `menagerie.LazyBody`,
+which carries the four fields a listing actually asks (`id`, `title`, `noun`,
+`kind` — all knowable from the manifest and the name) as real attributes and
+resolves through `__getattr__` for everything else. The ~340 ms that remains
+is the built-ins' own import and is untouched — and it is worth noting that
+it GREW from 225 ms when this was first measured on `67688ae`, because 4a
+gave MARS an env and a recipe. A built-in growing is a cost paid once; a
+catalogue growing must not multiply it, which is the whole argument. One
+subtlety is worth knowing
+before touching this again: **`conforms()` sees through a lazy proxy by
+RESOLVING it** — it asks `hasattr`, which `__getattr__` answers — so running
+the registry's conformance gate on a proxy would have compiled every model
+and bought nothing. The gate recognises a proxy by `_resolve` on its CLASS
+(a lookup that does not go through `__getattr__`) and the check moved into
+`menagerie.body()`, where the body is already built.
+
+Not built, and deliberately: `env_class`, `driver` and `frames` raise, each
+naming the level that lands them. `make_sensors` is the one contract member
+inherited rather than overridden, because `robots/body.py` already documents
+the empty dict as the TRUE answer for a body with no declared apertures —
+raising would take a kinematic body out of the room level 0 promises it.
+
 ### 7.2 Where generic pays
 
 1. **A body plugin is a directory, and a Python entry point.**
@@ -1055,7 +1148,41 @@ stage, posable, with **0 lines** of Go2-specific code in this repo.
 ### 7.4 What to build for it, in order
 
 1. `MjcfBody` + `fetch-robot menagerie:<name>` (level 0, after §6.4).
+   **DONE (2026-09-18)** — `robots/mjcf_body.py`, `robots/menagerie.py`,
+   `tests/test_mjcf_body.py`, `tests/test_menagerie.py`,
+   `scripts/probe_mjcf_body.py`. The numbers and the four corrections are in
+   §7.1's ANSWERED block. What it added to the registry is a FOURTH source
+   beside built-ins, entry points and `register()`: a **discovery
+   namespace** (`registry._NAMESPACES`), because a catalogue of 71 models
+   cannot be a table anyone maintains — a fetched model is found by its
+   `.cache/menagerie/<name>/body.json`, and an id nobody has downloaded is
+   still answered with the command that fetches it. Level 1 for a Menagerie
+   walker is the open half: see the list at the end of this section.
 2. Entry-point registration and the fake-plugin test.
 3. Body-tagged terms and one recipe proven on two legged bodies.
 4. The verification tooling's own README, so it can be pointed at without
    the rest.
+
+**What level 1 would cost a Menagerie walker — read off `unitree_go2/go2.xml`
+at the pinned sha (2026-09-18), not estimated.** `RobotSpec`'s three REQUIRED
+fields split cleanly into one that is free, one that is a naming convention,
+and one that is not in the file at all:
+
+| `RobotSpec` field | go2 | guessable from the MJCF? |
+|---|---|---|
+| `base_body` | `base` | **yes** — the body carrying the free joint, and `MjcfBody` already finds that joint |
+| `floor_geom` | `floor` | **yes** — the shipped `scene.xml` names it that, and a generated one is written by us |
+| `foot_geoms` | `FL` `FR` `RL` `RR` — the ONLY four named geoms in the file | **the names, yes; the mapping, no.** They are named by the `class="foot"` default, so the SET is findable. Which are `{"left"}` and which `{"right"}` is not: `F`/`R` is front/rear here and `L`/`R` is left/right, and a quadruped has four feet where the walking env's air-time model has two sides |
+| `gyro_sensor` | **absent** — `go2.xml` has an `imu` SITE and no `<sensor>` block at all | **no, and it cannot be.** The site is there, so a per-KIND step ("add a `<gyro>` on the imu site when the model has one, at scene generation") is feasible and is not per-robot. A model with no imu site has nowhere to put one |
+| `fall_height` / `fall_gravity_z` | base z is 0.27 at `home` | **measurable, not guessable.** A threshold is a judgement about when a run is over, and the duck's 0.07 m on a 0.277 m body is not 0.27's ratio |
+| `action_scale`, `twist_obs_slice`, `obs_dim` | — | **no.** They belong to the env layout and the policy convention, which is what level 1 is choosing |
+| velocity ranges, `min_forward_cmd` | — | **no.** MEASURED per body: the duck's air-time window paid on 0 % of G1 swings until re-measured, which is §7.2 item 3's rule |
+| `sole_tol` / `ground_tol` | — | **scale-derivable.** Both are lengths on the body (5 mm on a 25 cm duck, 1 cm on a 1.3 m G1), so a fraction of the measured width is a defensible default that a measurement then replaces |
+| `effectors`, `rig_controls`, `com_bodies`, `pose_joint_ids` | — | authored, and all four have honest empty defaults today |
+
+So the shape of level 1 is: **two fields free, one a per-kind rule, one a
+mapping only a person can state, and the windows measured per body.** A
+`legged` base env for a quadruped is also not the duck's env with different
+names — four-legged air time and a trot are a different reward structure, and
+the honest version is a kind with its own env rather than `MicroduckWalkEnv`
+with `foot_geoms` of length four.

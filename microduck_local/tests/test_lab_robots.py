@@ -581,11 +581,17 @@ def _body_width_m(robot: str) -> float:
 
     Measured off the compiled model — the geom AABBs in world axes — so a
     model revision that changes a body's size shows up here instead of quietly
-    crowding the stage.
+    crowding the stage. The AABB loop is
+    `robots/body.widest_horizontal_extent_m`: it was written out here and
+    again in `tests/test_body_conformance.py`, and `MjcfBody` needs it a third
+    time to measure a body nobody typed a pitch for, so there is one copy.
+    What is local to this case is the ENV's model — the walking env's own
+    compiled scene, rather than `scene_fn()`'s.
     """
     import mujoco
 
     from microduck_local.robots import spec as S
+    from microduck_local.robots.body import widest_horizontal_extent_m
     from microduck_local.train import env_class
 
     sp = S.get(robot)
@@ -599,17 +605,7 @@ def _body_width_m(robot: str) -> float:
     mujoco.mj_resetDataKeyframe(
         m, d, mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, sp.stand_keyframe))
     mujoco.mj_forward(m, d)
-    lo = np.full(3, np.inf)
-    hi = np.full(3, -np.inf)
-    for g in range(m.ngeom):
-        if m.geom_bodyid[g] == 0:          # world geoms (the floor plane)
-            continue
-        R = d.geom_xmat[g].reshape(3, 3)
-        centre = d.geom_xpos[g] + R @ m.geom_aabb[g, :3]
-        ext = np.abs(R) @ m.geom_aabb[g, 3:]
-        lo = np.minimum(lo, centre - ext)
-        hi = np.maximum(hi, centre + ext)
-    return float(max(hi[0] - lo[0], hi[1] - lo[1]))
+    return widest_horizontal_extent_m(m, d)
 
 
 def _min_gap(slots) -> float:

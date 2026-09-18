@@ -401,6 +401,81 @@ class BodyBase:
         return {}
 
 
+#: How much floor a body gets per unit of its own width, centre to centre.
+#: NOT a design choice — a MEASUREMENT, back-derived from the one number the
+#: viewer has always drawn: 0.65 m of stage for a duck that is 0.1845 m across.
+#: Every other body's pitch is that ratio on ITS width, because one
+#: duck-sized constant put six 1.3 m G1 helpers inside each other.
+#: `tests/test_body_conformance.py` re-derives every registered body's
+#: `lab_spacing_m` from this, and `tests/test_lab_robots.py` pins the ratio
+#: itself against the duck's model.
+LAB_PITCH_RATIO = 3.52
+
+
+def widest_horizontal_extent_m(model: Any, data: Any) -> float:
+    """The widest HORIZONTAL extent of the whole robot, in metres.
+
+    The geom AABBs in WORLD axes — which is what must not overlap when two of
+    these stand side by side on the stage — over a `data` that has already
+    been posed and `mj_forward`ed. World geoms (`geom_bodyid == 0`: the floor
+    plane, a skybox) are skipped, or an infinite plane would answer for every
+    body.
+
+    The larger of the x and y extents, not the y one: MEASURED, MARS at HOME
+    folds its arm over a chassis whose rear tray overhangs 76 mm, so it is
+    longer (0.4135 m) than it is wide (0.3665 m), and taking y alone would
+    have parked two of them 0.7 m closer than their own bodies allow.
+
+    Lives here, beside the `lab_spacing_m` field it measures, because three
+    callers needed it and a duplicated ten-line AABB loop is a measurement
+    that can drift from itself: `MjcfBody` uses it to MEASURE a stranger's
+    robot at construction, and the two test modules use it to re-derive what
+    a declared body wrote down. `numpy` and `mujoco` are imported inside so
+    that importing this module still costs nothing — the module docstring's
+    `Any` annotations exist for the same reason.
+    """
+    import numpy as np
+
+    lo = np.full(3, np.inf)
+    hi = np.full(3, -np.inf)
+    for g in range(model.ngeom):
+        if model.geom_bodyid[g] == 0:            # world geoms (the floor plane)
+            continue
+        rot = data.geom_xmat[g].reshape(3, 3)
+        centre = data.geom_xpos[g] + rot @ model.geom_aabb[g, :3]
+        ext = np.abs(rot) @ model.geom_aabb[g, 3:]
+        lo = np.minimum(lo, centre - ext)
+        hi = np.maximum(hi, centre + ext)
+    return float(max(hi[0] - lo[0], hi[1] - lo[1]))
+
+
+def measure_lab_spacing_m(model: Any, keyframe: str | None = None
+                          ) -> tuple[float, float]:
+    """`(lab_spacing_m, measured_width_m)` for `model` at `keyframe`.
+
+    The pitch a body should declare, computed rather than typed. A per-body
+    number written by hand drifts from the model it describes the moment the
+    MJCF changes shape, and `MjcfBody` has no author to type one — so it
+    measures its own at construction and the conformance suite then re-derives
+    the same arithmetic and agrees to within 5 %.
+
+    `keyframe=None` measures at `qpos0`, for a model that has none.
+    """
+    import mujoco
+
+    data = mujoco.MjData(model)
+    if keyframe:
+        mujoco.mj_resetDataKeyframe(model, data, model.key(keyframe).id)
+    mujoco.mj_forward(model, data)
+    width = widest_horizontal_extent_m(model, data)
+    if not width > 0:
+        raise ValueError(
+            "the body measures 0 m across at "
+            f"{keyframe or 'qpos0'} — it has no geoms on any body, so there "
+            "is nothing to put on a stage or to draw")
+    return LAB_PITCH_RATIO * width, width
+
+
 def conforms(body: object) -> tuple[str, ...]:
     """Which `Body` names `body` is missing — empty when it conforms.
 
@@ -430,4 +505,5 @@ WANTED: Sequence[str] = (
 )
 
 
-__all__ = ["WANTED", "Body", "BodyBase", "RobotFrames", "conforms"]
+__all__ = ["LAB_PITCH_RATIO", "WANTED", "Body", "BodyBase", "RobotFrames",
+           "conforms", "measure_lab_spacing_m", "widest_horizontal_extent_m"]

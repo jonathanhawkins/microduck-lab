@@ -179,9 +179,14 @@ def test_the_registry_lists_mars_on_a_machine_that_never_fetched_it(monkeypatch)
     """`--robot mars` must be ACCEPTED and then answered with the download
     command, exactly as `--robot g1` is: an argparse "invalid choice" would
     tell somebody their robot does not exist when it is one command away.
-    `ids()` therefore reads the DECLARATION, not the loaded body."""
+    `ids()` therefore reads the DECLARATION, not the loaded body.
+
+    A prefix, not an equality: `menagerie:<name>` bodies are DISCOVERED from
+    a cache and follow the built-ins (see
+    `test_registry.test_ids_lists_a_known_body_whether_or_not_it_loads`).
+    """
     monkeypatch.setattr(R, "_load_builtin", lambda b: None)
-    assert R.ids() == ("microduck", "g1", "mars")
+    assert R.ids()[:3] == ("microduck", "g1", "mars")
     assert R.setup_hint("mars") == "uv run fetch-robot mars"
     with pytest.raises(KeyError, match="uv run fetch-robot mars"):
         R.get("mars")
