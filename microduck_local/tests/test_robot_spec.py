@@ -94,6 +94,50 @@ def test_mirror_permutation_agrees_with_the_symmetry_module():
     assert np.array_equal(C.MICRODUCK.mirror_joint_perm(), symmetry.JOINT_PERM)
 
 
+def test_a_walker_with_no_scene_is_still_refused_at_construction():
+    """`scene_fn` and `stand_keyframe` moved up to `BodyBase`.
+
+    Every body has a model and a pose to spawn in, walker or not, and a
+    non-walker (Innate's MARS) needs both — but a field on the base class
+    needs a DEFAULT, and inheriting one would have turned "you forgot the
+    scene" from a TypeError at construction into a NotImplementedError
+    somewhere inside the trainer. `RobotSpec.__post_init__` restates the
+    requirement, so this is the planted negative for that guard.
+    """
+    fields = {f.name: getattr(C.MICRODUCK, f.name)
+              for f in dataclasses.fields(C.MICRODUCK)}
+    fields.pop("scene_fn")
+    with pytest.raises(TypeError, match="no scene_fn"):
+        spec_mod.RobotSpec(**fields)
+    # And the keyframe still defaults to STAND for a walker that omits it.
+    assert spec_mod.RobotSpec(**fields, scene_fn=C.MICRODUCK.scene_fn
+                              ).stand_keyframe == "STAND"
+
+
+def test_a_body_that_declares_no_scene_says_so_when_asked():
+    """The `BodyBase.scene_fn` placeholder, and the trap it sidesteps.
+
+    A plain function held as a dataclass DEFAULT is a class attribute, and
+    functions are descriptors — so `self.scene_fn()` would have called it
+    with `self` and raised a TypeError about arity instead of saying what is
+    missing. MEASURED: the generated `__init__` copies the default into the
+    instance, so the call arrives with no arguments and the message is the
+    useful one. (A `staticmethod` default or a lambda would each behave
+    differently again; this pins which of them is in play.)
+    """
+    from microduck_local.robots.body import BodyBase
+
+    @dataclasses.dataclass(frozen=True, eq=False, kw_only=True)
+    class Bare(BodyBase):
+        pass
+
+    bare = Bare(id="bare", joint_names=("a",),
+                default_pose=np.zeros(1, np.float32), obs_dim=3)
+    assert "scene_fn" in bare.__dict__, "the default did not reach the instance"
+    with pytest.raises(NotImplementedError, match="declares no scene_fn"):
+        bare.scene_fn()
+
+
 def test_registry_knows_the_duck_and_rejects_nonsense():
     reg = spec_mod.registry()
     assert "microduck" in reg

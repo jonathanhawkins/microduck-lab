@@ -386,7 +386,7 @@ def test_ids_lists_a_known_body_whether_or_not_it_loads(monkeypatch):
     would be a worse answer, so the choices must not depend on the download —
     and `ids()` must therefore read the DECLARATION, not the loaded body."""
     monkeypatch.setattr(R, "_load_builtin", lambda b: None)
-    assert R.ids() == ("microduck", "g1")
+    assert R.ids() == ("microduck", "g1", "mars")
     assert T.parse_args(["--robot", "g1"]).robot == "g1"
 
 

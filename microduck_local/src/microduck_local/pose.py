@@ -669,5 +669,20 @@ def pose_scratch(robot: str = "microduck") -> PoseScratch:
         key = "microduck"
     if key not in _scratch:
         from .robots import spec as S
-        _scratch[key] = PoseScratch(S.get(key))
+        body = S.get(key)
+        if not hasattr(body, "base_body"):
+            # The editor is a WALKER's tool: it reads a base body, effectors,
+            # soles and a stand height, none of which a wheeled body declares.
+            # The lab's `/robots` list offers every registry entry, and a
+            # non-walker (MARS, docs/mars-roadmap.md Phase 2b) would otherwise
+            # arrive here and die on `spec.base_body` as a 500. KeyError is
+            # what `viz_server.scratch_for` turns into a 404 with the text.
+            # Asked as a capability, not `isinstance(body, RobotSpec)`: the
+            # G1 arrives as a lazy proxy that IS a RobotSpec once resolved
+            # and fails isinstance until then (robots/body.py's docstring).
+            raise KeyError(
+                f"{key!r} has no animate support yet — the 🎬 editor poses "
+                "walkers (a base body, effectors, soles); a wheeled body's "
+                "arm editor is docs/mars-roadmap.md Phase 2b")
+        _scratch[key] = PoseScratch(body)
     return _scratch[key]

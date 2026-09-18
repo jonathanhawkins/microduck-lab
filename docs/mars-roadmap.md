@@ -192,7 +192,7 @@ for 1b: `viz_server.py` (15 literals), `render_rollout.py`, the viewer — and
 `MicroduckBody.visual_scene()/shipped_policies()` import from `viz_server`
 in the wrong direction until `lab/robots.py` exists (marked `PHASE 1B:`).
 
-### Phase 2 — MARS on the stage: download, spec, look  `[ ]`
+### Phase 2 — MARS on the stage: download, spec, look  `[~]`
 
 - `robots/mars.py`: `MarsSpec` — `CACHE_DIR = .cache/innate_mars/`,
   `INNATE_OS_SHA` pinned, joint names in the order Innate's `/mars/arm/state`
@@ -222,6 +222,65 @@ in the wrong direction until `lab/robots.py` exists (marked `PHASE 1B:`).
   roster of `duck, g1, mars` renders with no overlap (`tests/test_lab_robots.py`
   re-measures the width like it does for the G1); a screenshot in
   `docs/media/lab-mars.png` (`.claude/skills/capture-viewer-screenshots`).
+
+**2a DONE (2026-09-17)** — the BACKEND: `robots/mars.py` (`MarsBody(BodyBase)`
+— NOT a `RobotSpec`, so no feet, no gyro, no fall height), registered as
+`mars`, `fetch-robot mars`, Innate's recipe as `robot_spec()`, the scene and
+`HOME` keyframe as `scene_xml()`, their arm/head PD as `arm_servo()`, the
+viewer's dump as `visual_scene()`. The lab server and the viewer are NOT in
+it (Phase 2b). `tests/test_body_conformance.py` is split by kind — generic /
+`RobotSpec` / `kind == "wheeled"` — plus `tests/test_mars.py`: 36 + 59 cases,
+3.7 s, and all 24 planted breaks caught. Measured:
+
+- **`fetch-robot mars` takes 8.0 s** cold on home broadband (11 files, 7.2 MB,
+  sha256 each) and **0.28 s** warm, which answers the < 30 s bar.
+- **`lab_spacing_m` is 1.46 m, not the planned 1.09 m.** The AABB at HOME is
+  0.4135 x 0.3665 x 0.4483 m: the arm folds over the chassis, so the body is
+  LONGER than it is wide and the plan's estimate (the y extent at qpos0)
+  would have parked two MARSes inside each other's rear trays. 3.52x the
+  larger extent, as for the G1.
+- **One more URDF rewrite than Innate's two: `fusestatic="false"`.** The
+  importer defaults it on, which merges 8 jointless frames away — and then
+  `robot_spec().compile()` alone gives 10 bodies / 1.3650 kg while attaching
+  that already-compiled spec gives 10 bodies / **1.3340 kg**, silently
+  dropping the marker links' mass. Two compiles that disagree on the body
+  list would draw a robot with its parts on the wrong joints (the lab indexes
+  poses positionally), and `base_laser` / `head_camera_left` / `ee_link` —
+  Phase 3's senses and Phase 4's reward — have no name once fused.
+- **The hold: max |q − home| 0.00344 rad** over 2 s at HOME under
+  `arm_servo`, base z drift 0.0 mm, planar drift 1e-5 m / 1.4e-4 rad, ncon ≤ 6,
+  identical at 5 ms (the lab's timestep, what the scene uses) and at Innate's
+  2 ms — so their finger tuning survives the coarser step.
+- **134,700 physics steps/s** bare, 80,000 with the servo in python, against
+  the duck's own scene at 70,400: **0.52x a duck per step**, cheaper than the
+  0.78x the probe suggested (that number had the python servo in the loop).
+- `nu == 0` and it is correct: mars.urdf has no `<actuator>` block, because
+  Innate's driver commands positions through `qfrc_applied`.
+- The obs contract is declared but unfilled: **32 floats** (28 used + 4
+  reserved) and **8 actions** (6 joint targets + `vx, wz`) at 25 Hz.
+- Two constants that a first draft of the tests could not see: comparing the
+  model to the module's own constant is a tautology, so the ported numbers
+  are now pinned against literals (`test_mars.INNATE_CONSTANTS`) — a planted
+  `FINGER_ARMATURE = 0.0` and `GRIPPER_CLOSED_ON_AIR_RAD = 0.0` both passed
+  the first version.
+
+Still open for 2b: `viz_server`'s 15 robot literals and `lab/robots.py`, the
+viewer's material table for `look() == "mars"` (the colours already travel in
+the dump), the roster screenshot, and `scripts/setup.sh --with-mars`. Two of
+those literals are now WRONG rather than merely duplicated, measured with a
+third body in the registry:
+
+- `GET /robots` lists every registry entry for the 🎬 editor, and answers
+  `"ready": True if rid == "microduck" else bool(g1_ready())` — so MARS
+  inherits the G1's download state. `Body.ready()` is the fix and it exists.
+- worse, that list is what the editor offers, and `pose.pose_scratch("mars")`
+  raises `AttributeError: 'MarsBody' object has no attribute 'base_body'`.
+  `PoseScratch` is a walker's tool (effectors, soles, a base body), so the
+  editor's list has to be filtered by capability — `isinstance(body,
+  RobotSpec)`, or an `effectors`-shaped question — before a MARS appears in
+  it. Nothing else in the tree breaks on a non-walker entry: `train
+  --robot mars` raises NotImplementedError naming Phase 4, the palette's
+  shipped groups come back empty, and the stage pitch is per body already.
 
 ### Phase 3 — MARS in a room: drive it, sense with it, give it the existing brains  `[ ]`
 

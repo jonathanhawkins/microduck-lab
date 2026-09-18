@@ -23,11 +23,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
-from .body import Body, BodyBase
+from .body import Body, BodyBase, _no_scene_fn
 
 
 @dataclass(frozen=True)
@@ -64,13 +63,17 @@ class RobotSpec(BodyBase):
     base_body: str                            # the IMU body: trunk / pelvis
     gyro_sensor: str                          # mjOBJ_SENSOR name, 3 floats
     foot_geoms: Mapping[str, tuple[str, ...]] # {"left": (...), "right": (...)}
-    scene_fn: Callable[[], Path]              # default training scene
+    # `scene_fn` (the default training scene) and `stand_keyframe` are
+    # `BodyBase` fields now — every body has a model and a spawn pose, walker
+    # or not. Declaring them here was what made a non-walker impossible.
+    # `__post_init__` keeps a walker's own loudness: they were REQUIRED
+    # keywords on this class, and a RobotSpec without a scene still fails at
+    # construction rather than when something tries to compile it.
     # target = default_pose + action * action_scale. The duck's contract is
     # scale 1.0 (contract.py); the G1's walker.onnx carries a per-joint scale.
     action_scale: np.ndarray | None = None
     action_clip: float = 4.0
     floor_geom: str = "floor"
-    stand_keyframe: str = "STAND"
     # Joints the pose reward holds at the default (the duck pays on legs
     # only — its head has its own command-tracking term).
     pose_joint_ids: np.ndarray | None = None
@@ -116,6 +119,21 @@ class RobotSpec(BodyBase):
     ground_tol: float = 0.005
     # Free-form, for tools that want to say something about the robot.
     extra: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """A walker with no scene is a construction error, as it always was.
+
+        `scene_fn` was a required keyword on this class before it moved up to
+        `BodyBase` (where it needs a default, because a body may be declared
+        before its model exists). Inheriting a default would have turned
+        "you forgot the scene" from a TypeError here into a
+        NotImplementedError somewhere in the trainer, so the loudness is
+        re-stated rather than lost.
+        """
+        if self.scene_fn is _no_scene_fn:
+            raise TypeError(
+                f"RobotSpec {self.id!r} has no scene_fn — the walking env "
+                "spawns from that scene's keyframe, so it is required")
 
     def scale_action(self, action: np.ndarray) -> np.ndarray:
         """Policy output -> position target (radians)."""

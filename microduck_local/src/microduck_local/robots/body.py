@@ -43,7 +43,22 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
+
+
+def _no_scene_fn() -> Path:
+    """The `scene_fn` placeholder: a body that never declared one.
+
+    A default that RAISES rather than a `None` to be checked at every call
+    site, and rather than one robot's scene — which is the whole reason the
+    duck's assets moved off `RobotSpec` (`robots/microduck.py`'s docstring).
+    `RobotSpec.__post_init__` refuses it outright, so a walker still fails at
+    CONSTRUCTION as it did when the field was declared there.
+    """
+    raise NotImplementedError(
+        "this body declares no scene_fn — a Body must be able to hand out a "
+        "compiled-scene path (robots/g1.g1_scene_xml and "
+        "robots/mars.scene_xml both generate theirs under .cache)")
 
 
 @runtime_checkable
@@ -58,7 +73,7 @@ class Body(Protocol):
     id: str                      # "microduck" | "g1" | "mars" — the wire name
     title: str                   # "Unitree G1" — what a chip or menu shows
     noun: str                    # "duck" | "G1" — what a SENTENCE calls one
-    kind: str                    # "legged" today; "wheeled" / "arm" reserved
+    kind: str                    # "legged" | "wheeled"; "arm" reserved
     # --- the policy contract this body speaks -----------------------------
     joint_names: tuple[str, ...]
     joint_groups: tuple[str, ...] | None
@@ -66,6 +81,14 @@ class Body(Protocol):
     #                              so conforming does not drag numpy in.
     obs_dim: int
     lab_spacing_m: float         # floor one slot on the lab stage gets, m
+    # --- the model, and the pose it starts in -----------------------------
+    # Both were `RobotSpec` fields until a non-walker needed them: EVERY body
+    # has a compiled scene and a keyframe to spawn at, walker or not, and
+    # `tests/test_body_conformance.py`'s generic cases read exactly these two
+    # to compile a body and measure it. A body that cannot answer them is one
+    # the suite cannot check, so the contract says so here.
+    scene_fn: Callable[[], Path]
+    stand_keyframe: str
 
     @property
     def num_actions(self) -> int: ...
@@ -129,6 +152,16 @@ class BodyBase:
     # 1.307 m — would give the G1 3.07 m: also defensible, simply further apart
     # than the stage camera can frame.)
     lab_spacing_m: float = 0.65
+    # The compiled scene ONE of these stands in, as a callable so a body
+    # whose scene is GENERATED (the G1's, MARS's) writes it on demand rather
+    # than at import. See `_no_scene_fn` for why the default raises instead
+    # of being None or one robot's scene.
+    scene_fn: Callable[[], Path] = _no_scene_fn
+    # The keyframe in that scene a body spawns from. Named for the walkers
+    # that came first — MARS's is "HOME", an arm pose with nothing to stand
+    # on — and kept under that name because the walking env, the 🎬 pose
+    # editor, `render-rollout` and the conformance suite all read it already.
+    stand_keyframe: str = "STAND"
 
     # ------------------------------------------------------------------ data
 
@@ -273,6 +306,7 @@ def conforms(body: object) -> tuple[str, ...]:
 WANTED: Sequence[str] = (
     "id", "title", "noun", "kind", "joint_names", "joint_groups",
     "default_pose", "obs_dim", "num_actions", "lab_spacing_m",
+    "scene_fn", "stand_keyframe",
     "ready", "fetch", "setup_hint", "visual_scene", "look",
     "env_class", "tasks", "shipped_policies", "train_env_kwargs",
     "attach", "driver",

@@ -64,6 +64,8 @@ _BUILTINS: tuple[_Builtin, ...] = (
              setup_hint=""),
     _Builtin(id="g1", module=".g1", attr="G1_SPEC",
              setup_hint="uv run fetch-robot g1"),
+    _Builtin(id="mars", module=".mars", attr="MARS",
+             setup_hint="uv run fetch-robot mars"),
 )
 
 # Bodies handed in by `register()`. Module state on purpose: a plugin

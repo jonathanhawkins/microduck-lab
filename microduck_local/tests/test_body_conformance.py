@@ -12,21 +12,42 @@ So this file is the definition: every case is parameterised over the
 registry, and **a body is supported when this file is green for it**. What it
 pins, and the mistake each case prevents, is in the individual docstrings.
 
+**Three rosters, because a body is not always a walker.** MARS is a wheeled
+base with an arm: it has no feet, no gyro and no fall height, and its action
+vector (6 joint targets + a base twist) is not its joint vector. Holding it
+to the walker's cases would mean inventing those fields, which is the
+architecture-scale version of the mistake `AGENTS.md` warns about most. So:
+
+    ROBOTS   every id in the registry — the scene compiles, the names
+             resolve, the numbers agree, it attaches beside a duck, its
+             stage pitch matches its measured width, the viewer can see it
+    WALKERS  `isinstance(body, RobotSpec)` — feet, gyro, base body, com
+             bodies, rig joints, the mirror, the env's observation width,
+             the shipped-idle hold, the open-loop topple, the exporter
+    WHEELED  `kind == "wheeled"` — it holds its arm where it was put, and
+             a planar base neither sinks nor drifts
+
+A case in the generic set must be answerable by a body with no feet. That is
+the whole discipline of the split: `num_actions >= num_joints` generically,
+`num_actions == num_joints` for a walker.
+
 Two conventions worth knowing before adding a case:
 
 * **Every positive case has a planted negative beside it** (the repo rule: a
   test proves nothing until it has been shown to fail — two toothless tests
   were caught here that way). The positives put their assertions in small
-  helpers (`_missing_names`, `_dimension_report`, `_check_visual_scene`) so
-  the negative can hand the SAME code a broken copy of the spec and watch it
-  fail. `RobotSpec` is `frozen=True, eq=False`, so a broken copy is
-  `dataclasses.replace`; the G1's spec is a lazy proxy, hence `_resolved`.
-* **Two seams do not exist yet** and are faked here by a one-line table with
-  the body's id in it: which shipped policy holds a body up, and where its
-  visual scene comes from. Both are `Body.shipped_policies()` /
-  `Body.visual_scene()` in the MARS plan (§1); `viz_server.get_scene` carries
-  the same if-chain today. When the seam lands, the tables below collapse to
-  a registry lookup and nothing else in this file changes.
+  helpers (`_missing_body_names`, `_dimension_report`, `_check_visual_scene`)
+  so the negative can hand the SAME code a broken copy of the body and watch
+  it fail. `BodyBase` is `frozen=True, eq=False`, so a broken copy is
+  `dataclasses.replace`; the G1's spec is a lazy proxy, hence `_resolved`;
+  `num_actions` is a property, hence `_with_num_actions`.
+* **Two seams still do not exist** and are faked here by a table with a
+  body's id in it: which shipped policy holds a body up, and where its
+  visual scene comes from. `Body.shipped_policies()` and
+  `Body.visual_scene()` both exist now, but the duck's answers still reach
+  into `viz_server` (marked PHASE 1B there) and the nmesh each dump is
+  checked against has no seam at all. `ready()` and `setup_hint()` used to
+  be faked here too and are now asked of the body.
 """
 
 from __future__ import annotations
@@ -42,9 +63,10 @@ import onnxruntime as ort
 import pytest
 
 from microduck_local import contract as C
+from microduck_local.robots import registry as R
 from microduck_local.robots import spec as S
+from microduck_local.robots.spec import RobotSpec
 from microduck_local.train import env_class
-from microduck_local.world.compose import ROBOT_XML
 
 # The lab's stage pitch per body is this ratio on the body's measured width:
 # 0.65 m of floor for a duck measured 0.1845 m across (robots/spec.py's own
@@ -52,50 +74,63 @@ from microduck_local.world.compose import ROBOT_XML
 # single duck-sized constant looked like.
 LAB_PITCH_RATIO = 3.52
 # Contacts during a 2 s hold, MEASURED on this Mac: 5 at the peak for the
-# duck (2 foot pads on a plane), 28 for the G1 (14 foot capsules). The
-# ceiling is a blow-up detector, not a tight bound — a solver that has lost
-# the plot reports contacts in the hundreds or thousands.
+# duck (2 foot pads on a plane), 28 for the G1 (14 foot capsules), 6 for
+# MARS (2 wheels + the chassis box, all resting on z = 0). The ceiling is a
+# blow-up detector, not a tight bound — a solver that has lost the plot
+# reports contacts in the hundreds or thousands.
 CONTACT_CEILING = 200
 HOLD_SECONDS = 2.0
+# A wheeled body's own hold band, MEASURED on MARS at HOME under its servo
+# (robots/mars.arm_servo, 2 s): max |q - home| 0.00344 rad, base z drift
+# 0.0 mm, planar drift 1e-5 m / 1.4e-4 rad. The bands below are ~3x the
+# joint error and 1 mm of z, which a planar base cannot use at all — it has
+# no z degree of freedom, so anything above zero means the base body moved
+# in a way the joints alone should not be able to produce.
+WHEELED_JOINT_BAND_RAD = 0.01
+WHEELED_BASE_Z_BAND_M = 0.001
 
 
 # --------------------------------------------------------------- the roster
 
-def _resolved(spec):
-    """The `RobotSpec` behind a registry entry.
+def _resolved(body):
+    """The concrete body behind a registry entry.
 
     The G1's is a `_LazyG1Spec` proxy (`load_config()` reads the fetched
     cache, so importing the module on a machine that never ran `fetch-g1`
-    must not explode). `dataclasses.replace` needs the real thing.
+    must not explode). `dataclasses.replace` and `isinstance` need the real
+    thing — `robots/body.conforms()` exists for the same reason.
     """
-    return spec._resolve() if hasattr(spec, "_resolve") else spec
+    return body._resolve() if hasattr(body, "_resolve") else body
 
 
 def _assets_ready(robot_id: str) -> bool:
-    """Are this body's assets on disk? (`Body.ready()` in the MARS plan.)
+    """`Body.ready()`, which every body now answers for itself.
 
-    The fallback is generic — a body is fetched when the scene it trains in
-    exists — but the G1 answers for itself, because its `scene_fn` GENERATES
-    that scene and would compile a 0.7 s model at collection time.
+    This was a table with `"g1"` in it: the generic fallback ("a body is
+    fetched when the scene it trains in exists") compiled a 0.7 s model at
+    collection time for a body whose `scene_fn` GENERATES that scene. The
+    seam landed, so the table is gone.
     """
-    if robot_id == "g1":
-        from microduck_local.robots.g1 import g1_ready
-        return g1_ready()
     try:
-        return Path(S.get(robot_id).scene_fn()).is_file()
+        return bool(S.get(robot_id).ready())
     except Exception:                       # a body that cannot even say
         return False
 
 
-# What to run when a body's assets are missing (`Body.setup_hint()`).
-_SETUP_HINT = {
-    "microduck": "clone microduck_rl next to microduck_local, or set MICRODUCK_RL_DIR",
-    "g1": "uv run fetch-g1",
-}
+def _hint(robot_id: str) -> str:
+    """What to run when a body's assets are missing.
+
+    `Body.setup_hint()` for the bodies that have a download; the duck's is
+    empty by design (nothing to fetch — a missing MJCF is a broken checkout,
+    not a forgotten command) so it keeps a sentence of its own.
+    """
+    if robot_id == "microduck":
+        return "clone microduck_rl next to microduck_local, or set MICRODUCK_RL_DIR"
+    return R.setup_hint(robot_id) or "fetch this body's assets"
 
 
-def _robot_params():
-    """Every id in the registry, each skipped if its assets are missing.
+def _params(predicate=None):
+    """Registry ids, each skipped if its assets are missing.
 
     Built from `registry()` rather than listed, so a body that is added
     without appearing here — the whole failure mode this file exists for —
@@ -103,19 +138,43 @@ def _robot_params():
     """
     out = []
     for rid in sorted(S.registry()):
-        hint = _SETUP_HINT.get(rid, "fetch this body's assets")
-        reason = f"{rid} assets missing — {hint}"
+        if predicate is not None and not predicate(_resolved(S.get(rid))):
+            continue
+        reason = f"{rid} assets missing — {_hint(rid)}"
         out.append(pytest.param(
             rid, marks=pytest.mark.skipif(not _assets_ready(rid), reason=reason)))
     return out
 
 
-ROBOTS = _robot_params()
+#: Every body. The cases over this list must be answerable without feet.
+ROBOTS = _params()
+#: The bodies the WALKING env can walk — `RobotSpec`'s own first line.
+WALKERS = _params(lambda b: isinstance(b, RobotSpec))
+#: Wheeled bodies: a base that cannot pitch and an arm instead of a gait.
+WHEELED = _params(lambda b: b.kind == "wheeled")
+
+
+def test_every_body_is_on_exactly_one_of_the_kind_rosters():
+    """The split must not lose a body.
+
+    A `kind` nobody wrote a case for would silently drop that body from
+    every hold check in this file — it would still be "green", by being
+    untested, which is exactly the shape of a toothless suite. So: every
+    registry id is a walker or a wheeled body, and none is both.
+    """
+    def ids(params):
+        return {p.values[0] for p in params}
+
+    assert ids(WALKERS) | ids(WHEELED) == ids(ROBOTS), (
+        f"bodies on no kind roster: "
+        f"{ids(ROBOTS) - ids(WALKERS) - ids(WHEELED)} — add a case set for "
+        "their kind, or say here why the generic cases are enough")
+    assert not (ids(WALKERS) & ids(WHEELED)), "a body claims two kinds"
 
 
 @lru_cache(maxsize=4)
 def _model(robot_id: str) -> mujoco.MjModel:
-    """The body's own training scene, compiled. Cached: the G1's costs 0.7 s."""
+    """The body's own scene, compiled. Cached: the G1's costs 0.7 s."""
     return mujoco.MjModel.from_xml_path(str(S.get(robot_id).scene_fn()))
 
 
@@ -126,7 +185,7 @@ def _env(robot_id: str, **kw):
     MICRODUCK_ACTUATOR is read by the plain `actuator` kwarg, so a lab or
     trainer process that exported it would otherwise change what this file
     measures. ("bam" is the duck's XL330 identification and the G1 refuses
-    it, so "xml" is the one setting every body can be held to.)
+    it, so "xml" is the one setting every WALKER can be held to.)
     """
     kw.setdefault("obs_noise", False)
     kw.setdefault("domain_rand", False)
@@ -137,16 +196,107 @@ def _env(robot_id: str, **kw):
     return env_class(robot_id, "walk")(**kw)
 
 
-# ------------------------------------------------- 1. the scene and its names
+def _with_num_actions(body, n: int):
+    """A copy of `body` whose `num_actions` is `n`.
 
-def _missing_names(model: mujoco.MjModel, spec) -> list[str]:
-    """Every NAME the spec declares that the compiled model does not have.
+    `dataclasses.replace` cannot express this: `num_actions` is a PROPERTY,
+    derived from the joints for a walker and a constant 8 for MARS. The
+    planted negative for the width rule needs it anyway, so the copy gets a
+    subclass with the number pinned.
+    """
+    cls = type(body)
+    plant = type(f"{cls.__name__}NumActionsPlant", (cls,),
+                 {"num_actions": property(lambda self: n)})
+    return plant(**{f.name: getattr(body, f.name)
+                    for f in dataclasses.fields(body)})
+
+
+# ------------------------------------------- 1. the scene and its names (all)
+
+def _missing_body_names(model: mujoco.MjModel, body) -> list[str]:
+    """Every name ANY body declares that the compiled model does not have.
 
     A spec is "either a NAME the compiled model is asked for or a dimension"
     (robots/spec.py). The point of a name is that it fails LOUDLY: a wrong
     foot pad used to resolve to id -1, no contact ever matched it, and the
-    air-time reward silently paid nothing. This is that scan, over every
-    field at once, so a new field cannot be added without a home here.
+    air-time reward silently paid nothing. This is that scan over the fields
+    EVERY body has; `_missing_walker_names` adds the walker's.
+    """
+    miss: list[str] = []
+
+    def need(kind: str, objtype, name: str) -> None:
+        if mujoco.mj_name2id(model, objtype, name) < 0:
+            miss.append(f"{kind}={name!r}")
+
+    need("stand_keyframe", mujoco.mjtObj.mjOBJ_KEY, body.stand_keyframe)
+    for j in body.joint_names:
+        need("joint_names", mujoco.mjtObj.mjOBJ_JOINT, j)
+    # `effectors` is a RobotSpec field TODAY but not a walker's idea: it is
+    # what the 🎬 editor lets you drag, and MARS's arm gets an `ee_link` one
+    # in Phase 4. Checked generically so that when it arrives it is already
+    # covered — and read with a default rather than assumed, because a body
+    # with nothing draggable declares nothing.
+    for e in getattr(body, "effectors", ()):
+        need(f"effectors[{e.id}].body", mujoco.mjtObj.mjOBJ_BODY, e.body)
+    return miss
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
+def test_the_bodys_scene_compiles_and_every_declared_name_resolves(robot):
+    """The floor of "supported": `scene_fn()` compiles, it carries the
+    keyframe the body spawns from, and nothing it names is a typo."""
+    body = S.get(robot)
+    model = _model(robot)
+    assert model.nq > 0
+    # Not `nu > 0`: a walker's env writes `data.ctrl`, so it needs actuators
+    # (asserted in the walker case below), but mars.urdf has no <actuator>
+    # block at all — Innate's driver commands positions through
+    # `qfrc_applied`, and `robots/mars.arm_servo` is that. nu == 0 is the
+    # correct answer for MARS, not a broken model.
+    assert _missing_body_names(model, body) == []
+    key = model.key(body.stand_keyframe)         # raises if absent
+    assert key.qpos.shape[0] == model.nq, "the spawn keyframe is a different nq"
+
+
+def _body_name_plants(robot: str) -> list[tuple[str, dict]]:
+    """One planted wrong name per kind of name EVERY body carries."""
+    body = _resolved(S.get(robot))
+    plants = [
+        ("stand_keyframe", dict(stand_keyframe="NO_SUCH_KEY")),
+        ("joint_names", dict(joint_names=("no_such_joint",) + body.joint_names[1:])),
+    ]
+    if getattr(body, "effectors", ()):
+        plants.append(("effectors", dict(effectors=tuple(
+            dataclasses.replace(e, body="no_such_body") if i == 0 else e
+            for i, e in enumerate(body.effectors)))))
+    return plants
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
+def test_the_name_scan_catches_a_wrong_name_of_every_kind(robot):
+    """The planted regression for the scan above.
+
+    Each field gets a deliberately wrong name in a copy of the body, and the
+    same scan must report THAT field. Without this, a scan that silently
+    stopped checking a field (a renamed attribute, an empty tuple) would keep
+    passing — which is how a toothless test gets written.
+    """
+    model = _model(robot)
+    body = _resolved(S.get(robot))
+    for kind, override in _body_name_plants(robot):
+        miss = _missing_body_names(model, dataclasses.replace(body, **override))
+        assert any(m.startswith(kind) for m in miss), (
+            f"{robot}: a wrong {kind} was not reported ({miss})")
+
+
+# ------------------------------------- 2. the walker's own names (WALKERS)
+
+def _missing_walker_names(model: mujoco.MjModel, spec) -> list[str]:
+    """Every name the WALKING env asks the model for.
+
+    Feet, the IMU body, the gyro, the floor, the randomizer's com bodies and
+    the 🎮 rig controls' joints. None of these mean anything on a wheeled
+    base, which is why they are not in the generic scan.
     """
     miss: list[str] = []
 
@@ -157,16 +307,11 @@ def _missing_names(model: mujoco.MjModel, spec) -> list[str]:
     need("base_body", mujoco.mjtObj.mjOBJ_BODY, spec.base_body)
     need("gyro_sensor", mujoco.mjtObj.mjOBJ_SENSOR, spec.gyro_sensor)
     need("floor_geom", mujoco.mjtObj.mjOBJ_GEOM, spec.floor_geom)
-    need("stand_keyframe", mujoco.mjtObj.mjOBJ_KEY, spec.stand_keyframe)
     for side, geoms in spec.foot_geoms.items():
         for g in geoms:
             need(f"foot_geoms[{side}]", mujoco.mjtObj.mjOBJ_GEOM, g)
     for b in spec.com_bodies:
         need("com_bodies", mujoco.mjtObj.mjOBJ_BODY, b)
-    for e in spec.effectors:
-        need(f"effectors[{e.id}].body", mujoco.mjtObj.mjOBJ_BODY, e.body)
-    for j in spec.joint_names:
-        need("joint_names", mujoco.mjtObj.mjOBJ_JOINT, j)
     # A rig control is a direction in (joints + rootPitch) space keyed by
     # joint NAME, served verbatim to the viewer, which DROPS a joint the body
     # lacks. Dropping is the right behaviour for a control authored for
@@ -182,67 +327,49 @@ def _missing_names(model: mujoco.MjModel, spec) -> list[str]:
     return miss
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
-def test_the_bodys_scene_compiles_and_every_declared_name_resolves(robot):
-    """The floor of "supported": `scene_fn()` compiles, it carries the STAND
-    keyframe the env spawns from, and nothing the spec names is a typo."""
+@pytest.mark.parametrize("robot", WALKERS)
+def test_every_name_the_walking_env_needs_resolves(robot):
+    """The walker's half of the name scan, plus the two model facts its env
+    depends on: actuators to write `data.ctrl` into, and a 3-float gyro."""
     spec = S.get(robot)
     model = _model(robot)
-    assert model.nq > 0 and model.nu > 0
-    assert _missing_names(model, spec) == []
-    key = model.key(spec.stand_keyframe)         # raises if absent
-    assert key.qpos.shape[0] == model.nq, "the STAND keyframe is a different nq"
+    assert model.nu > 0, "the walking env drives data.ctrl"
+    assert _missing_walker_names(model, spec) == []
     # walk_env reads the gyro as sensordata[adr:adr+3]; a 1-d sensor under
     # that name would hand the policy two neighbouring channels.
     assert int(model.sensor(spec.gyro_sensor).dim[0]) == 3
 
 
-def _name_plants(robot: str) -> list[tuple[str, dict]]:
-    """One planted wrong name per KIND of name a spec carries."""
+@pytest.mark.parametrize("robot", WALKERS)
+def test_the_walker_name_scan_catches_a_wrong_name_of_every_kind(robot):
+    """The planted regression for the walker's scan."""
+    model = _model(robot)
     spec = _resolved(S.get(robot))
     side, geoms = next(iter(spec.foot_geoms.items()))
     rig = spec.rig_controls[0]
-    return [
+    plants = [
         ("base_body", dict(base_body="no_such_link")),
         ("gyro_sensor", dict(gyro_sensor="no_such_sensor")),
         ("floor_geom", dict(floor_geom="no_such_floor")),
-        ("stand_keyframe", dict(stand_keyframe="NO_SUCH_KEY")),
         ("foot_geoms", dict(foot_geoms={**spec.foot_geoms,
                                         side: ("no_such_pad",) + geoms[1:]})),
         ("com_bodies", dict(com_bodies=spec.com_bodies + ("no_such_body",))),
-        ("effectors", dict(effectors=tuple(
-            dataclasses.replace(e, body="no_such_body") if i == 0 else e
-            for i, e in enumerate(spec.effectors)))),
-        ("joint_names", dict(joint_names=("no_such_joint",) + spec.joint_names[1:])),
         ("rig_controls", dict(rig_controls=(
             {**rig, "parts": {**rig["parts"], "no_such_joint": 1.0}},)
             + spec.rig_controls[1:])),
     ]
-
-
-@pytest.mark.parametrize("robot", ROBOTS)
-def test_the_name_scan_catches_a_wrong_name_of_every_kind(robot):
-    """The planted regression for the scan above.
-
-    Each field gets a deliberately wrong name in a copy of the spec, and the
-    same scan must report THAT field. Without this, a scan that silently
-    stopped checking a field (a renamed attribute, an empty tuple) would keep
-    passing — which is how a toothless test gets written.
-    """
-    model = _model(robot)
-    spec = _resolved(S.get(robot))
-    for kind, override in _name_plants(robot):
-        miss = _missing_names(model, dataclasses.replace(spec, **override))
+    for kind, override in plants:
+        miss = _missing_walker_names(model, dataclasses.replace(spec, **override))
         assert any(m.startswith(kind) for m in miss), (
             f"{robot}: a wrong {kind} was not reported ({miss})")
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_the_env_refuses_a_spec_naming_a_geom_the_model_lacks(robot):
     """Not just the scan above: the ENV itself must refuse the bad name.
 
     `test_robot_spec.py` pins this for the duck. It is a property of every
-    body — the lookups are spec-driven — and a body whose env swallowed a
+    walker — the lookups are spec-driven — and a body whose env swallowed a
     missing foot pad would train against a reward that never fires.
     """
     spec = _resolved(S.get(robot))
@@ -253,14 +380,66 @@ def test_the_env_refuses_a_spec_naming_a_geom_the_model_lacks(robot):
         _env(robot, robot=bad)
 
 
-# ----------------------------------------------------------- 2. the dimensions
+# ------------------------------------------------- 3. the dimensions (all)
 
-def _dimension_report(spec) -> list[str]:
-    """Every way a spec's numbers can disagree with each other."""
+def _dimension_report(body) -> list[str]:
+    """Every way ANY body's numbers can disagree with each other."""
+    bad: list[str] = []
+    nj = body.num_joints
+    if len(body.default_pose) != nj:
+        bad.append(f"default_pose is {len(body.default_pose)} for {nj} joints")
+    # Generically a body's action vector must at least COVER its joints;
+    # MARS's is 8 for 6 joints (the two extra are the base twist). A walker
+    # is held to equality in `_walker_dimension_report`.
+    if body.num_actions < nj:
+        bad.append(f"num_actions {body.num_actions} < {nj} joints")
+    if body.joint_groups is not None and len(body.joint_groups) != nj:
+        bad.append(f"joint_groups is {len(body.joint_groups)} for {nj} joints")
+    if body.obs_dim <= 0:
+        bad.append(f"obs_dim {body.obs_dim}")
+    if body.lab_spacing_m <= 0:
+        bad.append(f"lab_spacing_m {body.lab_spacing_m}")
+    return bad
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
+def test_the_bodys_own_numbers_agree_with_each_other(robot):
+    """A body's dimensions are read by code that cannot sanity-check them.
+
+    `default_pose` is added to every action, the 🎬 panel labels joints by
+    `joint_groups`, `obs_dim` is what the lab refuses a foreign policy by and
+    what the exporter shapes the graph from. Each of those is a silent wrong
+    answer, not a crash, when a length is off by one.
+    """
+    assert _dimension_report(_resolved(S.get(robot))) == []
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
+def test_a_planted_dimension_mismatch_is_caught(robot):
+    """The planted regression: one broken number at a time, all reported."""
+    body = _resolved(S.get(robot))
+    groups = body.joint_groups or ("a",) * body.num_joints
+    plants = [
+        ("a joint short of a default pose", "default_pose",
+         dataclasses.replace(body, default_pose=body.default_pose[:-1])),
+        ("a joint short of a group label", "joint_groups",
+         dataclasses.replace(body, joint_groups=groups[:-1])),
+        ("an obs width of zero", "obs_dim",
+         dataclasses.replace(body, obs_dim=0)),
+        ("a stage pitch of zero", "lab_spacing_m",
+         dataclasses.replace(body, lab_spacing_m=0.0)),
+        ("fewer actions than joints", "num_actions",
+         _with_num_actions(body, body.num_joints - 1)),
+    ]
+    for label, field, bad in plants:
+        report = _dimension_report(bad)
+        assert any(field in b for b in report), f"{label} not reported: {report}"
+
+
+def _walker_dimension_report(spec) -> list[str]:
+    """The numbers only the walking env reads."""
     bad: list[str] = []
     nj = spec.num_joints
-    if len(spec.default_pose) != nj:
-        bad.append(f"default_pose is {len(spec.default_pose)} for {nj} joints")
     if spec.num_actions != nj:
         bad.append(f"num_actions {spec.num_actions} != {nj} joints")
     if spec.action_scale is not None and len(spec.action_scale) != nj:
@@ -269,64 +448,55 @@ def _dimension_report(spec) -> list[str]:
         ids = np.asarray(spec.pose_joint_ids)
         if ids.size and (ids.min() < 0 or ids.max() >= nj):
             bad.append(f"pose_joint_ids {ids.min()}..{ids.max()} outside 0..{nj - 1}")
-    if spec.joint_groups is not None and len(spec.joint_groups) != nj:
-        bad.append(f"joint_groups is {len(spec.joint_groups)} for {nj} joints")
     lo, hi = spec.twist_obs_slice
     if not (0 <= lo < hi <= spec.obs_dim):
         bad.append(f"twist_obs_slice {(lo, hi)} does not fit obs_dim {spec.obs_dim}")
-    # A twist is at most (vx, vy, wz) — both legged bodies use all three; a
-    # wheeled base would use two. Its consumer (`_seed_command_stats`) is
-    # width-agnostic, so the ceiling is here to catch a slice typed one field
-    # too wide, which would silently stop normalizing real observations.
+    # A twist is at most (vx, vy, wz) — both legged bodies use all three. Its
+    # consumer (`_seed_command_stats`) is width-agnostic, so the ceiling is
+    # here to catch a slice typed one field too wide, which would silently
+    # stop normalizing real observations.
     if not 1 <= hi - lo <= 3:
         bad.append(f"twist_obs_slice {(lo, hi)} is {hi - lo} wide, not 1-3")
-    if spec.obs_dim <= 0:
-        bad.append(f"obs_dim {spec.obs_dim}")
     return bad
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
-def test_the_specs_own_numbers_agree_with_each_other(robot):
-    """A spec's dimensions are read by code that cannot sanity-check them.
-
-    `scale_action` adds `default_pose` to the action, the pose reward indexes
-    `pose_joint_ids`, the 🎬 panel labels joints by `joint_groups`, and
-    `train._seed_command_stats` writes into `twist_obs_slice` — the last one
-    because a policy cloned under a PINNED command has ~zero variance there
-    and the first real command normalizes to thousands. Each of those is a
-    silent wrong answer, not a crash, when the length is off by one.
-    """
-    assert _dimension_report(_resolved(S.get(robot))) == []
+@pytest.mark.parametrize("robot", WALKERS)
+def test_the_walkers_numbers_agree_with_each_other(robot):
+    """`scale_action` adds `default_pose` to the action, the pose reward
+    indexes `pose_joint_ids`, and `train._seed_command_stats` writes into
+    `twist_obs_slice` — that last one because a policy cloned under a PINNED
+    command has ~zero variance there and the first real command normalizes to
+    thousands."""
+    assert _walker_dimension_report(_resolved(S.get(robot))) == []
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
-def test_a_planted_dimension_mismatch_is_caught(robot):
-    """The planted regression: one broken number at a time, all reported."""
+@pytest.mark.parametrize("robot", WALKERS)
+def test_a_planted_walker_dimension_mismatch_is_caught(robot):
+    """The planted regression for the walker's numbers."""
     spec = _resolved(S.get(robot))
-    groups = spec.joint_groups or ("a",) * spec.num_joints
     lo, _hi = spec.twist_obs_slice
     plants = [
-        ("a joint short of a default pose", "default_pose",
-         dict(default_pose=spec.default_pose[:-1])),
-        ("a joint short of a group label", "joint_groups",
-         dict(joint_groups=groups[:-1])),
         ("a pose id one past the last joint", "pose_joint_ids",
-         dict(pose_joint_ids=np.array([spec.num_joints]))),
+         dataclasses.replace(spec, pose_joint_ids=np.array([spec.num_joints]))),
         ("a twist slice hanging off the end", "twist_obs_slice",
-         dict(twist_obs_slice=(spec.obs_dim - 1, spec.obs_dim + 2))),
+         dataclasses.replace(spec, twist_obs_slice=(spec.obs_dim - 1,
+                                                    spec.obs_dim + 2))),
         ("a twist slice eight floats wide", "twist_obs_slice",
-         dict(twist_obs_slice=(lo, lo + 8))),
+         dataclasses.replace(spec, twist_obs_slice=(lo, lo + 8))),
         ("one action scale too many", "action_scale",
-         dict(action_scale=np.ones(spec.num_joints + 1, np.float32))),
+         dataclasses.replace(spec, action_scale=np.ones(spec.num_joints + 1,
+                                                        np.float32))),
+        ("an action per joint plus one", "num_actions",
+         _with_num_actions(spec, spec.num_joints + 1)),
     ]
-    for label, field, override in plants:
-        bad = _dimension_report(dataclasses.replace(spec, **override))
-        assert any(field in b for b in bad), f"{label} not reported: {bad}"
+    for label, field, bad in plants:
+        report = _walker_dimension_report(bad)
+        assert any(field in b for b in report), f"{label} not reported: {report}"
 
 
-# -------------------------------------------------------------- 3. the mirror
+# ------------------------------------------------- 4. the mirror (WALKERS)
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_the_mirror_is_a_permutation_and_its_own_inverse(robot):
     """`symmetry.py` augments a rollout by applying this map to the joints.
 
@@ -334,6 +504,10 @@ def test_the_mirror_is_a_permutation_and_its_own_inverse(robot):
     (two joints reading the same servo, one read by none); if it is not an
     involution, mirroring twice is not the identity and the augmentation
     drifts the dataset instead of doubling it.
+
+    Walkers only because the map is `RobotSpec`'s: a left/right pairing by
+    name is a statement about a body with two sides, and MARS's one arm has
+    no mirror to be.
     """
     spec = S.get(robot)
     perm = spec.mirror_joint_perm()
@@ -342,7 +516,7 @@ def test_the_mirror_is_a_permutation_and_its_own_inverse(robot):
     assert np.array_equal(perm[perm], np.arange(spec.num_joints))
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_a_duplicated_joint_name_breaks_the_mirror_and_is_caught(robot):
     """The planted regression: `mirror_joint_perm` pairs by NAME with
     `names.index`, so a copy-pasted duplicate makes two joints mirror to the
@@ -354,9 +528,9 @@ def test_a_duplicated_joint_name_breaks_the_mirror_and_is_caught(robot):
     assert sorted(perm.tolist()) != list(range(len(names)))
 
 
-# ------------------------------------------------------- 4. the policy contract
+# ----------------------------------------- 5. the policy contract (WALKERS)
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_the_env_serves_exactly_the_width_the_spec_declares(robot):
     """The lab refuses a policy on the wrong body BY OBSERVATION WIDTH (61 vs
     99, guarded at four sites in `viz_server`), and the exporter shapes the
@@ -366,7 +540,9 @@ def test_the_env_serves_exactly_the_width_the_spec_declares(robot):
     They are three places today: `walk_env` sizes `observation_space` from
     the spec but the duck's `_get_obs` writes a literal 61-float layout (the
     deployment contract, deliberately fixed). This is the cross-check that
-    they cannot drift apart.
+    they cannot drift apart. MARS declares its 32-float layout in
+    `robots/mars.py` with no env to fill it yet (Phase 4), which is why this
+    case is a walker's.
     """
     spec = S.get(robot)
     env = _env(robot)
@@ -381,7 +557,7 @@ def test_the_env_serves_exactly_the_width_the_spec_declares(robot):
                        spec.default_pose, atol=1e-6)
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_a_spec_that_understates_its_obs_width_cannot_serve_an_observation(robot):
     """The planted regression for the cross-check above: a spec one float
     short of what its `_get_obs` assembles must not quietly hand out an
@@ -400,16 +576,19 @@ def test_a_spec_that_understates_its_obs_width_cannot_serve_an_observation(robot
         f"{env.observation_space.shape} — the widths can drift silently")
 
 
-# ----------------------------------------------------------------- 5. it holds
+# ------------------------------------------------ 6. it holds (per kind)
 
 def _hold_policy(robot_id: str) -> Path | None:
     """The shipped policy that holds this body STILL, or None.
 
-    `Body.shipped_policies()` in the MARS plan; today the duck's live in
+    `Body.shipped_policies()` exists now, but WHICH of a body's policies is
+    the idle is still only known here: the duck's live in
     `../microduck/policies` (the lab's `POLICIES_DIR`) and the G1's in its
-    fetched cache, and only this table knows which one is the idle. The G1's
-    `walker.onnx` IS its idle — measured at zero command, 60 s, two seeds:
-    1.2-1.7 cm of drift, both feet down, no falls (robots/g1.py).
+    fetched cache. The G1's `walker.onnx` IS its idle — measured at zero
+    command, 60 s, two seeds: 1.2-1.7 cm of drift, both feet down, no falls
+    (robots/g1.py). MARS ships nothing (Innate's learned skills are ACT
+    checkpoints, not ONNX), and its own servo holds it instead — see the
+    wheeled case below.
     """
     if robot_id == "microduck":
         from microduck_local.viz_server import POLICIES_DIR
@@ -462,7 +641,7 @@ def _hold(robot_id: str, seconds: float, policy: Path | None):
     return worst
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_the_shipped_hold_policy_keeps_the_body_up_for_two_seconds(robot):
     """The spawn state has to be a state the body can be held in.
 
@@ -478,10 +657,6 @@ def test_the_shipped_hold_policy_keeps_the_body_up_for_two_seconds(robot):
                                  -0.998, ncon <= 5
         g1         walker.onnx   z 0.763 -> 0.765 (min 0.760), gravity_z
                                  -1.000, ncon <= 28
-
-    A body with no shipped policy (Innate's MARS ships none — its learned
-    skills are ACT checkpoints, not ONNX) skips this, and the open-loop case
-    below carries the sanity half on its own.
     """
     policy = _hold_policy(robot)
     if policy is None:
@@ -501,7 +676,7 @@ def test_the_shipped_hold_policy_keeps_the_body_up_for_two_seconds(robot):
         f"{robot}: {worst['ncon']} contacts — a solver blow-up, not a stand")
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_an_open_loop_hold_topples_inside_that_window(robot):
     """The planted regression for the settle test, and the measurement that
     decides how it is written.
@@ -517,13 +692,12 @@ def test_an_open_loop_hold_topples_inside_that_window(robot):
     Keeping it as a test does two jobs: it shows the settle assertions bite
     (the same window, no policy, fails them), and its first two assertions —
     no NaN, no contact explosion — are the half of "it settles" that needs no
-    policy, so a body that ships none is still held to something here.
+    policy.
 
-    Every id in the registry today is one the WALKING env can walk
-    (`RobotSpec`'s own first line), so every one of them topples. A wheeled
-    base cannot fall at all: when `Body.kind` lands (MARS plan §1) this case
-    keeps the two assertions above and asks for the topple only when
-    `kind == "legged"`.
+    A wheeled body is the other way round: it CANNOT fall, and its own hold
+    is `test_a_wheeled_body_holds_its_arm_where_it_was_put`. That is why this
+    case is on the WALKERS roster — the `kind` guard the earlier draft asked
+    for is the roster itself.
     """
     spec = S.get(robot)
     worst = _hold(robot, HOLD_SECONDS, None)
@@ -538,11 +712,122 @@ def test_an_open_loop_hold_topples_inside_that_window(robot):
         f"(z {worst['z']:.3f}, gravity_z {worst['gravity_z']:+.3f}). For a "
         "legged body that is GOOD NEWS — and it means the settle test above "
         "is passing for a reason its docstring no longer describes: "
-        "re-measure and rewrite both. For a wheeled body it is expected: "
-        "guard this assertion on the body's kind.")
+        "re-measure and rewrite both.")
 
 
-# --------------------------------------------------- 6. two bodies, one model
+def _servo_hold(robot_id: str, seconds: float):
+    """Hold a wheeled body at its HOME keyframe with its OWN servo.
+
+    The seam this stands in for is `Body.driver()` (Phase 3): a wheeled
+    body's reflex tier is not a policy, it is a controller, so "hold still"
+    means running that controller rather than loading an ONNX. Until the
+    driver lands, the one wheeled body's servo is named here — the last
+    id-table in this file, and the case's whole point is the numbers, not
+    the lookup.
+    """
+    assert robot_id == "mars", (
+        f"no servo hold for {robot_id!r} — give its kind a hold case in "
+        "_servo_hold, or add its driver (docs/mars-roadmap.md Phase 3)")
+    from microduck_local.robots import mars
+
+    body = S.get(robot_id)
+    model = _model(robot_id)
+    data = mujoco.MjData(model)
+    mujoco.mj_resetDataKeyframe(model, data, model.key(body.stand_keyframe).id)
+    adr = mars.servo_addresses(model)
+    base = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, mars.BASE_BODY)
+    assert base >= 0, f"{robot_id}: no {mars.BASE_BODY} body"
+    # The planar DoFs, by NAME: (x m, y m, yaw rad). Reported, not asserted
+    # on — the arm's reaction torque IS allowed to shove an undriven base
+    # (that is what Innate's station keeping exists for, Phase 3), so a band
+    # here would be a guess about a controller that does not exist yet.
+    planar = [model.joint(n).qposadr[0] for n in mars.BASE_JOINTS]
+    mujoco.mj_forward(model, data)
+    start_z = float(data.xpos[base][2])
+    start_planar = data.qpos[planar].copy()
+    worst = dict(joint_err=0.0, ncon=0, nan=False, base_dz=0.0)
+    for _ in range(int(round(seconds / model.opt.timestep))):
+        mars.arm_servo(model, data, mars.ARM_HOME, adr=adr)
+        mujoco.mj_step(model, data)
+        err = max(abs(float(data.qpos[adr[n][0]]) - t)
+                  for n, t in mars.ARM_HOME.items())
+        worst["joint_err"] = max(worst["joint_err"], err)
+        worst["ncon"] = max(worst["ncon"], int(data.ncon))
+        worst["base_dz"] = max(worst["base_dz"],
+                               abs(float(data.xpos[base][2]) - start_z))
+        worst["nan"] = worst["nan"] or not (
+            np.isfinite(data.qpos).all() and np.isfinite(data.qvel).all())
+    worst["mimic"] = float(data.qpos[adr[mars.MIMIC_JOINT[0]][0]])
+    worst["planar"] = np.abs(data.qpos[planar] - start_planar)
+    return worst
+
+
+@pytest.mark.parametrize("robot", WHEELED)
+def test_a_wheeled_body_holds_its_arm_where_it_was_put(robot):
+    """The wheeled kind's version of "the spawn state is a state it can hold".
+
+    A walker's hold is a trained behaviour, and its failure is a fall. A
+    wheeled base cannot fall — `add_planar_base` gives it (x, y, yaw) and no
+    z or pitch at all — so the equivalent statement is: at HOME, under the
+    body's own servo, the arm stays where it was put, nothing explodes, and
+    the base does not move in a direction it has no degree of freedom in.
+
+    That last one is the load-bearing assertion. `base z within 1 mm` is not
+    a tolerance, it is a structural claim: a non-zero value means the model
+    is not the model this body thinks it is (a free joint that crept back in,
+    a keyframe from another nq, an attach that lost the planar joints).
+
+    MEASURED on MARS (this Mac, its scene at 5 ms, 2 s): max |q - home|
+    0.00344 rad, base z drift 0.0 mm, ncon <= 6, joint6M mirroring joint6 to
+    5 decimal places. `arm_servo` is Innate's own PD (KP 50 / KD 1, 50 N*m,
+    the gripper on 2), so a number out of band here is a port that drifted
+    from theirs, not a policy that needs training.
+    """
+    from microduck_local.robots import mars
+
+    worst = _servo_hold(robot, HOLD_SECONDS)
+    assert not worst["nan"], f"{robot}: NaN in qpos/qvel during the hold"
+    assert worst["ncon"] < CONTACT_CEILING, (
+        f"{robot}: {worst['ncon']} contacts — a solver blow-up, not a hold")
+    assert worst["joint_err"] < WHEELED_JOINT_BAND_RAD, (
+        f"{robot}: the arm drifted {worst['joint_err']:.4f} rad off HOME, "
+        f"band is {WHEELED_JOINT_BAND_RAD}")
+    assert worst["base_dz"] < WHEELED_BASE_Z_BAND_M, (
+        f"{robot}: the base moved {worst['base_dz'] * 1e3:.3f} mm in z — a "
+        "planar base has no z degree of freedom, so the model is not the "
+        "one this body describes (its planar drift over the window was "
+        f"{worst['planar'][0]:.2g}, {worst['planar'][1]:.2g} m and "
+        f"{worst['planar'][2]:.2g} rad, which IS allowed: nothing holds an "
+        "undriven base against the arm's reaction torque until Phase 3's "
+        "station keeping)")
+    assert worst["mimic"] == pytest.approx(
+        mars.MIMIC_JOINT[2] * mars.ARM_HOME[mars.MIMIC_JOINT[1]], abs=1e-3), (
+        f"{robot}: the mimic finger sits at {worst['mimic']:+.5f}, not "
+        "mirroring joint6 — a gripper that opens one blade only")
+
+
+@pytest.mark.parametrize("robot", WHEELED)
+def test_a_wheeled_hold_with_a_dead_servo_sags_out_of_the_band(robot):
+    """The planted regression for the hold above: KP 0 and the arm falls.
+
+    Without this, "the arm stays within 0.01 rad of HOME" could be passing
+    because the arm has nowhere to go — a frozen joint, a zero-gravity
+    option, a keyframe that is also the equilibrium. Turning the servo's
+    stiffness off must therefore break it, and by a lot: MEASURED, the arm
+    sags to the joint limits within the same 2 s window.
+    """
+    from microduck_local.robots import mars
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(mars, "KP_JOINT", 0.0)
+        worst = _servo_hold(robot, HOLD_SECONDS)
+    assert not worst["nan"], f"{robot}: a dead servo produced NaN, not a sag"
+    assert worst["joint_err"] > WHEELED_JOINT_BAND_RAD, (
+        f"{robot} held HOME to {worst['joint_err']:.4f} rad with KP 0 — the "
+        "hold test above is not measuring the servo")
+
+
+# --------------------------------------------- 7. two bodies, one model (all)
 
 def _floor_world(robot_id: str) -> mujoco.MjSpec:
     """An empty floor world, with the option block `compose()` uses."""
@@ -562,12 +847,17 @@ def _floor_world(robot_id: str) -> mujoco.MjSpec:
     return world
 
 
-def _attachable(robot_id: str) -> mujoco.MjSpec:
-    """One body as an `MjSpec` ready to attach — `compose()`'s own sources."""
-    if robot_id == "g1":
-        from microduck_local.robots.g1 import g1_spec
-        return g1_spec()
-    return mujoco.MjSpec.from_file(str(ROBOT_XML["walk"]))
+def _attach(world: mujoco.MjSpec, robot_id: str, prefix: str, pos) -> None:
+    """Attach one body into `world` — through `Body.attach()`, the seam.
+
+    The duck's and the G1's attach sequences are `compose()`'s own (the
+    `MicroduckBody` / `G1Body` methods hold them today), and MARS's is
+    Innate's recipe. Going through the body rather than reaching for each
+    one's XML is what makes this case prove the SEAM works, not just that
+    three files happen to contain attachable models.
+    """
+    frame = world.worldbody.add_frame(pos=pos)
+    S.get(robot_id).attach(world, prefix=prefix, frame=frame)
 
 
 @pytest.mark.parametrize("robot", ROBOTS)
@@ -582,11 +872,8 @@ def test_the_body_attaches_under_a_prefix_beside_a_duck_in_one_model(robot):
     possible world: this body as "a/", a duck as "b/".
     """
     world = _floor_world(robot)
-    w = world.worldbody
-    world.attach(_attachable(robot), prefix="a/",
-                 frame=w.add_frame(pos=[0, 1.0, 0.0]))
-    world.attach(_attachable("microduck"), prefix="b/",
-                 frame=w.add_frame(pos=[0, -1.0, 0.0]))
+    _attach(world, robot, "a/", [0, 1.0, 0.0])
+    _attach(world, "microduck", "b/", [0, -1.0, 0.0])
     model = world.compile()
 
     for rid, prefix in ((robot, "a/"), ("microduck", "b/")):
@@ -610,27 +897,25 @@ def test_two_bodies_in_one_model_need_the_prefix(robot):
     MuJoCo refuses the repeated name. If this ever stops raising, the test
     above is not proving that the prefix did the work."""
     world = _floor_world(robot)
-    w = world.worldbody
-    world.attach(_attachable(robot), prefix="", frame=w.add_frame(pos=[0, 1.0, 0.0]))
+    _attach(world, robot, "", [0, 1.0, 0.0])
     with pytest.raises(ValueError, match="repeated name"):
-        world.attach(_attachable(robot), prefix="",
-                     frame=w.add_frame(pos=[0, -1.0, 0.0]))
+        _attach(world, robot, "", [0, -1.0, 0.0])
         world.compile()
 
 
-# ------------------------------------------------------------- 7. the lab slot
+# ------------------------------------------------- 8. the lab slot (all)
 
 def _widest_horizontal_extent_m(robot_id: str) -> float:
-    """Widest HORIZONTAL extent of the whole body at its STAND keyframe, m.
+    """Widest HORIZONTAL extent of the whole body at its spawn keyframe, m.
 
     The geom AABBs in world axes — what must not overlap on the stage.
     `tests/test_lab_robots.py` measures the same thing by hand for the duck
     and the G1; here it is re-derived for whatever is in the registry.
     """
-    spec = S.get(robot_id)
+    body = S.get(robot_id)
     model = _model(robot_id)
     data = mujoco.MjData(model)
-    mujoco.mj_resetDataKeyframe(model, data, model.key(spec.stand_keyframe).id)
+    mujoco.mj_resetDataKeyframe(model, data, model.key(body.stand_keyframe).id)
     mujoco.mj_forward(model, data)
     lo = np.full(3, np.inf)
     hi = np.full(3, -np.inf)
@@ -652,29 +937,35 @@ def test_the_lab_pitch_is_the_ducks_ratio_on_this_bodys_measured_width(robot):
     One duck-sized constant put six 1.3 m G1 helpers inside each other on
     the stage, so the pitch is per body now — and a per-body number written
     by hand drifts from the model it describes the moment the MJCF changes
-    shape. 5 % is the band: the duck is 3.522x its 0.1845 m and the G1
-    3.522x its 0.5338 m, both within 0.1 % of the ratio.
+    shape. 5 % is the band: the duck is 3.522x its 0.1845 m, the G1 3.522x
+    its 0.5338 m and MARS 3.531x its 0.4135 m, all within 0.3 % of the ratio.
+
+    MARS is also why this case takes the larger of x and y: at HOME its arm
+    is folded over a chassis whose rear tray overhangs 76 mm, so the body is
+    longer (0.4135 m) than it is wide (0.3665 m), and the plan's 1.09 m
+    estimate — taken from the y extent with the arm straight out — would have
+    parked two MARSes 0.7 m closer than their own bodies allow.
     """
-    spec = S.get(robot)
+    body = S.get(robot)
     width = _widest_horizontal_extent_m(robot)
     assert width > 0
-    assert spec.lab_spacing_m == pytest.approx(LAB_PITCH_RATIO * width, rel=0.05), (
+    assert body.lab_spacing_m == pytest.approx(LAB_PITCH_RATIO * width, rel=0.05), (
         f"{robot} measures {width:.4f} m across, so its stage pitch should be "
-        f"~{LAB_PITCH_RATIO * width:.3f} m; the spec says {spec.lab_spacing_m}")
+        f"~{LAB_PITCH_RATIO * width:.3f} m; the spec says {body.lab_spacing_m}")
 
 
 @pytest.mark.parametrize("robot", ROBOTS)
 def test_a_pitch_that_drifted_from_the_measured_width_is_caught(robot):
-    """The planted regression: the same check on a spec whose pitch is 1.5x
+    """The planted regression: the same check on a body whose pitch is 1.5x
     what its body measures (the G1's real bug was the duck's 0.65 m on a
     0.53 m body — a 3.5x error; 1.5x is the smallest thing worth catching)."""
-    spec = _resolved(S.get(robot))
-    bad = dataclasses.replace(spec, lab_spacing_m=spec.lab_spacing_m * 1.5)
+    body = _resolved(S.get(robot))
+    bad = dataclasses.replace(body, lab_spacing_m=body.lab_spacing_m * 1.5)
     width = _widest_horizontal_extent_m(robot)
     assert bad.lab_spacing_m != pytest.approx(LAB_PITCH_RATIO * width, rel=0.05)
 
 
-# --------------------------------------------------------------- 8. the export
+# ----------------------------------------------- 9. the export (WALKERS)
 
 def _tiny_run(robot_id: str, out: Path, robot_in_json: str | None = None) -> Path:
     """The smallest run dir `export_onnx.export` will read: a PPO checkpoint
@@ -699,17 +990,21 @@ def _tiny_run(robot_id: str, out: Path, robot_in_json: str | None = None) -> Pat
     return out
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_a_random_weight_policy_round_trips_through_the_exporter(robot, tmp_path):
-    """Export is the only way a policy leaves this harness, for every body.
+    """Export is the only way a policy leaves this harness.
 
     `export-walk` bakes the observation normaliser into the graph (an
     un-baked checkpoint sees unnormalised observations at deployment and
     silently misbehaves) and shapes the graph from the run's own robot. So
-    for a body to be supported, a checkpoint trained on its env has to come
-    out the far side as `obs[1, obs_dim] -> actions[1, num_actions]` and
-    agree with the torch policy it came from. Random weights are the point:
-    the arithmetic is what is under test, not the behaviour.
+    for a trainable body to be supported, a checkpoint trained on its env has
+    to come out the far side as `obs[1, obs_dim] -> actions[1, num_actions]`
+    and agree with the torch policy it came from. Random weights are the
+    point: the arithmetic is what is under test, not the behaviour.
+
+    Walkers only because it starts from a trained checkpoint, and MARS has no
+    env to train in until Phase 4 — at which point `MarsArmEnv` joins this
+    roster and the case is unchanged.
     """
     import pickle
 
@@ -743,7 +1038,7 @@ def test_a_random_weight_policy_round_trips_through_the_exporter(robot, tmp_path
         np.testing.assert_allclose(got, want, rtol=0, atol=1e-5)
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("robot", WALKERS)
 def test_the_exporter_refuses_a_run_that_names_another_body(robot, tmp_path):
     """The planted regression for the round trip: a run.json that names the
     wrong body must be refused, not exported at the wrong width. Handing
@@ -760,22 +1055,29 @@ def test_the_exporter_refuses_a_run_that_names_another_body(robot, tmp_path):
         export(run, run / "policy.onnx")
 
 
-# ---------------------------------------------------------- 9. the viewer sees
+# ------------------------------------------- 10. the viewer sees (all)
 
 def _visual_scene(robot_id: str) -> tuple[dict, int]:
     """The body's viewer scene, and the `nmesh` of the model it came from.
 
-    `GET /scene?robot=<id>` is this same if-chain in `viz_server`, and
-    `Body.visual_scene()` is where both are going (MARS plan §1).
+    The dump itself is `Body.visual_scene()` now. What has no seam is the
+    number it should be checked AGAINST — each body's dump is built from a
+    different model (the duck's composed scene with its hinged mouth, the
+    G1's bare MJCF, MARS's robot spec), so `nmesh` is still read per body
+    here. `GET /scene?robot=<id>` carries the same if-chain in `viz_server`
+    (PHASE 1B, `docs/mars-roadmap.md` §6.4).
     """
+    scene = S.get(robot_id).visual_scene()
     if robot_id == "microduck":
-        from microduck_local.viz_server import extract_scene
         from microduck_local.world.compose import scene_model
-        return extract_scene(), int(scene_model().nmesh)
+        return scene, int(scene_model().nmesh)
     if robot_id == "g1":
-        from microduck_local.robots.g1 import g1_xml, visual_scene
-        return visual_scene(), int(mujoco.MjModel.from_xml_path(str(g1_xml())).nmesh)
-    raise AssertionError(f"no visual scene for {robot_id!r} — see _visual_scene")
+        from microduck_local.robots.g1 import g1_xml
+        return scene, int(mujoco.MjModel.from_xml_path(str(g1_xml())).nmesh)
+    if robot_id == "mars":
+        from microduck_local.robots import mars
+        return scene, int(mars.robot_spec().compile().nmesh)
+    raise AssertionError(f"no nmesh source for {robot_id!r} — see _visual_scene")
 
 
 def _check_visual_scene(scene: dict, nmesh: int) -> list[str]:

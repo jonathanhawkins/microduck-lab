@@ -302,3 +302,28 @@ def test_the_duck_spec_still_names_the_contract_joints():
     assert C.MICRODUCK.joint_groups is not None
     assert len(C.MICRODUCK.joint_groups) == C.NUM_JOINTS
     assert {e.id for e in C.MICRODUCK.effectors} == {"left_foot", "right_foot", "head"}
+
+
+def test_a_non_walker_is_refused_by_the_editor_with_a_404_not_a_500(monkeypatch):
+    """A third body that does not walk is in the registry now, and the lab's
+    `/robots` list hands every registry entry to the 🎬 editor. `PoseScratch`
+    reads `base_body`, effectors and a stand height — a walker's things — so
+    without this guard a click on MARS died as `AttributeError` (a 500). A
+    `KeyError` is what `viz_server.scratch_for` reports as a 404, with a
+    sentence that says where the arm editor is planned."""
+    from microduck_local import pose
+    from microduck_local.robots import registry as R
+    from microduck_local.robots.body import BodyBase
+
+    class Wheelie(BodyBase):
+        def ready(self):
+            return True
+
+    body = Wheelie(id="wheelie", joint_names=("j1",), default_pose=[0.0],
+                   obs_dim=4, kind="wheeled")
+    monkeypatch.setitem(R._EXTRA, "wheelie", body)
+    monkeypatch.setattr(pose, "_scratch", {})
+    with pytest.raises(KeyError, match="no animate support"):
+        pose.pose_scratch("wheelie")
+    assert "wheelie" not in pose._scratch
+

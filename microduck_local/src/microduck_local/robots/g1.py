@@ -374,13 +374,21 @@ def _quat_apply_inverse(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
     return vec - w * t + np.cross(xyz, t)
 
 
-def extract_visual_scene(model: mujoco.MjModel, prefix: str = "") -> dict:
+def extract_visual_scene(model: mujoco.MjModel, prefix: str = "",
+                         group: int = 2) -> dict:
     """The real G1 visual meshes.
 
     Verts are millimetres (ints) so the JSON is ~21 MB instead of ~78 MB of
     floats; the viewer multiplies by `vertScale`. No voxel weld — that turned
     every thin CAD shell (chest, thighs, shins) into craters.
     Same `{bodies, meshes, geoms}` shape as viz_server.extract_scene.
+
+    `group` is which geom group holds the VISUALS. 2 is the Lucky Robots
+    MJCF's convention and the default, so nothing about the G1 changes;
+    MuJoCo's URDF importer uses 1, which is what `robots/mars.visual_scene`
+    passes. Everything else here is body-agnostic — PHASE 1B: this dump
+    belongs in a shared module rather than on one robot
+    (`docs/mars-roadmap.md` §6.4).
     """
     body_index: dict[int, int] = {}
     bodies: list[str] = []
@@ -394,7 +402,7 @@ def extract_visual_scene(model: mujoco.MjModel, prefix: str = "") -> dict:
     meshes: list[dict] = []
     geoms: list[dict] = []
     for i in range(model.ngeom):
-        if int(model.geom_group[i]) != 2:
+        if int(model.geom_group[i]) != group:
             continue
         if model.geom_type[i] != mujoco.mjtGeom.mjGEOM_MESH:
             continue
