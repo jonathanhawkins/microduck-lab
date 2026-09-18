@@ -199,10 +199,16 @@ each duck senses:
 - **Scenario picker + load** (top bar): built-ins and anything saved under
   `microduck_local/scenarios/`. Walls, static boxes and the floor come from
   the scenario JSON; balls and free boxes stream their poses at 25 Hz.
-- **ToF overlay** (`T`): one dot per zone of each duck's 8×8 depth matrix,
-  at the depth the sensor *reports*, colored near→far amber→teal, plus the
-  four corner rays from the aperture. Select a duck (click, or `1`–`9`) to
-  see only its fan.
+- **Sensor overlay** (`T` — the button names the selected body's own range
+  sensor): for a duck, **ToF overlay** — one dot per zone of its 8×8 depth
+  matrix, at the depth the sensor *reports*, colored near→far amber→teal,
+  plus the four corner rays from the aperture. For a wheeled body with a
+  planar scanner (MARS), **LiDAR overlay** — all 360 rays from the
+  `base_laser` aperture in the base's heading frame: a short tick at each
+  hit coloured by range, a faint full-length ray where the beam reached
+  nothing, and the 45° front sector its brains read drawn as a tinted fan
+  with the eight winning rays brightest. One `BufferGeometry` for the lot.
+  Select a body (click, or `1`–`9`) to see only its rays.
 - **Pitch panel** (on a soccer scenario): the score, the kickoff countdown,
   goals split into kicked and walked in, and — under a rule — the three
   per-team rates the benchmark actually judges by. Goals are about 2.5 a
@@ -234,9 +240,31 @@ each duck senses:
   instead of turning in place, which took 3v3 falls from 5.00 to 1.75 a
   run. The pitch panel splits the goals into kicked (within 4 s of a kick)
   and walked in, the same attribution `eval-pitch` prints.
-- **Inspector** (right): the selected duck's heatmap painted straight off the
-  stream, frame age (amber when stale), a noise preset select (`ideal` /
-  `datasheet` / `hostile`, applied live), and which brain is steering it.
+- **Inspector** (right): the selected body's senses, **one block per channel
+  it actually has** (`sensors` keys on the frame — never a ToF placeholder on
+  a robot with no ToF), painted straight off the stream with the frame age
+  (amber when stale), a noise preset select (`ideal` / `datasheet` /
+  `hostile`) and which brain is steering it.
+  - `tof` → the duck's 8×8 heatmap, hover a zone for its range.
+  - `lidar` → the **polar plot**: nose UP, all 360 returns coloured by range,
+    range rings to the device's 6 m, the 0.15 m disc it cannot resolve
+    inside, the footprint circle whose returns are dropped as the robot's own
+    arm, and the 45° front sector out to the ToF's own 4 m. It is centred on
+    the LASER, with the chassis drawn 76 mm ahead of it, because the ranges
+    are the laser's — reading them off the chassis origin puts every obstacle
+    76 mm too far away. Under it, the **eight bearing columns** that sector is
+    binned into: the 8×8 frame `wander` and `follow` actually steer on,
+    computed in the browser the way `sensors/lidar.tof_from_lidar` computes it
+    (`lib/lidar.ts`, whose vitest cases assert the Python's own numbers). The
+    plot's note says what the scan is blind to: one horizontal slice at 0.17 m,
+    so the basket's 6 cm rim and the toys on the floor exist only in the head
+    camera's `sees:` list.
+  - `det` → what the head camera found (class, bearing, range), and the
+    camera inset's boxes.
+  - `gripper` / `arm` → the claw's load against its 1.0 N·m hold threshold and
+    the arm's achieved joint angles. Drawn when the frame carries them; the
+    lab does not send them yet (`lib/sim.ts` `GripperPayload` / `ArmPayload`
+    name the shape).
 - **States** (`G`): the selected duck's brain as a graph — every state it
   could be in, grouped by what it is *for* (find the ball / go to it / hit
   it / stay safe / team duties), the one it is in now lit, the ones it has

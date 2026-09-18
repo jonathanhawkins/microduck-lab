@@ -4,7 +4,9 @@
 // Reuses the lab page's stage (scene meshes, Duck renderer, selection store)
 // against the lab's world mode (/ws/sim, world_server.py). Keys: R restarts
 // the world, P toggles drive mode (WASD / arrows steer every duck), T toggles
-// the ToF overlay, L the ducks’ name labels, M the occupancy map, Shift+M
+// the sensor overlay (a duck's ToF cone, a wheeled body's 360° scan — the
+// button names whichever the selected body has), L the ducks’ name labels,
+// M the occupancy map, Shift+M
 // mutes their voices, 1–9 select a duck, Esc deselects.
 //
 // WASD/QE are shared between two consumers, split by drive mode: with drive
@@ -48,7 +50,7 @@ import {
   headCameraPose,
   tofZonePoints,
   CAM_FOV_DEG,
-  lidarRingPoints,
+  OVERLAY_LAYER,
   TOF_PRESETS,
   SIM_SPEEDS,
   SIM_SPEED_DEFAULT,
@@ -58,16 +60,17 @@ import {
   teamColor,
   teamSwatch,
   type FrameEvent,
-  type LidarPayload,
   type SimFrame,
   type ScenarioListing,
   type SimDuck,
   type TofPreset,
   type WorldInfo,
 } from "@/lib/sim";
+import { rangeChannel, sensorOverlayLabel } from "@/lib/lidar";
 import { camAspect, renderInset } from "@/lib/inset";
 import { buildBodyGeometries, Duck, type BodyGeometry } from "./Duck";
 import { RobotBody } from "./SimStage";
+import { ArmBlock, GripperBlock, LidarOverlay, LidarPlot } from "./SimLidar";
 import { robotLook } from "@/lib/robots";
 import CameraKeys from "./CameraKeys";
 import { useTruckSwipe } from "./useTruckSwipe";
@@ -262,56 +265,11 @@ function SimDucks({
   );
 }
 
-/** The 360-degree scan, as a small forward-up plot in the inspector.
- *
- *  A wheeled body ships `lidar` and no `tof` on purpose: its brains DO read
- *  an 8x8 (the arena adapts the scan for them), but that frame is a fiction
- *  of 64 bearing bins with no elevation and no mount pose, and the stage
- *  draws a ToF as a cone hung off the HEAD CAMERA — it would draw a sensor
- *  the robot does not have, pointing where it is not (world_server's own
- *  note). The scan is the honest thing to show, so this shows it.
- *
- *  SVG, not a canvas or scene overlay: it is ~360 points redrawn at the
- *  inspector's own React rate, inside a panel that is already DOM, and it
- *  costs the 50 Hz frame loop nothing. */
-function LidarRing({ scan }: { scan: LidarPayload }) {
-  const size = 112;
-  const pts = lidarRingPoints(scan, size);
-  const age = scan.age === undefined ? null : Math.round(scan.age * 1000);
-  return (
-    <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
-      <svg
-        width={size}
-        height={size}
-        viewBox={`0 0 ${size} ${size}`}
-        style={{ background: "#0d1218", borderRadius: 6, border: "1px solid rgba(255,255,255,.08)" }}
-      >
-        <circle cx={size / 2} cy={size / 2} r={size / 2 - 1} fill="none" stroke="rgba(255,255,255,.10)" />
-        <circle cx={size / 2} cy={size / 2} r={size / 4} fill="none" stroke="rgba(255,255,255,.06)" />
-        {/* the robot, nose up — so the plot can be read against the stage */}
-        <path
-          d={`M ${size / 2} ${size / 2 - 7} L ${size / 2 - 4} ${size / 2 + 4} L ${size / 2 + 4} ${size / 2 + 4} Z`}
-          fill="#43c2b8"
-          opacity={0.8}
-        />
-        {pts.map((q, i) => (
-          <circle key={i} cx={q.x} cy={q.y} r={0.9} fill="#e8b24a" opacity={0.85} />
-        ))}
-      </svg>
-      <div style={{ color: "#9aa5b1", fontSize: 10, lineHeight: 1.5 }}>
-        <div>lidar · {pts.length}/{scan.mm.length} rays</div>
-        <div>{(scan.maxRange ?? 6).toFixed(1)} m ring{age === null ? "" : ` · ${age} ms`}</div>
-      </div>
-    </div>
-  );
-}
-
 const MAX_DOTS = 64 * 12;
 const CORNER_ZONES = [0, 7, 56, 63];
-// Overlays (ToF dots, detection rays, the map) live on this layer: the orbit
-// camera sees it, the head-camera inset does not - a duck does not see its
-// own sensor drawings.
-const OVERLAY_LAYER = 1;
+// Overlays (ToF dots, the LiDAR scan, detection rays, the map) live on
+// OVERLAY_LAYER, which lib/sim owns: the orbit camera sees it, the
+// head-camera inset does not — a robot does not see its own sensor drawings.
 // The DOM box the head-camera inset renders into (CamInset owns the element,
 // InsetRender reads its rectangle every frame). Module state on purpose: no
 // React state per frame.
@@ -1722,6 +1680,20 @@ export default function SimViewer() {
   };
 
   const selDuck: SimDuck | undefined = clientRef.current?.frame?.ducks.find((d) => d.id === selected);
+  // WHICH RANGE SENSOR the panel is talking about. MARS has no ToF — its
+  // range sense is a 360° planar scanner — so the inspector's block, the
+  // brain-input row's label, the preset's label and the overlay toggle's
+  // wording all come off the body's own channel instead of being the duck's
+  // by default (lib/lidar.rangeChannel).
+  const selChan = rangeChannel(selDuck);
+  // The block's own body: the selected one, else the first with senses —
+  // exactly the ToF grid's long-standing fallback, so the two cannot end up
+  // describing different robots.
+  const blockDuck = selDuck ?? clientRef.current?.frame?.ducks.find((d) => d.sensors);
+  const blockChan = rangeChannel(blockDuck);
+  // The toggle draws every body's range sensor when nothing is selected, so
+  // its label follows the selection first and the room second.
+  const overlayChan = selChan ?? rangeChannel(clientRef.current?.frame?.ducks.find((d) => rangeChannel(d)));
   const scenario = world?.scenario ?? null;
   const client = clientRef.current;
   // Asked for more than this box can step. Not an error — the loop runs
@@ -1773,6 +1745,9 @@ export default function SimViewer() {
             <SimDucks scene={scene} client={client} robotScenes={robotScenes} />
           )}
           {scene && client && <TofOverlay scene={scene} client={client} enabled={showTof} />}
+          {/* …and the same toggle draws the planar scan for a body that has
+              one instead of a ToF (components/SimLidar.tsx). */}
+          {client && <LidarOverlay client={client} robotScenes={robotScenes} enabled={showTof} />}
           {scene && client && <DetOverlay scene={scene} client={client} enabled={showTof} />}
           {client && <ChaseOverlay client={client} enabled={showTof} />}
           {client && <MapOverlay client={client} duckId={selected} enabled={showMap} />}
@@ -1881,8 +1856,10 @@ export default function SimViewer() {
         <button style={{ ...BTN, borderColor: showMap ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowMap((v) => !v)} title="M: the selected duck's occupancy map, in its own odometry frame">
           map
         </button>
+        {/* One toggle, whatever the selected body's range sensor is: the
+            duck's ToF cone, or a MARS's 360° scan (lib/lidar.sensorOverlayLabel). */}
         <button style={{ ...BTN, borderColor: showTof ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowTof((v) => !v)} title="T">
-          ToF overlay
+          {sensorOverlayLabel(overlayChan)}
         </button>
         <button style={{ ...BTN, borderColor: showCam ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowCam((v) => !v)} title="V: the selected duck's head camera, with the detector's boxes">
           cam
@@ -2030,15 +2007,24 @@ export default function SimViewer() {
                     <input type="checkbox" checked={selDuck.headApplied} onChange={(e) => client?.sendHead(selDuck.id, e.target.checked)} /> head
                   </label>
                 </div>
-                {selDuck.sensors?.lidar && <LidarRing scan={selDuck.sensors.lidar} />}
-                {selDuck.brain.inputs && (selDuck.brain.inputs.tof || selDuck.brain.inputs.det) && (
+                {selDuck.brain.inputs && (selDuck.brain.inputs.tof || selDuck.brain.inputs.lidar || selDuck.brain.inputs.det) && (
                   <div style={{ marginTop: 4, display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 8px", color: "#9aa5b1" }}>
-                    {(["tof", "det"] as const).map((k) => {
+                    {(["tof", "lidar", "det"] as const).map((k) => {
                       const inp = selDuck.brain.inputs[k];
                       if (!inp) return null;
+                      // A body with a scanner and no ToF still reports its
+                      // range input under `tof`, because the lab hands its
+                      // brains an ADAPTED 8×8 and keeps the SCAN's timestamp
+                      // (world/arena.World.senses_tof: a 6 Hz frame is up to
+                      // 167 ms old and a brain gating on freshness must see
+                      // that). So the row is labelled by the channel the body
+                      // HAS, and the duplicate is dropped if a lab ever sends
+                      // both.
+                      if (k === "tof" && selChan === "lidar" && selDuck.brain.inputs.lidar) return null;
+                      const label = k === "tof" && selChan === "lidar" ? "lidar" : k;
                       const age = inp.age === null ? null : Math.round(inp.age * 1000);
                       return [
-                        <span key={`${k}l`}>{k}</span>,
+                        <span key={`${k}l`} title={label === "lidar" ? "the age of the 360° SCAN the adapted 8×8 was binned from" : undefined}>{label}</span>,
                         <span key={`${k}v`} style={{ color: inp.stale ? "#f2b632" : "#43c2b8" }}>
                           {age === null ? "never" : `${age} ms`}{inp.stale ? " · stale" : ""}{k === "det" && "n" in inp ? ` · ${inp.n} seen` : ""}
                         </span>,
@@ -2105,6 +2091,12 @@ export default function SimViewer() {
                     <span title="person / ball / marker are simulated-only classes today; the robot's NPU detects ducks"> ⓘ</span>
                   </div>
                 )}
+                {/* The ARM channels, for a body that has a hand. Both render
+                    nothing until a lab sends them (lib/sim.GripperPayload /
+                    ArmPayload name what is still owed); `holding` beside the
+                    badge is the pickable's id, which the frame does carry. */}
+                {selDuck.sensors?.gripper && <GripperBlock g={selDuck.sensors.gripper} holding={selDuck.holding} />}
+                {selDuck.sensors?.arm && <ArmBlock arm={selDuck.sensors.arm} />}
                 <div style={{ marginTop: 4, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                   {selDuck.tof && (
                     <>
@@ -2116,6 +2108,35 @@ export default function SimViewer() {
                           </option>
                         ))}
                         {selDuck.tof === "custom" && <option value="custom">custom</option>}
+                      </select>
+                    </>
+                  )}
+                  {/* The same control for a body whose range sensor is the
+                      scanner. The LABEL is the device, because that is what
+                      the noise belongs to; the WIRE stays `tof`, because the
+                      scenario has one range-sensor field and
+                      `world/scenario.Duck`'s docstring says why ("how noisy
+                      is this robot's range sense" is one question). The lab
+                      REFUSES it today — `world_server.set_noise` has only a
+                      `tof` and a `det` branch and a MARS's `d.tof` is None,
+                      so it answers 409 and the event log says "noise
+                      ignored"; the scenario's own field is what sets it at
+                      load. A `lidar` branch there is the fix. */}
+                  {selDuck.lidar && (
+                    <>
+                      lidar{" "}
+                      <select
+                        value={selDuck.lidar}
+                        onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "tof")}
+                        style={{ ...BTN, padding: "1px 4px" }}
+                        title="the 360° scanner's noise preset (the scenario field is `tof` — one range-sensor field per body). NOTE: the lab has no live lidar branch yet and refuses the change; set it in the scenario."
+                      >
+                        {TOF_PRESETS.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                        {selDuck.lidar === "custom" && <option value="custom">custom</option>}
                       </select>
                     </>
                   )}
@@ -2149,7 +2170,19 @@ export default function SimViewer() {
             )}
             {/* A learned brain's own view of the world — nothing for rule brains. */}
             {client && <BrainPanel client={client} duckId={selected} />}
-            {client && <Heatmap client={client} duckId={selected} />}
+            {/* THE RANGE-SENSOR BLOCK, chosen by the body's CHANNEL and never
+                by its id: the duck's 8×8 grid, a wheeled body's polar plot
+                (components/SimLidar.tsx), or a line of text for a body with
+                neither. An empty ToF grid saying "no ToF frame yet" on a
+                robot that has no ToF is a lie about the hardware, which is
+                what a MARS in the playroom used to show. */}
+            {client && blockChan === "tof" && <Heatmap client={client} duckId={selected} />}
+            {client && blockChan === "lidar" && <LidarPlot client={client} duckId={selected} />}
+            {client && blockChan === null && (
+              <div style={{ color: "#9aa5b1" }}>
+                {blockDuck ? `${blockDuck.id} has no range sensor` : "select a robot with a range sensor"}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -2179,7 +2212,7 @@ export default function SimViewer() {
           </div>
           WASD/QE fly the camera (A/D slide, W/S zoom, Q/E rise) · arrows orbit · Shift+R view home
           <div style={{ marginTop: 6 }}>
-            R restart · P drive (the same WASD/arrows, Q/E steer the ducks instead) · T ToF · V cam ·
+            R restart · P drive (the same WASD/arrows, Q/E steer the ducks instead) · T sensors · V cam ·
             L labels · M map · Shift+M mute the ducks · I inspector · B scoreboard · G states · Shift+E edit ·
             1–9 select · Esc · space scrub
           </div>

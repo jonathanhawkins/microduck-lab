@@ -7,6 +7,12 @@ import { LAB_HTTP } from "@/lib/lab";
 
 export const SIM_WS = LAB_HTTP.replace(/^http/, "ws") + "/ws/sim";
 
+/** The three.js layer every /sim sensor overlay draws on: the orbit camera
+ *  sees it, the head-camera inset does not — a robot does not see its own
+ *  sensor drawings. One definition, because a second copy that said 2 would
+ *  put the new LiDAR overlay into the robot's own camera view. */
+export const OVERLAY_LAYER = 1;
+
 /** Scale a scene dump's vertices into metres IN PLACE, and say so.
  *
  *  A dump may carry millimetre ints with a `vertScale` (the G1's is 21 MB
@@ -286,6 +292,13 @@ export interface TofPayload {
 export const TOF_ROWS = 8;
 export const TOF_COLS = 8;
 export const TOF_FOV_DEG = 45;
+/** The ToF's own range limits (`sensors/tof.TofSpec`): a return outside them
+ *  is "no target", 0 on the wire. They are the SENSOR's, not the duck's, so
+ *  the lidar→ToF adapter a wheeled body's brains read applies the same pair
+ *  (lib/lidar.ts ports it) — a 4.5 m wall is inside a 6 m scan and outside
+ *  the 8x8 those brains were tuned on. */
+export const TOF_MIN_RANGE_M = 0.02;
+export const TOF_MAX_RANGE_M = 4.0;
 export const TOF_SITE_POS: [number, number, number] = [0.0135, 0.0224086, -0.0733];
 export const TOF_SITE_QUAT_WXYZ: [number, number, number, number] = [0.707107, 0, 0.707107, 0];
 
@@ -312,7 +325,11 @@ function quatMul(a: number[], b: number[]): [number, number, number, number] {
     a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
   ];
 }
-function quatRotate(q: number[], v: [number, number, number]): [number, number, number] {
+/** A wxyz quaternion applied to a vector. Exported because the /sim overlays
+ *  need it too (the LiDAR overlay turns a mount-frame bearing into a world
+ *  ray off the `base_laser` pose the frame already carries) and two copies of
+ *  a rotation are two chances to get one of them wrong. */
+export function quatRotate(q: number[], v: [number, number, number]): [number, number, number] {
   // wxyz quaternion applied to v
   const [w, x, y, z] = q;
   const t0 = 2 * (y * v[2] - z * v[1]);
@@ -347,6 +364,16 @@ export interface DetectionItem { cls: string; name: string; bearing: number; ele
 export interface DetPayload { t: number; age: number; fov?: [number, number]; cam?: number[]; items: DetectionItem[] }
 export interface BrainInputs {
   tof?: { age: number | null; stale: boolean; max: number };
+  /** The planar scan's own freshness, for a body that reads one.
+   *
+   *  Not sent today: `brain/runtime.age_inputs` reports `tof` and `det` only,
+   *  and for a wheeled body the `tof` entry's age IS the scan's age
+   *  (`World.senses_tof` hands the brain an adapted 8x8 and deliberately
+   *  keeps the SCAN's timestamp — a 6 Hz scanner's frame is up to 167 ms old
+   *  and a brain gating on freshness must see that). The inspector therefore
+   *  LABELS that row by the body's channel, and renders this one whenever a
+   *  lab starts sending it. */
+  lidar?: { age: number | null; stale: boolean; max: number };
   det?: { age: number | null; stale: boolean; max: number; n: number };
   target?: { bearing: number; range: number | null; since: number } | null;
   /** The brain's tracker, with each track's odometry-frame position and velocity once it has both. */
@@ -408,7 +435,13 @@ export interface SimDuck {
   speed: number;
   cmdSpeed: number;
   steerable: boolean;
+  /** The RANGE-SENSOR noise preset, by device. A duck carries the 8x8 ToF and
+   *  `lidar` is null; a wheeled body carries the 360-degree scanner and `tof`
+   *  is null (`world_server.duck_info`). Which of the two is set is what the
+   *  inspector reads to know which instrument this body HAS — it is the
+   *  body's declaration, so it answers before the first frame arrives. */
   tof: TofPreset | "custom" | null;
+  lidar?: TofPreset | "custom" | null;
   detector: TofPreset | "custom" | null;
   holding: string | null;
   /** Odometry drift preset the brain's pose carries (roadmap 1.7), and the drifted estimate itself. */
@@ -439,43 +472,58 @@ export interface SimDuck {
   };
   headApplied: boolean;
   bodies: number[][];
-  sensors: { tof?: TofPayload; det?: DetPayload; lidar?: LidarPayload } | null;
+  /** What this body SENSES, one key per channel it has
+   *  (`world_server.tof_payload`, `robots/body.Body.make_sensors`): the duck's
+   *  8x8 `tof`, a wheeled body's 360-degree `lidar`, the head camera's `det`.
+   *  The inspector renders one block per key present, which is why a body with
+   *  no ToF never shows a ToF placeholder. `gripper` and `arm` are the arm
+   *  channels — see their own types for what the lab still owes. */
+  sensors: {
+    tof?: TofPayload;
+    det?: DetPayload;
+    lidar?: LidarPayload;
+    gripper?: GripperPayload;
+    arm?: ArmPayload;
+  } | null;
 }
 
-/** The scan as points on a small square, for the inspector's ring.
+/** The claw, as a reading: the constraint torque at joint6 and whether that
+ *  counts as holding something (`robots/mars_drive.MarsDriver.held_body` —
+ *  `|load| >= mars.HOLD_LOAD_NM` AND a blade contact with a body that is not
+ *  part of the robot; closing on AIR reads 0.0 N·m, identical to an open
+ *  claw, which is why the contact conjunct exists).
  *
- *  `size` is the box's side in px; the robot sits at its centre and a return
- *  at `maxRange` lands on the inscribed circle.
+ *  **NOT SENT YET.** The lab streams the grasp as `SimDuck.holding` (the
+ *  pickable's id) and nothing else; the load is measured on the Python side
+ *  (`MarsDriver.gripper_load`) and never leaves it. The inspector draws this
+ *  block when a lab starts sending it and nothing when it does not. */
+export interface GripperPayload {
+  /** N·m at joint6. Signed: closing is one direction, opening the other. */
+  load: number;
+  /** The driver's own predicate, not a threshold re-applied here. */
+  holding?: boolean;
+  /** Full scale for the bar, if the body has an opinion
+   *  (`mars.GRIPPER_EFFORT_LIMIT`, 2.0 N·m — the servo's own clamp). */
+  limit?: number;
+  /** The hold threshold to mark (`mars.HOLD_LOAD_NM`, 1.0 N·m). */
+  hold?: number;
+}
+
+/** The arm's ACHIEVED joint positions by name — what Innate's
+ *  `/mars/arm/state` publishes, and NOT the commanded targets: the servo
+ *  carries structural compliance and backlash, so a commanded pose is reached
+ *  a few hundredths of a radian low (`brain/runtime.Senses.arm` measures 28.5
+ *  mm of claw height at the pick pose).
  *
- *  The bearings are the ROBOT's, CCW from its own +x (`sensors/ray.planar_fan`
- *  with `ccw`, which is Innate's convention), so the drawing is drawn in the
- *  robot's frame: **forward is UP**, its left is left, and what is behind it
- *  is below. Plotting +x rightward instead would be a world-frame picture of
- *  a robot-frame measurement — it would only look right while the robot faced
- *  +x, and would silently lie the moment it turned.
- *
- *  Skips every **0**, which is the payload's "no reading" and not a
- *  zero-range one (`sensors/lidar.LidarFrame.as_payload`): drawing those
- *  would put a dense blob of false contacts on the robot's own origin, which
- *  is the most misleading thing a range drawing can do. A reading longer
- *  than `maxRange` is CLAMPED rather than dropped — the direction is real
- *  even where the distance saturates.
- */
-export function lidarRingPoints(
-  f: Pick<LidarPayload, "a0" | "da" | "mm" | "maxRange">,
-  size: number
-): { x: number; y: number }[] {
-  const max = f.maxRange && f.maxRange > 0 ? f.maxRange : 6;
-  const r0 = size / 2;
-  const out: { x: number; y: number }[] = [];
-  f.mm.forEach((mm, i) => {
-    if (!mm) return; // 0 = no reading
-    const r = (Math.min(mm / 1000, max) / max) * r0;
-    const a = f.a0 + i * f.da;
-    // Forward (a = 0) is up; +a is CCW, which on a forward-up plot is left.
-    out.push({ x: r0 - r * Math.sin(a), y: r0 - r * Math.cos(a) });
-  });
-  return out;
+ *  **NOT SENT YET** either — `WorldRobot.arm_qpos` exists and feeds
+ *  `Senses.arm`, but no frame carries it. With `cmd` the inspector marks the
+ *  command beside the achieved angle, which is the sag the brain
+ *  pre-compensates. */
+export interface ArmPayload {
+  q: Record<string, number>;
+  cmd?: Record<string, number>;
+  /** Joint limits, for a bar that means something: [lo, hi] rad by name. */
+  limits?: Record<string, [number, number]>;
 }
 
 /** One 360-degree planar scan (`sensors/lidar.LidarFrame.as_payload`).
