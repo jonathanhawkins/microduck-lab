@@ -393,6 +393,21 @@ G1 test does this by hand); `mirror_joint_perm()` is a permutation; every
 declared sensor site and effector body resolves by name. **Settles:** a new
 body is "supported" when this file is green for it, and the README says so.
 
+**DONE (2026-09-17)** — `tests/test_body_conformance.py`, 38 cases (19 a
+body) in 2.7 s, every positive shown to fail on a planted break (27/27
+plants caught). Both specs pass clean: every name resolves, both mirrors
+are involutions, both pitches are within 0.1 % of 3.52× the re-measured
+width, ONNX round-trips at 1.2e-8. Two measurements changed the test as
+written above: **neither body settles open-loop** (the duck falls at 0.98 s
+on xml servos, 1.62 s under BAM; the G1 at 1.22 s), so the 2 s hold runs the
+body's shipped idle (`alpha_stand`, `walker.onnx`) and the open-loop topple
+is the planted negative — a wheeled body will need a `kind` guard there;
+and the duck env's `_get_obs` writes a literal 61 while `observation_space`
+is spec-sized, so a wrong `obs_dim` on the duck disagrees silently where the
+G1's raises — the width case checks all three numbers. Four seams are faked
+by id tables until 6.4 lands: `ready()`, `setup_hint()`, which shipped
+policy is the idle, and `visual_scene()`.
+
 ### 6.3 Self-describing policies: a contract id, not a width  (do first)
 
 `run.json` records `robot`; `export_onnx.run_robot()` reads it; the lab
