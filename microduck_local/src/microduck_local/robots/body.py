@@ -61,6 +61,33 @@ def _no_scene_fn() -> Path:
         "robots/mars.scene_xml both generate theirs under .cache)")
 
 
+@dataclass(frozen=True)
+class RobotFrames:
+    """The frames and joints `/sim` world mode has to know by NAME about a
+    body it DRIVES rather than runs a policy on.
+
+    Declared by the body (`Body.frames`), not tabled by the world. The first
+    cut of Phase 3b held these two names in a `ROBOT_FRAMES` dict inside
+    `world/arena.py`, which is precisely the pattern this whole split exists
+    to delete: `docs/mars-roadmap.md` §1 counts 45 hand-written `if robot ==
+    "g1"` sites, and §6.5's fix is that a body DECLARES its channels and the
+    world asks. Both names are the body's own knowledge and `robots/mars.py`
+    already carries them (`BASE_BODY`, `HEAD_JOINT`); a fourth robot is an
+    entry in its own module, and a body from a pip-installed plugin can
+    import this class rather than patch a dict in the arena.
+    """
+
+    #: The link the rest of the robot's bodies hang off — the subtree root, so
+    #: that `World.duck_bodies`, `_geom_owner` and the pose payload can slice
+    #: it out of a composed model the way they slice a duck off `trunk_base`.
+    base: str
+    #: The one joint a duck's `head_pitch` gaze intent maps onto, and the sign
+    #: that makes "down" mean down on this robot. None for a body with no
+    #: pitching head, and then a gaze intent reaches nothing.
+    head_pitch_joint: str | None = None
+    head_pitch_sign: float = 1.0
+
+
 @runtime_checkable
 class Body(Protocol):
     """One robot the lab can list, draw, teach and put in a room.
@@ -105,6 +132,9 @@ class Body(Protocol):
     def train_env_kwargs(self, args: Any) -> dict: ...
     def attach(self, spec: Any, prefix: str, frame: Any) -> None: ...
     def driver(self, model: Any, prefix: str) -> Any: ...
+    def frames(self) -> RobotFrames: ...
+    def make_sensors(self, model: Any, prefix: str, *, presets: Any,
+                     targets: Any, seed: Any) -> dict: ...
 
 
 @dataclass(frozen=True, eq=False, kw_only=True)   # eq=False: ndarray fields
@@ -311,6 +341,65 @@ class BodyBase:
             f"{self.id!r} has no driver() — see robots/g1.G1Walker and "
             "world/arena.WorldDuck (docs/mars-roadmap.md Phase 3)")
 
+    def frames(self) -> RobotFrames:
+        """This body's `RobotFrames` — the names `/sim` needs to drive it.
+
+        No generic answer, and a guessed one would be the bad kind of silence:
+        `mj_name2id` answers -1 for a base link a body does not have, and a
+        `WorldRobot` built on -1 would slice the wrong subtree out of a
+        composed model and stream a robot drawn with its parts on another
+        robot's joints. So a body that world mode is asked to DRIVE says what
+        its root link is called, and one that is never driven never needs to.
+
+        Only a `Body.driver()`-stepped body is asked
+        (`world/arena.WorldRobot.__init__`). The duck is stepped as a
+        `WorldDuck` and the G1 in a room is still a `WorldPerson`, so neither
+        overrides this — which is the honest state of the tree and not an
+        omission: the day a G1 enters a room as a roster entry rather than as
+        a person is the day it declares one.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} does not declare its /sim frames — implement "
+            "frames() returning a robots/body.RobotFrames (robots/mars.py is "
+            "the one shape: a base link, a head pitch joint and its sign)")
+
+    def make_sensors(self, model: Any, prefix: str, *, presets: Any,
+                     targets: Any, seed: Any) -> dict:
+        """This body's SENSE CHANNELS on an attached model: {name: sensor}.
+
+        `world/arena.World` mounted a duck's two sensors by the duck's own
+        SITE NAMES — `prefix + "tof"`, `prefix + "head_camera"` — hard-coded
+        in the arena (`docs/mars-roadmap.md` §6.5 counts that as one of world
+        mode's two hacks). A body knows where its own apertures are and what
+        device is behind them, so it answers that here and the arena asks.
+
+        Channel names are the contract, because `brain/runtime.Senses` has a
+        field per channel: `"tof"` (an 8x8 `sensors.tof.TofSensor`),
+        `"detector"` (`sensors.detector.Detector`) and `"lidar"`
+        (`sensors.lidar.LidarSensor`). A channel a body does not have is
+        simply absent from the dict; the arena never invents one.
+
+        Arguments, all keyword:
+
+        * `presets` — the scenario entry's preset names, `{"tof": ...,
+          "detector": ...}` off `world/scenario.Duck` (a value of None means
+          "no such sensor on this robot"). `"tof"` is the entry's RANGE
+          SENSOR, which on MARS is the lidar — see `Duck`'s docstring.
+        * `targets` — the detector's `sensors.detector.Target` list, which
+          only the World can build (it spans every body in the room).
+        * `seed` — a zero-argument callable returning the next seed. A
+          callable and not an int because the ORDER of draws off the World's
+          RNG is part of the duck's measured behaviour: the duck's ToF seed is
+          drawn before its detector's, and every golden bit and every seeded
+          soccer number was recorded that way.
+
+        The generic answer is NO SENSORS, and it is a true one rather than a
+        placeholder: a body at level 0 of §7.1's ladder (an MJCF and an id)
+        has declared no apertures, and a room is still a place it can stand
+        in. A body that wants senses says so by overriding this.
+        """
+        return {}
+
 
 def conforms(body: object) -> tuple[str, ...]:
     """Which `Body` names `body` is missing — empty when it conforms.
@@ -337,8 +426,8 @@ WANTED: Sequence[str] = (
     "contract",
     "ready", "fetch", "setup_hint", "visual_scene", "look",
     "env_class", "tasks", "shipped_policies", "train_env_kwargs",
-    "attach", "driver",
+    "attach", "driver", "frames", "make_sensors",
 )
 
 
-__all__ = ["WANTED", "Body", "BodyBase", "conforms"]
+__all__ = ["WANTED", "Body", "BodyBase", "RobotFrames", "conforms"]

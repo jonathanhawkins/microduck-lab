@@ -282,7 +282,7 @@ third body in the registry:
   --robot mars` raises NotImplementedError naming Phase 4, the palette's
   shipped groups come back empty, and the stage pitch is per body already.
 
-### Phase 3 — MARS in a room: drive it, sense with it, give it the existing brains  `[~]`
+### Phase 3 — MARS in a room: drive it, sense with it, give it the existing brains  `[x]`
 
 This is where MARS earns its place fastest, because the room-and-brain
 layer was built around a twist-emitting brain over a reflex tier, and for a
@@ -372,6 +372,68 @@ Measured:
   0.91 mm with the hold stubbed out. A 200 ms *sustained* push is the
   discriminating one: 51 mm out, back to 5.6 mm with the hold and still
   51 mm without it.
+
+**3b DONE (2026-09-17)** — MARS IN A ROOM. `Duck.robot` is a first-class
+field validated against `robots.registry.ids()`; `compose()` routes a
+non-duck entry through `Body.attach`; `world/arena.WorldRobot` is a SEPARATE
+class from `WorldDuck` (1,600 lines of walker fields answer nothing a wheeled
+base asks) that holds the driver, steps it every physics step, and shares the
+odometry, bump and brain plumbing by being written once in `World`; a body
+mounts its own sensors through the new `Body.make_sensors` and names its own
+root link and gaze joint through the new `Body.frames()` (a `RobotFrames`, in
+`robots/body.py` so a plugin can import it — the first cut of this phase held
+those two names in a `ROBOT_FRAMES` dict in the arena, which is the §1 pattern
+being deleted, and the review caught it); `Senses.lidar` /
+`Intent.arm` exist; and `sensors.lidar.tof_from_lidar` hands the duck's
+`wander` and `follow` a 64-zone frame so `brain/controllers.py` is UNEDITED.
+`tests/test_world_robot.py` + the ToF-adapter block in `tests/test_lidar.py`,
+25 planted breaks, 25 caught; 1802 passed suite-wide, duck fingerprints
+unchanged. **Four things measured, two of them bugs the phase found:**
+
+- **A planar base's attach frame must be the IDENTITY.** A frame's transform
+  is baked into the attached body's `pos`/`quat`, which a FREE joint's qpos
+  replaces (why the duck keeps its spawn frame) but which a SLIDE or HINGE
+  joint treats as its reference — so the two compose. A MARS spawned at
+  (0.4, -0.3, 0.9 rad) and then written to the same numbers landed at
+  (0.884, -0.173): the spawn applied twice, silently, because both halves
+  were individually right. The driver poses it; the frame is the origin.
+- **A body-mounted camera's housing is its PARENT.** `head_camera_left` is a
+  5 mm marker inside `head`'s 113x121x36 mm collision box, and the occlusion
+  ray excluded only the mount — so every ray hit `head_body` at 0.0206 m,
+  `_unoccluded` returned 0.0 for a person 1.22 m dead ahead, and `follow` sat
+  in `search` for a whole 60 s run. Exactly the failure the lidar's turret
+  had; `Detector` got the same `exclude_body` default and override.
+- **The world's option block costs MARS nothing.** `attach` keeps the
+  parent's `<option>`, and MARS's own three (`implicitfast`, elliptic cone,
+  impratio 10) agree with `compose`'s block to five decimals on the hold
+  (0.00344 rad), the line (1.4994 m / -6.7 mm / -0.0045 rad) and the contact
+  count — because the arm is a `qfrc_applied` servo with no contacts and the
+  wheels are frictionless, so there is no friction cone to model. NOT tested
+  for a GRASP, which is what those options were set for; re-measure in
+  Phase 4.
+- **`wander` is the wrong brain for a wheeled body, and the scan already
+  says why.** The bar (`0 wall contacts` x 3 seeds, 60 s) is MET on
+  `mars-playroom` — 0, 0, 0 — but only because the run never reaches a wall:
+  the MARS cruises 1.2 m to the basket and is then pinned on its 6 cm rim for
+  53 of 60 s (5-6 contact episodes, ~2680 of 3000 ticks, path 3.7-3.8 m,
+  states steer/unstick). The rim is 11 cm BELOW the 17 cm scan plane, so the
+  lidar cannot see it — and the head camera CAN (the basket marker is a
+  detector target). In a bare walled room the same brain covers 17.55 m and
+  bumps 0 / 0 / 2 on seeds 0 / 1 / 2, and the two grazes are the ARM'S ELBOW
+  (`link2_elbow`, 0.199 m to the SIDE, measured at the contact) against a
+  wall it is driving parallel to at 0.28 m/s with 2.3-3.2 m clear AHEAD. The
+  360-degree scan has that wall; the 45-degree ToF adapter throws it away.
+  **Phase 5's lever is a brain that reads `Senses.lidar` and the camera, not
+  a tuned `stop_at`** — for reference `wander`'s 0.30 m stop leaves a duck
+  0.21 m of clearance and leaves MARS 0.014 m, against a 6 Hz scanner whose
+  staleness is 0.05 m of travel at cruise.
+- **`follow` works unchanged: 0.988 in band** (0.45-0.95 m, `FollowParams.
+  distance` 0.7 +- `FollowTask.band` 0.25), median 0.849 m, p10-p90
+  0.769-0.903, 10.82 m of path, 0 wall contacts, 0 falls, `approach` for 2808
+  of 3000 ticks. Against the bar of >= 0.95 and the duck's own measured
+  0.955-1.00. The MARS drops the brain's `vy` (a differential-drive base
+  cannot strafe, so `idle_vy`'s gait-warming sidestep is inert) and does not
+  need it: it has no gait to keep warm.
 
 ### Phase 4 — arm policies: `MarsArmEnv`, `reach` → `pick`, the teach panel, ONNX  `[ ]`
 
@@ -652,6 +714,19 @@ with mount sites) and **intent channels** (`twist`, `head`, `beak`, `arm`),
 and the brain observation builder is chosen by `obs_version` per body as
 `learned.py` already selects by version. `Person.kind == "g1"` stays for old
 scenarios and stops being the way a second body enters a room.
+
+**DONE in 3b (2026-09-17)**, with one deliberate difference from the sketch
+above: `WorldDuck` was NOT generalised. `WorldRobot` is a second class, and
+the sense/intent channels are declared by `Body.make_sensors` plus the
+`Senses`/`Intent` field per channel rather than by a channel table; the
+frames world mode needs by name come from `Body.frames()`. **No `if robot ==
+...` was added anywhere** — `world/arena.py` branches on the CLASS it holds
+(`isinstance(d, WorldRobot)`), never on an id, and `world/compose.py` and
+`world/scenario.py` branch only on `!= DUCK_ROBOT` to keep the duck's own
+attach byte-identical. The
+`obs_version`-per-body observation builder is still Phase 4's, because
+nothing trains on MARS yet. What is left of §6.5 is the `/sim` VIEWER
+(Phase 2b) and `brain_env`'s hard-coded `[0:64]`.
 
 ### 6.6 Per-joint servo models, not one string  (Phase 4)
 

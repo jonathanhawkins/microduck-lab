@@ -60,6 +60,7 @@ import mujoco
 import numpy as np
 
 from .ray import DEFAULT_GROUPS, RayFan, planar_fan
+from .tof import TofFrame, TofSpec
 
 #: The device, from `docs/mars-roadmap.md` §0 (Innate's published spec).
 DEFAULT_N_RAYS = 360
@@ -333,6 +334,122 @@ class LidarSensor:
         return self.fan.hit_points(data, self._last_hits)
 
 
+# -- the ToF adapter ---------------------------------------------------------
+
+def tof_column_bearings(spec: TofSpec = TofSpec()) -> np.ndarray:
+    """The (cols + 1) bearing EDGES of a ToF frame's columns, rad, DESCENDING
+    (column 0 is the leftmost, so its edges are the largest bearings).
+
+    Read off `sensors/ray.tof_fan`'s own geometry rather than assumed: that
+    function lays the zone centres out on the TANGENT PLANE at x = 1, evenly
+    in y between +-tan(fov/2), and `+y` is left. So a column's edges are
+    `atan` of the plane coordinates that bound it, which is NOT evenly spaced
+    in angle — the outer columns of a 45-degree matrix are ~0.4 degrees
+    narrower than the middle ones. Using even angles instead would put a
+    hit in the wrong column near the edges, which is the whole thing this
+    adapter exists to get right.
+    """
+    half = float(np.tan(np.deg2rad(spec.fov_deg) / 2.0))
+    ys = np.linspace(half, -half, int(spec.cols) + 1)
+    return np.arctan(ys)
+
+
+def tof_from_lidar(frame: LidarFrame, spec: TofSpec = TofSpec(),
+                   footprint_m: float = 0.0) -> TofFrame:
+    """A planar scan, as an 8x8 `TofFrame` the duck's ToF brains can read.
+
+    `brain/controllers.py`'s `wander_from_tof` and `Follow`'s bumper are
+    written against 64 zones with the duck's 45-degree field of view, and
+    `docs/mars-roadmap.md` Phase 3 says the way a wheeled body gets those
+    brains on day one is an adapter, not an edit: "their ToF-based avoidance
+    reads `lidar` through a small adapter (64 zones <- nearest bins in the
+    ToF's FOV, so nothing in the controllers changes)". This is it.
+
+    **The bins are the ToF's own, so the brains see the geometry they were
+    tuned on.** The front sector `+-fov/2` is cut into `spec.cols` bearing
+    columns by `tof_column_bearings`, and each column reports the NEAREST
+    valid return in it — the same reduction `_column_clearance` performs over
+    a real frame's rows. Every ROW of a column gets that one number, because a
+    planar scan has nothing to say about elevation.
+
+    **The 76 mm matters and is applied here.** MARS's scanner sits 76.4 mm
+    BEHIND the base origin (`LidarFrame.mount_pos`), so a ray's (bearing,
+    range) is in the LASER's frame and a consumer that read it as the base's
+    would place every obstacle further away than it is — a 1.95 m wall reads
+    2.0264 m, a third of the robot's length. Each ray is therefore turned into
+    a point, offset by `mount_pos`, and re-read as a base-frame bearing and
+    range. A frame with no `mount_pos` (a sensor built without `base_body=`)
+    is taken as already base-framed.
+
+    **What the adapter throws away, and what that costs.**
+
+    * **No elevation.** One 2-D slice at the scanner's own height (17 cm on
+      MARS) fills all 8 rows with the same range, so a brain cannot tell a
+      wall from a table leg, and `brain/controllers.tof_hits_3d` and its
+      callers fall back to their COLUMN path — which is deliberate and is why
+      `mount_pos`, `mount_rot` and `dirs_local` are left None on the frame
+      returned here. Setting them would invite `tof_clearance_3d` to place
+      each row's hit at the row's elevation and then filter on z, which for a
+      flat scan means the outer rows land 38 cm above and below the plane and
+      are dropped as floor and sky.
+    * **No floor returns, and no low obstacles.** A planar scan cannot see
+      the floor, a step, a toy or a ball — `tof_floor_ball` on a frame from
+      here is always None, and `brain/tidy.py`'s pick geometry is therefore
+      not available to a wheeled body (its grasp is Phase 4's arm anyway).
+      Nothing below or above the scan plane exists.
+    * **No zone patch.** A ToF zone integrates a small solid angle and reports
+      its median; a lidar ray is a line. Where a real zone straddling an edge
+      would hedge, this reports the nearer of the two things exactly.
+
+    `footprint_m` drops returns closer than that to the BASE origin as the
+    robot's own body. MEASURED on MARS (`sensors/lidar.py`'s module
+    docstring): the arm folded at `ARM_HOME` blocks 4 of 360 rays at 7-10
+    degrees from 0.156 m off `link5`, which in the base frame is ~0.08 m at
+    ~15 degrees — inside the chassis, and a brain reading it as an obstacle
+    steers away from its own elbow for the whole run. 0 (the default) keeps
+    every return, because the shadow is a property of the ROBOT and this
+    function is a property of the SENSOR; `robots/mars.FOOTPRINT_M` is the
+    value the lab passes.
+    """
+    rows, cols = int(spec.rows), int(spec.cols)
+    edges = tof_column_bearings(spec)
+    r = np.asarray(frame.ranges, np.float64)
+    a = np.asarray(frame.angles, np.float64)
+    ok = np.asarray(frame.valid, bool).copy()
+    mx, my = (0.0, 0.0) if frame.mount_pos is None else (float(frame.mount_pos[0]),
+                                                         float(frame.mount_pos[1]))
+    x = mx + r * np.cos(a)
+    y = my + r * np.sin(a)
+    bear = np.arctan2(y, x)
+    rng = np.hypot(x, y)
+    truth = None
+    if frame.truth_m is not None:
+        tr = np.asarray(frame.truth_m, np.float64)
+        truth = np.hypot(mx + tr * np.cos(a), my + tr * np.sin(a))
+    ok &= (rng >= spec.min_range_m) & (rng <= spec.max_range_m)
+    if footprint_m > 0.0:
+        ok &= rng > float(footprint_m)
+    depth = np.zeros((rows, cols), np.uint16)
+    valid = np.zeros((rows, cols), bool)
+    truth_out = np.full((rows, cols), -1.0)
+    for c in range(cols):
+        # Half-open `(lo, hi]` per column, so a ray exactly on an internal
+        # edge lands in exactly one of them. Column 0's upper edge is nudged
+        # instead, because a ray at exactly +fov/2 — which a 360-ray fan has
+        # whenever the count divides — belongs in the frame, not nowhere.
+        hi, lo = edges[c], edges[c + 1]
+        if c == 0:
+            hi = hi + 1e-12
+        sel = ok & (bear > lo) & (bear <= hi)
+        if not sel.any():
+            continue
+        k = int(np.argmin(np.where(sel, rng, np.inf)))
+        depth[:, c] = np.uint16(round(float(rng[k]) * 1000.0))
+        valid[:, c] = True
+        truth_out[:, c] = float(rng[k] if truth is None else truth[k])
+    return TofFrame(t=float(frame.t), depth_mm=depth, valid=valid, truth_m=truth_out)
+
+
 __all__ = ["DEFAULT_MAX_RANGE_M", "DEFAULT_MIN_RANGE_M", "DEFAULT_MOUNT",
            "DEFAULT_N_RAYS", "DEFAULT_RATE_HZ", "LidarFrame", "LidarNoise",
-           "LidarSensor"]
+           "LidarSensor", "tof_column_bearings", "tof_from_lidar"]

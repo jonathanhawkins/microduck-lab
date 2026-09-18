@@ -18,6 +18,7 @@ from microduck_local.world import (
     Person,
     Scenario,
     Wall,
+    World,
     compose,
     load_scenario,
     make_room,
@@ -148,6 +149,85 @@ def test_scenario_roundtrip_and_validation(tmp_path):
     bad(lambda r: r.update(collision="rollers"))
     bad(lambda r: r.update(floor={"size": [100, 1]}))
     bad(lambda r: r["ducks"].extend({"id": f"x{i}", "spawn": [0, 0, 0]} for i in range(20)))
+    bad(lambda r: r["ducks"][0].update(robot="mars_bot"))      # not a registry id
+    bad(lambda r: r["ducks"][0].update(robot="rollerduck"))
+
+
+def test_which_robot_an_entry_is_round_trips_and_absent_means_the_duck(tmp_path):
+    """`Duck.robot` (`docs/mars-roadmap.md` §6.5): a first-class field on the
+    room's entries, validated against `robots.registry.ids()`, and DEFAULTED
+    so that every scenario written before it is the scenario it was."""
+    from microduck_local.robots.registry import ids
+    from microduck_local.world import DUCK_ROBOT
+
+    # Absent is the duck, and a file that never heard of the field loads.
+    raw = {"name": "old", "ducks": [{"id": "d0", "spawn": [0, 0, 0]}]}
+    assert validate_scenario(raw).ducks[0].robot == DUCK_ROBOT == "microduck"
+    assert validate_scenario({**raw, "ducks": [{**raw["ducks"][0], "robot": None}]}) \
+        .ducks[0].robot == DUCK_ROBOT
+
+    sc = Scenario(name="mixed", floor=(6.0, 6.0), ducks=[
+        Duck("d0", (0.0, 0.6, 0.0)),
+        Duck("m0", (1.0, 0.0, 0.5), None, "datasheet", "datasheet", "wander", robot="mars"),
+        Duck("d1", (0.0, -0.6, 0.0)),
+    ])
+    p = tmp_path / "mixed.json"
+    sc.save(p)
+    assert json.loads(p.read_text())["ducks"][1]["robot"] == "mars"
+    assert load_scenario(p) == sc
+
+    # Every id the registry KNOWS is accepted, fetched or not — a scenario
+    # naming a body whose assets are missing must fail at compose with the
+    # download command, not at load as a malformed file.
+    for rid in ids():
+        raw2 = {"name": "ok", "ducks": [{"id": "d0", "spawn": [0, 0, 0], "robot": rid}]}
+        assert validate_scenario(raw2).ducks[0].robot == rid
+    with pytest.raises(ScenarioError, match="ducks\\[0\\].robot"):
+        validate_scenario({"name": "no", "ducks": [{"id": "d0", "spawn": [0, 0, 0],
+                                                    "robot": "unicycle"}]})
+
+
+@pytest.mark.skipif(not __import__("microduck_local.robots.mars", fromlist=["x"]).mars_ready(),
+                    reason="MARS assets not fetched")
+def test_a_mars_attaches_beside_two_ducks_and_the_whole_room_steps():
+    """`compose()` routes a non-duck entry through `Body.attach`, and the
+    result is ONE model: three robots, one `mj_step`, prefixed names for all
+    of them. The duck half is untouched — `tests/test_arena.py` locks the
+    composed duck step for step against the walk env, which is the actual
+    proof; this checks the room they now share."""
+    from microduck_local.robots import mars
+
+    sc = Scenario(name="trio", floor=(6.0, 6.0), walls=[Wall((2.0, -2.0), (2.0, 2.0), 0.3)],
+                  ducks=[Duck("d0", (-0.6, 0.5, 0.0)),
+                         Duck("m0", (0.8, 0.0, 0.0), None, "datasheet", "datasheet",
+                              robot="mars"),
+                         Duck("d1", (-0.6, -0.5, 0.0))])
+    m = compose(sc)
+    # Every robot's names are prefixed, so nothing collides and DuckAddress
+    # still resolves both ducks.
+    for did in ("d0", "d1"):
+        assert DuckAddress.resolve(m, did).trunk_body > 0
+    for name in (mars.BASE_BODY, mars.LIDAR_SITE, mars.CAMERA_BODY):
+        assert mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "m0/" + name) >= 0
+    for j in mars.DRIVEN_JOINTS + mars.BASE_JOINTS:
+        assert m.joint("m0/" + j).id >= 0
+    # The MARS brought no actuators (mars.urdf has no <actuator> block — its
+    # arm is driven through qfrc_applied), so the ducks' ctrl layout is
+    # exactly two ducks' worth and nothing shifted under them.
+    ref = compose(Scenario(name="two", floor=(6.0, 6.0),
+                           ducks=[Duck("d0", (-0.6, 0.5, 0.0)), Duck("d1", (-0.6, -0.5, 0.0))]))
+    assert m.nu == ref.nu
+    # …and the room steps as one model, with the MARS held by its driver
+    # while the two ducks do whatever a zero-action duck does (they topple —
+    # `AGENTS.md`, "Open-loop holds topple" — and that is not this test's
+    # business; what matters is that the MARS is not moved by it).
+    w = World(sc, seed=0)
+    for _ in range(50):
+        w.step()
+    assert np.all(np.isfinite(w.data.qpos))
+    m0 = w.ducks["m0"]
+    assert m0.falls == 0
+    np.testing.assert_allclose(m0.trunk_pos(w.data)[:2], [0.8, 0.0], atol=0.01)
 
 
 def test_all_collision_robot_variant_composes():

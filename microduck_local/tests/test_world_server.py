@@ -3,7 +3,9 @@ loading a world, the /ws/sim frame shape with ToF payloads, drive and reset
 over the socket, and the same front-door origin rule as /ws."""
 
 import json
+import math
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -122,6 +124,64 @@ def test_load_world_and_stream_frames(app):
         assert r.status_code == 200 and r.json()["tof"] == "ideal"
         assert c.post("/world/noise", json={"duck": "zz", "preset": "ideal"}).status_code == 404
         assert c.post("/world/noise", json={"duck": "d0", "preset": "x"}).status_code == 422
+
+
+@pytest.mark.skipif(
+    not __import__("microduck_local.robots.mars", fromlist=["x"]).mars_ready(),
+    reason="MARS assets not fetched")
+def test_a_mars_entrys_frame_block_says_what_it_is_and_what_it_senses(app, tmp_path):
+    """The /ws/sim row for a driver-stepped body (`world_server`'s docstring).
+
+    Four things the viewer needs and one it must NOT be given: `robot` so it
+    can pick the mesh set, `bodies` in THAT robot's scene order, `steerable`
+    so WASD still reaches it, `sensors.lidar` to draw the scan — and no
+    `sensors.tof`, because the 8x8 its brains read is adapted from the scan
+    and drawing it would put a cone on a head that carries no such sensor.
+    """
+    from microduck_local.robots import mars
+
+    with TestClient(app) as c:
+        # The tracked scenario, through the same door the editor saves by, so
+        # this is the file on disk and not a fixture that resembles it.
+        raw = json.loads((Path(W.__file__).resolve().parents[2]
+                          / "scenarios" / "mars-playroom.json").read_text())
+        assert c.put("/scenarios/mars-room", json=raw).status_code == 200
+        r = c.post("/world/load", json={"scenario": "mars-room"})
+        assert r.status_code == 200, r.text
+        info = r.json()["ducks"][0]
+        assert info["robot"] == "mars" and info["steerable"] is True
+        assert info["tof"] is None and info["lidar"] == "datasheet"
+        assert info["falls"] == 0 and info["wallBumps"] == 0
+
+        with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+            frame = None
+            for _ in range(14):          # 6 Hz: a couple of scans in
+                frame = ws.receive_json()
+            d = frame["ducks"][0]
+            assert d["robot"] == "mars" and d["steerable"] is True
+            # One pose per body of `GET /scene?robot=mars`, world first — a
+            # count off the body's own dump, not a constant.
+            assert len(d["bodies"]) == len(mars.visual_scene()["bodies"])
+            assert d["bodies"][0] == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+            lidar = d["sensors"]["lidar"]
+            assert len(lidar["mm"]) == 360 and lidar["maxRange"] == 6.0
+            assert lidar["da"] == pytest.approx(2 * math.pi / 360, abs=1e-5)
+            assert lidar["mount"][0] == pytest.approx(-0.0764, abs=0.001)
+            assert 0.0 <= lidar["age"] <= 1 / 6.0 + 0.05
+            assert max(lidar["mm"]) > 500                     # it can see the room
+            assert "tof" not in d["sensors"], "a wheeled body ships no ToF block"
+            # A planar base cannot topple, so the fall count never moves…
+            assert d["falls"] == 0
+            # …and the gaze is always applied: there is no walker observation
+            # for a head pose to disturb (`world_server.head_applied`).
+            assert d["headApplied"] is True
+            # WASD reaches it through the same command as a duck.
+            ws.send_text(json.dumps({"cmd": [0.3, 0.0, 0.0]}))
+            for _ in range(6):
+                frame = ws.receive_json()
+            assert frame["mode"] == "manual"
+            assert frame["ducks"][0]["cmdSpeed"] == pytest.approx(0.3)
+            assert frame["ducks"][0]["speed"] > 0.1, "the base actually moved"
 
 
 def test_sim_socket_rejects_foreign_origins(app):

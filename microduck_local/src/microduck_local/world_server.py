@@ -31,11 +31,25 @@ send more of them. (A scene that saturates the box does drop frames — a 3v3
 at 8x measured ~17 a second — because the loop is late, not because it is
 fast.)
   {t, tick, rtf, simSpeed, perf: {stepMs, sensorMs}, scenario, cmd, mode, events,
-   ducks: [{id, name, policy, falls, step, rew, speed, cmdSpeed, steerable,
+   ducks: [{id, robot, name, policy, falls, step, rew, speed, cmdSpeed, steerable,
             brain: {kind, state, cmd, head, note, inputs: {tof: {age, stale}, det: {age, stale, n}, target?}},
             bodies: [[x,y,z,qw,qx,qy,qz] × 17] (world first, as GET /scene lists bodies),
             sensors: {tof: {t, mm[64], age}, det: {t, age, items: [{cls, name, bearing, elevation, width, range, conf}]}} | null}],
    objects: [{id, kind: "ball"|"box"|"person", pose, possessed?}], possessed: person id | null}
+
+`robot` is which BODY the entry is (`world/scenario.Duck.robot`, always
+present), and it is what decides how the rest of the row reads:
+
+  "microduck"  the duck, exactly as above: 17 bodies in `GET /scene`'s order,
+               `sensors.tof` 64 zones off the head, `falls` counts topples.
+  anything     a driver-stepped body (`world/arena.WorldRobot`) — MARS today.
+  else         `bodies` is ITS scene's list, in `GET /scene?robot=<id>` order
+               (18 for a MARS, world first); `sensors.lidar` carries one
+               360-ray scan and there is NO `sensors.tof` (the 8x8 its brains
+               read is adapted, and drawing it would be a sensor the robot
+               does not have — `tof_payload`); `falls` is always 0, because a
+               planar base cannot topple; `steerable` is true and WASD drives
+               it through the same `cmd`.
 accepts:
   {"cmd": [vx, vy, wz]}   drive every duck (held OVERRIDE_HOLD_S); otherwise a duck with
                           a ToF wanders on the brain layer's Wander controller and a
@@ -80,8 +94,20 @@ from .brain.graph import payload as graph_payload
 from .brain.learned import learned_index
 from .brain.mapping import GridSpec, OccupancyGrid
 from .brain.tether import Tether
-from .sensors import DetectorNoise, TofNoise
-from .world import Ball, Duck, Person, Scenario, Wall, World, make_pitch, make_playroom, make_room
+from .sensors import DetectorNoise, LidarNoise, TofNoise
+from .world import (
+    DUCK_ROBOT,
+    Ball,
+    Duck,
+    Person,
+    Scenario,
+    Wall,
+    World,
+    WorldRobot,
+    make_pitch,
+    make_playroom,
+    make_room,
+)
 from .world.scenario import NAME_RE, TOF_PRESETS, ScenarioError, validate_scenario
 
 # The lab's pitches have the COVE (roadmap Track 4 item 14): a 15 cm
@@ -479,11 +505,19 @@ class WorldState:
         }
 
     def senses_for(self, d) -> Senses:
+        """What a brain is handed this tick, for either kind of body.
+
+        `World.senses_tof` is the one place that decides where the 8x8 comes
+        from: a duck's own sensor, or a planar scan adapted for a wheeled
+        body. `lidar` rides beside it for a brain that wants the whole turn."""
         w = self.world
-        tof = d.tof.last if d.tof is not None else None
+        tof, tof_age = w.senses_tof(d)
         det = d.detector.last if d.detector is not None else None
-        return Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
+        lidar = getattr(d, "lidar", None)
+        lf = None if lidar is None else lidar.last
+        return Senses(t=w.t, tof=tof, tof_age=tof_age,
                       det=det, det_age=None if det is None else w.t - det.t,
+                      lidar=lf, lidar_age=None if lf is None else w.t - lf.t,
                       speed=d.heading_speed(w.data),
                       odom=w.odom(d),
                       holding=d.holding is not None, skill=d.skill, bumped=w.bumped(d))
@@ -519,8 +553,8 @@ class WorldState:
             self.intents[d.id] = intent
             w.apply_intent(d, intent)
             if d.skill is None:              # a running skill owns the command block
-                use_head = d.id in self.head_cmds or getattr(brain, "wants_head", False)
-                d.set_cmd(w.data, intent.twist, intent.head if use_head else None)
+                d.set_cmd(w.data, intent.twist,
+                          intent.head if head_applied(d, brain, self.head_cmds) else None)
 
     def after_step(self) -> None:
         """A goal restarts play: the World moved everyone (World.kickoff);
@@ -651,14 +685,20 @@ class WorldState:
                 ducks.append({
                     **duck_info(w, d, self.brains),
                     "brain": self.brain_payload(d, mode),
-                    "headApplied": d.id in self.head_cmds or bool(getattr(self.brains.get(d.id), "wants_head", False)),
+                    "headApplied": head_applied(d, self.brains.get(d.id), self.head_cmds),
                     # Body 0 is the WORLD in the viewer's scene (GET /scene),
                     # so a duck's 16 bodies ride behind one identity pose and
                     # the same Duck renderer works on both pages. 16, not 15:
                     # `split_jaw` hangs the hinged `mouth` body off the head in
                     # BOTH models, and this list is mapped onto /scene's
                     # positionally (tests/test_arena.py locks the order).
-                    "bodies": [[0, 0, 0, 1, 0, 0, 0]] + w.duck_pose(d.id),
+                    #
+                    # A non-duck body answers for itself, in ITS scene's body
+                    # order (`world/arena.WorldRobot.bodies_payload` — mapped
+                    # onto `GET /scene?robot=<id>` the same way, which
+                    # `viz_server._robot_scene_to_env` resolves by name).
+                    "bodies": (d.bodies_payload(w.data) if isinstance(d, WorldRobot)
+                               else [[0, 0, 0, 1, 0, 0, 0]] + w.duck_pose(d.id)),
                     "sensors": tof_payload(w, d),
                 })
         return {
@@ -685,6 +725,23 @@ class WorldState:
         }
 
 
+def head_applied(d, brain, head_cmds: set[str]) -> bool:
+    """Does a brain's gaze intent reach this body's servos?
+
+    The duck's answer is an opt-in, and for a measured reason (roadmap 3.7):
+    its head pose rides in the 61-obs command block, and the shipped walker
+    never trained with one, so a gaze reaching it changes the observation of a
+    policy that has never seen it. A driver-stepped body has no such
+    observation — its head is a position servo outside every policy — so it
+    declares `head_always` and the gaze always lands
+    (`world/arena.WorldRobot`). One function, because the frame reports this
+    flag and `drive()` acts on it, and the two answering differently would
+    show a gaze the robot is not following.
+    """
+    return (getattr(d, "head_always", False) or d.id in head_cmds
+            or bool(getattr(brain, "wants_head", False)))
+
+
 def duck_info(w: World, d, brains: dict | None = None) -> dict:
     # `team` is a colorway and `role` is the job it plays (world/scenario.py):
     # what the page paints the duck and what it labels it. Both come off the
@@ -692,17 +749,36 @@ def duck_info(w: World, d, brains: dict | None = None) -> dict:
     spec = next((x for x in w.scenario.ducks if x.id == d.id), None)
     return {
         "id": d.id,
+        # WHICH BODY this is (`world/scenario.Duck.robot`), so the viewer can
+        # pick the mesh set to draw it with — `GET /scene?robot=<id>` — instead
+        # of assuming a duck. Always present and always the duck's id on a
+        # duck, so a reader needs no absent-field case.
+        "robot": DUCK_ROBOT if spec is None else spec.robot,
         "team": None if spec is None else spec.team,
         "role": None if spec is None else spec.role,
         "name": d.id if d.policy_id is None else f"{d.id} · {d.policy_id.split(':', 1)[-1]}",
         "policy": d.policy_id,
         "falls": d.falls,
+        # Separate episodes of contact with the room's boards and its static
+        # furniture (`World.wall_bumps`; `wallTicks` is how long). Not the
+        # `bumped` a brain senses, which is body-on-body — see
+        # `World._stamp_bumps`. A wheeled body's Phase 3 bar is stated in
+        # this number, and it is the one thing a room can tell you about a
+        # driver that a fall count cannot.
+        "wallBumps": w.wall_bumps.get(d.id, 0),
+        "wallTicks": w.wall_ticks.get(d.id, 0),
         "step": d.step_count,
         "rew": 0.0,
         "speed": round(d.heading_speed(w.data), 3),
         "cmdSpeed": round(float(d.twist_cmd[0]), 3),
+        # Every body in `World.ducks` takes a twist (`set_cmd`), duck or
+        # driver-stepped, so the page's WASD drive works on all of them.
         "steerable": True,
         "tof": None if d.tof is None else preset_name(d.tof.noise),
+        # The 360-degree scan a wheeled body carries instead of a ToF
+        # (`sensors/lidar.py`). None on a duck.
+        "lidar": (None if getattr(d, "lidar", None) is None
+                  else lidar_preset_name(d.lidar.noise)),
         "detector": None if d.detector is None else det_preset_name(d.detector.noise),
         "brainKind": getattr(brains.get(d.id), "kind", "script") if brains is not None else None,
         "holding": d.holding,
@@ -731,12 +807,39 @@ def preset_name(noise: TofNoise) -> str:
     return "custom"
 
 
+def lidar_preset_name(noise: LidarNoise) -> str:
+    for name in TOF_PRESETS:
+        if LidarNoise.preset(name) == noise:
+            return name
+    return "custom"
+
+
 def tof_payload(w: World, d) -> dict | None:
-    """A duck's senses for the frame: the ToF matrix and the detector's
-    frame (the page draws the detection rays and the head-camera inset's
-    boxes from it - bearing, elevation, apparent width, and the field of
-    view they sit in)."""
+    """A robot's senses for the frame: the ToF matrix, the 360-degree scan and
+    the detector's frame (the page draws the detection rays and the
+    head-camera inset's boxes from it - bearing, elevation, apparent width,
+    and the field of view they sit in).
+
+    A wheeled body ships `lidar` and NO `tof`, deliberately. Its brains do
+    read an 8x8 (`World.senses_tof` adapts the scan for them), but that frame
+    is a fiction of 64 bearing bins with no elevation and no mount pose, and
+    the page draws a ToF as a cone of zone points hung off the HEAD CAMERA's
+    pose. Shipping it would draw a sensor the robot does not have, pointing
+    where it is not — the class of wrong picture this repo's rule about
+    looking before claiming exists for. The scan is the honest thing to draw
+    and the viewer's job (Phase 2b).
+    """
     out: dict = {}
+    lidar = getattr(d, "lidar", None)
+    if lidar is not None and lidar.last is not None:
+        f = lidar.last
+        out["lidar"] = {**f.as_payload(), "age": round(w.t - f.t, 4),
+                        "maxRange": lidar.max_range,
+                        # Where the scanner is in the base's HEADING frame, so
+                        # the viewer can draw the scan from the aperture and
+                        # not from the chassis origin — 76 mm apart on MARS.
+                        "mount": (None if f.mount_pos is None
+                                  else [round(float(v), 4) for v in f.mount_pos])}
     if d.tof is not None and d.tof.last is not None:
         f = d.tof.last
         # No world points here: the page reconstructs each zone's point from the

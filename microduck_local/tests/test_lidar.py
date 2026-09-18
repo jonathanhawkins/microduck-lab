@@ -521,3 +521,109 @@ def test_the_sensor_refuses_a_geometry_it_cannot_measure():
         LidarSensor(model, rate_hz=0.0)
     with pytest.raises(KeyError, match="base_body"):
         LidarSensor(model, base_body="pelvis")
+
+
+# -- the ToF adapter: a planar scan the DUCK's brains can read ---------------
+#
+#     positive                             planted break            caught by
+#     ---------------------------------    ---------------------    ------------
+#     the wall lands in the two centre     bins on EVEN angles      an outer
+#     columns at its true distance         instead of tan edges     column's range
+#     the 76 mm mount offset is removed    mount_pos ignored        centre range
+#     a return inside the footprint is     footprint_m = 0          the nearest
+#     the robot's own arm, not an          (the default)            column is
+#     obstacle                                                      0.08 m
+#     out of the ToF's range is UNKNOWN    clipped instead          a 5 m wall
+#     (0 mm), never "far"                  of dropped               reads 4000
+
+def _frame(bearings_deg, ranges_m, *, mount=(0.0, 0.0, 0.0), t=1.0):
+    """One synthetic scan: rays only where asked, everything else a miss.
+
+    Synthetic on purpose — the adapter is pure arithmetic over (bearing,
+    range) pairs, and a scene would measure the scene as well as the bins.
+    """
+    n = 360
+    a = np.deg2rad(np.arange(n) * (360.0 / n)).astype(np.float32)
+    r = np.full(n, LD.DEFAULT_MAX_RANGE_M, np.float32)
+    for b, d in zip(bearings_deg, ranges_m):
+        r[int(round(b)) % n] = d
+    return LD.LidarFrame(t=t, ranges=r, angles=a, valid=np.ones(n, bool),
+                         truth_m=r.copy(), mount_pos=np.array(mount))
+
+
+def test_the_tof_columns_are_the_tofs_own_bearing_bins():
+    """`tof_column_bearings` is read off `sensors/ray.tof_fan`'s geometry —
+    zone centres evenly spaced on the TANGENT PLANE, not evenly in angle — so
+    the outer columns of a 45 degree matrix are narrower than the middle ones
+    and a hit near the edge lands in the right one."""
+    from microduck_local.sensors.tof import TofSpec
+    e = LD.tof_column_bearings()
+    assert len(e) == 9
+    assert e[0] == pytest.approx(math.radians(22.5), abs=1e-9)
+    assert e[-1] == pytest.approx(-math.radians(22.5), abs=1e-9)
+    assert np.all(np.diff(e) < 0)                           # column 0 is the LEFT
+    w = -np.diff(e)
+    assert w[3] == pytest.approx(w[4], abs=1e-12)            # symmetric about the nose
+    assert w[3] > w[0] + 0.005, (w[0], w[3])                 # …and wider in the middle
+    # A 90 degree sensor's edges are the same construction at a wider FOV.
+    assert LD.tof_column_bearings(TofSpec(fov_deg=90.0))[0] == pytest.approx(
+        math.radians(45.0), abs=1e-9)
+
+
+def test_the_adapter_puts_a_wall_in_the_centre_columns_at_its_base_frame_range():
+    # A flat wall 1 m ahead of the LASER, sampled every degree: range
+    # 1/cos(bearing) at each. The laser is 76.4 mm behind the base origin, so
+    # from the base the same wall is at 1.0 - 0.0764.
+    degs = list(range(-30, 31))
+    face_from_laser = 1.0
+    rs = [face_from_laser / math.cos(math.radians(d)) for d in degs]
+    f = _frame(degs, rs, mount=(-0.0764, 0.0, 0.17165))
+    tof = LD.tof_from_lidar(f)
+    assert tof.t == 1.0 and tof.depth_mm.shape == (8, 8)
+    face_from_base = face_from_laser - 0.0764
+    for c in (3, 4):
+        assert tof.depth_mm[0, c] / 1000.0 == pytest.approx(face_from_base, abs=0.004), c
+    # The outer columns read the same wall further away, by 1/cos of their
+    # own bearing — which is what makes the bin geometry testable at all.
+    e = LD.tof_column_bearings()
+    for c in (0, 1, 6, 7):
+        mid = 0.5 * (e[c] + e[c + 1])
+        assert tof.depth_mm[0, c] / 1000.0 == pytest.approx(
+            face_from_base / math.cos(mid), rel=0.03), c
+    # Every row of a column is the same number: no elevation.
+    assert len({tuple(tof.depth_mm[r]) for r in range(8)}) == 1
+    # A frame WITHOUT a mount pose is taken as already base-framed, so the
+    # same scan reads 76 mm further out — the error the offset exists to stop.
+    plain = LD.tof_from_lidar(_frame(degs, rs))
+    assert plain.depth_mm[0, 3] / 1000.0 == pytest.approx(face_from_laser, abs=0.004)
+    assert plain.depth_mm[0, 3] - tof.depth_mm[0, 3] == pytest.approx(76, abs=2)
+
+
+def test_the_adapter_drops_the_robots_own_footprint_and_never_reports_far_as_near():
+    # The measured self-shadow: MARS's folded arm, 4 rays at 7-10 degrees,
+    # 0.156 m off the laser (`sensors/lidar.py`'s module docstring).
+    f = _frame([7, 8, 9, 10], [0.1562] * 4, mount=(-0.0764, 0.0, 0.17165))
+    loose = LD.tof_from_lidar(f)
+    tight = LD.tof_from_lidar(f, footprint_m=mars.FOOTPRINT_M)
+    # In the base frame the elbow is ~0.08 m out at ~15 degrees: column 1.
+    def nearest(fr) -> float:
+        d = fr.depth_mm.astype(np.float64)
+        return float(np.min(np.where(fr.valid, d, np.inf))) / 1000.0
+
+    assert nearest(loose) < 0.12, nearest(loose)
+    assert nearest(tight) > 0.9, nearest(tight)
+    # …and NOTHING else changed: only the columns the elbow was in.
+    moved = [c for c in range(8) if loose.depth_mm[0, c] != tight.depth_mm[0, c]]
+    assert moved and all(c <= 2 for c in moved), moved
+
+    # Beyond the ToF's own 4 m a column is UNKNOWN (0 mm, invalid), which
+    # `_column_clearance` reads as +inf — "nothing within range" — and never
+    # as a target at 4000 mm, which would be an obstacle that is not there.
+    far = LD.tof_from_lidar(_frame([0], [5.0], mount=(-0.0764, 0.0, 0.0)))
+    assert far.depth_mm[0, 3] == 0 and not far.valid[0, 3]
+    assert far.truth_m[0, 3] == -1.0
+    # An invalid RAY is dropped the same way, and a column with only invalid
+    # rays reports nothing rather than the noise-free truth behind it.
+    f2 = _frame([0], [1.0], mount=(0.0, 0.0, 0.0))
+    f2.valid[:] = False
+    assert LD.tof_from_lidar(f2).valid.sum() == 0

@@ -34,6 +34,10 @@ from .scenario import PICKABLE_KINDS, TEAM_COLORWAYS, Scenario, Wall
 # once hid a basket for a whole run, and a real detector would look at a
 # 30 cm basket, not at a point its centre.
 PICKABLE_GROUP = 4
+#: The `Duck.robot` value that means "the upstream Microduck MJCF, attached
+#: the way this file has always attached it". Every other value goes through
+#: `robots.registry.get(id).attach(...)`.
+DUCK_ROBOT = "microduck"
 ROBOT_DIR = C.MICRODUCK_RL_DIR / "src/mjlab_microduck/robot/microduck"
 ROBOT_XML = {
     "walk": ROBOT_DIR / "robot_walk.xml",
@@ -420,7 +424,38 @@ def scene_model() -> mujoco.MjModel:
 
 def compose(scenario: Scenario) -> mujoco.MjModel:
     """Compile the scenario. Raises FileNotFoundError if microduck_rl is not
-    checked out (same message as the walk env)."""
+    checked out (same message as the walk env).
+
+    **The option block is the PARENT's, and a MARS does not need its own.**
+    `MjSpec.attach` keeps this spec's `<option>`, so an attached body runs on
+    whatever is set here — which is why the G1 branch above sets
+    `implicitfast` / 10 / 20 before its person is attached.
+    `mars._scene_spec` sets three of its own for the standalone scene
+    (`implicitfast`, elliptic cone, impratio 10), and MEASURED on 2026-09-17
+    they buy a MARS in a room NOTHING: the same walled room, the same
+    `MarsDriver`, this block against MARS's own three written onto `opt`
+    after compile, agrees to five decimals on every number —
+
+        hold 2 s at ARM_HOME     max |q - HOME| 0.00344 rad   (both)
+        0.3 m/s for 5 s          x 1.4994 m, y -6.7 mm, yaw -0.0045 rad (both)
+        arm while driving        max |q - HOME| 0.00344 rad   (both)
+        contacts                 6 (both)
+
+    and those are also the standalone scene's own figures
+    (`robots/mars_drive.py`'s measured block), so the coarser cone costs the
+    drive and the hold nothing. The mechanism: the arm is a position servo
+    through `qfrc_applied` with no contacts on it, and MARS's only contacts
+    are its two wheels, which `mars.tune_contacts` makes FRICTIONLESS
+    (condim 1, priority 1) — a contact with no friction cone cannot care
+    which cone model is in use. So the world's block stays as it is and the
+    duck's physics is not perturbed by the presence of a MARS.
+
+    What this measurement does NOT cover is a GRASP: elliptic + impratio 10
+    are what Innate set to stop a held object creeping out of a closed claw
+    (MuJoCo docs, "Preventing slip"), and with an empty gripper there is
+    nothing for them to hold. Phase 4's pick is where this has to be
+    re-measured, and if it needs them then it needs them for the whole room.
+    """
     robot_xml = ROBOT_XML[scenario.collision]
     if not robot_xml.exists():
         raise FileNotFoundError(
@@ -549,11 +584,36 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
                       size=[person.radius, half, 0], group=0,
                       rgba=[0.35, 0.55, 0.85, 1.0])
     for duck in scenario.ducks:
+        x, y, yaw = duck.spawn
+        if duck.robot != DUCK_ROBOT:
+            # A body that is not the duck attaches ITSELF: `Body.attach` is the
+            # declared seam (`robots/body.py`), so a fourth robot is a registry
+            # entry and not a fourth branch here. The duck path below is
+            # untouched byte for byte — `tests/test_arena.py`'s step-for-step
+            # lock against the walk env is what says so.
+            #
+            # **At the ORIGIN, not at the spawn**, and its DRIVER poses it
+            # (`world/arena.WorldRobot.spawn_at`). A frame's transform is
+            # baked into the attached body's `pos`/`quat`, which for a body on
+            # a FREE joint is only its default — the joint's qpos replaces it,
+            # which is why `spawn_duck` can write a duck's pose and why the
+            # duck keeps its frame here. For SLIDE and HINGE joints that
+            # transform is the joint's REFERENCE FRAME, so the two compose:
+            # MEASURED, a MARS whose scenario spawn was (0.4, -0.3, 0.9 rad)
+            # and whose planar base was then written to the same numbers
+            # landed at (0.884, -0.173) — the spawn applied twice, and
+            # silently, because both halves were individually right. A planar
+            # base's three DoFs ARE its world pose (`mars.add_planar_base`),
+            # so the frame must be the identity for `MarsDriver.pose` to mean
+            # anything. Safe for any driver-posed body: a driver's `spawn`
+            # writes the root state either way.
+            from ..robots.registry import get as _get_body
+            _get_body(duck.robot).attach(spec, duck_prefix(duck.id), w.add_frame())
+            continue
         robot = mujoco.MjSpec.from_file(str(robot_xml))
         if scenario.collision != "walk":
             _pin_mass_properties_to_walk(robot)
         split_jaw(robot)
-        x, y, yaw = duck.spawn
         frame = w.add_frame(pos=[x, y, 0.0], quat=_yaw_quat(yaw))
         spec.attach(robot, prefix=duck_prefix(duck.id), frame=frame)
     # Grasp = attachment: one INACTIVE weld per (duck, pickable). The world
@@ -566,6 +626,8 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
     # (measured, tests/test_tidy.py). The jaw still meets the floor, the
     # boards, the ball, the basket, persons and other ducks.
     for duck in scenario.ducks:
+        if duck.robot != DUCK_ROBOT:
+            continue          # a beak weld needs a beak; MARS's grasp is its gripper (Phase 4)
         for t in scenario.pickables:
             spec.add_equality(name=f"{duck.id}/hold/{t.id}", type=mujoco.mjtEq.mjEQ_WELD,
                               objtype=mujoco.mjtObj.mjOBJ_BODY,
@@ -578,6 +640,8 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
             paint_team(model, duck.id, duck.team)
     # Feet win the friction pair, as the walk env sets for every model.
     for duck in scenario.ducks:
+        if duck.robot != DUCK_ROBOT:
+            continue          # no feet, no soles; MARS's wheels are tuned in `mars.tune_contacts`
         for side in ("left", "right"):
             gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
                                     f"{duck_prefix(duck.id)}{side}_foot_collision")

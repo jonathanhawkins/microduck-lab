@@ -10,7 +10,8 @@ Format v1 (JSON, saved under microduck_local/scenarios/<name>.json):
      "balls": [{"pos": [x, y], "radius": 0.035, "mass": 0.015, "rolling": 0.002}],  # rolling: the floor
      "ducks": [{"id": "d0", "spawn": [x, y, yaw], "policy": "pollen:alpha_walking",
                 "tof": "datasheet", "detector": "datasheet", "brain": "follow",
-                "team": "cream", "role": "striker"}],      # soccer: a colorway, a job
+                "team": "cream", "role": "striker",        # soccer: a colorway, a job
+                "robot": "microduck"}],                    # WHICH BODY (robots/registry.ids())
      "goal_width": 0.7,                                # > 0 makes it a pitch
      "attacks": {"cream": "right"},                    # …and which mouth a team attacks
      "persons": [{"id": "p0", "pos": [x, y], "yaw": 0.0, "path": [[x, y], ...],
@@ -180,15 +181,38 @@ class Ball:
 
 @dataclass
 class Duck:
+    """One ROBOT in a room. Named `Duck` because for two tracks it could only
+    be one, and the name is now the wire format — every saved scenario and
+    every `GET /scenarios` payload says `ducks`.
+
+    `robot` is which BODY the entry attaches (`robots/registry.ids()`), and
+    `"microduck"` is the default so that every scenario written before this
+    field is byte-for-byte the scenario it was. A non-duck body reads the
+    same fields with its own meanings, documented where they differ:
+
+    * `policy` — the duck's reflex walker. MARS has no walker (there is no
+      gait to learn on a wheeled base), so `world/arena.WorldRobot` drives it
+      with `Body.driver()` and this field is unused.
+    * `tof` — the entry's RANGE-SENSOR preset, one of `TOF_PRESETS`. On the
+      duck that sensor is the 8x8 ToF on the head; on MARS it is the 360-deg
+      lidar on the chassis lid (`sensors/lidar.py`), which is why a MARS with
+      `tof: null` has no range sensor at all and falls back to `script` the
+      same way a blind duck does. A per-sensor field per device would be the
+      tidier contract and is not worth a format version for one preset name.
+    * `team` / `role` / `odom` — unchanged; `team` paints nothing on a body
+      that has no colorway materials (`compose.paint_team` returns 0).
+    """
+
     id: str
     spawn: tuple[float, float, float]  # x, y, yaw
     policy: str | None = None          # palette id; None = zero-action stand
-    tof: str | None = "datasheet"      # ToF noise preset, None = no sensor
+    tof: str | None = "datasheet"      # range-sensor noise preset, None = no sensor
     detector: str | None = "datasheet" # camera+NPU detector preset, None = none
     brain: str | None = None           # brain kind in auto mode; None = wander if ToF else script
     odom: str = "ideal"                # odometry drift preset the brain's (x, y, yaw) carries (roadmap 1.7)
     team: str | None = None            # soccer: a TEAM_COLORWAYS name; teammates share a blackboard (brain/team.py)
     role: str | None = None            # soccer: a ROLES name; None = the board's dynamic attacker/support
+    robot: str = "microduck"           # which BODY (robots/registry.ids()); absent means the duck
 
 
 @dataclass
@@ -338,6 +362,25 @@ def _vec(x, n: int, what: str, lo: float = -math.inf, hi: float = math.inf) -> t
     return tuple(_num(v, f"{what}[{i}]", lo, hi) for i, v in enumerate(x))
 
 
+def _robot_ids() -> tuple[str, ...]:
+    """Every body id a scenario may name — `robots.registry.ids()`.
+
+    `ids()` and not `registry()`: a scenario that names a body whose assets
+    are not downloaded must still LOAD and then fail at compose with the
+    fetch command, exactly as `--robot g1` does on a fresh checkout
+    (`robots/registry.ids`'s docstring). Refusing it here would report a
+    missing download as a malformed file.
+
+    Imported inside the function so that `world/scenario.py` — the on-disk
+    contract, which the editor and `record-world` both import to validate a
+    file — does not drag the robot package (and its entry-point scan) in
+    just to read a room's walls. The scan is memoised, so the second call
+    costs a dict lookup.
+    """
+    from ..robots.registry import ids
+    return ids()
+
+
 def validate_scenario(raw: dict) -> Scenario:
     if not isinstance(raw, dict):
         raise ScenarioError("scenario must be a JSON object")
@@ -431,7 +474,11 @@ def validate_scenario(raw: dict) -> Scenario:
             raise ScenarioError(f"ducks[{i}].role must be one of {sorted(ROLES)} or null")
         if role is not None and team is None:
             raise ScenarioError(f"ducks[{i}] has a role but no team")
-        ducks.append(Duck(did, spawn, policy, tof, det, brain, odom, team, role))
+        robot = d.get("robot") or Duck.robot
+        if robot not in _robot_ids():
+            raise ScenarioError(
+                f"ducks[{i}].robot must be one of {sorted(_robot_ids())}, got {robot!r}")
+        ducks.append(Duck(did, spawn, policy, tof, det, brain, odom, team, role, robot))
     if len(ducks) > MAX_DUCKS:
         raise ScenarioError(f"more than {MAX_DUCKS} ducks")
     persons = []

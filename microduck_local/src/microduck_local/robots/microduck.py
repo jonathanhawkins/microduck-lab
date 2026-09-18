@@ -212,5 +212,50 @@ class MicroduckBody(RobotSpec):
         split_jaw(robot)
         spec.attach(robot, prefix=prefix, frame=frame)
 
+    def make_sensors(self, model: Any, prefix: str, *, presets: Any,
+                     targets: Any, seed: Any) -> dict:
+        """The duck's two sense channels: the head ToF and the head camera.
+
+        This is `world/arena.World.__init__`'s own code, moved to the body
+        that owns the site names (`docs/mars-roadmap.md` §6.5). It is a MOVE
+        and not a rewrite, and that matters to the bit: the two seeds are
+        drawn in the same order off the same callable, the ToF is still
+        stamped against `trunk_base` (the frame a brain's odometry lives in),
+        the detector still takes `DetectorSpec.from_env()` so a battery's
+        `MICRODUCK_CAMERA` variant still reaches it, and a duck whose MJCF has
+        no `tof` site still gets no ToF. `tests/test_arena.py`'s step-for-step
+        lock against the walk env and the golden-bit tests are what say the
+        move changed nothing.
+
+        The base body is resolved HERE, by name, rather than passed in: it is
+        the duck's own `trunk_base` and no caller should have to know that.
+        """
+        import mujoco
+
+        from ..sensors import (
+            Detector,
+            DetectorNoise,
+            DetectorSpec,
+            TofNoise,
+            TofSensor,
+        )
+        out: dict = {}
+        tof_preset = presets.get("tof")
+        site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, prefix + "tof")
+        if tof_preset is not None and site >= 0:
+            out["tof"] = TofSensor(
+                model, site=prefix + "tof", noise=TofNoise.preset(tof_preset),
+                seed=seed(),
+                base_body=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY,
+                                            prefix + "trunk_base"))
+        det_preset = presets.get("detector")
+        if det_preset is not None:
+            out["detector"] = Detector(
+                model, site=prefix + "head_camera",
+                spec=DetectorSpec.from_env(),   # MICRODUCK_CAMERA, a battery's sensor variant
+                noise=DetectorNoise.preset(det_preset), targets=targets,
+                seed=seed())
+        return out
+
 
 __all__ = ["MicroduckBody"]

@@ -61,7 +61,7 @@ import mujoco
 import numpy as np
 
 from .. import contract as C
-from .body import BodyBase
+from .body import BodyBase, RobotFrames
 from .policy_contract import PolicyContract, Slot, declare
 
 _ROOT = Path(__file__).resolve().parents[3]  # microduck_local/
@@ -176,6 +176,61 @@ FLOOR_GEOM = "floor"
 # takes the larger of x and y. 3.52x that (the duck's ratio) is 1.4555.
 BODY_WIDTH_M = 0.4135
 LAB_SPACING_M = 1.46
+
+# ------------------------------------------------------- the head camera's lens
+#
+# Innate's CALIBRATED intrinsics, from `docs/mars-roadmap.md` §0: the stereo
+# head camera is 640x480 on the wire with fx 200.3 / fy 267.3 / cx 319.1 /
+# cy 248.7. A pinhole lens's full field of view is 2*atan(half_px / f), so
+#
+#     hfov = 2*atan(320 / 200.3) = 2.0237 rad = 115.95 deg
+#     vfov = 2*atan(240 / 267.3) = 1.4633 rad =  83.84 deg
+#
+# and they are DERIVED here rather than typed, because this lab has already
+# paid for a hard-coded field of view twice: the duck's default was the stock
+# lens's full-array figure for a camera the robot does not run that way
+# (`sensors/detector.py`'s block), and an uncalibrated equidistant default
+# inflated every bearing by 1.58x near the axis (AGENTS.md, "Uncalibrated lens
+# is a bearing GAIN"). A calibration is two numbers and an arctangent; a
+# degree figure is a number somebody once wrote down.
+#
+# Note how WIDE this is: 116 degrees horizontally is the same class of lens
+# the duck turned out to have, and 84 vertically is wider still. The
+# projection stays `pinhole` (the detector's default) because these ARE
+# pinhole intrinsics — Innate publishes fx/fy/cx/cy for a pinhole model — and
+# no distortion coefficients come with them, so the frame edges are as wrong
+# here as they are for the duck, and for the same reason.
+CAMERA_PX = (640, 480)
+CAMERA_FX, CAMERA_FY = 200.3, 267.3
+CAMERA_HFOV_DEG = 2.0 * math.degrees(math.atan(CAMERA_PX[0] / 2 / CAMERA_FX))
+CAMERA_VFOV_DEG = 2.0 * math.degrees(math.atan(CAMERA_PX[1] / 2 / CAMERA_FY))
+#: The head camera's depth range (Innate's published spec, §0): 0.4-6 m. The
+#: detector here is geometric and has one range knob, so the FAR end is what
+#: it takes; nothing models the 0.4 m near cutoff.
+CAMERA_MAX_RANGE_M = 6.0
+#: Innate's own detection cadence is not published, so the lab's default rate
+#: stands (`sensors/detector.DetectorSpec.rate_hz`) and this constant exists
+#: to say that it is a LAB number and not the robot's — the same honesty the
+#: duck's 10 Hz carries against its robot's measured 2 Hz.
+CAMERA_RATE_HZ = 10.0
+
+# ------------------------------------------------------- the scanner's own body
+#
+# A range return closer than this to the BASE ORIGIN is MARS looking at
+# itself. MEASURED (`sensors/lidar.py`'s module docstring): at `ARM_HOME` the
+# folded arm's `link5` blocks 4 of the 360 rays, at 7-10 degrees, from
+# 0.1562 m off the laser — and the laser sits 76.4 mm behind the base origin,
+# so in the base frame those returns are ~0.08 m out at ~15 degrees, well
+# inside the chassis. A consumer that reads them as obstacles steers away
+# from its own elbow for a whole run.
+#
+# 0.12 m and not the half-width (0.207 m): the cut must be big enough to
+# cover the elbow and small enough that it cannot hide anything a brain needs.
+# It cannot hide an obstacle that matters, because the chassis's own front
+# face is ~0.17 m ahead of the origin and its wheels are wider than 0.12 m —
+# something 12 cm from the base origin is already inside the robot. The
+# scanner's own 0.15 m minimum range is a further floor underneath this.
+FOOTPRINT_M = 0.12
 
 # ------------------------------------------------- the v1 observation layout
 #
@@ -789,6 +844,12 @@ class MarsBody(BodyBase):
     no fields, only answers.
     """
 
+    #: How far from the base origin a range return is MARS looking at itself
+    #: (`FOOTPRINT_M`, measured there). Not a `Body` field: only a body with a
+    #: planar scanner has anything to say about it, and the one consumer
+    #: (`world/arena.WorldRobot`) reads it with a `getattr` default of 0.
+    footprint_m = FOOTPRINT_M
+
     # 6 joint targets + (vx, wz). `BodyBase`'s default is one action per
     # joint, which is right for a body whose actions ARE its joints.
     @property
@@ -915,6 +976,80 @@ class MarsBody(BodyBase):
         from .mars_drive import MarsDriver
         return MarsDriver(model, prefix)
 
+    def frames(self) -> RobotFrames:
+        """MARS's root link and its one pitching joint, for `/sim`.
+
+        `base_link` is the URDF's root and carries the planar base's three
+        DoFs (`add_planar_base`), so it is the body every other body of a MARS
+        hangs off and the subtree a composed world slices out.
+
+        **The sign is -1 and it is read off the two models, not chosen.** The
+        duck's `head_pitch` turns about +y (`contract.py`'s axis table), so a
+        POSITIVE command looks DOWN — which is what every brain's `head_down`
+        constant means. `joint_head` in mars.urdf is `axis="0 -1 0"`, so a
+        positive angle here looks UP. Hence `joint_head = -head_pitch`, and a
+        brain that asks to look down looks down. Getting it backwards is a
+        silent failure: the arm still moves, the servo still tracks, and the
+        camera looks at the ceiling.
+
+        The duck's other three gaze slots have no joint on this robot and are
+        dropped by `world/arena.WorldRobot.set_cmd`, which documents what that
+        costs: `neck_pitch` is the first joint of a two-joint gaze chain whose
+        combined depression is measured on the duck, and MARS has one pitch
+        DoF; `head_yaw` and `head_roll` do not exist here at all, because MARS
+        turns its whole base to look sideways.
+        """
+        return RobotFrames(base=BASE_BODY, head_pitch_joint=HEAD_JOINT,
+                           head_pitch_sign=-1.0)
+
+    def make_sensors(self, model, prefix: str, *, presets, targets, seed) -> dict:
+        """MARS's two sense channels: the 360-degree lidar and the head camera.
+
+        `robots/body.py`'s hook, for the reason it exists: the arena used to
+        mount sensors by the DUCK's site names, and MARS has neither a `tof`
+        site nor a `head_camera` site. What it has is a `base_laser` frame on
+        the chassis lid and a `head_camera_left` link on the pitching head.
+
+        * **lidar** — `sensors/lidar.LidarSensor` at the device's own 6 Hz,
+          0.15-6 m, 360 rays. Two arguments are not defaults and both are
+          measured (that module's docstring): `base_body` so every frame
+          carries the 76 mm the laser sits behind the base origin, and the
+          exclusion that the sensor resolves to the mount's PARENT — without
+          it all 360 rays return 0.04-0.10 m off the turret box that models
+          the scanner's own housing.
+        * **detector** — `sensors/detector.Detector` on the camera BODY (the
+          URDF frame is x-forward, so it is the detector's own convention),
+          with Innate's calibrated lens rather than `DetectorSpec.from_env()`:
+          `MICRODUCK_CAMERA` is a knob for the DUCK's sensor variants and a
+          battery that sets it is asking a question about the duck's camera,
+          not about this one.
+
+        The scenario's `tof` field is the entry's RANGE-SENSOR preset
+        (`world/scenario.Duck`'s docstring), so on MARS it names the LIDAR's
+        noise — which is why a MARS written with `"tof": null` has no range
+        sensor and the lab falls its brain back to `script`, exactly as a
+        blind duck does. `LidarNoise.datasheet` is a PLACEHOLDER shape and
+        says so in its own docstring; nothing is tuned against it.
+        """
+        from ..sensors import Detector, DetectorNoise, DetectorSpec, LidarNoise, LidarSensor
+        out: dict = {}
+        lidar_preset = presets.get("tof")
+        if lidar_preset is not None:
+            out["lidar"] = LidarSensor(
+                model, prefix + LIDAR_SITE, noise=LidarNoise.preset(lidar_preset),
+                seed=seed(), base_body=prefix + BASE_BODY)
+        det_preset = presets.get("detector")
+        if det_preset is not None:
+            out["detector"] = Detector(
+                model, body=prefix + CAMERA_BODY,
+                spec=DetectorSpec(fov_h_deg=CAMERA_HFOV_DEG,
+                                  fov_v_deg=CAMERA_VFOV_DEG,
+                                  max_range_m=CAMERA_MAX_RANGE_M,
+                                  rate_hz=CAMERA_RATE_HZ),
+                noise=DetectorNoise.preset(det_preset), targets=targets,
+                seed=seed())
+        return out
+
 
 MARS = MarsBody(
     id="mars",
@@ -931,8 +1066,9 @@ MARS = MarsBody(
 )
 
 
-__all__ = ["ARM_HOME", "ARM_JOINTS", "ASSETS", "CACHE_DIR", "CONTRACT_ID",
-           "HEAD_JOINT", "INNATE_OS_SHA", "MARS", "OBS_DIM", "MarsBody",
-           "arm_servo",
+__all__ = ["ARM_HOME", "ARM_JOINTS", "ASSETS", "BASE_BODY", "CACHE_DIR",
+           "CAMERA_BODY", "CAMERA_HFOV_DEG", "CAMERA_VFOV_DEG", "CONTRACT_ID",
+           "FOOTPRINT_M", "HEAD_JOINT", "INNATE_OS_SHA", "LIDAR_SITE", "MARS",
+           "OBS_DIM", "MarsBody", "arm_servo",
            "fetch", "mars_ready", "model", "robot_spec", "scene_xml",
            "servo_addresses", "visual_scene"]

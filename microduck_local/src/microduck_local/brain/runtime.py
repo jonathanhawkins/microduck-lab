@@ -16,12 +16,14 @@ Kinds registered here are what the page's brain picker offers:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
 
 from ..sensors.detector import DetectionFrame
+from ..sensors.lidar import LidarFrame
 from ..sensors.tof import TofFrame
 from .graph import graph_key
 
@@ -41,6 +43,18 @@ class Senses:
     holding: bool = False
     skill: str | None = None
     bumped: bool = False                 # the body is touching another body (contacts here; IMU / servo loads on the robot)
+    # A planar 360-degree scan, for a body that carries one (MARS's chassis
+    # lid: `sensors/lidar.py`). A brain written for the duck never sees this
+    # and does not have to: a wheeled body's `tof` above is filled by
+    # `sensors.lidar.tof_from_lidar`, so `wander` and `follow` run on it
+    # unchanged. This channel is here for a brain that wants the whole turn —
+    # what is BEHIND the robot, which no ToF can answer.
+    lidar: LidarFrame | None = None
+    lidar_age: float | None = None
+
+    def fresh_lidar(self, max_age: float) -> LidarFrame | None:
+        return self.lidar if (self.lidar is not None and self.lidar_age is not None
+                              and self.lidar_age <= max_age) else None
 
     def fresh_tof(self, max_age: float) -> TofFrame | None:
         return self.tof if (self.tof is not None and self.tof_age is not None
@@ -58,6 +72,15 @@ class Intent:
     note: str = ""                       # one-line "why" for the inspector
     beak: str | None = None              # "open" | "close" — the mouth servo, outside the policy
     skill: str | None = None             # ask the reflex tier for a skill cycle ("ground_pick")
+    # Joint position targets for a body with an ARM, by joint name (MARS:
+    # `robots/mars.DRIVEN_JOINTS`). None leaves the arm where it is; a body
+    # with no arm ignores it, the way a body with no beak ignores `beak`.
+    # A NAMED mapping and not a vector, because an arm's joints are not a
+    # policy's action block: a brain that only wants the gripper to close
+    # says so in one key (`robots/mars_drive.MarsDriver.set_arm`), and a
+    # vector would have made every such brain carry all seven numbers and
+    # the order they go in.
+    arm: Mapping[str, float] | None = None
 
 
 class Brain(Protocol):
