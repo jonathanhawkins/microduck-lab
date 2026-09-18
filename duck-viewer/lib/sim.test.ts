@@ -7,6 +7,7 @@ import { applyFloorClick, makePitch, makeRoom } from "@/components/SimEditor";
 import { goalDefenders, groupLearned, LEARNED_GROUPS, lidarRingPoints, PITCH_TEAMS, RUG_LONG_MAX,
   RUG_SHORT_MAX, rugSize, SIM_SPEEDS, SIM_SPEED_DEFAULT, simRate, SimClient, speedLabel,
   speedShortfall, stepSpeed, type LearnedInfo, type Scenario } from "./sim";
+import { scaleSceneToMetres } from "./sim";
 
 const b = (name: string, group: string | null, title: string | null = null): LearnedInfo => ({
   name, group, title, description: null,
@@ -321,5 +322,24 @@ describe("lidarRingPoints", () => {
   it("falls back to a 6 m scale for a lab that sends no maxRange", () => {
     const [p] = lidarRingPoints({ a0: 0, da: 0, mm: [6000] }, 100);
     expect(p.y).toBeCloseTo(0, 6);
+  });
+});
+
+describe("scaleSceneToMetres", () => {
+  it("scales millimetre ints to metres ONCE and then says so, so a renderer that scales by vertScale does not scale twice", () => {
+    const sc = { meshes: [{ v: [1000, 2000, 3000] }], vertScale: 0.001 };
+    scaleSceneToMetres(sc);
+    expect(sc.meshes[0].v).toEqual([1, 2, 3]);
+    expect(sc.vertScale).toBe(1);
+    // The regression: the G1 person vanished because the loader scaled and
+    // RobotBody scaled again. A second pass must be the identity now.
+    scaleSceneToMetres(sc);
+    expect(sc.meshes[0].v).toEqual([1, 2, 3]);
+  });
+  it("leaves a scene already in metres alone", () => {
+    const sc: { meshes: { v: number[] }[]; vertScale?: number } = { meshes: [{ v: [0.5, 0.25, 0.125] }] };
+    scaleSceneToMetres(sc);
+    expect(sc.meshes[0].v).toEqual([0.5, 0.25, 0.125]);
+    expect(sc.vertScale).toBeUndefined();
   });
 });

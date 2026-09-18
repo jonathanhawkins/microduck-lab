@@ -7,19 +7,34 @@ import { LAB_HTTP } from "@/lib/lab";
 
 export const SIM_WS = LAB_HTTP.replace(/^http/, "ws") + "/ws/sim";
 
-/** Visual scene for a G1 person (same shape as GET /scene). null if unfetched. */
-export async function fetchG1Scene(): Promise<import("./lab").Scene | null> {
-  const r = await fetch(`${LAB_HTTP}/scene/g1`);
-  if (!r.ok) return null;
-  const sc = await r.json() as import("./lab").Scene & { vertScale?: number };
+/** Scale a scene dump's vertices into metres IN PLACE, and say so.
+ *
+ *  A dump may carry millimetre ints with a `vertScale` (the G1's is 21 MB
+ *  that way instead of 78 MB of floats). Whoever scales it must also reset
+ *  `vertScale` to 1: `SimStage.RobotBody` scales by that field itself (the
+ *  lab stage's `Duck.tsx` always has), and a scene scaled here that still
+ *  said 0.001 was scaled AGAIN there — a G1 person drawn a thousand times
+ *  too small, i.e. not at all, with nothing in the console. That is how the
+ *  /sim G1 vanished on 2026-09-18 when the person renderer was generalised.
+ *  Idempotent: scaling a scene that already says 1 changes nothing. */
+export function scaleSceneToMetres<T extends { meshes: { v: number[] }[]; vertScale?: number }>(sc: T): T {
   const scale = sc.vertScale ?? 1;
   if (scale !== 1) {
     for (const m of sc.meshes) {
       const v = m.v;
       for (let i = 0; i < v.length; i++) v[i] *= scale;
     }
+    sc.vertScale = 1;
   }
   return sc;
+}
+
+/** Visual scene for a G1 person (same shape as GET /scene). null if unfetched. */
+export async function fetchG1Scene(): Promise<import("./lab").Scene | null> {
+  const r = await fetch(`${LAB_HTTP}/scene/g1`);
+  if (!r.ok) return null;
+  const sc = await r.json() as import("./lab").Scene & { vertScale?: number };
+  return scaleSceneToMetres(sc);
 }
 
 export type TofPreset = "ideal" | "datasheet" | "hostile";
