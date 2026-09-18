@@ -216,6 +216,19 @@ class MarsDriver:
         self._cmd_t = -math.inf
         self._hold: tuple[float, float, float] | None = None
         self._still_since: float | None = None
+        # THE CLAW, for `held_body`: the two blades, and this robot's whole
+        # subtree (by `body_rootid`, so an attached MARS in a room with five
+        # other bodies in it answers about its own parts and nothing else).
+        self._finger_bodies = frozenset(
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, prefix + n)
+            for n in mars.FINGER_LINKS)
+        if -1 in self._finger_bodies:
+            raise KeyError(
+                f"no {list(mars.FINGER_LINKS)} bodies under {prefix!r} — "
+                "a MARS must be attached with its gripper blades")
+        self._my_bodies = frozenset(
+            b for b in range(model.nbody)
+            if int(model.body_rootid[b]) == int(model.body_rootid[self.base_id]))
 
     # -------------------------------------------------- the step-size guard
 
@@ -466,6 +479,52 @@ class MarsDriver:
     def hold_pose(self) -> tuple[float, float, float] | None:
         """The latched station-keeping pose, or None while driving/settling."""
         return self._hold
+
+    # -------------------------------------------------------------- the claw
+
+    def gripper_load(self, data: mujoco.MjData) -> float:
+        """The torque an OBJECT feeds back through joint6 (N*m).
+
+        `qfrc_constraint`, not the servo's `qfrc_applied`, and the table that
+        decided it is on `mars.OBS_GRIPPER_LOAD`: the servo torque is
+        saturated at -2 N*m for 8 of the 40 control steps of a close on AIR,
+        so one sample of it cannot tell "closing" from "holding", while the
+        constraint is 0.0000 for all 40 and ~2 N*m with the block in.
+
+        Identical to `MarsArmEnv.gripper_load` by construction — same address,
+        same array — so a policy's observation slot and a brain's
+        `Senses.holding` cannot disagree about what the claw is doing.
+        """
+        return float(data.qfrc_constraint[self.adr[mars.ARM_JOINTS[-1]][1]])
+
+    def held_body(self, data: mujoco.MjData) -> int:
+        """Which BODY the claw is holding, or -1 — the measured predicate.
+
+        `|gripper_load| >= mars.HOLD_LOAD_NM` **and** a finger-blade contact
+        with a body that is not part of this robot. `MarsArmEnv.holding()`
+        asks the same two questions of a scene with exactly one toy in it and
+        can answer `bool`; a `/sim` room has six toys and a basket, so this
+        returns WHICH — the reason 4b kept the contact conjunct at all ("the
+        contact adds no discrimination today; it is there so that holding
+        names the OBJECT once Phase 5's room has several").
+
+        The robot's own subtree is excluded by `body_rootid`, not by a name
+        list: the two blades touch each other every close (`tune_contacts`
+        excludes that pair, but a prefix-blind scan would still have to know),
+        and 4b's own `_robot_bodies` bug was exactly this — "everything that
+        is not the world" counted a TOY as part of the robot and terminated a
+        successful grasp as a self-collision.
+        """
+        if abs(self.gripper_load(data)) < mars.HOLD_LOAD_NM:
+            return -1
+        m = self.model
+        for i in range(data.ncon):
+            con = data.contact[i]
+            b1, b2 = int(m.geom_bodyid[con.geom1]), int(m.geom_bodyid[con.geom2])
+            for finger, other in ((b1, b2), (b2, b1)):
+                if finger in self._finger_bodies and other not in self._my_bodies:
+                    return other
+        return -1
 
 
 __all__ = ["CMD_VEL_TIMEOUT_S", "GAIN_LIMIT", "HOLD_SETTLE_S", "KP_FORWARD",

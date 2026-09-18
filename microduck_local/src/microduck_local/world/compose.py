@@ -463,7 +463,12 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
             "or set MICRODUCK_RL_DIR")
     spec = mujoco.MjSpec()
     spec.modelname = f"world:{scenario.name}"
-    spec.option.timestep = C.PHYSICS_DT
+    # THE ROOM'S CLOCK, from the scenario (`Scenario.physics_dt`, whose block
+    # carries the 5 ms / 2 ms grasp table). `DEFAULT_PHYSICS_DT` is
+    # `C.PHYSICS_DT`, so every duck scenario compiles to the model it always
+    # did and `tests/test_arena.py`'s step-for-step lock against the walk env
+    # is untouched; a MARS room that has to GRASP says 0.002 and gets it.
+    spec.option.timestep = scenario.physics_dt
     # The G1 XML wants implicitfast / 10 / 20; attach keeps the PARENT, so
     # set it here before the robot is attached. Capsule-only worlds stay on
     # the spec default — test_arena's duck lock does not load a G1.

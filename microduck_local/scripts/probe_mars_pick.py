@@ -222,7 +222,19 @@ class Rig:
         """Coordinate descent with restarts — `scratchpad/probe_box_reach2`'s
         solver, which is the one `ACTION_SCALE_RAD` was chosen with, so the
         residuals here are comparable with the shell numbers in
-        `robots/mars_env.py`'s docstring."""
+        `robots/mars_env.py`'s docstring.
+
+        The loop itself now lives in `robots/mars_ik.solve_arm`, because
+        Phase 5's `brain/tidy_arm.py` needs the same routine in a room and two
+        coordinate descents with slightly different acceptance rules would be
+        two different arms (4b's table would stop meaning anything). This
+        wrapper is what supplies the probe's own scene, its grasp point and
+        its toy-aware contact rule. VERIFIED unchanged: the 2 ms / mars cell
+        of `--scripted` reports the same residuals and the same HELD verdict
+        before and after the move.
+        """
+        from microduck_local.robots.mars_ik import solve_arm
+
         def read():
             return (self.grasp_point() if point == "grasp"
                     else np.array(self.d.xpos[self.ee]))
@@ -232,34 +244,10 @@ class Rig:
             dist = float(np.linalg.norm(read() - target))
             return dist + (1.0 if self.bad_contact(ignore_toy) else 0.0), dist
 
-        best, best_q = 1e9, None
-        for k in range(restarts):
-            if k == 0:
-                q = self.home.copy() if start is None else np.array(start)
-            elif start is not None:
-                q = np.array(start) + rng.normal(0.0, 0.25, 6)
-            else:
-                q = rng.uniform(self.lo, self.hi)
-            q[5] = q6
-            c, dist = cost(q)
-            step = step0
-            for _ in range(iters):
-                improved = False
-                for i in range(5):           # joint6 is the jaw, held fixed
-                    for s in (+step, -step):
-                        t = q.copy()
-                        t[i] = np.clip(t[i] + s, self.lo[i], self.hi[i])
-                        c2, d2 = cost(t)
-                        if c2 < c - 1e-6:
-                            q, c, dist, improved = t, c2, d2, True
-                if not improved:
-                    step *= 0.5
-                    if step < 2e-3:
-                        break
-            self.place(q)
-            if not self.bad_contact(ignore_toy) and dist < best:
-                best, best_q = dist, q.copy()
-        return best, best_q
+        return solve_arm(cost, lambda: not self.bad_contact(ignore_toy),
+                         self.lo, self.hi, q6, rng, home=self.home,
+                         start=start, restarts=restarts, iters=iters,
+                         step0=step0)
 
     # ---------------------------------------------------------------- motion
 

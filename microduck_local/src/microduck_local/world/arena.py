@@ -65,6 +65,19 @@ from .compose import (
 from .scenario import PICKABLE_KINDS, Person, Scenario
 
 
+def mars_joint_names(body) -> tuple[str, ...]:
+    """The joint names a body's TELEMETRY reports, in its own order.
+
+    `Body.joint_names` plus its gaze joint: for MARS that is the six arm
+    joints and `joint_head`, which is exactly `mars.DRIVEN_JOINTS` and exactly
+    what `MarsDriver.set_arm` accepts. Asked of the BODY rather than imported
+    from one robot's module, so `WorldRobot.arm_qpos` names no robot.
+    """
+    head = getattr(body.frames(), "head_pitch_joint", None)
+    names = tuple(body.joint_names)
+    return names + ((head,) if head and head not in names else ())
+
+
 def _body_of(robot_id: str):
     """The `Body` a scenario entry names (`robots/registry.get`).
 
@@ -532,6 +545,43 @@ class WorldRobot:
         self.head_cmd[:] = 0.0
         self.twist_cmd[:] = 0.0
         self._arm_cmd = {}
+        self.holding = None
+
+    def arm_qpos(self, data: mujoco.MjData) -> dict[str, float] | None:
+        """The ACHIEVED joint positions, by name — `Senses.arm`.
+
+        What Innate's `/mars/arm/state` publishes, and NOT what `arm_targets`
+        returns: the servo carries their structural compliance and backlash,
+        so a commanded pose arrives with a few hundredths of a radian of sag
+        (MEASURED at the pick pose: 28.5 mm of claw height). A brain that
+        wants the claw somewhere has to read this.
+
+        None for a body whose driver has no joint table, the way `held_body`
+        answers -1 for one with no claw.
+        """
+        adr = getattr(self.driver, "adr", None)
+        if not adr:
+            return None
+        # The DRIVEN set only. `servo_addresses` also carries the mirrored
+        # finger (`mars.MIMIC_JOINT`), which is a constraint and not a
+        # commandable joint — Innate's own `/mars/arm/state` does not report
+        # it and `Intent.arm` refuses it, so neither does this.
+        return {name: float(data.qpos[adr[name][0]]) for name in mars_joint_names(self.body)
+                if name in adr}
+
+    def held_body(self, data: mujoco.MjData) -> int:
+        """Which body this robot's gripper has hold of, or -1.
+
+        Delegated to the driver, which owns the predicate
+        (`MarsDriver.held_body`: |constraint torque at joint6| past
+        `mars.HOLD_LOAD_NM` AND a blade contact with a body that is not part
+        of the robot). A driver with no claw answers -1 the way a body with no
+        beak ignores `Intent.beak` — the body vocabulary is per channel, and
+        `World.sense_grip` turns this into the pickable id that
+        `Senses.holding`, the events log and the tidy overlay all read.
+        """
+        fn = getattr(self.driver, "held_body", None)
+        return -1 if fn is None else int(fn(data))
 
     def scene_bodies(self) -> list[str]:
         """The body names the viewer's scene lists, in ITS order, stripped of
@@ -854,6 +904,15 @@ class World:
                   f"ball through the recipe's projection in {what}. SIM-ONLY ABLATION: the robot has no "
                   "truth, this can never ship.", flush=True)
         self.model = compose(scenario)
+        # PHYSICS STEPS PER 50 Hz TICK, read off the compiled model rather
+        # than from `C.DECIMATION`. The control tick is fixed — it is when a
+        # brain decides, when the lab streams and what every sensor rate is
+        # scheduled against — and the timestep underneath it is the room's
+        # (`Scenario.physics_dt`: a MARS that must grasp needs 2 ms, and the
+        # grasp table is in that field's block). At the default 5 ms this is
+        # exactly `C.DECIMATION` = 4, which is what keeps `tests/test_arena.py`'s
+        # step-for-step lock against the walk env exact.
+        self.substeps = int(round(C.CTRL_DT / float(self.model.opt.timestep)))
         self.data = mujoco.MjData(self.model)
         self.t = 0.0
         self.tick = 0
@@ -892,6 +951,9 @@ class World:
         self.pickables: dict[str, int] = {
             t.id: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, t.id) for t in scenario.pickables}
         self.pickable_kind = {t.id: t.kind for t in scenario.pickables}
+        # ...and the reverse, for `sense_grip`: a gripper reports the BODY it
+        # has hold of and the rest of the world speaks toy ids.
+        self._pickable_of_body: dict[int, str] = {b: t for t, b in self.pickables.items()}
         targets += [Target(t.id, "toy", self.pickables[t.id],
                            max(PICKABLE_KINDS[t.kind]["size"]) / 2) for t in scenario.pickables]
         self.basket = scenario.basket
@@ -1752,7 +1814,37 @@ class World:
             d.beak_closed = False          # a cycle starts with an open, empty beak
         return True
 
+    def sense_grip(self, d) -> str | None:
+        """Refresh a driver-stepped body's `holding` from its gripper, and
+        return the toy id it has hold of (or None).
+
+        **A MARS's grasp is PHYSICS, not an attachment.** A duck's is a weld
+        the World switches on (`grasp`, roadmap 12.2), because a soft bill
+        closing around a toy is not something a rigid convex hull does. MARS's
+        two blades are real geoms with Innate's own contact model on them
+        (`mars.FINGER_*`), and 4b measured that at 2 ms they hold the 4 cm
+        block 14 spots of 16 — so there is nothing to weld and nothing to
+        model: the claw either has it or it does not, and this reads which.
+        That is also why `pick`/`release` are not events a MARS emits. The
+        transition of THIS value is the event, which is what `record-world`'s
+        log and the `/sim` overlay already watch (`d.holding` changing).
+
+        Called once a tick, after the substep loop, beside the sensor polls —
+        `Senses.holding` is a sense.
+        """
+        bid = d.held_body(self.data)
+        d.holding = self._pickable_of_body.get(bid) if bid >= 0 else None
+        return d.holding
+
     def in_basket(self, toy: str) -> bool:
+        """Is this toy in the basket? GEOMETRY, and body-agnostic on purpose.
+
+        Nothing here asks who put it there or how: the footprint of the tray
+        and a height under the rim plus 5 cm. So the tidy score, `eval-tidy`'s
+        count and `record-world`'s overlay measure a MARS's arm and a duck's
+        beak with the same instrument, and "toys in the basket" is one number
+        across bodies rather than two definitions that could drift.
+        """
         if self.basket is None:
             return False
         p = self.data.xpos[self.pickables[toy]]
@@ -1907,7 +1999,7 @@ class World:
         for p in self.persons.values():
             p.step(data, C.CTRL_DT, blockers)
         pairs: list[np.ndarray] = []
-        for _ in range(C.DECIMATION):
+        for _ in range(self.substeps):
             # A controller-stepped body runs EVERY physics step, not once a
             # control tick. MEASURED (`robots/mars_drive.py`): decimated to
             # 50 Hz the base's velocity loop has gain 3.04 — past the explicit
@@ -1988,6 +2080,10 @@ class World:
                     d.lidar.maybe_scan(data, self.t)
                 if d.detector is not None:
                     d.detector.sample(data, self.t)
+                # The claw is a sense too (`sense_grip`): a driver-stepped
+                # body's grasp is physics, so "am I holding something" is
+                # READ each tick rather than remembered from an event.
+                self.sense_grip(d)
                 continue
             if d.tof is not None:
                 d.tof.sample(data, self.t)

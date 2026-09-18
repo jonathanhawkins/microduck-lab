@@ -130,6 +130,7 @@ uv run export-walk runs/g1-walk               # obs[1,99] -> actions[1,29]
 uv run duck-lab --checkpoints runs/my-run    # + viewer below → watch it in the browser
 uv run duck-lab --world playroom              # world mode: rooms, sensors, brains (the /sim page)
 uv run eval-tidy --seeds 3 --seconds 300      # Track 12 benchmark; trace-tidy / walker-facts to debug it
+uv run eval-tidy --robot mars --seeds 3 --seconds 300   # the same room, tidied by MARS's ARM (brain tidy_arm)
 uv run eval-pitch --seeds 4 --seconds 300     # soccer benchmark: two chase brains, shipped kicks, goals
 uv run eval-pitch --seeds 12 --per-side 3 --out runs/poacher.jsonl --tag poacher   # resumable: re-run the SAME
                                               # command after any interruption and it continues (--seed0 extends)

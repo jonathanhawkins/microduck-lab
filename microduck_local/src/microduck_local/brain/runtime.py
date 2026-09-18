@@ -51,6 +51,22 @@ class Senses:
     # what is BEHIND the robot, which no ToF can answer.
     lidar: LidarFrame | None = None
     lidar_age: float | None = None
+    # The ACHIEVED joint positions of a body with an arm, by joint name — what
+    # Innate's `/mars/arm/state` publishes, and the counterpart of
+    # `Intent.arm`'s commanded targets. A body with no arm leaves it None.
+    #
+    # It exists because the two are NOT the same, by design: `mars.arm_servo`
+    # carries Innate's own structural compliance and backlash
+    # (`STRUCT_STIFFNESS` 25 N*m/rad, `ARM_BACKLASH_RAD` 0.055), so a
+    # commanded pose is reached with a few hundredths of a radian of sag.
+    # MEASURED in a room at the pick pose: joint2 -0.067 rad and joint3
+    # -0.048 rad off the command, which is **28.5 mm of claw height and
+    # 11.5 mm of reach** — three times the margin a 58.8 mm jaw has on a
+    # 40 mm block, and it is why `brain/tidy_arm.py` measures the sag at a
+    # hover pose and pre-compensates the descent rather than trusting its own
+    # forward kinematics. A learned policy reads the same numbers in
+    # `robots/mars.OBS_ARM_QPOS` and closes the same loop by training.
+    arm: Mapping[str, float] | None = None
 
     def fresh_lidar(self, max_age: float) -> LidarFrame | None:
         return self.lidar if (self.lidar is not None and self.lidar_age is not None
@@ -121,6 +137,27 @@ class BrainRegistry:
 REGISTRY = BrainRegistry()
 
 
+def attach_world(brain, world, robot_id: str):
+    """Hand a brain the world it lives in and its own id, if it asked for them.
+
+    A `Brain` is stepped on `Senses` alone and that is the contract — nothing
+    here is a back door to physics. What a brain may legitimately need is the
+    ROOM's own geometry, which is not a sense and is not a constant either:
+    `brain/tidy_arm.TidyArm` reads `Basket.rim` to decide how high to hold the
+    toy before it opens the jaw, and a tray of a different depth is a
+    different number. A brain constructed with `truth=True` — a CONTROL ARM,
+    never a benchmark — also reads the toy's true pose through this.
+
+    Duck-typed (`hasattr`), so no brain has to grow slots it does not use and
+    this is one call at every construction site instead of a branch on kind.
+    """
+    if hasattr(brain, "world"):
+        brain.world = world
+    if hasattr(brain, "robot_id"):
+        brain.robot_id = robot_id
+    return brain
+
+
 def payload(brain: Brain | None, intent: Intent | None, mode: str) -> dict:
     """The frame's per-duck brain block."""
     if mode == "manual" or brain is None:
@@ -189,5 +226,5 @@ def age_inputs(senses: Senses, tof_max: float, det_max: float) -> dict:
     }
 
 
-__all__ = ["Brain", "BrainRegistry", "Intent", "REGISTRY", "Senses", "age_inputs", "brain_view",
-           "graph_key", "payload", "np"]
+__all__ = ["Brain", "BrainRegistry", "Intent", "REGISTRY", "Senses", "age_inputs",
+           "attach_world", "brain_view", "graph_key", "payload", "np"]

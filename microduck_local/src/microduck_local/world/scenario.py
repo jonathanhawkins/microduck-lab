@@ -19,6 +19,7 @@ Format v1 (JSON, saved under microduck_local/scenarios/<name>.json):
                   "kind": "capsule"|"g1"}],  # capsule = mocap; g1 = Unitree G1 + walker.onnx
      "pickables": [{"id": "t0", "kind": "brick"|"block"|"sock", "pos": [x, y], "yaw": 0.0}],
      "basket": {"pos": [x, y], "size": [0.3, 0.3], "rim": 0.06} | null,   # the tidy target
+     "physics_dt": 0.005,                               # MuJoCo timestep (see Scenario.physics_dt)
      "collision": "all"}                                # "all" | "walk" robot MJCF ("walk": only the soles collide)
 
 Everything is metres, radians, world frame, z up. Validation is strict on
@@ -133,6 +134,21 @@ MAX_FLOOR_M = 20.0
 # room height, so it clears a person-sized room with headroom.
 MAX_WALL_HEIGHT_M = 3.0
 TOF_PRESETS = ("ideal", "datasheet", "hostile")
+
+# The physics timestep a room runs at, and the control tick every world in
+# this repo streams and decides at. Re-declared here rather than imported
+# because `contract.py` pulls in `robots/microduck.py` and this module is the
+# ON-DISK contract — the editor and `record-world` import it to validate a
+# file and must not drag a robot package in to read a room's walls (the same
+# reason `_robot_ids` imports inside the function). `tests/test_tidy_arm.py`
+# asserts both against `contract.PHYSICS_DT` / `contract.CTRL_DT`, so a change
+# to the world's clock fails there instead of drifting.
+DEFAULT_PHYSICS_DT = 0.005
+CONTROL_DT = 0.02
+#: A room's timestep must divide the control tick to this tolerance — the
+#: arena derives its substeps per tick by rounding, and a 3 ms step (6.67
+#: substeps) would silently run the world at 49.5 Hz.
+PHYSICS_DT_RANGE = (0.0005, CONTROL_DT)
 
 
 class ScenarioError(ValueError):
@@ -326,6 +342,37 @@ class Scenario:
     # every number measured before it. compose.py builds it from tangent
     # boxes; `make_pitch(cove=)` and `eval-pitch --cove` set it.
     cove: float = 0.0
+    # The MuJoCo timestep this room is COMPILED at (`compose` writes it into
+    # `option.timestep`, and `world/arena.World` derives its substeps per
+    # 50 Hz tick from it). A property of the ROOM and not of a body, because
+    # `MjSpec.attach` keeps the parent's `<option>`: there is one timestep and
+    # every robot in the room runs on it.
+    #
+    # **Why it exists: a MARS cannot GRASP at 5 ms.** MEASURED 2026-09-18
+    # (`docs/mars-roadmap.md` Phase 4b, `scripts/probe_mars_pick.py
+    # --scripted`, 16 spots of the reach shell, each an IK place / close /
+    # lift 10 cm / hold 2 s):
+    #
+    #     timestep   MARS's own option block   the world's (compose defaults)
+    #     5 ms                   4/16                      1/16
+    #     2 ms                  14/16                     14/16
+    #
+    # What fails at 5 ms is not slip but EJECTION — the block leaves at
+    # 0.08-6.6 m of travel in the two seconds after the lift, a contact
+    # impulse the coarse step cannot integrate. The elliptic cone and
+    # `impratio 10` are a NULL (2 ms with the world's pyramidal cone at
+    # impratio 1 scores exactly what Innate's block does), so the lever is the
+    # step and nothing else — and a timestep is a whole-world decision, which
+    # is why it is a scenario field and not something the composer could set
+    # for one body.
+    #
+    # Every DUCK scenario stays at `DEFAULT_PHYSICS_DT`: the shipped walker's
+    # trajectory is a golden bit (`tests/test_arena.py` locks the composed
+    # world step for step against the walk env) and 2 ms would be a different
+    # robot. `mars-playroom.json` and `mars-follow.json` carry 0.002, and
+    # `robots/mars.MarsBody.physics_dt` is where that number comes from, so a
+    # builder asks the BODY rather than typing it (`make_playroom`).
+    physics_dt: float = DEFAULT_PHYSICS_DT
     version: int = SCENARIO_VERSION
 
     # -- serialisation -----------------------------------------------------
@@ -360,6 +407,25 @@ def _vec(x, n: int, what: str, lo: float = -math.inf, hi: float = math.inf) -> t
     if not isinstance(x, (list, tuple)) or len(x) != n:
         raise ScenarioError(f"{what}: expected {n} numbers, got {x!r}")
     return tuple(_num(v, f"{what}[{i}]", lo, hi) for i, v in enumerate(x))
+
+
+def robot_physics_dt(robot: str) -> float:
+    """The timestep a room holding this BODY has to run at.
+
+    The body declares it (`robots/body.BodyBase.physics_dt`): MARS answers
+    2 ms because its claw ejects a block at 5 ms, the duck and the G1 answer
+    nothing and get `DEFAULT_PHYSICS_DT`. Asked by the procedural builders
+    (`make_playroom`) and by anything else that assembles a scenario in code,
+    so the 2 ms lives in ONE place and no builder carries an `if robot ==`
+    (`docs/mars-roadmap.md` §1 counts what that pattern cost the G1).
+
+    A hand-written JSON is NOT silently upgraded: `physics_dt` is whatever the
+    file says, because a room's clock is the room's and a loader that rewrote
+    it would change the physics of a saved scene under its author.
+    """
+    from ..robots.registry import get
+
+    return float(getattr(get(robot), "physics_dt", None) or DEFAULT_PHYSICS_DT)
 
 
 def _robot_ids() -> tuple[str, ...]:
@@ -536,10 +602,17 @@ def validate_scenario(raw: dict) -> Scenario:
     if not isinstance(goal_width, (int, float)) or not 0.0 <= goal_width <= 5.0:
         raise ScenarioError("goal_width must be a number in [0, 5]")
     cove = _num(raw.get("cove", 0.0) or 0.0, "cove", 0.0, 0.5)
+    physics_dt = _num(raw.get("physics_dt") or DEFAULT_PHYSICS_DT, "physics_dt", *PHYSICS_DT_RANGE)
+    sub = CONTROL_DT / physics_dt
+    if abs(sub - round(sub)) > 1e-9:
+        raise ScenarioError(
+            f"physics_dt {physics_dt} does not divide the {CONTROL_DT} s control tick "
+            f"({sub:.4f} substeps) — the arena rounds, so the world would run off 50 Hz")
     attacks = _validate_attacks(raw.get("attacks") or {}, ducks, float(goal_width))
     return Scenario(name=name, seed=seed, floor=floor, walls=walls, boxes=boxes, goal_width=float(goal_width),
                     balls=balls, ducks=ducks, persons=persons, pickables=pickables,
-                    basket=basket, collision=collision, attacks=attacks, cove=cove)
+                    basket=basket, collision=collision, attacks=attacks, cove=cove,
+                    physics_dt=physics_dt)
 
 
 def _validate_attacks(raw: dict, ducks: list[Duck], goal_width: float) -> dict[str, str]:
@@ -625,9 +698,21 @@ def make_room(seed: int = 0, size: tuple[float, float] = (3.0, 2.5),
 
 
 def make_playroom(seed: int = 0, n: int = 6, size: tuple[float, float] = (3.0, 2.5),
-                  name: str | None = None) -> Scenario:
+                  name: str | None = None, robot: str = "microduck",
+                  brain: str = "tidy", kinds: tuple[str, ...] | None = None) -> Scenario:
     """A walled room with `n` toys scattered on the floor, a low basket in a
-    corner, and one duck facing the mess. Deterministic in `seed`."""
+    corner, and one robot facing the mess. Deterministic in `seed`.
+
+    `robot` / `brain` are what `eval-tidy --robot mars` builds the benchmark
+    from: the same room, the same layouts, the same seeds, with a MARS in the
+    middle running `tidy_arm` instead of a duck running `tidy`. The timestep
+    comes from the BODY (`robot_physics_dt`) — a MARS room is 2 ms because its
+    claw cannot hold a block at 5 ms, and a duck room stays at 5 ms so every
+    `eval-tidy` number ever measured is still the number it was.
+
+    `kinds` restricts which `PICKABLE_KINDS` are scattered; None cycles all
+    three, which is what the duck's benchmark has always done.
+    """
     import numpy as np
 
     rng = np.random.default_rng(seed)
@@ -635,7 +720,7 @@ def make_playroom(seed: int = 0, n: int = 6, size: tuple[float, float] = (3.0, 2
     corners = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
     walls = [Wall(corners[i], corners[(i + 1) % 4], 0.3, 0.02) for i in range(4)]
     basket = Basket((hx - 0.35, hy - 0.35), (0.3, 0.3), 0.06)
-    kinds = list(PICKABLE_KINDS)
+    kind_list = list(kinds if kinds else PICKABLE_KINDS)
     toys: list[Pickable] = []
     for i in range(n):
         for _try in range(50):
@@ -644,11 +729,13 @@ def make_playroom(seed: int = 0, n: int = 6, size: tuple[float, float] = (3.0, 2
             if math.dist((x, y), basket.pos) < 0.45 or math.dist((x, y), (0.0, 0.0)) < 0.35:
                 continue
             if all(math.dist((x, y), t.pos) > 0.2 for t in toys):
-                toys.append(Pickable(f"t{i}", kinds[i % len(kinds)], (x, y), float(rng.uniform(0, math.pi))))
+                toys.append(Pickable(f"t{i}", kind_list[i % len(kind_list)], (x, y), float(rng.uniform(0, math.pi))))
                 break
     return Scenario(name=name or f"playroom-{seed}", seed=seed, floor=(size[0] + 0.5, size[1] + 0.5),
-                    walls=walls, ducks=[Duck("d0", (0.0, 0.0, 0.0), None, "datasheet", "datasheet", "tidy")],
-                    pickables=toys, basket=basket)
+                    walls=walls,
+                    ducks=[Duck("d0", (0.0, 0.0, 0.0), None, "datasheet", "datasheet", brain,
+                                robot=robot)],
+                    pickables=toys, basket=basket, physics_dt=robot_physics_dt(robot))
 
 
 def make_pitch(size: tuple[float, float] | None = None, name: str | None = None,

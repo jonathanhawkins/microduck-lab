@@ -90,6 +90,7 @@ from pydantic import BaseModel
 from .brain import REGISTRY, Intent, Senses
 from .brain import runtime as brain_runtime
 from .brain import tidy as _tidy  # noqa: F401  (registers the tidy brain)
+from .brain import tidy_arm as _tidy_arm  # noqa: F401  (…and the arm's, for a MARS)
 from .brain.graph import payload as graph_payload
 from .brain.learned import learned_index
 from .brain.mapping import GridSpec, OccupancyGrid
@@ -463,9 +464,15 @@ class WorldState:
         in-one. A live swap passes None and joins the running boards; a world
         under construction passes its own dict, so the old world's boards are
         neither read nor written from the worker thread."""
+        from .brain.runtime import attach_world
         from .brain.team import brain_kwargs
         spec = replace(sd, brain=kind)
-        return REGISTRY.make(kind, **brain_kwargs(spec, world, self.teams if teams is None else teams))
+        brain = REGISTRY.make(kind, **brain_kwargs(spec, world, self.teams if teams is None else teams))
+        # A brain that declared a `world` / `robot_id` slot gets them
+        # (`brain/runtime.attach_world`): `tidy_arm` reads the BASKET's rim
+        # height from the scenario rather than carrying a constant, because a
+        # deeper tray is a different place-over-the-rim target.
+        return attach_world(brain, world, sd.id)
 
     def new_metrics(self):
         """The pitch's continuous metrics for the world just built, or None.
@@ -515,11 +522,16 @@ class WorldState:
         det = d.detector.last if d.detector is not None else None
         lidar = getattr(d, "lidar", None)
         lf = None if lidar is None else lidar.last
+        arm_fn = getattr(d, "arm_qpos", None)
         return Senses(t=w.t, tof=tof, tof_age=tof_age,
                       det=det, det_age=None if det is None else w.t - det.t,
                       lidar=lf, lidar_age=None if lf is None else w.t - lf.t,
                       speed=d.heading_speed(w.data),
                       odom=w.odom(d),
+                      # The ACHIEVED joint positions of a body with an arm
+                      # (`Senses.arm`): a commanded pose is not the pose, and
+                      # the 28.5 mm that costs is on that field.
+                      arm=None if arm_fn is None else arm_fn(w.data),
                       holding=d.holding is not None, skill=d.skill, bumped=w.bumped(d))
 
     def drive(self, cmd: np.ndarray, mode: str) -> None:

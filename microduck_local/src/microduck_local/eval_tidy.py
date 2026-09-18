@@ -32,22 +32,63 @@ from .brain import REGISTRY, Senses
 from .brain import tidy as _tidy  # noqa: F401
 from .brain.brain_env import POLICIES_DIR, onnx_infer
 from .world import World, make_playroom
+from .world.scenario import PICKABLE_KINDS
+
+#: Which brain tidies, per BODY. A CLI flag has to map to something, and this
+#: is a two-entry table in the benchmark rather than a branch in the world:
+#: the duck's beak runs `tidy` and MARS's arm runs `tidy_arm`
+#: (`brain/tidy_arm.py`, a sibling class and not a subclass — that file says
+#: why). A third body that grows a manipulator adds a row.
+TIDY_BRAINS: dict[str, str] = {"microduck": "tidy", "mars": "tidy_arm"}
+#: ...and which toys it is asked to tidy.
+#:
+#: The duck scatters all three `PICKABLE_KINDS`, as it always has, so every
+#: `eval-tidy` number ever measured is still comparable. MARS scatters BLOCKS,
+#: and that is a declared property of a 4 cm parallel jaw rather than a
+#: loosened benchmark — MEASURED in the composed room at 2 ms, 6 spots in the
+#: brain's own standoff band: **block 6/6 held, sock 3/6, brick 0/6**. A
+#: 9.6 mm-tall brick is below what two blades can pinch off a floor and a
+#: 60 mm sock only fits the 78.8 mm jaw on one of its axes. The duck's soft
+#: bill takes all three; this claw does not, and the mixed `mars-playroom`
+#: recording in `docs/mars-roadmap.md` Phase 5 reports what that costs.
+TIDY_KINDS: dict[str, tuple[str, ...] | None] = {"microduck": None, "mars": ("block",)}
 
 
 def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str = "ideal",
             tether_ms: float = 0.0, loop_closure: bool = True,
-            walker: str | None = None) -> dict:
+            walker: str | None = None, robot: str = "microduck",
+            kinds: tuple[str, ...] | None = None) -> dict:
     """`tether_ms` (roadmap 12.10): the brain runs somewhere else — a laptop
     over Wi-Fi, a cloud model — its senses reach it half this late and its
-    intent lands on the robot half this later (brain/tether.py). 0 = onboard."""
+    intent lands on the robot half this later (brain/tether.py). 0 = onboard.
+
+    `robot` picks the BODY (`robots/registry.ids()`). A non-duck body brings
+    three differences and no more, all of them declared by the body or by the
+    scenario rather than branched on here: its room's TIMESTEP
+    (`world/scenario.robot_physics_dt` — a MARS that must grasp needs 2 ms),
+    its BRAIN (`TIDY_BRAINS`) and its TOYS (`TIDY_KINDS`). It runs no walker
+    policy, because a wheeled base has no gait to run one for.
+    """
+    from .brain.runtime import attach_world
     from .brain.tether import Tether
-    sc = make_playroom(seed=seed, n=toys)
+    brain_kind = TIDY_BRAINS.get(robot)
+    if brain_kind is None:
+        raise SystemExit(f"--robot {robot}: no tidy brain for that body; have "
+                         f"{sorted(TIDY_BRAINS)}")
+    sc = make_playroom(seed=seed, n=toys, robot=robot, brain=brain_kind,
+                       kinds=kinds if kinds is not None else TIDY_KINDS.get(robot))
     sc.ducks[0].odom = odom
     tether = Tether(tether_ms / 1000.0)
-    w = World(sc, infer_for={"d0": onnx_infer(Path(walker) if walker else POLICIES_DIR / "alpha_walking.onnx")}, seed=seed)
+    infer_for = ({"d0": onnx_infer(Path(walker) if walker else POLICIES_DIR / "alpha_walking.onnx")}
+                 if robot == "microduck" else None)
+    w = World(sc, infer_for=infer_for, seed=seed)
     d = w.ducks["d0"]
-    from .brain.tidy import TidyParams
-    brain = REGISTRY.make("tidy", p=TidyParams(loop_closure=loop_closure))
+    if robot == "microduck":
+        from .brain.tidy import TidyParams
+        brain = REGISTRY.make("tidy", p=TidyParams(loop_closure=loop_closure))
+    else:
+        brain = REGISTRY.make(brain_kind)
+    attach_world(brain, w, "d0")
     t0 = time.time()
     states = []
     # Track 12 step 1: each fall filed by state and by `holding`, and the
@@ -57,9 +98,21 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
     falls_laden = falls_unladen = 0
     m_laden = m_unladen = 0.0
     while w.t < seconds:
-        tof, det = d.tof.last, d.detector.last
-        s = Senses(t=w.t, tof=tof, tof_age=None if tof is None else w.t - tof.t,
+        # `World.senses_tof` is the one place that decides where the 8x8 comes
+        # from — a duck's own sensor, or a planar scan adapted for a wheeled
+        # body — and `arm` is the ACHIEVED joint vector a body with an arm
+        # publishes. Reading them through the World rather than off `d.tof`
+        # is what makes this benchmark and the `/sim` page hand the brain the
+        # same senses.
+        tof, tof_age = w.senses_tof(d)
+        det = d.detector.last if d.detector is not None else None
+        lidar = getattr(d, "lidar", None)
+        lf = None if lidar is None else lidar.last
+        arm_fn = getattr(d, "arm_qpos", None)
+        s = Senses(t=w.t, tof=tof, tof_age=tof_age,
                    det=det, det_age=None if det is None else w.t - det.t,
+                   lidar=lf, lidar_age=None if lf is None else w.t - lf.t,
+                   arm=None if arm_fn is None else arm_fn(w.data),
                    speed=d.heading_speed(w.data), odom=w.odom(d),
                    holding=d.holding is not None, skill=d.skill, bumped=w.bumped(d))
         intent = tether.intent_out(brain.step(tether.senses_in(s)), w.t)
@@ -92,13 +145,22 @@ def run_one(seed: int, toys: int, seconds: float, quiet: bool = True, odom: str 
         if brain.state == "done":
             break
     score = w.tidy_score()
-    return {"seed": seed, "toys": toys, "odom": odom, "tetherMs": tether_ms, "loopClosure": loop_closure,
+    # A wheeled body has no beak, so it has no modelled grasp attempt either:
+    # its grip is physics (`World.sense_grip`) and the countable event is a
+    # PICK. `getattr` rather than a branch, so the row shape is one shape and
+    # `_seed_line` reads it either way.
+    return {"seed": seed, "toys": toys, "robot": robot, "odom": odom,
+            "tetherMs": tether_ms, "loopClosure": loop_closure,
             "seconds": seconds,
             "inBasket": score["inBasket"], "picked": brain.picked,
-            "delivered": brain.delivered, "falls": d.falls, "attempts": d.grasp_attempts,
+            "delivered": brain.delivered, "falls": d.falls,
+            "attempts": int(getattr(d, "grasp_attempts", brain.picked)),
             "falls_by_state": falls_by_state, "falls_laden": falls_laden, "falls_unladen": falls_unladen,
             "m_laden": round(m_laden, 2), "m_unladen": round(m_unladen, 2),
-            "grasps": d.grasp_successes, "givenUp": sorted(brain.given_up),
+            "grasps": int(getattr(d, "grasp_successes", brain.picked)),
+            "lostIn": dict(getattr(brain, "lost_in", {})),
+            "wallBumps": int(w.wall_bumps.get("d0", 0)),
+            "givenUp": sorted(brain.given_up),
             "simSeconds": round(w.t, 1), "wallSeconds": round(time.time() - t0, 1),
             "done": brain.state == "done", "transitions": len(states)}
 
@@ -117,6 +179,11 @@ def _falls_detail(r: dict) -> str:
 def _seed_line(r: dict) -> str:
     m = ("" if r.get("m_laden") is None
          else f" · walked {r['m_laden']:.0f} m laden / {r['m_unladen']:.0f} m unladen")
+    lost = r.get("lostIn") or {}
+    if lost:
+        m += " · lost in " + ", ".join(f"{k} {v}" for k, v in sorted(lost.items()))
+    if r.get("wallBumps"):
+        m += f" · scenery contacts {r['wallBumps']}"
     return (f"seed {r['seed']}: {r['inBasket']}/{r['toys']} in the basket · picked {r['picked']} · delivered {r['delivered']}"
             f" · grasps {r['grasps']}/{r['attempts']} · falls {r['falls']}{_falls_detail(r)}{m} · {r['simSeconds']} s sim"
             f"{' · done' if r['done'] else ''}{' · gave up ' + ','.join(r['givenUp']) if r['givenUp'] else ''}")
@@ -168,6 +235,11 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=1, help="seeds run in this many processes (each is single-threaded)")
     ap.add_argument("--odom", default="ideal", choices=["ideal", "datasheet", "hostile"],
                     help="odometry drift preset the brain has to live with (roadmap 1.7)")
+    ap.add_argument("--robot", default="microduck", choices=sorted(TIDY_BRAINS),
+                    help="which BODY tidies: the duck's beak (tidy) or MARS's arm (tidy_arm). "
+                         "A MARS room is compiled at 2 ms and scattered with blocks — see TIDY_KINDS")
+    ap.add_argument("--kinds", nargs="+", default=None, choices=sorted(PICKABLE_KINDS),
+                    help="which pickable kinds to scatter (default: the body's own, TIDY_KINDS)")
     ap.add_argument("--walker", default=None, metavar="PATH",
                     help="run this walk policy instead of the shipped alpha_walking.onnx")
     ap.add_argument("--tether-ms", type=float, default=0.0,
@@ -180,7 +252,11 @@ def main() -> None:
     # over an hour, and a machine that reclaims its container mid-run should
     # cost the seed it was on, not the battery (see eval_pitch.load_done).
     from .eval_pitch import load_done
-    key = f"{args.odom}/{args.tether_ms}/{not args.no_loop_closure}/{args.toys}|{args.tag}"
+    # The resume key carries the ROBOT and the toy kinds: a MARS row and a
+    # duck row are not the same measurement and must never pool in one --out
+    # file (`eval_pitch.load_done` refuses a tag mismatch).
+    key = (f"{args.robot}/{'+'.join(args.kinds) if args.kinds else 'default'}/"
+           f"{args.odom}/{args.tether_ms}/{not args.no_loop_closure}/{args.toys}|{args.tag}")
     done = load_done(args.out, key, args.toys, args.seconds)
     rows = [done[sd] for sd in seeds if sd in done]
     if not args.json:
@@ -198,7 +274,8 @@ def main() -> None:
             print(_seed_line(r), flush=True)
 
     args_list = [(sd, args.toys, args.seconds, True, args.odom, args.tether_ms,
-                  not args.no_loop_closure, args.walker) for sd in todo]
+                  not args.no_loop_closure, args.walker, args.robot,
+                  tuple(args.kinds) if args.kinds else None) for sd in todo]
     try:
         if args.jobs > 1 and len(todo) > 1:
             import multiprocessing as mp
@@ -210,7 +287,7 @@ def main() -> None:
         else:
             for a in args_list:
                 keep(run_one(*a[:3], quiet=not args.verbose, odom=a[4], tether_ms=a[5],
-                             loop_closure=a[6], walker=a[7] if len(a) > 7 else None))
+                             loop_closure=a[6], walker=a[7], robot=a[8], kinds=a[9]))
     finally:
         if out is not None:
             out.close()

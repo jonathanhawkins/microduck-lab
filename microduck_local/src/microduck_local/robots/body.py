@@ -208,6 +208,23 @@ class BodyBase:
     # env (`lab/robots.KinematicIdle`). Guessing it from `kind` would put the
     # duck's env behind a string the viewer also renders with.
     default_task: str | None = "walk"
+    # The world TIMESTEP a room holding one of these has to be compiled at
+    # (s), or None for "whatever the world runs at"
+    # (`world/scenario.DEFAULT_PHYSICS_DT`, 5 ms).
+    #
+    # Declared by the body because it is a measurement about the body's own
+    # CONTACTS, and read by `world/scenario.robot_physics_dt` so a procedural
+    # room asks instead of branching on an id. MARS answers 2 ms: MEASURED, at
+    # 5 ms its claw does not slip on the playroom block, it EJECTS it (4 of 16
+    # spots held against 14 of 16 at 2 ms — `robots/mars.GRASP_PHYSICS_DT`).
+    # The walkers answer None and their rooms are bit-for-bit what they were.
+    #
+    # One number per body and not per body PART, because `MjSpec.attach` keeps
+    # the parent's `<option>`: a room has one clock and every robot in it runs
+    # on that clock. A room with two bodies that disagree is a real conflict
+    # and the builder that assembles it has to choose — it is not something a
+    # composer can paper over.
+    physics_dt: float | None = None
 
     # ------------------------------------------------------------------ data
 

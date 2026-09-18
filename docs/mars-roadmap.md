@@ -354,6 +354,21 @@ What a person can now do, and what it took:
   scene dump's own `rgba`. MARS arrives Innate orange on a charcoal chassis
   because the SERVER painted it (`style_visual_geoms`), and a Go2 arrives in
   its MJCF's colours — 0 lines of viewer code know either.
+  **CORRECTED 2026-09-18: MARS needed its own table after all, and the reason
+  is the STAGE, not the robot.** `style_visual_geoms` lifts matt black to
+  charcoal 0.16, whose Rec.709 luminance is 0.16 — against the lab stage's
+  `#101216` backdrop at 0.07. MEASURED on the live stage: the chassis crop
+  read **0.032** and the head **0.048** against a 0.069 background, i.e. the
+  chassis was DARKER than the floor it stood on, and the only part of the
+  robot that read was the orange arm. `robotLook("mars")` is now `"mars"` and
+  `components/MarsLook.tsx` holds the table (a graphite `#3b3f47` chassis with
+  clearcoat and metalness — the specular top is what shows a dark shell's
+  shape, chassis **0.185**, head **0.532**, background unchanged at 0.069;
+  Innate's four store colorways, default orange/black; the frame markers
+  invisible). The rule the §6.4 design keeps: a body earns a table when a
+  generic paint FAILS ON A STAGE, and it is still a kind → material table
+  shared by the lab stage and `/sim`, not a component per robot. A Go2 and
+  every other Menagerie model stay `"generic"`.
 - **The 🎓 panel says "task", not "trick", for a non-legged body** — Innate's
   vocabulary for Innate's robot (§4) — and its two recipes needed a `suggest`
   phrase before they were VISIBLE at all: `teach_suggestions` lists only
@@ -933,7 +948,10 @@ hands back every point the lift earned — there is no jackpot in it.
   that changes, and the change is the whole world's — see the 2 ms table
   above before Phase 5 puts an arm in the playroom.
 
-### Phase 5 — a MARS brain: tidy with an arm, and `train-brain --robot mars`  `[ ]`
+### Phase 5 — a MARS brain: tidy with an arm, and `train-brain --robot mars`  `[~]`
+
+`[~]` and not `[x]`: the TIDY half is done and measured (the note below), the
+`train-brain --robot mars` half is untouched.
 
 - `Tidy` today is beak-shaped (13 beak/mouth/ground_pick references). A
   `TidyArm` brain keeps its state machine (search → approach → pick → carry →
@@ -947,6 +965,236 @@ hands back every point the lift earned — there is no jackpot in it.
 - **Settles:** `eval-tidy --robot mars --seeds 3 --seconds 300` reports
   toys/5 min; the duck's 0.83 is the yardstick. A learned follow brain on
   MARS reaches the scripted `follow`'s in-band level, as it did on the duck.
+
+**5 DONE / measured — MARS tidies the playroom, and the bar is MET at 0.94 on
+the 3 seeds it is stated in and 0.90 on 8 (2026-09-18).** `brain/tidy_arm.py`
+(`TidyArm`, registered as `tidy_arm`, a SIBLING of `brain/tidy.py` and not a
+subclass), `robots/mars_ik.py` (`ArmKinematics` + `solve_arm`, the probe's own
+coordinate descent lifted out so there is ONE solver),
+`world/scenario.Scenario.physics_dt` + `Body.physics_dt`,
+`MarsDriver.gripper_load` / `held_body`, `World.sense_grip`,
+`WorldRobot.arm_qpos`, `Senses.arm`, `brain.runtime.attach_world`,
+`make_playroom(robot=, brain=, kinds=)`, `eval-tidy --robot mars`, and a
+`tidy_arm` graph for the `/sim` inspector. 30 cases in
+`tests/test_tidy_arm.py`; **25 planted breaks, 24 caught and 1 declared an
+expected null** (see the table). 392 passed across the named files and
+**2092 passed / 15 skipped suite-wide**, with the one pre-existing failure
+(`test_kick_gym_duel::test_with_nobody_to_contest_it_we_touch_first`, the
+`approach_keepout` default recorded as UNFIXED) the only red — it is the same
+single failure `scratchpad/baseline-pytest.txt` recorded before this phase.
+The duck's and the G1's rollout fingerprints are unchanged
+(`3dfe999d8b52e4c3` / `64870f60588a8737` / `c3c8547d6d790171`).
+
+**The headline.** `eval-tidy --robot mars --seconds 300`, blocks (see the claw
+table below), against the duck's `eval-tidy` on its own room:
+
+| | mean tidied | per seed | falls | picks | where the toy is lost |
+|---|---|---|---|---|---|
+| MARS, 3 seeds | **0.94** | 6/6, 5/6, 6/6 | 0.00 | 22 | place 11, deliver 4 |
+| MARS, 8 seeds | **0.90** | 6 5 6 6 5 6 5 4 | 0.00 | 55 | place 33, deliver 8 |
+| duck, 3 seeds (control) | 1.00 | 6/6, 6/6, 6/6 | 0.00 | — | — |
+| MARS `wander` (null) | 0/6 | — | 0 | 0 | — |
+
+Falls are 0 **by construction** and not by luck: a planar base has no attitude
+to lose (`WorldRobot.fallen()`), so the whole rim-topple economy that
+`TidyParams.basket_reach` is a knife-edge in has no analogue here.
+
+**The timestep, and the cost of it.** A room now carries its own MuJoCo
+timestep (`Scenario.physics_dt`), because 4b's grasp table is a whole-world
+decision. Re-measured IN THE COMPOSED ROOM (`scratchpad/probe_room_grasp.py`,
+8 spots, IK place / close / lift / hold 2 s), which is what the field exists
+for and is now a test:
+
+| spots drawn from | 2 ms | 5 ms |
+|---|---|---|
+| this brain's own standoff band (r 0.22-0.28, yaw ±0.15) | **7/8** | **3/8** |
+| the whole ±60° shell (r 0.18-0.38, yaw ±1.0) | 5/8 | 0/8 |
+
+- **What it costs:** `mars-playroom` runs at **19 900 physics steps/s, RTF
+  39.8x** at 2 ms against 14 950 / 74.8x at 5 ms — 2.5x the steps for 0.53x
+  the real-time factor. A 300 s `record-world` at 2 ms takes **25.4 s of wall
+  clock** (`/usr/bin/time`, including 3000 rendered frames and the contact
+  sheet), so minutes and not an hour, and `eval-tidy --robot mars` is ~13 s a
+  seed.
+- **Every duck scenario stays at 5 ms** and `tests/test_arena.py`'s
+  step-for-step lock against the walk env is untouched; a test walks
+  `scenarios/*.json` and asserts it. A 2 ms MARS room perturbs nothing about
+  the duck's tidy numbers because **no duck is in it** — the duck's own
+  `eval-tidy` re-ran at 1.00/3 seeds and the three fingerprints are identical.
+- `MarsBody.physics_dt` is where the 2 ms lives, so `make_playroom(robot=…)`
+  asks the body and carries no `if robot ==`.
+
+**Four bugs this phase found, and every one of them was a measurement
+correcting a confident wrong diagnosis.** In the order they were found:
+
+- **`Intent.arm` is absolute and unlimited, so a BRAIN must carry the servo's
+  speed.** The first `tidy_arm` run wrote each IK solution as one `Intent.arm`
+  and `MarsDriver.set_arm` applied it whole: the 20 g block was flung out of
+  the room — found at **(5.2, 7.2) m in a 3.5 x 3.0 m room** — on 6 of 6
+  picks. That reads exactly like 4b's 5 ms EJECTION and is a different bug.
+  `mars_env` had the rate limit all along and the driver never did, which is
+  4a's own transferable lesson ("a limit applied at both training and
+  inference must come from one place") arriving from the other side.
+  `MAX_TARGET_RATE_RAD_S` now lives on `robots/mars.py` and both consumers
+  read it.
+- **"The arm sags" was WRONG, and the measurement caught it.** At the grasp
+  pose the commanded and achieved joint vectors differed by −0.067 / −0.048 rad
+  on joints 2/3, which is **28.5 mm of claw height and 11.5 mm of reach**, so
+  Innate's compliance model looked like the culprit and a whole sag-correction
+  phase was built for it. Then the same commanded pose was driven with
+  **nothing in reach**: the error is **0.5-3.2 mm** over 15 poses (3 yaws x 5
+  heights). The 28.5 mm was the arm BLOCKED by the block it was pushing. The
+  correction stays (it is cheap, and it is measured from `Senses.arm` rather
+  than from a stiffness constant on placeholder inertias) and its size is now
+  honestly stated as millimetres.
+- **A 40 mm cube is 56.6 mm across its diagonal, and the playroom scatters
+  toys at a random yaw.** The jaw gap is 33.4 mm at joint6 0.30, **58.8 at
+  0.60** and **78.8 at the 0.8727 stop**; the IK constrains the grasp POINT
+  and not the jaw's heading, so the jaw-to-block angle is effectively random
+  and at 0.60 rad a block presenting its diagonal has **1 mm of clearance a
+  side**. The blades pushed the block 16-30 mm sideways before they could
+  close: **1 pick in 6**. Opening to the stop took it to **6 of 6** on the same
+  layout. 4b's scripted pick holds 14/16 at 0.60 because it PLACES the block
+  with an identity quaternion, axis-aligned with the jaw — which a room is
+  not. `AGENTS.md`'s "suspect the harness when train and eval disagree".
+- **A pitched camera's azimuth is not a horizontal bearing.** With an IDEAL
+  detector (no noise at all) and the head at MARS's 0.349 rad limit, the
+  reported bearing to a block at four known spots was a consistent **0.84-0.86
+  of the true one** — a gain, `AGENTS.md`'s "uncalibrated lens is a bearing
+  GAIN" in a second form, the MOUNT this time and not the lens model. Fed
+  through the duck's `cam_pitch - elevation` shortcut that put the estimate
+  **11-22 mm to the side** of a 40 mm block. Rebuilt as a ray intersected with
+  the toy's plane, the same four spots land within **0.3-1.5 mm**. Separately,
+  the class-blind `toy_z` of 15 mm (against a block's true 21 mm) stretched
+  every range by a systematic **+9 to +10 mm**, which is the whole 9.4 mm
+  margin. `brain/tidy.py` is NOT touched: its `reach_pad` and `reach_left`
+  were fitted against this bias over 64 paired seeds and its targets sit near
+  the optical axis anyway, so the same approximation is 3 mm there.
+
+**What the claw can pick, and what that does to the mixed room.** MEASURED in
+the composed room at 2 ms, 6 spots in the brain's own standoff band:
+
+| toy | size / mass | held |
+|---|---|---|
+| **block** | 40 x 40 x 40 mm, 20 g | **6/6** |
+| sock | 60 x 35 x 25 mm, 20 g | 3/6 |
+| brick | 32 x 16 x 9.6 mm, 2.5 g | **0/6** |
+
+A 9.6 mm-tall brick is below what two blades can pinch off a floor, and a
+60 mm sock only fits the 78.8 mm jaw on one of its axes. That is a property of
+a parallel jaw and not of this brain — the duck's soft bill takes all three —
+so `eval-tidy --robot mars` scatters blocks (`eval_tidy.TIDY_KINDS`, declared
+with this table) and the mixed `mars-playroom` is reported as what it is:
+
+| `record-world mars-playroom --brain d0=tidy_arm --seconds 300 --seed s` | in basket | holds | places | unsticks | explores | falls | ended |
+|---|---|---|---|---|---|---|---|
+| seed 0 — `scratchpad/tidy-mars-0/` | 1/6 | 7 | 1 | 0 | 10 | 0 | search (approach 0.88 m) |
+| seed 1 — `scratchpad/tidy-mars-1/` | 3/6 | 8 | 3 | 4 | 0 | 0 | search (lift) |
+| seed 2 — `scratchpad/tidy-mars-2/` | 2/6 | 6 | 3 | 2 | 5 | 0 | **done** (6 clean scans, 264 s) |
+| null: the same room on `wander` — `scratchpad/tidy-mars-null-wander/` | **0/6** | 0 | 0 | 0 | — | 0 | — |
+
+**Run these SERIALLY.** The first pass ran the four recordings in parallel and
+reported 2/6, 1/6, 3/6; re-run one at a time the same seeds are 1/6, 3/6, 2/6,
+and each is then bit-reproducible (seed 0 gave 1/6 four times, including with
+`OMP_NUM_THREADS=1`). So the score moves with CPU CONTENTION, not with the
+seed — almost certainly a threaded BLAS reduction inside `MarsDriver.
+_apparent_inertia`'s `mj_fullM` / `np.linalg.inv`, which sets `kp_yaw` and
+therefore every metre the base drives. The table above is the serial run. It
+is a caveat for any future MARS battery and it is NOT in the duck's numbers,
+whose driver has no such step.
+
+**`mars-playroom.json` is ONE fixed layout** (the seed only moves the sensor
+noise), with 2 bricks, 2 blocks and 2 socks — so 2-3 of 6 is the claw's
+ceiling on it plus whichever socks present their narrow side, and the spread
+across seeds is the detector's. What the sheets SHOW, read tile by tile: the
+arm unfolds, hovers, descends and lifts cleanly (tiles #01-#06 of seed 1); the
+long carries work (seed 1 tiles #02-#05 are one 1.4 m delivery in progress);
+and the two failures are legible —
+
+- the brick approaches repeat and end in `given_up` after 3 retries each,
+  which is the claw table above and not a brain fault;
+- **the `deliver` leg did not converge before the detour was ported**: seed 1
+  spent **45 s** at 1.49 → 1.32 → 1.38 m with the note alternating on
+  "· blocked" (the guard turns away, the servo turns back), and a second run
+  sat in `approach 0.56 m` for **80 s** beside the basket because the keep-out
+  turned it off a toy on the rim, forever. Both are fixed and both were found
+  by reading the sheet, not the score.
+
+**Three fixes came out of those sheets and they are worth +0.10 toys a seed**
+(8 paired seeds, 0.79 → 0.896): the duck's `detour_s` ported (drive straight
+for 1 s once a blocker clears, whatever the servo wants); the basket keep-out
+scoped to `search`/`explore`/`carry_explore` as the duck scopes its own (an
+approach is allowed through — a radial approach leaves the chassis front
+0.165 m short of the toy, and `unstick` is the backstop); and **the robot's own
+extended arm cut out of the range sense** — MEASURED, the adapted 8x8's
+right-hand columns read **0.12-0.17 m** while carrying and the raw scan's
+nearest return is 0.196-0.204 m at −8 to −17°, which is the arm crossing the
+scanner's 0.17 m plane. `mars.FOOTPRINT_M` is 0.12 and was measured for the
+arm FOLDED, which is Phase 3b's own warning ("the shadow moves with the arm")
+coming due.
+
+**One knob was A/B'd and REFUTED, with its mechanism intact.**
+`TidyArmParams.carry_speed` / `carry_wz` (0.20 m/s + 0.5 rad/s against 0.30 +
+1.0), paired on 8 seeds x 300 s on the pre-detour build:
+
+| arm | tidied | per seed | picks | lost in |
+|---|---|---|---|---|
+| gentle | 0.750 | 5 3 6 4 5 5 5 3 | 48 | place 34, deliver 5 |
+| full | 0.792 | 6 5 5 5 5 4 4 4 | 56 | place 33, deliver 10 |
+
+paired gentle−full **−0.250 toys, SE 0.412**, better 3 / worse 4 / tied 1. It
+does exactly what it was built for — **deliver losses halve, 10 → 5** — and it
+does not buy a toy, because the slower carry costs 8 picks over the battery
+and a time-bound benchmark pays for that. Unresolved at this size (a real
+effect up to ~0.8 toys would not have been seen), so the simpler
+configuration ships and the knob keeps the table.
+
+**The planted-break table.** 25 plants, run against a COPY of the package on
+`PYTHONPATH` (`scratchpad/plant_tidy_arm.py`), **24 caught, 1 an expected
+null** — and the first pass read "24/24 caught" and was a LIE: `pytest` was
+not importable in the subprocess, so every row failed for the same wrong
+reason. A **NULL row that must PASS** is now the first plant, which is
+`AGENTS.md`'s "verify filters against the complement" earning its keep the
+first time it was applied. A second pass then read 9/25 because the asset
+roots resolve relative to the package, so every `@needs_mars` case SKIPPED in
+the copy; pinning `MICRODUCK_RL_DIR` and `MICRODUCK_MARS_DIR` recovered 12
+real catches. Five of the remaining misses were toothless tests of mine and
+are named in the file: a `physics_dt` plant that was a no-op, a stop rule
+tested only where both tolerances agreed, a `rim_z` case, a standoff assertion
+that read the FALLBACK pair, an `in_basket` case that never exercised the
+height rule, and a `_locate` case that named `toy_z` on both sides of its own
+comparison (4b's exact anti-pattern, third occurrence). The one declared null
+is `held_body`'s subtree check: with today's model nothing of the robot ever
+touches a blade (`tune_contacts` excludes the finger pair), so dropping it
+cannot change an answer — the same thing 4b said of the contact conjunct.
+
+**What Phase 5 does NOT do, and what 5b owes:**
+
+- **`train-brain --robot mars` is untouched.** `brain_env`'s 80-float
+  observation still bakes 64 ToF zones at `[0:64]`, and the `obs_version 3` /
+  per-body `ObsBuilder` this phase's second bullet asks for is not built.
+  Nothing here is a learned brain: `TidyArm` is scripted, as `Tidy` is.
+- **The trained `pick` ONNX is not used.** The phase plan's second pick mode
+  (`pick_policy="mars-pick-r1-warm"`) was not built, because the SCRIPTED pick
+  had to work first and getting it there consumed the four bugs above. The
+  contract's `target_base` slot is exactly what `_toy_target_base` already
+  computes, so the seam is in place; the A/B (scripted against the 11/20 warm
+  rung, in a room) is 5b's.
+- **`place` is where the toy is lost, 35 times of 53 picks.** It still lands in
+  the tray (the arm is already over it), which is why it counts as a delivery,
+  but it is a release 6-10 cm early and it is what puts a toy on the rim
+  instead of in. The mechanism is the grip loosening as the arm extends; the
+  cheapest candidate is a place pose closer in with the toy lower.
+- **A learned follow brain on MARS** (the phase's second settling condition) is
+  not measured.
+- **Loop closure is off** (`TidyArm._pose` is raw odometry). The duck needs its
+  own map because its odometry is dead reckoning off a gait; a wheeled base's
+  is wheel odometry in a 3.5 x 3.0 m room with ~1 m trips. It is a thing to add
+  with an `--odom datasheet` / `hostile` A/B, not to inherit untested.
+- **The 45° ToF adapter still throws the sides away**, so an obstacle beside
+  the robot is invisible to the guard and `unstick` is the only backstop —
+  Phase 3b's `link2_elbow` finding, unaddressed. The full 360 scan rides on
+  `Senses.lidar` for a brain that wants to do better.
 
 ### Phase 6 — the way out: a skill template, and the docs  `[ ]`
 

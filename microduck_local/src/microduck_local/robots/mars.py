@@ -365,6 +365,56 @@ FINGER_ARMATURE = 1e-4                 # else 12 g blades sink into the grasp
 #: each other (world.GRIPPER_CLOSED_ON_AIR_RAD).
 GRIPPER_CLOSED_ON_AIR_RAD = -0.085
 
+#: |`qfrc_constraint` at joint6| above which the claw is HOLDING something.
+#:
+#: It lives HERE, with the table above that decided it, because it is a fact
+#: about the ROBOT and two consumers need it: `robots/mars_env.HOLD_LOAD_NM`
+#: (which re-exports this name, so every 4b number and every planted break in
+#: `tests/test_mars_pick.py` still reads the same float) and
+#: `robots/mars_drive.MarsDriver.held_body`, which is how a MARS in a `/sim`
+#: room fills `Senses.holding`. `mars_drive` cannot import `mars_env` — that
+#: module pulls gymnasium in — so a constant shared by the env and the driver
+#: has exactly one honest home.
+#:
+#: **What it separates is EMPTY from LOADED**, and the margin is two orders:
+#: every empty pose measured reads 0.0000 (open, shut on air at the stop, the
+#: shut claw driven 0.25 rad into the floor) and the block in the claw reads
+#: 1.89-2.03. It does NOT separate "gripped" from "resting against" — that
+#: reading is pose-dependent and is the right answer either way, because a
+#: blade carrying 1.8 N*m of an object's reaction IS loaded by it.
+HOLD_LOAD_NM = 1.0
+
+#: The world timestep MARS's CLAW needs — Innate's own (`Body.physics_dt`).
+#:
+#: 2 ms, MEASURED, and it is the one lever: at this repo's 5 ms a grasp does
+#: not slip, it EJECTS (the block leaves at 0.08-6.6 m of travel in the two
+#: seconds after a lift, a contact impulse the coarse step cannot integrate),
+#: and the scripted pick holds 4 of 16 spots against 14 of 16 at 2 ms. The
+#: elliptic cone and `impratio 10` are a NULL at either step. Read by
+#: `world/scenario.robot_physics_dt`, so a room built for a MARS gets the
+#: clock its claw needs without any builder naming this number.
+GRASP_PHYSICS_DT = 0.002
+
+#: How fast a COMMANDED joint target may travel, rad/s.
+#:
+#: `[datasheet — the XL430-W250-T shoulder pair's 61 rpm no-load at 12 V; not
+#: measured here]`. It is the servo's own speed, which is why it lives with
+#: the robot: `MarsDriver.set_arm` takes an ABSOLUTE target and applies no
+#: limit at all, so every writer has to carry this, and 4a's transferable bug
+#: was exactly a limit that existed on one side and not the other.
+#:
+#: **What it costs to forget.** MEASURED twice. In the env (4a): with the
+#: target applied instantly, 60 of 60 random episodes ended in a
+#: self-collision inside 1-5 control steps, because a 3 rad step every 40 ms
+#: drives the arm straight through the chassis. In a ROOM (Phase 5, the first
+#: `tidy_arm` run): `brain/tidy_arm.py` wrote its IK solution as one
+#: `Intent.arm` and the servo slammed it — the 20 g block was flung out of the
+#: room (found at (5.2, 7.2) m in a 3.5 x 3.0 m room) on 6 of 6 picks, which
+#: reads exactly like the 5 ms EJECTION failure and is not it. Both consumers
+#: now slew: `mars_env.MAX_TARGET_RATE_RAD_S` is this name, and
+#: `TidyArmParams` slews its own commanded target at it.
+MAX_TARGET_RATE_RAD_S = 6.0
+
 # ------------------------------------------------------- innate's arm servo
 #
 # core.py: the arm and head run position PD through `qfrc_applied`, because
@@ -1125,8 +1175,20 @@ class MarsBody(BodyBase):
     # ---------------------------------------------------------- /sim world
 
     def attach(self, spec, prefix: str, frame) -> None:
-        """Put one MARS in a world model under `prefix`."""
-        spec.attach(robot_spec(), prefix=prefix, frame=frame)
+        """Put one MARS in a world model under `prefix`.
+
+        The child's `<option>` is written to the PARENT's timestep first.
+        `MjSpec.attach` keeps the parent's option block either way — that is
+        documented in `world/compose.compose` and measured — but it WARNS when
+        the two disagree, and once rooms carry their own clock
+        (`Scenario.physics_dt`: a MARS room is 2 ms) every compose of one
+        printed a `UserWarning` about a value that was never in doubt. Saying
+        it explicitly is also the more honest spelling: the room's clock is
+        the robot's clock.
+        """
+        robot = robot_spec()
+        robot.option.timestep = spec.option.timestep
+        spec.attach(robot, prefix=prefix, frame=frame)
 
     def driver(self, model, prefix: str):
         """One `MarsDriver` on this model — `robots/mars_drive.py`.
@@ -1239,6 +1301,11 @@ MARS = MarsBody(
     # — the ⭐ in the panel goes to whichever a measurement earns
     # (docs/mars-roadmap.md §5, open decision 2).
     default_task="reach",
+    # A room with a MARS in it that must GRASP runs at 2 ms, not the world's
+    # 5 ms — the measurement is on `GRASP_PHYSICS_DT`, and declaring it here
+    # is what lets `world/scenario.robot_physics_dt` build such a room without
+    # naming this robot.
+    physics_dt=GRASP_PHYSICS_DT,
 )
 
 

@@ -116,5 +116,6 @@
   "attacks": {},
   "collision": "all",
   "cove": 0.0,
+  "physics_dt": 0.002,
   "version": 1
 }

@@ -152,7 +152,14 @@ CTRL_DT = C.PHYSICS_DT * DECIMATION
 #: contract declares. A policy trained under `pick` and one trained under
 #: `reach` tick the same clock and mean the same thing; what differs is how
 #: finely the world underneath is integrated.
-PICK_PHYSICS_DT = 0.002
+#:
+#: Phase 5 moved the FLOAT to `mars.GRASP_PHYSICS_DT` and kept this name: a
+#: `/sim` room needs the same number (`world/scenario.Scenario.physics_dt`,
+#: read from `MarsBody.physics_dt`), and `world/scenario.py` cannot import
+#: this module — it is the on-disk contract and this one pulls gymnasium in.
+#: Same value, one definition, and `tests/test_mars_pick.py`'s planted breaks
+#: still read this name.
+PICK_PHYSICS_DT = mars.GRASP_PHYSICS_DT
 PICK_DECIMATION = int(round(1.0 / (mars.CONTROL_HZ * PICK_PHYSICS_DT)))
 
 #: `target = ARM_HOME + action[0:6] * ACTION_SCALE_RAD`, clipped to each
@@ -201,7 +208,14 @@ ACTION_CLIP = 1.0
 #: driver as an optional default-off knob (the way `RayFan` grew
 #: `exclude_body=`) is Phase 3b/4b work, and the day MARS has an `Intent.arm`
 #: channel it should be shared rather than copied.
-MAX_TARGET_RATE_RAD_S = 6.0
+#:
+#: Phase 5 moved the FLOAT to `mars.MAX_TARGET_RATE_RAD_S` and kept this name,
+#: for the third time and the same reason: `brain/tidy_arm.py` writes arm
+#: targets through `Intent.arm`, which `MarsDriver.set_arm` applies with no
+#: limit of its own, so a brain has to carry the servo's speed too — and a
+#: limit with two definitions is 4a's bug back again. The block on `mars.py`
+#: records what forgetting it did in a room.
+MAX_TARGET_RATE_RAD_S = mars.MAX_TARGET_RATE_RAD_S
 
 # ------------------------------------------------------- the action map
 #
@@ -588,7 +602,12 @@ SHELL_EXIT_MARGIN_RAD = math.radians(15.0)
 #: case reads exactly 0), and it is there to name the OBJECT: "holding" must
 #: mean holding the thing the task is about, and Phase 5's room has a basket
 #: and several toys in it.
-HOLD_LOAD_NM = 1.0
+#:
+#: Phase 5 moved the FLOAT to `mars.HOLD_LOAD_NM` for the same reason
+#: `PICK_PHYSICS_DT` moved: `robots/mars_drive.MarsDriver.held_body` fills
+#: `Senses.holding` for a MARS in a room off the identical predicate, and the
+#: driver cannot import this module. Same value, one definition.
+HOLD_LOAD_NM = mars.HOLD_LOAD_NM
 
 #: How far the toy must rise ABOVE ITS RESTING HEIGHT to count as lifted.
 #: "Lift 5 cm" read literally, so the number is the lift and not a height

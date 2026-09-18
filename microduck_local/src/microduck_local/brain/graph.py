@@ -128,6 +128,47 @@ TIDY = _g(
         ],
     })
 
+TIDY_ARM = _g(
+    "tidy_arm", "TidyArm — the playroom loop, with an ARM",
+    "A sibling of Tidy, not a subclass: a wheeled base with a gripper has no beak, no gait, "
+    "no fall and no blind leg (its camera keeps a floor toy in frame all the way to the grasp), "
+    "so the three legs the duck spends on those are four ARM phases instead.",
+    [("find", "find a toy"), ("go", "go to it"), ("grasp", "pick it up"),
+     ("carry", "carry it"), ("deliver", "put it in the basket"),
+     ("stuck", "stuck"), ("end", "finish")],
+    {
+        "find": [
+            ("search", "turn on the spot looking for something to pick up"),
+            ("explore", "nothing here — drive somewhere else and look again"),
+        ],
+        "go": [
+            ("approach", "drive so the toy lands inside the arm's reach shell"),
+            ("settle", "stand still, re-measure, and solve the grasp pose"),
+        ],
+        "grasp": [
+            ("hover", "jaws open 8 cm ABOVE the toy — and where the arm's sag is measured"),
+            ("reach", "straight down onto the toy, sag pre-compensated"),
+            ("close", "squeeze — the blades either load or they do not"),
+            ("lift", "raise the grasp point clear of the floor"),
+        ],
+        "carry": [
+            ("carry", "holding it — find the basket (the lidar cannot see a 6 cm rim)"),
+            ("carry_explore", "holding it and the basket is nowhere in sight — go and look"),
+        ],
+        "deliver": [
+            ("deliver", "drive to the standoff the arm can reach over the rim from"),
+            ("place", "extend the arm over the tray"),
+            ("drop", "open the jaw"),
+            ("retract", "arm back to HOME"),
+        ],
+        "stuck": [
+            ("unstick", "asked to move and did not — reverse and turn"),
+        ],
+        "end": [
+            ("done", "six clean scans with nothing seen — the room is tidy"),
+        ],
+    })
+
 WANDER = _g(
     "wander", "Wander — cruise on the ToF",
     "The smallest scripted brain: five states, and the only sensor is the 64-zone ToF.",
@@ -196,13 +237,15 @@ STRIKER = _g(
     ]})
 
 GRAPHS: dict[str, BrainGraph] = {g.key: g for g in
-                                 (CHASE, TIDY, WANDER, FOLLOW, SCRIPT, LEARNED, STRIKER)}
+                                 (CHASE, TIDY, TIDY_ARM, WANDER, FOLLOW, SCRIPT,
+                                  LEARNED, STRIKER)}
 
 # Which graph a brain OBJECT draws, by class name. The registry kind is not
 # the key: every `learned:<run>` is its own kind and they all share one
 # picture.
 BY_CLASS: dict[str, str] = {
-    "Chase": "chase", "Tidy": "tidy", "Wander": "wander", "Follow": "follow",
+    "Chase": "chase", "Tidy": "tidy", "TidyArm": "tidy_arm",
+    "Wander": "wander", "Follow": "follow",
     "Script": "script", "LearnedBrain": "learned", "LearnedStriker": "striker",
 }
 
