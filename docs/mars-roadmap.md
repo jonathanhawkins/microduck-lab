@@ -646,7 +646,8 @@ eight seeds (8/8 inside 0.3 mm), so nothing about the shell excuses a miss.
   was in the action space, and a reward cannot pay for a behaviour the action
   space has no way to express.
 
-**3b's open question is still open, and 4a could not close it.** Phase 3b
+**3b's open question WAS still open at 4a, and 4b closes it — see the 4b note
+below.** Phase 3b
 left "the world's option block costs MARS nothing… NOT tested for a GRASP,
 which is what those options were set for; re-measure in Phase 4". `reach`
 never closes the gripper on anything — there is no object in its scene — so
@@ -664,6 +665,180 @@ own model, hence `MarsArmEnv(own_model=True)`), and the `target_seen` gate
 finally doing something — it is hard-wired to 1.0 today because `reach`'s
 target is privileged, and the slot exists so that adding the head detector
 does not change the layout.
+
+**4b DONE — the claw works, the ladder is what makes it learnable, and the
+80 % bar is MISSED at 11/20 (2026-09-18).** `pick` is a task of `MarsArmEnv`
+(`MarsPickEnv`, `task="pick"`), with the playroom's own 4 cm / 20 g `block`
+free-jointed into a private scene at **2 ms**, `behaviors/mars_tasks.MARS_PICK`
+in the 🎓 panel with a four-rung curriculum, `MICRODUCK_MARS_PICK_RUNG` as the
+stage knob, and `scripts/probe_mars_pick.py` as the eye. 24 cases in
+`tests/test_mars_pick.py` plus the updated vocabulary cases in
+`tests/test_mars_env.py` / `tests/test_mars.py`; **18 planted breaks, 18
+caught — but only after four of them were MISSED on the first pass**, which
+is `AGENTS.md`'s "a test proves nothing until it has been shown to fail"
+earning its keep for the third time. All four were the same mistake: a test
+that names the constant it is checking on BOTH sides of the comparison
+(`toy_spec() == PICKABLE_KINDS[PICK_TOY_KIND]` agrees with itself for a sock;
+`opt.timestep == PICK_PHYSICS_DT` follows the constant to 5 ms), or that
+checks a discriminator only in the two states where the two candidates agree
+(the load slot at the END of a close, never during the travel that separates
+them). Three CLI runs under `MICRODUCK_RUNS_DIR` (the batteries exception),
+~19 minutes of training. The duck's and the G1's rollout fingerprints are
+unchanged (`3dfe999d8b52e4c3` / `64870f60588a8737` / `c3c8547d6d790171`).
+
+**The grasp was measured before a reward line existed, and it decided the
+environment** (`scripts/probe_mars_pick.py --scripted`, 16 spots drawn from
+the shell; each is an IK-driven open / place / close / lift 10 cm / hold 2 s):
+
+| timestep | MARS's option block (implicitfast, elliptic, impratio 10) | the world's (`compose.py` defaults) |
+|---|---|---|
+| **5 ms** (the lab's `C.PHYSICS_DT`) | 4/16 | 1/16 |
+| **2 ms** (Innate's own) | **14/16** | **14/16** |
+
+- **The TIMESTEP is the lever; the cone is not, and that closes 3b's open
+  question.** What fails at 5 ms is not slip but EJECTION — the block leaves
+  at 0.08–6.6 m of travel in the two seconds after the lift, a contact
+  impulse the coarse step cannot integrate. At 2 ms the world's pyramidal
+  cone at `impratio 1` scores exactly what Innate's elliptic cone at 10 does.
+  (The G1 variant of the world's block — `implicitfast`, iterations 10,
+  ls_iterations 20 — was bit-identical to the plain world's in all 24 cells
+  of an earlier sweep, so neither the integrator nor the solver budget does
+  anything here either.) **So a MARS that must GRASP in a `/sim` room needs
+  the room's timestep lowered, which is a whole-world decision, not a cone
+  the composer can set for one body.** Both 2 ms misses are the solver's, not
+  the grasp's: they are the two shell-EDGE spots (±57°, ±60° of the ±60° arc)
+  whose open-jaw pose lands 13.7 and 15.1 mm off the block — the worst two IK
+  residuals in the set — and every spot the claw was actually put on held.
+- **`pick` therefore runs at `PICK_PHYSICS_DT` = 2 ms with decimation 20, and
+  `reach` is untouched at 5 ms / 8.** The contract's 25 Hz is unmoved, so the
+  two policies tick the same clock. It costs 2.26× per control step
+  (0.52 ms against `reach`'s 0.23 ms single-env) and the training throughput
+  is **4 800 steps/s at rung 1** against `reach`'s 8 200–9 900 — except at
+  rung 0, where the block is in contact every step and it is **1 000–1 300**.
+- **`gripper_load` is the CONSTRAINT torque now, not the servo torque.** The
+  table (2 ms, the block):
+
+  | state | `qfrc_constraint` at joint6 | `qfrc_applied` (4a's slot) | finger↔block contacts |
+  |---|---|---|---|
+  | open, empty | 0.0000 | −0.0000 | 0 / 0 |
+  | shut on AIR, at the hard stop | 0.0000 | −0.0000 | 0 / 0 |
+  | shut claw driven into the FLOOR | 0.0000 | −0.0000 | 0 / 0 |
+  | jaws resting open ON the block | 0.0035 | −0.0063 | 1 / 1 |
+  | **HOLDING the block** | **1.9703** | −2.0000 | 4 / 12 |
+
+  4a had already found that shutting on air reads 0 because `set_arm` clamps
+  the close target to the stop; what 4b adds is that the servo torque is
+  **saturated at −2 N·m for 8 of the 40 control steps of a close on air**, so
+  one sample of it cannot tell "closing" from "holding" either. The
+  constraint is 0.0000 for all 40. The holding predicate is `|load| ≥ 1.0 N·m`
+  **and** a finger↔block contact (the contact adds no discrimination today —
+  every empty case reads exactly 0 — it is there so that "holding" names the
+  OBJECT once Phase 5's room has several). What the threshold separates is
+  EMPTY from LOADED, and not "gripped" from "resting against": that middle
+  row is pose-dependent (0.0035 where the jaws merely touch the block, 1.82
+  where the approach has pressed them onto it) and is the right answer either
+  way. Cost to `reach`: under its trained policy the old slot was non-zero on
+  7.6 % of steps and the new one is 0.0000 throughout, so the slot was
+  decoration for that task either way.
+
+**The rung table.** 20 deterministic episodes of the exported ONNX,
+`scripts/probe_mars_pick.py`:
+
+| variant | ever grasped | lifted ≥ 5 cm | **held 1 s** | final lift median | sheet |
+|---|---|---|---|---|---|
+| null (zero action), rung 1 | 0/20 | 0/20 | 0/20 | 0.0 cm | `scratchpad/mars-pick-null-eval/` |
+| **rung 1 from scratch**, 1.5 M | **0/20** | 0/20 | 0/20 | 0.0 cm | `scratchpad/mars-pick-r1-eval/` |
+| **rung 0 drill**, 600 k | 20/20 | 20/20 | **20/20** | 30.8 cm | `scratchpad/mars-pick-r0-eval/` |
+| **rung 1 warm-started** off it, 900 k | 18/20 | 12/20 | **11/20** | 30.7 cm | `scratchpad/mars-pick-r1warm-eval/` |
+
+- **Rung 1 from scratch never grasps, and the sheet says exactly why.** The
+  arm unfolds from HOME, puts the claw on the block inside 1 s and then sits
+  there for the remaining 7 s: `at_target` earns **+324 an episode** (more
+  than the +267 a scripted success earns, because it parks for the whole
+  episode) while `lift_progress` and `held_high` are **0.000 on every one of
+  20 seeds**, with the load oscillating between −0.15 and +0.91 as the blades
+  brush the block without ever squeezing past the 1.0 N·m line. That is
+  `AGENTS.md`'s "does ANY rollout ever do the thing?" answered NO, and the
+  rule then is explicit: **ladder the physics, do not re-price the reward.**
+- **Rung 0 is that ladder rung, and it is decisive.** The arm spawns with its
+  jaws already open around the block (`PICK_GRASP_POSE`, the pinned pose the
+  scripted pick uses), so closing is one action away. 600 k steps takes it to
+  **20/20 held, a 30.8 cm lift, hold_frac 1.000, one grasp attempt**. Read it
+  as ONE measurement rather than twenty: rung 0 is a single deterministic
+  state, so the 20 "seeds" are the same episode. It is a drill, exactly like
+  the headstand's `xml` stage.
+- **Warm-starting rung 1 off the drill turns 0/20 into 11/20**, with a
+  frozen normalizer (`--freeze-obs-norm`, the default) that was CHECKED
+  rather than assumed: rung-1 spawn observations under the drill's `obs_rms`
+  peak at **|z| = 4.8, mean 0.9, no dimension past 10**, so this is not the
+  "frozen normalizer blocks new states" case that cost the squat.
+- **What misses is the APPROACH, not the grasp.** 18/20 get hold of the block
+  at some point; the failures are **5/20 where the block is knocked out of
+  the shell**. Seed 11's sheet is the shape: the claw arrives at 2.1 cm with
+  the block visibly shoved along the floor, reads load +0.96 — just under the
+  line — and the episode ends when the block slides out of reach. The failing
+  seeds average **3 grasp attempts**, so they do close on it; they close on a
+  block that is no longer where they aimed. That is a shape 4c can ladder
+  (an approach that comes down on the block rather than into it) or price
+  (nothing currently charges for pushing the block before the grasp).
+- **The warm start's learning rate is a real cost.** `--init-from` defaults
+  to lr 1e-4 because it is meant to POLISH, and rung 0 → rung 1 is not
+  polishing — it asks the policy to learn a whole approach phase it has never
+  seen. At 287 k steps `at_target` was still 0.117 where the from-scratch run
+  at lr 1e-3 had 5.9 by 43 k; it recovers by 900 k, but the first third of
+  the run is spent re-learning something a scratch run gets in a tenth of the
+  steps. Worth an A/B at 1e-3 before 4c spends a longer chain on it.
+
+**Two bugs this phase found, and both are the same shape — a thing that is
+silently not wired:**
+
+- **`_robot_bodies` meant "everything that is not the world", and a toy is
+  not the world either.** A successful grasp would have terminated as a
+  SELF-COLLISION at the moment of success. It is now `base_link`'s subtree,
+  walked through `body_parentid`, which is what it always meant; for `reach`
+  the two spellings are provably the same set, and a test pins that.
+- **`train.make_env` uses `--task` only to choose a CLASS.** `MarsBody.
+  env_class` answered `MarsArmEnv` for both tasks, so the first `--task pick`
+  run trained **`reach`** — in `reach`'s scene, at `reach`'s timestep, under
+  a pick run's name — and the only tell was that `progress.jsonl` carried six
+  reward keys instead of nine. The G1 has one env class per task for exactly
+  this reason; MARS now has `MarsPickEnv`, whose entire content is its default
+  task. (A third of the same shape, caught in the probe: `rung = int(rung or
+  DEFAULT_PICK_RUNG)` makes rung **0** into rung 1, and it scored the drill
+  policy in the wrong spawn box before anybody noticed the label.)
+
+**The economy, measured rather than reasoned about** (20 episodes each; the
+scripted column is the IK pick driven through the env's own `delta` actions):
+
+| | ep_rew | reach_progress | at_target | lift_progress | held_high | the four penalties |
+|---|---|---|---|---|---|---|
+| null (zero action) | +0.0 | +0.00 | 0 | 0 | 0 | 0.00 |
+| random (uniform action) | −4.1 | −0.10 | 0 | 0 | 0 | −4.04 |
+| **scripted success** | **+637.1** | +9.73 | +267.3 | +9.16 | +351.5 | **−0.62** |
+
+The penalties cost a successful trajectory 0.1 % of what it earns and cost a
+thrashing random one 4.1 — present enough to price the thrashing, nowhere near
+enough to eat the task (`AGENTS.md`, "a ramped penalty can eat its task").
+`lift_progress` telescopes in the HELD height (0 whenever the claw is empty),
+so knocking the block into the air earns nothing and dropping it from height
+hands back every point the lift earned — there is no jackpot in it.
+
+**What 4c owes, from 4b's own numbers:**
+
+- **The bar is 80 % and this is 55 %.** The gap is entirely the approach
+  shove. Two candidates, in order of cheapness: a rung between 0 and 1 that
+  starts the arm ABOVE the block instead of around it (so the descent is
+  practised without the travel), and a term that prices moving the block
+  before the grasp — which is a real absence rather than a re-pricing, since
+  nothing today charges for it.
+- **Two training seeds, always** — 4a-2's rule, and none of these three runs
+  has a second seed. 0/20 → 11/20 is structural enough to credit the ladder;
+  11/20 itself is one run.
+- **Rungs 2 and 3 are untrained.** The ladder is built and tested; only rungs
+  0 and 1 have been climbed.
+- **The world still runs at 5 ms.** Nothing in a `/sim` room can grasp until
+  that changes, and the change is the whole world's — see the 2 ms table
+  above before Phase 5 puts an arm in the playroom.
 
 ### Phase 5 — a MARS brain: tidy with an arm, and `train-brain --robot mars`  `[ ]`
 

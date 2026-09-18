@@ -31,11 +31,12 @@ lidar is `sensors/lidar.py`. Read that module before changing `ARM_HOME` or
 the planar base: one constant of Innate's could NOT be ported verbatim (their
 `KP_YAW` is unstable at this repo's 5 ms step) and the reason is measured
 there. **The arm env is `robots/mars_env.py`** (Phase 4a) — `MarsArmEnv`,
-which `env_class()` hands out, with its `reach` task as a `Behavior` in
-`behaviors/mars_tasks.py`; it is the thing that FILLS the observation layout
-declared below, and `scripts/probe_mars_reach.py` is the eye for it. `pick`
-and `place` are still Phase 4b. This module is the download, the body, the
-model, the arm/head servo, the senses' mounts and the viewer's mesh dump.
+which `env_class()` hands out, with its `reach` and `pick` tasks as
+`Behavior`s in `behaviors/mars_tasks.py`; it is the thing that FILLS the
+observation layout declared below, and `scripts/probe_mars_reach.py` /
+`scripts/probe_mars_pick.py` are the eyes for it. `place` is still Phase 4c.
+This module is the download, the body, the model, the arm/head servo, the
+senses' mounts and the viewer's mesh dump.
 
 MEASURED on this Mac, `scene_xml()` compiled (2026-09-17):
 
@@ -257,6 +258,42 @@ OBS_ARM_QPOS = slice(0, 6)        # rad, the six joints, absolute (not rel)
 OBS_ARM_QVEL = slice(6, 12)       # rad/s
 OBS_HEAD_PITCH = slice(12, 13)    # rad, joint_head
 OBS_GRIPPER_LOAD = slice(13, 14)  # N*m at joint6 — what "holding" reads
+#
+# WHAT THAT N*m IS, and it changed once. Phase 4a filled this slot with the
+# torque `arm_servo` WROTE (`qfrc_applied`), and Phase 4b measured that this
+# cannot be the holding signal: `set_arm` clamps the close target to the hard
+# stop, so shutting on air ends with zero position error and zero torque — and
+# while the blades are TRAVELLING through air the same torque is saturated at
+# -2 N*m, so one sample cannot tell "closing" from "holding". MEASURED
+# (`scripts/probe_mars_pick.py --scripted`, 2 ms, the playroom block):
+#
+#                                   qfrc_constraint   qfrc_applied  contacts
+#     open, empty                        0.0000         -0.0000       0 /  0
+#     shut on AIR, at the stop           0.0000         -0.0000       0 /  0
+#     shut claw driven into the FLOOR    0.0000         -0.0000       0 /  0
+#     jaws resting open ON the block     0.0035         -0.0063       1 /  1
+#     HOLDING the block                  1.9703         -2.0000       4 / 12
+#
+# The three EMPTY rows read 0.0000 in every pose measured, which is the split
+# that matters. The "resting" row is pose-dependent (0.0035 where the jaws
+# merely touch, 1.82 where the approach has pressed them onto the block) and
+# is the right answer either way: a blade carrying an object's reaction IS
+# loaded by it. `mars_env.HOLD_LOAD_NM` documents what that buys and what it
+# does not.
+#
+# ...and through a whole close on AIR, `qfrc_applied` is saturated at -2 N*m
+# for 8 of the 40 control steps (the travel) before it falls to 0 at the stop,
+# while `qfrc_constraint` is 0.0000 for all 40. One sample of the servo torque
+# cannot tell "closing" from "holding"; one sample of the constraint can.
+#
+# So the slot carries `qfrc_constraint` at joint6 — the torque the OBJECT
+# feeds back through the blade — which is 0.0000 in every empty case and
+# ~2 N*m with something in the claw. On hardware it is not a register: an
+# Innate code skill reconstructs it from `present_load` AND the encoder (the
+# real servo stalls at its current limit on air too, so load alone says
+# nothing — `arm_qpos[5]` short of `GRIPPER_CLOSED_ON_AIR_RAD` is the other
+# half). `reach` is unaffected in practice: under its trained policy the old
+# slot was non-zero on 7.6% of steps and the new one is 0.0000 throughout.
 OBS_LAST_ACTION = slice(14, 22)   # the previous action, all 8 slots
 OBS_TARGET_BASE = slice(22, 25)   # xyz of the task target in the BASE frame
 OBS_TARGET_SEEN = slice(25, 26)   # 1.0 when the detector has it this step
@@ -621,14 +658,26 @@ def _home_qpos(model: mujoco.MjModel, prefix: str = "") -> np.ndarray:
     return qpos
 
 
-def _scene_spec() -> mujoco.MjSpec:
+def _scene_spec(timestep: float | None = None) -> mujoco.MjSpec:
     """The standalone scene: one MARS, a floor, a light, a HOME keyframe.
 
-    On the lab's `C.PHYSICS_DT` (5 ms), not Innate's 2 ms: a `/sim` world is
-    ONE model with one timestep, and this is it. MEASURED at both, the 2 s
-    hold is identical to five decimal places (0.00344 rad), so the finger
-    tuning survives the coarser step — which was the thing worth checking,
-    since their contact model was tuned at 2 ms on a 2e-5 inertia blade.
+    On the lab's `C.PHYSICS_DT` (5 ms) by default, not Innate's 2 ms: a
+    `/sim` world is ONE model with one timestep, and this is it. MEASURED at
+    both, the 2 s hold is identical to five decimal places (0.00344 rad), so
+    the finger tuning survives the coarser step for a HOLD — which was the
+    thing worth checking, since their contact model was tuned at 2 ms on a
+    2e-5 inertia blade.
+
+    **A GRASP is the case where it does not survive, and `timestep` is here
+    because of it.** Phase 4b put the playroom's 4 cm / 20 g block between the
+    blades, closed, lifted 10 cm and held 2 s at 16 spots in the shell
+    (`scripts/probe_mars_pick.py --scripted`): **4/16 at 5 ms, 14/16 at
+    2 ms**. What fails at 5 ms is not slip but EJECTION — the block leaves at
+    0.08-6.6 m of travel in the two seconds after the lift — which is the
+    coarse step's contact impulse, not the friction cone (the world's own
+    pyramidal cone scores the same 14/16 at 2 ms). So `robots/mars_env.py`'s
+    `pick` compiles this scene at 2 ms with decimation 20, and `reach`, which
+    never closes on anything, keeps the world's 5 ms.
     """
     spec = robot_spec()
     # Innate's own option block (world.build_world_xml): implicitfast damps
@@ -641,6 +690,8 @@ def _scene_spec() -> mujoco.MjSpec:
     spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     spec.option.impratio = 10.0
+    if timestep is not None:
+        spec.option.timestep = float(timestep)
     w = spec.worldbody
     light = w.add_light()
     light.pos = [0.0, 0.0, 3.0]
@@ -668,6 +719,34 @@ def _scene_spec() -> mujoco.MjSpec:
     return spec
 
 
+def scene_spec(timestep: float | None = None) -> mujoco.MjSpec:
+    """The standalone scene as an editable `MjSpec`, for a task that adds to it.
+
+    `robots/mars_env.py`'s `pick` needs a block in the scene and a 2 ms step
+    (see `_scene_spec`), and a task's furniture does not belong in this
+    module: what belongs here is the ROBOT and the one scene every body in
+    the lab is entitled to. A caller that adds a free-jointed body must also
+    widen the HOME keyframe's `qpos`, which is `MjSpec.key(HOME_KEY)`.
+    """
+    return _scene_spec(timestep)
+
+
+def write_scene_xml(spec: mujoco.MjSpec, path: Path) -> Path:
+    """Write `spec` to `path` atomically, and only when the content differs.
+
+    `scene_xml`'s body, shared so a task scene gets the same two properties
+    for free: the file lands beside the assets (so `meshdir` still resolves)
+    and a vec-env worker can never import a half-written one (AGENTS.md,
+    "Atomic writes and live imports").
+    """
+    xml = spec.to_xml()
+    if not path.exists() or path.read_text() != xml:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(xml)
+        os.replace(tmp, path)
+    return path
+
+
 def scene_xml() -> Path:
     """Path to the generated scene, written under the cache.
 
@@ -677,13 +756,7 @@ def scene_xml() -> Path:
     vec-env worker must never import a half-written scene.
     """
     require_mars()
-    out = CACHE_DIR / SCENE_NAME
-    xml = _scene_spec().to_xml()
-    if not out.exists() or out.read_text() != xml:
-        tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
-        tmp.write_text(xml)
-        os.replace(tmp, out)
-    return out
+    return write_scene_xml(_scene_spec(), CACHE_DIR / SCENE_NAME)
 
 
 @lru_cache(maxsize=1)
@@ -941,7 +1014,7 @@ class MarsBody(BodyBase):
     # ----------------------------------------------------------- training
 
     def env_class(self, task: str = "walk") -> type:
-        """The env that trains `task` on MARS. Phase 4a: `reach`.
+        """The env that trains `task` on MARS. Phase 4a: `reach`; 4b: `pick`.
 
         `MarsArmEnv` is gymnasium and its OWN base class, not
         `MicroduckWalkEnv` — see `robots/mars_env.py`. A body that quietly
@@ -951,14 +1024,22 @@ class MarsBody(BodyBase):
 
         Imported lazily, like the G1's: a machine with no MARS assets must
         still be able to train the duck.
+
+        **One class PER TASK, not one class with a task argument.**
+        `train.make_env` uses `--task` to choose the class and then constructs
+        it with the shared kwargs, so a body that answers the same class for
+        two tasks trains whichever one the constructor defaults to — which is
+        what a `--task pick` run did before `MarsPickEnv` existed.
         """
-        from .mars_env import TASKS, MarsArmEnv
-        if task in TASKS:
+        from .mars_env import TASKS, MarsArmEnv, MarsPickEnv
+        if task == "pick":
+            return MarsPickEnv
+        if task == "reach":
             return MarsArmEnv
         raise SystemExit(
             f"unknown --task {task!r} for {self.id} (have: "
-            f"{', '.join(TASKS)}) — MARS does not walk, and `pick` / `place` "
-            "are later rungs of docs/mars-roadmap.md Phase 4")
+            f"{', '.join(TASKS)}) — MARS does not walk, and `place` is a "
+            "later rung of docs/mars-roadmap.md Phase 4")
 
     def shipped_policies(self) -> tuple[dict, ...]:
         """MARS ships no policy this lab can run.
@@ -972,7 +1053,7 @@ class MarsBody(BodyBase):
         return ()
 
     def train_env_kwargs(self, args) -> dict:
-        """One per-body knob: `--action-mode`, MARS's arm action map.
+        """MARS's per-body knobs: the arm action map, and `pick`'s rung.
 
         `--actuator bam` is the flag that must not be allowed through, and it
         is REFUSED rather than dropped: joints 4-6 and the head are XL330s,
@@ -993,6 +1074,15 @@ class MarsBody(BodyBase):
         Left out entirely when the flag is, so the env's own
         `DEFAULT_ACTION_MODE` stays the single definition of the default and
         a run that did not ask is not recorded as having asked.
+
+        **`MICRODUCK_MARS_PICK_RUNG` is an ENVIRONMENT variable and not a
+        flag, and that is the one difference from `--action-mode` above.** It
+        is a CURRICULUM knob: the lab's teach job runs a `Behavior`'s stages
+        by exporting each `CurriculumStage.env` dict into the trainer
+        subprocess, and it does not rewrite argv — which is exactly how the
+        G1's `MICRODUCK_G1_COMMAND_MIX` reaches `command_mix`. It still lands
+        in `run.json`'s `env_kwargs` from here, so the rung a run trained on
+        is recorded whether the lab or a shell set it.
         """
         if getattr(args, "actuator", None) == "bam":
             raise SystemExit(
@@ -1013,6 +1103,23 @@ class MarsBody(BodyBase):
                 kw["action_scale_rad"] = RUNG_SCALE_RAD
             else:
                 kw["action_mode"] = mode
+        if getattr(args, "task", None) == "pick":
+            from .mars_env import PICK_RUNGS
+            raw = os.environ.get("MICRODUCK_MARS_PICK_RUNG")
+            if raw:
+                try:
+                    rung = int(raw)
+                except ValueError as e:
+                    raise SystemExit(
+                        f"MICRODUCK_MARS_PICK_RUNG={raw!r} is not an integer; "
+                        f"the rungs are {', '.join(str(r) for r in PICK_RUNGS)}"
+                    ) from e
+                if rung not in PICK_RUNGS:
+                    raise SystemExit(
+                        f"MICRODUCK_MARS_PICK_RUNG={rung} is not a rung of "
+                        f"the pick ladder ({', '.join(str(r) for r in PICK_RUNGS)}"
+                        ") — a spawn box nobody measured is not a curriculum")
+                kw["pick_rung"] = rung
         return kw
 
     # ---------------------------------------------------------- /sim world
@@ -1132,5 +1239,5 @@ __all__ = ["ARM_HOME", "ARM_JOINTS", "ASSETS", "BASE_BODY", "CACHE_DIR",
            "CAMERA_BODY", "CAMERA_HFOV_DEG", "CAMERA_VFOV_DEG", "CONTRACT_ID",
            "FOOTPRINT_M", "HEAD_JOINT", "INNATE_OS_SHA", "LIDAR_SITE", "MARS",
            "OBS_DIM", "MarsBody", "arm_servo",
-           "fetch", "mars_ready", "model", "robot_spec", "scene_xml",
-           "servo_addresses", "visual_scene"]
+           "fetch", "mars_ready", "model", "robot_spec", "scene_spec",
+           "scene_xml", "servo_addresses", "visual_scene", "write_scene_xml"]

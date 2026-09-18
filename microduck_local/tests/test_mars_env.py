@@ -885,11 +885,18 @@ def test_success_needs_the_LAST_second_not_a_fly_by():
 # ------------------------------------------------------------ the CLI seam
 
 def test_env_class_picks_the_mars_arm_env():
+    """One class PER TASK. `train.make_env` uses `--task` only to choose the
+    class and then constructs it with the shared kwargs, so a body that
+    answers the same class for two tasks trains the constructor's default —
+    which is what a `--task pick` run did before `MarsPickEnv` existed."""
+    from microduck_local.robots.mars_env import MarsPickEnv
+
     assert T.env_class("mars", "reach") is MarsArmEnv
+    assert T.env_class("mars", "pick") is MarsPickEnv
     with pytest.raises(SystemExit, match="unknown --task"):
         T.env_class("mars", "walk")
     with pytest.raises(SystemExit, match="unknown --task"):
-        T.env_class("mars", "pick")
+        T.env_class("mars", "place")
 
 
 def test_the_task_vocabulary_has_one_definition():
@@ -899,7 +906,7 @@ def test_the_task_vocabulary_has_one_definition():
     from drifting."""
     from microduck_local import behaviors as B
 
-    assert T.MARS_TASKS == ME.TASKS == ("reach",)
+    assert T.MARS_TASKS == ME.TASKS == ("reach", "pick")
     assert tuple(b.task for b in B.for_robot("mars")) == T.MARS_TASKS
 
 
@@ -1084,7 +1091,7 @@ def test_the_recipe_the_teach_panel_shows_matches_the_env():
     from microduck_local import behaviors as B
 
     recipes = B.for_robot("mars")
-    assert [b.id for b in recipes] == ["mars_reach"]
+    assert [b.id for b in recipes] == ["mars_reach", "mars_pick"]
     reach = recipes[0]
     assert reach.robot == "mars"
     assert reach.trainer == ("-m", "microduck_local.train", "--robot", "mars",

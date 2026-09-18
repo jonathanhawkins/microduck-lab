@@ -384,21 +384,24 @@ def test_the_answers_that_are_refusals_name_the_phase_that_lands_them():
     shows up as bad behaviour. Raising with the phase number is also how the
     next person finds out where the work goes.
 
-    Two of these were refusals until the phase named in them landed, and the
-    progression is what this test is for: `driver()` became real in Phase 3a
-    (`robots/mars_drive.py`, measured next door), and `env_class` / `tasks`
-    in **Phase 4a** — `reach` now builds `MarsArmEnv` and the 🎓 panel lists
-    `mars_reach`, both measured in `tests/test_mars_env.py`. What is still a
-    refusal is `pick` and `place`, and they refuse by NAMING the ones that
-    exist rather than by falling back to anything.
+    Three of these were refusals until the phase named in them landed, and
+    the progression is what this test is for: `driver()` became real in Phase
+    3a (`robots/mars_drive.py`, measured next door), `env_class` / `tasks` in
+    **Phase 4a** (`reach` builds `MarsArmEnv` and the 🎓 panel lists
+    `mars_reach`) and `pick` in **Phase 4b** (`MarsPickEnv`, a block in the
+    scene, `mars_pick`) — all measured in `tests/test_mars_env.py` and
+    `tests/test_mars_pick.py`. What is still a refusal is `place`, and it
+    refuses by NAMING the ones that exist rather than by falling back to
+    anything.
     """
-    from microduck_local.robots.mars_env import MarsArmEnv
+    from microduck_local.robots.mars_env import MarsArmEnv, MarsPickEnv
 
     assert mars.MARS.env_class("reach") is MarsArmEnv
-    for absent in ("walk", "pick", "place"):
+    assert mars.MARS.env_class("pick") is MarsPickEnv
+    for absent in ("walk", "place", "stand"):
         with pytest.raises(SystemExit, match="unknown --task"):
             mars.MARS.env_class(absent)
-    assert [b.id for b in mars.MARS.tasks()] == ["mars_reach"]
+    assert [b.id for b in mars.MARS.tasks()] == ["mars_reach", "mars_pick"]
     # Still nothing: Innate's learned skills are ACT checkpoints, not ONNX.
     assert mars.MARS.shipped_policies() == ()
     assert mars.MARS.train_env_kwargs(None) == {}

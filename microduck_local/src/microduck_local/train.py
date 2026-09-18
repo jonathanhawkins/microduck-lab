@@ -43,7 +43,7 @@ HOLD_TASKS = ("stand", "squat", "front_kick", "punch", "imitate")
 # at runtime (`env_class` -> `MarsBody.env_class` -> `mars_env.TASKS`), and
 # `tests/test_mars_env.py` pins this tuple against both `mars_env.TASKS` and
 # `behaviors.for_robot("mars")`, so the three cannot drift apart.
-MARS_TASKS = ("reach",)
+MARS_TASKS = ("reach", "pick")
 # What a `--robot` value may be besides a registry id. The default and the
 # empty string have always meant the duck; the registry itself is strict, so
 # these live at the CLI edge instead of loosening `registry.get`.
@@ -79,11 +79,12 @@ def is_pinned_command(task: str) -> bool:
     nothing could check any of them without running a trainer.
 
     `stand` and `imitate` are the G1's held poses — asked for a twist and
-    paid to ignore it. `reach` is stronger than ignoring: `MarsArmEnv` forces
-    the base pair of the action to zero for an arm task, so a drive command
-    was never in that policy's training distribution at all.
+    paid to ignore it. `reach` and `pick` are stronger than ignoring:
+    `MarsArmEnv` forces the base pair of the action to zero for every task in
+    its `ARM_ONLY_TASKS`, so a drive command was never in those policies'
+    training distribution at all.
     """
-    return task in ("stand", "imitate", "reach")
+    return task in ("stand", "imitate", "reach", "pick")
 
 
 def env_class(robot: str, task: str = "walk"):
