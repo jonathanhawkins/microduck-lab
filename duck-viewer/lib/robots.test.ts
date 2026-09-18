@@ -31,11 +31,14 @@ describe("robotEmoji", () => {
 });
 
 describe("robotLook", () => {
-  it("names the two hand-built looks and sends everything else to generic", () => {
+  it("names the three hand-built looks and sends everything else to generic", () => {
     expect(robotLook("microduck")).toBe("duck");
     expect(robotLook("")).toBe("duck"); // an older lab's rows carry no robot
     expect(robotLook("g1")).toBe("g1");
-    expect(robotLook("mars")).toBe("generic");
+    // MARS was "generic" until 2026-09-18: the server's charcoal chassis sat
+    // within a few percent of the lab stage's backdrop and only the orange
+    // arm read (components/MarsLook.tsx).
+    expect(robotLook("mars")).toBe("mars");
     expect(robotLook("menagerie:unitree_go2")).toBe("generic");
   });
 });

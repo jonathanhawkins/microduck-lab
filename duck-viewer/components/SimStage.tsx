@@ -30,6 +30,7 @@ import { goalDefenders, PICKABLE_COLORS, PICKABLE_SIZES, rugSize, TEAM_COLORWAYS
   type Scenario, type SimClient, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
 import type { Scene } from "@/lib/lab";
 import { g1PartKind, weldAndSmooth, type G1PartKind } from "./G1Look";
+import { MARS_KINDS, marsPartKind, useMarsMaterials, type MarsPartKind } from "./MarsLook";
 
 // -- palette -----------------------------------------------------------------
 // Kept close to the page's UI accents (amber / teal) so the stage and the
@@ -776,10 +777,13 @@ const Z_BLOB = 0.0016;
  *  component can draw either.
  *
  *  `look` picks the material: "g1" keeps its part-kind table (a glossy visor,
- *  dark metal, a flat logo, a clear-coated shell), and everything else paints
- *  each geom in its own streamed `rgba` — MARS's Innate orange on a charcoal
- *  chassis comes from the server (`robots/mars.style_visual_geoms`), and a
- *  Menagerie model arrives in its MJCF's colours. */
+ *  dark metal, a flat logo, a clear-coated shell), "mars" takes MARS's
+ *  (components/MarsLook.tsx — the graphite chassis and head, the colorway's
+ *  accent on the arm, the frame markers invisible), and everything else
+ *  paints each geom in its own streamed `rgba`, which is how a Menagerie
+ *  model arrives in its MJCF's colours. The two hand-built looks draw from
+ *  the SAME tables the lab stage uses (Duck.tsx), which is the only reason
+ *  the two pages cannot drift apart. */
 export function RobotBody({
   id,
   scene,
@@ -791,8 +795,12 @@ export function RobotBody({
   scene: Scene;
   client: SimClient;
   from?: "objects" | "ducks";
-  look?: "g1" | "generic";
+  look?: "g1" | "generic" | "mars";
 }) {
+  // /sim has no stage lights of its own, so it takes the full reflection —
+  // the 0.35 the lab uses would leave the chassis flat here (the same split
+  // `useG1Materials` documents).
+  const marsMaterials = useMarsMaterials(look === "mars", { envScale: 1 });
   const tree = useMemo(() => {
     // Vertices arrive in metres, or in millimetre ints with a `vertScale`
     // (the G1's dump is 21 MB that way instead of 78 MB of floats). Scaling
@@ -821,8 +829,12 @@ export function RobotBody({
           geo.applyMatrix4(mat4);
           if (g.rgba) col.setRGB(g.rgba[0], g.rgba[1], g.rgba[2], THREE.SRGBColorSpace);
           else col.set("#888888");
-          const kind: G1PartKind | "own" =
-            look === "g1" ? g1PartKind(g.name, g.mat, col) : "own";
+          const kind: G1PartKind | MarsPartKind | "own" =
+            look === "g1"
+              ? g1PartKind(g.name, g.mat, col)
+              : look === "mars"
+                ? marsPartKind(scene.bodies[g.body], g.name)
+                : "own";
           return { geo, color: "#" + col.getHexString(), kind };
         }),
     );
@@ -854,25 +866,39 @@ export function RobotBody({
       {tree.map((parts, i) =>
         parts.length ? (
           <group key={scene.bodies[i]} ref={(el) => { refs.current[i] = el; }}>
-            {parts.map((p, k) => (
-              <mesh key={k} geometry={p.geo} castShadow={false} receiveShadow={false}>
-                {p.kind === "own" ? (
-                  // The body's OWN colour, straight from the scene dump.
-                  <meshStandardMaterial color={p.color} roughness={0.42} metalness={0.2}
-                    envMapIntensity={0.9} />
-                ) : p.kind === "visor" ? (
-                  <meshPhysicalMaterial color={p.color} roughness={0.08} metalness={0.85}
-                    clearcoat={1} clearcoatRoughness={0.06} envMapIntensity={1.6} />
-                ) : p.kind === "logo" ? (
-                  <meshStandardMaterial color={p.color} roughness={0.55} metalness={0} envMapIntensity={0.4} />
-                ) : p.kind === "dark" ? (
-                  <meshStandardMaterial color={p.color} roughness={0.35} metalness={0.45} envMapIntensity={0.9} />
-                ) : (
-                  <meshPhysicalMaterial color="#d8d8d8" roughness={0.34} metalness={0.06}
-                    clearcoat={0.35} clearcoatRoughness={0.28} envMapIntensity={0.75} />
-                )}
-              </mesh>
-            ))}
+            {parts.map((p, k) =>
+              // MARS's materials come from the shared table (one material per
+              // kind for the whole robot), not from per-mesh JSX: the
+              // colorway, the clearcoats and the reflection have to be the
+              // same objects the lab stage uses or the two pages diverge.
+              marsMaterials ? (
+                <mesh
+                  key={k}
+                  geometry={p.geo}
+                  castShadow={false}
+                  receiveShadow={false}
+                  material={marsMaterials[Math.max(0, MARS_KINDS.indexOf(p.kind as MarsPartKind))]}
+                />
+              ) : (
+                <mesh key={k} geometry={p.geo} castShadow={false} receiveShadow={false}>
+                  {p.kind === "own" ? (
+                    // The body's OWN colour, straight from the scene dump.
+                    <meshStandardMaterial color={p.color} roughness={0.42} metalness={0.2}
+                      envMapIntensity={0.9} />
+                  ) : p.kind === "visor" ? (
+                    <meshPhysicalMaterial color={p.color} roughness={0.08} metalness={0.85}
+                      clearcoat={1} clearcoatRoughness={0.06} envMapIntensity={1.6} />
+                  ) : p.kind === "logo" ? (
+                    <meshStandardMaterial color={p.color} roughness={0.55} metalness={0} envMapIntensity={0.4} />
+                  ) : p.kind === "dark" ? (
+                    <meshStandardMaterial color={p.color} roughness={0.35} metalness={0.45} envMapIntensity={0.9} />
+                  ) : (
+                    <meshPhysicalMaterial color="#d8d8d8" roughness={0.34} metalness={0.06}
+                      clearcoat={0.35} clearcoatRoughness={0.28} envMapIntensity={0.75} />
+                  )}
+                </mesh>
+              ),
+            )}
           </group>
         ) : null,
       )}

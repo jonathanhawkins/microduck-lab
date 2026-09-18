@@ -38,15 +38,22 @@ export function robotEmoji(id: string, kind?: string): string {
 /** Which material table the stage paints a body with — the server's own
  *  answer (`Body.look()`), carried here so the viewer has one name for it.
  *
- *  "duck" and "g1" are the two hand-built looks. Everything else is
- *  "generic": each geom drawn in its own streamed `rgba`, which is how MARS
- *  arrives Innate orange and a Menagerie model arrives in its MJCF's own
- *  colours with no component of its own. The scene dump does not carry the
- *  look, so this is derived from the id the same way the server derives it.
- */
-export function robotLook(id: string): "duck" | "g1" | "generic" {
+ *  "duck", "g1" and "mars" are the three hand-built looks. Everything else is
+ *  "generic": each geom drawn in its own streamed `rgba`, which is how a
+ *  Menagerie model arrives in its MJCF's own colours with no component of its
+ *  own. The scene dump does not carry the look, so this is derived from the
+ *  id the same way the server derives it.
+ *
+ *  MARS was "generic" until its own table existed, and looked it: the
+ *  server's charcoal-0.16 chassis and black head are within a few percent of
+ *  the lab stage's #101216 backdrop, so the robot read as a floating orange
+ *  arm (components/MarsLook.tsx has the whole argument). A body only earns a
+ *  table when a generic paint fails ON A STAGE — that is the bar, not
+ *  "shipped with the lab". */
+export function robotLook(id: string): "duck" | "g1" | "generic" | "mars" {
   if (!id || id === "microduck") return "duck";
   if (id === "g1") return "g1";
+  if (id === "mars") return "mars";
   return "generic";
 }
 

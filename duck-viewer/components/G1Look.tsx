@@ -67,7 +67,10 @@ export function makeG1Material(
 // scene.environment, so the lab's ducks keep exactly the lighting they had.
 const envByRenderer = new WeakMap<THREE.WebGLRenderer, THREE.Texture>();
 
-function roomEnv(gl: THREE.WebGLRenderer): THREE.Texture {
+/** The shared procedural reflection, built once per renderer. Exported so a
+ *  second CAD look (MarsLook.tsx) reflects the SAME room rather than paying
+ *  for a second PMREM render of an identical scene. */
+export function roomEnv(gl: THREE.WebGLRenderer): THREE.Texture {
   let env = envByRenderer.get(gl);
   if (!env) {
     const pmrem = new THREE.PMREMGenerator(gl);

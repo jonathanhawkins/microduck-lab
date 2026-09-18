@@ -235,6 +235,9 @@ function SimDucks({
           // nothing rather than borrowing the duck's meshes, which would put
           // a duck's parts on a MARS's joints.
           const rs = robotScenes[d.robot];
+          // The body's own look, forwarded whole. "duck" cannot happen in
+          // this branch; it collapses to "generic" only to satisfy the type.
+          const look = robotLook(d.robot);
           return rs ? (
             <RobotBody
               key={d.id}
@@ -242,7 +245,9 @@ function SimDucks({
               scene={rs}
               client={client}
               from="ducks"
-              look={robotLook(d.robot) === "g1" ? "g1" : "generic"}
+              // A look this page forgets to forward is how MARS stayed
+              // "generic" and near-invisible after its own table existed.
+              look={look === "duck" ? "generic" : look}
             />
           ) : null;
         }

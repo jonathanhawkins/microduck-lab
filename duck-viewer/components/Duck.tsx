@@ -19,6 +19,7 @@ import { captureWantsCleanFrame } from "@/lib/record";
 import { getSelectedDuck } from "@/lib/select";
 import { getDuckLabels } from "@/lib/ui";
 import { G1_KINDS, g1PartKind, useG1Materials, weldAndSmooth } from "./G1Look";
+import { MARS_KINDS, marsPartKind, useMarsMaterials } from "./MarsLook";
 import { duckMouths, MOUTH_TRAVEL_RAD } from "@/lib/mouth";
 import { SHELL_MATERIALS, TEAM_COLORWAYS, TRIM_MATERIALS, teamColor, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
 
@@ -78,13 +79,15 @@ export interface BodyGeometry {
    *    always been;
    *  - "g1" — welded + smoothed, groups indexing G1_KINDS materials
    *    (components/G1Look.tsx), the same look as the /sim page's G1;
+   *  - "mars" — the same shape of thing for MARS_KINDS
+   *    (components/MarsLook.tsx): a graphite chassis and head that survive
+   *    the dark stage, the colorway's accent on the arm and gripper, and the
+   *    frame markers drawn as nothing;
    *  - "generic" — welded + smoothed like the G1 but painted per geom from
-   *    the scene dump's own `rgba`. That is how MARS arrives Innate orange
-   *    on a charcoal chassis (the SERVER paints it —
-   *    robots/mars.style_visual_geoms) and how a Menagerie model arrives in
+   *    the scene dump's own `rgba`. That is how a Menagerie model arrives in
    *    its MJCF's colours, with no component and no colour table per robot.
    */
-  look?: "g1" | "generic";
+  look?: "g1" | "generic" | "mars";
 }
 
 /** Merge every geom of every body into one geometry per body (body-local
@@ -98,15 +101,18 @@ export interface BodyGeometry {
 export function buildBodyGeometries(
   scene: Scene,
   team?: string | null,
-  opts: { look?: "g1" | "generic" } = {}
+  opts: { look?: "g1" | "generic" | "mars" } = {}
 ): BodyGeometry[] {
   const paint = teamPaint(team);
-  const g1 = opts.look === "g1";
   // A non-duck body: welded + smoothed, one draw per material group. The G1
-  // groups by PART KIND (a visor, dark metal, a logo, the shell); everything
-  // else groups by nothing and is drawn from its own vertex colours, so a
-  // robot the viewer has never seen still arrives in its own paint.
-  const cad = g1 || opts.look === "generic";
+  // and MARS group by PART KIND (a visor or a chassis, each with its own
+  // material); "generic" groups by nothing and is drawn from its own vertex
+  // colours, so a robot the viewer has never seen still arrives in its own
+  // paint. `kinds` is both the switch and the index table — a look with a
+  // material array is exactly a look with a kind list.
+  const kinds: readonly string[] | null =
+    opts.look === "g1" ? G1_KINDS : opts.look === "mars" ? MARS_KINDS : null;
+  const cad = kinds !== null || opts.look === "generic";
   // Vertices arrive in metres (the duck) or in millimetre ints with a
   // vertScale (the G1 — a 21 MB dump instead of 78 MB of floats). Scaling
   // here rather than at the call site is what keeps a second robot from
@@ -135,7 +141,12 @@ export function buildBodyGeometries(
         const colors = new Float32Array(n * 3);
         for (let i = 0; i < n; i++) col.toArray(colors, i * 3);
         geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-        const kind = g1 ? G1_KINDS.indexOf(g1PartKind(g.name, g.mat, col)) : 0;
+        const kind =
+          opts.look === "g1"
+            ? G1_KINDS.indexOf(g1PartKind(g.name, g.mat, col))
+            : opts.look === "mars"
+              ? MARS_KINDS.indexOf(marsPartKind(name, g.name))
+              : 0;
         return { geo, kind };
       });
     if (!parts.length) return { name, geometry: null };
@@ -145,7 +156,7 @@ export function buildBodyGeometries(
       merged.computeVertexNormals();
       return { name, geometry: merged };
     }
-    if (!g1) {
+    if (!kinds) {
       // Generic: keep the welded normals (re-smoothing the merge would blend
       // across part seams, which is what makes a CAD robot look melted) and
       // merge into ONE group — the per-geom colour already rode in on the
@@ -154,8 +165,9 @@ export function buildBodyGeometries(
       parts.forEach((p) => p.geo.dispose());
       return { name, geometry: merged, look: "generic" as const };
     }
-    // G1: keep each part's welded normals (re-smoothing the merge would blend
-    // across part seams) and group the parts by kind, one draw per material.
+    // G1 / MARS: keep each part's welded normals (re-smoothing the merge would
+    // blend across part seams) and group the parts by kind, one draw per
+    // material.
     parts.sort((a, b) => a.kind - b.kind);
     const merged = mergeGeometries(parts.map((p) => p.geo), true);
     parts.forEach((p) => p.geo.dispose());
@@ -167,7 +179,7 @@ export function buildBodyGeometries(
     });
     merged.clearGroups();
     groups.forEach((grp) => merged.addGroup(grp.start, grp.count, grp.materialIndex));
-    return { name, geometry: merged, look: "g1" as const };
+    return { name, geometry: merged, look: opts.look as "g1" | "mars" };
   });
   meshGeos.forEach((g) => g.dispose());
   return out;
@@ -193,6 +205,13 @@ export function Duck({
   const mouthIdx = useMemo(() => bodies.findIndex((b) => b.name === "mouth"), [bodies]);
   const billRef = useRef<THREE.Mesh>(null);
   const g1Materials = useG1Materials(bodies.some((b) => b.look === "g1"));
+  // MARS's material table. The colorway is a VIEWER default today
+  // (MARS_DEFAULT_COLORWAY, Innate's orange/black hero): a duck's colorway
+  // rides in on the frame's `team`, and that channel carries the four Pollen
+  // DUCK colorways — the lab validates it against them and rejects anything
+  // else (world/scenario.py), so a MARS cannot borrow it. A per-slot choice
+  // would pass a `colorway` here from a new field on the roster row.
+  const marsMaterials = useMarsMaterials(bodies.some((b) => b.look === "mars"));
   // A generic body is lit like the G1's shell but takes its colour from the
   // geometry, so one material serves every one of them.
   const genericMaterial = useMemo(
@@ -298,6 +317,8 @@ export function Duck({
           <group key={b} ref={(el) => void (bodyRefs.current[b] = el)}>
             {body.look === "g1" && g1Materials ? (
               <mesh geometry={body.geometry} material={g1Materials} />
+            ) : body.look === "mars" && marsMaterials ? (
+              <mesh geometry={body.geometry} material={marsMaterials} />
             ) : body.look === "generic" ? (
               <mesh geometry={body.geometry} material={genericMaterial} />
             ) : (

@@ -84,10 +84,10 @@ function Ducks({
       if (!s) continue;
       try {
         // The body's own look: "duck" merges and vertex-colours as it always
-        // has, "g1" takes its material table, and every OTHER body is
-        // "generic" — welded, smoothed, painted from the scene dump's own
-        // rgba. That is the line that puts a MARS or a Menagerie model on
-        // the stage without a component of its own (lib/robots.robotLook).
+        // has, "g1" and "mars" take their material tables, and every OTHER
+        // body is "generic" — welded, smoothed, painted from the scene dump's
+        // own rgba. That is the line that puts a Menagerie model on the stage
+        // without a component of its own (lib/robots.robotLook).
         const look = robotLook(id);
         out[id as RobotId] =
           look === "duck" ? buildBodyGeometries(s) : buildBodyGeometries(s, null, { look });
