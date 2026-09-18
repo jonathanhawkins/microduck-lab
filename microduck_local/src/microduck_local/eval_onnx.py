@@ -22,6 +22,8 @@ import sys
 import numpy as np
 import onnxruntime as ort
 
+from .robots import registry
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -34,7 +36,7 @@ def main() -> None:
                     help="Pin twist vx (run eval). Default 0.4 for --behavior run")
     ap.add_argument("--actuator", default=None, choices=("xml", "bam"),
                     help="Override actuator; run defaults to bam")
-    ap.add_argument("--robot", default=None, choices=("microduck", "g1"),
+    ap.add_argument("--robot", default=None, choices=registry.ids(),
                     help="which body the policy drives; default: read from the "
                          "run's run.json next to the .onnx. Behaviors are duck "
                          "recipes and are refused for another body.")

@@ -13,6 +13,7 @@ import time
 
 import numpy as np
 
+from .robots import registry
 from .train import env_class
 from .vec_env import make_vec_env
 
@@ -21,7 +22,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--envs", type=int, default=16)
     ap.add_argument("--steps", type=int, default=2000)
-    ap.add_argument("--robot", default="microduck", choices=("microduck", "g1"),
+    ap.add_argument("--robot", default="microduck", choices=registry.ids(),
                     help="which body to bench (measured here: the G1 holds "
                          "32.5k ctrl steps/s at 32 envs against the duck's "
                          "61.3k — 1.9x the cost. Measure, do not extrapolate)")

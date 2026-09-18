@@ -38,6 +38,7 @@ import onnxruntime as ort
 
 from .. import contract as C
 from ..world.compose import duck_prefix
+from .spec import RobotSpec
 
 _PKG = Path(__file__).resolve().parent / "unitree_g1"
 _ROOT = Path(__file__).resolve().parents[3]  # microduck_local/
@@ -573,6 +574,137 @@ class G1Walker:
 # spec is only materialized when something asks for the G1 by name.
 
 
+class G1Body(RobotSpec):
+    """The G1's half of the lab's `Body` contract.
+
+    A subclass, the sibling of `robots/microduck.MicroduckBody`: everything
+    here already existed and was reached by an `if robot == "g1"` somewhere
+    else, so this is the same code with the branch removed.
+
+    Not a `@dataclass` of its own — it adds no fields, only answers, and
+    re-emitting `__init__` would invite a field to be added here instead of
+    in the spec construction below where it belongs.
+
+    Module level, and importing this module still reads nothing: the
+    laziness that matters is `load_config()` touching the fetched cache, not
+    importing `robots/spec.py` (which imports only `body.py`, and nothing in
+    the spec/registry chain imports this module at module level). A class
+    built inside a function is also unpicklable by name —
+    `pickle.dumps` of the spec failed with "Can't get local object
+    '_g1_body_cls.<locals>.G1Body'" — and a vec-env worker ships specs.
+    `tests/test_registry.py` pins that the import stays cache-free.
+    """
+
+    def ready(self) -> bool:
+        """The MJCF, the meshes and the walker ONNX, not just the scene:
+        `g1_scene_xml()` GENERATES a scene, so the base class's "is the
+        scene file there" would answer for a file that does not exist
+        until something asks for it."""
+        return g1_ready()
+
+    def fetch(self):
+        from ..fetch_g1 import fetch
+        return fetch()
+
+    def look(self) -> str:
+        return "g1"
+
+    def visual_scene(self) -> dict:
+        return visual_scene()
+
+    def shipped_policies(self) -> tuple[dict, ...]:
+        """The Lucky Robots drop, as palette entries.
+
+        Only the ones that speak this robot's observation are listed —
+        `shipped_policies()` reads each graph, so a 101-obs croucher or a
+        36-obs arm overlay stays out of the palette instead of becoming a
+        chip that can never be assigned. Empty, and the group disappears,
+        on a machine that never fetched the assets.
+        """
+        return tuple(
+            {"id": f"g1:{e['name']}", "label": e["name"], "group": "g1",
+             "path": e["path"], "robot": self.id, "note": e.get("note", "")}
+            for e in shipped_policies() if e["usable"])
+
+    def env_class(self, task: str = "walk") -> type:
+        """The env that trains `task` on the G1.
+
+        The G1 is not a `MicroduckWalkEnv` kwarg away: it speaks a
+        different observation (99-d, robots/g1_env.py). Imported lazily so
+        a machine without the fetched assets can still train the duck.
+        """
+        from ..train import G1_TASKS
+        if task in (None, "", "walk"):
+            from .g1_env import G1WalkEnv
+            return G1WalkEnv
+        if task == "stand":
+            from .g1_env import G1StandEnv
+            return G1StandEnv
+        if task == "squat":
+            from .g1_env import G1SquatEnv
+            return G1SquatEnv
+        if task in ("front_kick", "punch"):
+            from .g1_karate import G1FrontKickEnv, G1PunchEnv
+            return G1FrontKickEnv if task == "front_kick" else G1PunchEnv
+        if task == "imitate":
+            # Tracks the clip MICRODUCK_CLIP / --clip names (g1_imitate).
+            from .g1_imitate import G1ImitateEnv
+            return G1ImitateEnv
+        raise SystemExit(
+            f"unknown --task {task!r} for {self.id} "
+            f"(have: {', '.join(G1_TASKS)})")
+
+    def train_env_kwargs(self, args) -> dict:
+        """`train-walk`'s per-body knobs for the G1.
+
+        `HOLD_TASKS` and `G1_TASKS` stay in `train.py`: `--task` is a
+        trainer flag and its vocabulary has one definition. §6.1 of
+        `docs/mars-roadmap.md` collapses the two task systems and this
+        import with them.
+        """
+        from ..train import HOLD_TASKS
+        kw: dict = {}
+        # BAM is an XL330 identification; the G1 runs MJCF position servos.
+        if getattr(args, "actuator", None) == "bam":
+            raise SystemExit(
+                "--actuator bam is the duck's XL330 servo model — "
+                "the G1 trains on its MJCF position actuators")
+        kw["actuator_force"] = "xml"
+        task = getattr(args, "task", "walk")
+        if task in HOLD_TASKS:
+            # Practise LONG holds. The env default is 20 s, and the sway
+            # this task is trying to remove damps out at ~20 s — so a
+            # default episode is almost entirely the transient, and the
+            # settled regime is a tail the policy barely experiences.
+            kw["max_episode_s"] = 40.0
+            # Fraction of episodes that SHOW a drive command the idle must
+            # ignore. Default 0: a clone that has only seen zeros collapses
+            # on a commanded episode, so mixing them in from step one feeds
+            # PPO a run of one-second disasters. Raise it once the policy
+            # holds its ground (see --command-mix).
+            # A curriculum stage passes its knobs through the trainer's
+            # ENVIRONMENT (the lab's stage machinery does not rewrite
+            # argv), so the env var wins when the flag was left at its
+            # default.
+            mix = getattr(args, "command_mix", 0.0) or 0.0
+            if not mix:
+                mix = float(os.environ.get("MICRODUCK_G1_COMMAND_MIX", 0.0) or 0.0)
+            kw["command_mix"] = float(mix)
+        if task == "imitate":
+            clip = getattr(args, "clip", None) or os.environ.get("MICRODUCK_CLIP")
+            if not clip:
+                raise SystemExit("--task imitate needs --clip <name> (or "
+                                 "MICRODUCK_CLIP): a clip saved in the 🎬 panel")
+            kw["clip_name"] = clip
+        return kw
+
+    def attach(self, spec: mujoco.MjSpec, prefix: str, frame,
+               collision: str = "walk") -> None:
+        """Put one G1 in a `/sim` world. `collision` is the duck's knob
+        and has no meaning here — the G1 has one MJCF."""
+        spec.attach(g1_spec(), prefix=prefix, frame=frame)
+
+
 class _LazyG1Spec:
     """`G1_SPEC` without paying `load_config()` at import time."""
 
@@ -580,10 +712,10 @@ class _LazyG1Spec:
 
     def _resolve(self):
         if _LazyG1Spec._spec is None:
-            from .spec import RobotSpec
-            _LazyG1Spec._spec = RobotSpec(
+            _LazyG1Spec._spec = G1Body(
                 id="g1",
                 title="Unitree G1",
+                noun="G1",
                 joint_names=joint_names(),
                 default_pose=default_pose(),
                 action_scale=action_scales(),

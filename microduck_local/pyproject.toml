@@ -60,6 +60,9 @@ trace-tidy = "microduck_local.trace_tidy:main"
 walker-facts = "microduck_local.walker_facts:main"
 eval-find-ball = "microduck_local.eval_find_ball:main"
 record-world = "microduck_local.record_world:main"
+fetch-robot = "microduck_local.fetch_robot:main"
+# The G1's own name, kept: the README, scripts/setup.sh and the memory index
+# all say `fetch-g1`. It is `fetch-robot g1` with the body spelled in.
 fetch-g1 = "microduck_local.fetch_g1:main"
 
 [tool.pytest.ini_options]

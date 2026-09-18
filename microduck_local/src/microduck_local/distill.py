@@ -45,6 +45,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .robots import registry
 from .train import RUNS_DIR
 
 
@@ -371,7 +372,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--head-range", default=None, metavar="nlo,nhi,hlo,hhi,ylo,yhi,rlo,rhi",
                     help="head-pose command ranges the clone is collected under (train-walk --head-range)")
-    ap.add_argument("--robot", default="microduck", choices=("microduck", "g1"),
+    ap.add_argument("--robot", default="microduck", choices=registry.ids(),
                     help="which body the teacher drives (default microduck); "
                          "the G1's teacher is .cache/unitree_g1/walker.onnx")
     ap.add_argument("--task", default="walk",

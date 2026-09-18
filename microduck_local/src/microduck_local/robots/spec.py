@@ -7,6 +7,11 @@ the rewards, the domain randomization, the shared-model plumbing, the
 step cache. A `RobotSpec` is that handful of names lifted out, so a second
 body (the Unitree G1) can reuse the env instead of forking it.
 
+A `RobotSpec` is a `Body` (`robots/body.py` — what the LAB needs) PLUS the
+walking env's names and windows. The split exists because the next body
+planned does not walk: `docs/mars-roadmap.md` §1. Nothing moved out of the
+walker's half, so the duck and the G1 keep every field they had.
+
 The duck's spec lives in `contract.MICRODUCK` and is bit-for-bit what the
 env used to hard-code: the golden-bit tests are the proof (tests/goldens/).
 Nothing here changes the 61-obs / 14-action deployment contract — a spec
@@ -21,6 +26,8 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+
+from .body import Body, BodyBase
 
 
 @dataclass(frozen=True)
@@ -41,19 +48,19 @@ class Effector:
     point: str | tuple[float, float, float] | None = None
 
 
-@dataclass(frozen=True, eq=False)     # eq=False: ndarray fields have no bool eq
-class RobotSpec:
+@dataclass(frozen=True, eq=False, kw_only=True)   # eq=False: ndarray fields
+class RobotSpec(BodyBase):
     """One body the env can walk.
 
     Every field is either a NAME the compiled model is asked for (so a
     model revision that renames a link fails loudly at construction rather
     than silently walking on the wrong geometry) or a dimension.
+
+    `id`, `title`, `noun`, `kind`, `joint_names`, `joint_groups`,
+    `default_pose`, `obs_dim` and `lab_spacing_m` come from `BodyBase`: they
+    are what the lab, the viewer and `/sim` ask any body, walker or not.
     """
 
-    id: str                                   # "microduck" | "g1"
-    joint_names: tuple[str, ...]              # policy/action order
-    default_pose: np.ndarray                  # rad, len == num_joints
-    obs_dim: int
     base_body: str                            # the IMU body: trunk / pelvis
     gyro_sensor: str                          # mjOBJ_SENSOR name, 3 floats
     foot_geoms: Mapping[str, tuple[str, ...]] # {"left": (...), "right": (...)}
@@ -92,24 +99,7 @@ class RobotSpec:
     twist_obs_slice: tuple[int, int] = (48, 51)
     # Velocity pushes, m/s on the base's world xy (upstream's DR).
     push_vel_range: tuple[float, float] = (-0.3, 0.3)
-    # How much floor ONE SLOT on the lab stage gets, centre to centre (m).
-    # The lab lays its roster out in a square grid and each slot is pitched by
-    # its own robot (viz_server.lab_slot_offsets), because one duck-sized
-    # constant put six 1.3 m G1 helpers inside each other.
-    # Measured at each robot's own STAND keyframe — the widest HORIZONTAL
-    # extent of the whole body's geom AABBs, which is what must not overlap:
-    #     microduck  0.1845 m wide  ->  0.65 m   (3.52x, the pitch the viewer
-    #                                             has always drawn: this default)
-    #     g1         0.5338 m wide  ->  1.88 m   (the same 3.52x; robots/g1.py)
-    # tests/test_lab_robots.py re-measures both widths from the models, so a
-    # model revision that changes a body's size fails here rather than quietly
-    # crowding the stage. (Scaling on standing height instead — 0.277 m vs
-    # 1.307 m — would give the G1 3.07 m: also defensible, simply further apart
-    # than the stage camera can frame.)
-    lab_spacing_m: float = 0.65
     # --- the 🎬 animation editor (pose.py serves these to the viewer) ------
-    # Panel section label per joint, in joint_names order (None: one group).
-    joint_groups: tuple[str, ...] | None = None
     # The draggable IK targets — feet, hands — see Effector.
     effectors: tuple[Effector, ...] = ()
     # 🎮 rig controls: coupled-joint macro sliders, served verbatim to the
@@ -125,16 +115,7 @@ class RobotSpec:
     # the air. Millimetres on a 25 cm duck; a 1.3 m humanoid needs more.
     ground_tol: float = 0.005
     # Free-form, for tools that want to say something about the robot.
-    title: str = ""
     extra: Mapping[str, object] = field(default_factory=dict)
-
-    @property
-    def num_joints(self) -> int:
-        return len(self.joint_names)
-
-    @property
-    def num_actions(self) -> int:
-        return len(self.joint_names)
 
     def scale_action(self, action: np.ndarray) -> np.ndarray:
         """Policy output -> position target (radians)."""
@@ -156,28 +137,48 @@ class RobotSpec:
             out.append(names.index(partner) if partner in names else names.index(n))
         return np.array(out, dtype=np.int64)
 
+    # ------------------------------------------------------ the Body contract
+    #
+    # ONLY the answers that hold for ANY walker, computed from the spec
+    # itself. Everything that names a robot's assets — its meshes, its
+    # shipped policies, its env, how it attaches — is on the body:
+    # `robots/microduck.MicroduckBody` and `robots/g1.G1Body`. A generic
+    # default that happened to be one robot's would be inherited in silence,
+    # and arrive as a wrong picture and a wrong policy instead of an error.
 
-def registry() -> dict[str, RobotSpec]:
+    def ready(self) -> bool:
+        """The training scene is on disk.
+
+        Generic: a walker is set up when the scene it trains in exists.
+        Cheap for a body whose `scene_fn` is a path, and False rather than an
+        exception for one whose `scene_fn` GENERATES a scene from assets that
+        are missing — `tests/test_body_conformance.py` uses the same rule as
+        its fallback, and `G1Body` narrows it to the meshes and the ONNX too.
+        """
+        try:
+            return Path(self.scene_fn()).is_file()
+        except Exception:
+            return False
+
+
+def registry() -> dict[str, Body]:
     """Every robot the training stack can build, by id.
 
-    Imported lazily: the G1 spec touches `.cache/unitree_g1`, which most
-    machines have never fetched, and asking for the duck must not care.
+    A thin alias for `robots/registry.registry()`, which is where bodies now
+    come from (including ones a pip-installed plugin adds). Kept because
+    `viz_server`, `export_onnx`, `motion`, `pose` and two test modules import
+    it from here. The values are `Body`, not `RobotSpec`: a non-walker is a
+    legal registry entry, and a caller that needs `foot_geoms` should ask the
+    body for the walker's half rather than assume every entry has one.
     """
-    from .. import contract as C
-
-    out = {C.MICRODUCK.id: C.MICRODUCK}
-    try:
-        from .g1 import G1_SPEC
-    except Exception:                          # assets missing / import error
-        return out
-    out[G1_SPEC.id] = G1_SPEC
-    return out
+    from . import registry as _registry
+    return _registry.registry()
 
 
-def get(robot_id: str) -> RobotSpec:
-    reg = registry()
-    if robot_id not in reg:
-        raise KeyError(
-            f"unknown robot {robot_id!r} — have {sorted(reg)}"
-            + ("; `uv run fetch-g1` adds the G1" if robot_id == "g1" else ""))
-    return reg[robot_id]
+def get(robot_id: str) -> Body:
+    """`robots/registry.get()`, under the name the tree already imports."""
+    from . import registry as _registry
+    return _registry.get(robot_id)
+
+
+__all__ = ["Body", "BodyBase", "Effector", "RobotSpec", "get", "registry"]

@@ -152,7 +152,7 @@ runs onnxruntime, streams `/cmd_vel` and `/mars/arm/commands`); an Innate
 
 ## 2. Phases, each with the command and the number that settles it
 
-### Phase 1 — the seam: `Body` + registry, no behaviour change  `[ ]`
+### Phase 1 — the seam: `Body` + registry, no behaviour change  `[~]`
 
 - Add `robots/body.py`, `robots/registry.py`; make `RobotSpec` a `Body`;
   move the G1's fetch/ready/scene/look/tasks/attach/driver behind it (they all
@@ -171,6 +171,26 @@ runs onnxruntime, streams `/cmd_vel` and `/mars/arm/commands`); an Innate
   `uv run --with pytest pytest tests/` green including the goldens;
   `npm test` green; `tests/test_lab_robots.py` extended with a fake third
   registry entry so the seam is proven by something that is not the G1.
+
+**1a DONE (2026-09-17)** — `robots/body.py` (`Body` protocol + `BodyBase`,
+`conforms()` because `isinstance` cannot see through the G1's lazy proxy),
+`robots/registry.py` (built-ins declared without importing, a
+`microduck_local.bodies` entry-point group for pip-installed bodies,
+`register()` for tests, `ids()` lists a known-but-unfetched body so
+`--robot g1` still answers with the fetch command), `robots/microduck.py`
+(`MicroduckBody(RobotSpec)`: every duck-asset answer lives here, not on the
+generic walker — a first draft put them on `RobotSpec` behind an id guard,
+which is the shape of the mistake the split exists to prevent), `G1Body` at
+module level in `robots/g1.py`, `fetch-robot <id>` with `fetch-g1` kept as an
+alias, and `train`/`export`/`bench`/`distill`/`eval-onnx` reading choices
+from the registry: `"g1"` literals in those five files 7 → 0. Behaviour
+preserved to the bit: 200-step rollout fingerprints identical to HEAD for
+duck xml, duck bam and G1 xml; every `MICRODUCK` and `G1_SPEC` field
+unchanged (only `noun`, `kind` added). 33 registry tests, each shown to fail
+on a planted break; the conformance suite unchanged and green. Still open
+for 1b: `viz_server.py` (15 literals), `render_rollout.py`, the viewer — and
+`MicroduckBody.visual_scene()/shipped_policies()` import from `viz_server`
+in the wrong direction until `lab/robots.py` exists (marked `PHASE 1B:`).
 
 ### Phase 2 — MARS on the stage: download, spec, look  `[ ]`
 

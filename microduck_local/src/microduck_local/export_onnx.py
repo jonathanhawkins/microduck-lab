@@ -27,6 +27,8 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 
+from .robots import registry
+
 
 def run_robot(run_dir: Path) -> str:
     """Which body this run was trained on, from its own run.json."""
@@ -112,7 +114,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("-o", "--out", type=Path, default=None)
-    ap.add_argument("--robot", default=None, choices=("microduck", "g1"),
+    ap.add_argument("--robot", default=None, choices=registry.ids(),
                     help="override the robot recorded in the run's run.json")
     args = ap.parse_args()
     out = args.out or (args.run_dir / "policy.onnx")

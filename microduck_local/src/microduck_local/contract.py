@@ -19,7 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .robots.spec import Effector, RobotSpec
+from .robots.microduck import MicroduckBody
+from .robots.spec import Effector
 
 # microduck_rl checkout providing the MJCF models. Sibling of this project by
 # default; override with MICRODUCK_RL_DIR for a non-standard layout.
@@ -158,9 +159,10 @@ RIG_CONTROLS = (
      "handle": {"joint": "head_pitch", "offset": [-0.02, 0, 0.115]}},
 )
 
-MICRODUCK = RobotSpec(
+MICRODUCK = MicroduckBody(
     id="microduck",
     title="Microduck",
+    noun="duck",
     joint_groups=JOINT_GROUPS,
     effectors=EFFECTORS,
     rig_controls=RIG_CONTROLS,

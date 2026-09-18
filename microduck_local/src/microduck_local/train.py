@@ -23,8 +23,8 @@ from pathlib import Path
 
 from .machine import profile, with_phase_callbacks
 from .ppo_hparams import N_STEPS, VF_COEF, configure_torch_cpu, ppo_batch_size
+from .robots import registry
 from .vec_env import as_sb3_vec_env, make_vec_env
-from .walk_env import MicroduckWalkEnv
 
 # What a robot can be trained to do. The duck's tasks are reward recipes in
 # `behaviors/` (train-behavior); another body has no recipe library, so its
@@ -33,38 +33,40 @@ G1_TASKS = ("walk", "stand", "squat", "front_kick", "punch", "imitate")
 # Every G1 task that is a HELD POSE rather than locomotion: long
 # episodes, and a drive command it is paid to ignore.
 HOLD_TASKS = ("stand", "squat", "front_kick", "punch", "imitate")
+# What a `--robot` value may be besides a registry id. The default and the
+# empty string have always meant the duck; the registry itself is strict, so
+# these live at the CLI edge instead of loosening `registry.get`.
+ROBOT_ALIASES = {None: "microduck", "": "microduck", "duck": "microduck"}
+
+
+def _body(robot: str | None):
+    """The `Body` a `--robot` value names, as a CLI error when it names none.
+
+    `""`/`None`/`"duck"` have always meant the duck here; the registry is
+    strict about ids, so the aliases stay at the CLI edge that documented them.
+    """
+    body_id = ROBOT_ALIASES.get(robot, robot)
+    try:
+        return registry.get(body_id)
+    except KeyError as e:
+        # Recomposed rather than passed through: the registry's own text says
+        # "unknown robot", and a CLI should name the FLAG. The hint still
+        # travels, for the id that is known but not downloaded.
+        hint = registry.setup_hint(body_id)
+        raise SystemExit(
+            f"unknown --robot {robot!r} (have: {', '.join(registry.ids())})"
+            + (f"; `{hint}` adds it" if hint else "")) from e
 
 
 def env_class(robot: str, task: str = "walk"):
     """The env class that trains `task` on `robot`.
 
-    The G1 is not a MicroduckWalkEnv kwarg away: it speaks a different
-    observation (99-d, robots/g1_env.py). Imported lazily so a machine
-    without the fetched assets can still train the duck.
+    One line, because each body now answers for itself
+    (`robots/body.Body.env_class`). This was an if-chain per robot, which is
+    the pattern `docs/mars-roadmap.md` §1 costs out: a third body would have
+    been a third branch here and in five more files.
     """
-    if robot in (None, "", "microduck", "duck"):
-        if task not in (None, "", "walk"):
-            raise SystemExit(
-                f"--task {task!r} is a G1 env; the duck's tasks are reward "
-                "recipes — use `train-behavior <name>`")
-        return MicroduckWalkEnv
-    if robot == "g1":
-        from .robots.g1_env import G1SquatEnv, G1StandEnv, G1WalkEnv
-        if task in (None, "", "walk"):
-            return G1WalkEnv
-        if task == "stand":
-            return G1StandEnv
-        if task == "squat":
-            return G1SquatEnv
-        if task in ("front_kick", "punch"):
-            from .robots.g1_karate import G1FrontKickEnv, G1PunchEnv
-            return G1FrontKickEnv if task == "front_kick" else G1PunchEnv
-        if task == "imitate":
-            # Tracks the clip MICRODUCK_CLIP / --clip names (robots/g1_imitate).
-            from .robots.g1_imitate import G1ImitateEnv
-            return G1ImitateEnv
-        raise SystemExit(f"unknown --task {task!r} for g1 (have: {', '.join(G1_TASKS)})")
-    raise SystemExit(f"unknown --robot {robot!r} (have: microduck, g1)")
+    return _body(robot).env_class(task)
 
 # Overridable so tests and scratch lab servers write somewhere disposable —
 # discover_policies() scans this dir, so stray test runs would otherwise show
@@ -303,13 +305,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "is the lab's channel for the same thing")
     ap.add_argument("--task", default="walk",
                     help="what to train on a non-duck body (g1: "
-                         f"{', '.join(G1_TASKS)}). 'stand' is the IDLE: it "
-                         "ignores the drive command and holds its ground, "
+                         f"{', '.join(G1_TASKS)}; a name that body does not "
+                         "have lists the ones it does). 'stand' is the IDLE: "
+                         "it ignores the drive command and holds its ground, "
                          "the role alpha_stand plays for the duck.")
-    ap.add_argument("--robot", default="microduck", choices=("microduck", "g1"),
+    ap.add_argument("--robot", default="microduck", choices=registry.ids(),
                     help="which body to train (default microduck). 'g1' needs "
-                         "`uv run fetch-g1` and trains the 99-obs/29-action "
-                         "Unitree G1 — a lab contract, not a sim2real one.")
+                         "`uv run fetch-robot g1` and trains the "
+                         "99-obs/29-action Unitree G1 — a lab contract, not a "
+                         "sim2real one.")
     ap.add_argument("--actuator", default=None, choices=("xml", "bam"),
                     help=f"servo model (default {DEFAULT_ACTUATOR}; "
                          "MICRODUCK_ACTUATOR overrides the default, an "
@@ -318,7 +322,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def env_kwargs_from_args(args: argparse.Namespace) -> dict:
-    """The walking-env kwargs a train-walk invocation trains under."""
+    """The walking-env kwargs a train-walk invocation trains under.
+
+    The knobs every body shares are here; the per-body ones come from the
+    body (`Body.train_env_kwargs`), which is where the old `if robot == g1`
+    block went — the actuator model it refuses, the episode length its held
+    poses need, the clip an imitation task tracks.
+    """
     robot = getattr(args, "robot", "microduck")
     kw = dict(
         domain_rand=not args.no_domain_rand,
@@ -331,43 +341,7 @@ def env_kwargs_from_args(args: argparse.Namespace) -> dict:
         v = [float(x) for x in args.head_range.split(",")]
         assert len(v) == 8, "--head-range needs 8 numbers"
         kw["head_cmd_ranges"] = tuple((v[i], v[i + 1]) for i in range(0, 8, 2))
-    if robot == "g1":
-        # BAM is an XL330 identification; the G1 runs MJCF position servos.
-        if args.actuator == "bam":
-            raise SystemExit("--actuator bam is the duck's XL330 servo model — "
-                             "the G1 trains on its MJCF position actuators")
-        kw["actuator_force"] = "xml"
-        if getattr(args, "task", "walk") in HOLD_TASKS:
-            # Practise LONG holds. The env default is 20 s, and the sway this
-            # task is trying to remove damps out at ~20 s — so a default
-            # episode is almost entirely the transient, and the settled
-            # regime is a tail the policy barely experiences.
-            kw["max_episode_s"] = 40.0
-            # Fraction of episodes that SHOW a drive command the idle must
-            # ignore. Default 0: a clone that has only seen zeros collapses
-            # on a commanded episode, so mixing them in from step one feeds
-            # PPO a run of one-second disasters. Raise it once the policy
-            # holds its ground (see --command-mix).
-            # A curriculum stage passes its knobs through the trainer's
-            # ENVIRONMENT (the lab's stage machinery does not rewrite argv),
-            # so the env var wins when the flag was left at its default.
-            mix = getattr(args, "command_mix", 0.0) or 0.0
-            if not mix:
-                mix = float(os.environ.get("MICRODUCK_G1_COMMAND_MIX", 0.0) or 0.0)
-            kw["command_mix"] = float(mix)
-        if getattr(args, "task", "walk") == "imitate":
-            clip = getattr(args, "clip", None) or os.environ.get("MICRODUCK_CLIP")
-            if not clip:
-                raise SystemExit("--task imitate needs --clip <name> (or "
-                                 "MICRODUCK_CLIP): a clip saved in the 🎬 panel")
-            kw["clip_name"] = clip
-        return kw
-    if args.actuator:
-        # An explicit flag is a per-run decision and beats the process env
-        # (MICRODUCK_ACTUATOR hard-overrides `actuator=`, not `actuator_force=`).
-        kw["actuator_force"] = args.actuator
-    else:
-        kw["actuator"] = DEFAULT_ACTUATOR
+    kw.update(_body(robot).train_env_kwargs(args))
     return kw
 
 
