@@ -86,6 +86,26 @@ def main() -> None:
         raise SystemExit(
             f"--behavior is a Microduck reward recipe; {robot} has none yet")
 
+    # EVERY number this command prints is a walker's: fall rate, linear and
+    # angular twist-tracking error against a commanded twist, achieved
+    # body-x speed. A wheeled body has no gait to score and `MarsArmEnv` has
+    # no `twist_cmd`, no gyro and no fall — so this refuses rather than
+    # building `registry.get(robot).env_class(task)` and printing three
+    # meaningless columns off it. AGENTS.md's rule 6 in its writing-side
+    # form: a measurement that cannot produce the answer it reports is worse
+    # than no measurement, because it reads like one.
+    #
+    # The eye for a MARS policy is `scripts/probe_mars_reach.py`: the
+    # deterministic ONNX in its own env over N seeds, the final distance per
+    # seed, and a contact sheet to LOOK at.
+    if registry.get(robot).kind != "legged":
+        raise SystemExit(
+            f"eval-walk scores a GAIT — falls, twist tracking, body-x speed — "
+            f"and {robot} is a {registry.get(robot).kind} body with none of "
+            f"them. For a MARS arm policy use:\n"
+            f"    uv run python scripts/probe_mars_reach.py {args.onnx_path} "
+            f"--seeds 8 --out /tmp/mars-reach")
+
     if args.behavior == "run" and args.cmd is None:
         args.cmd = 0.4
     if args.behavior == "run" and args.cmd is not None:

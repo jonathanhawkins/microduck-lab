@@ -30,9 +30,12 @@ came from, so a drive or a grasp that is wrong here is wrong there too.
 lidar is `sensors/lidar.py`. Read that module before changing `ARM_HOME` or
 the planar base: one constant of Innate's could NOT be ported verbatim (their
 `KP_YAW` is unstable at this repo's 5 ms step) and the reason is measured
-there. The arm env, the tasks and the obs builder are still Phase 4. This
-module is the download, the body, the model, the arm/head servo, and the
-viewer's mesh dump.
+there. **The arm env is `robots/mars_env.py`** (Phase 4a) — `MarsArmEnv`,
+which `env_class()` hands out, with its `reach` task as a `Behavior` in
+`behaviors/mars_tasks.py`; it is the thing that FILLS the observation layout
+declared below, and `scripts/probe_mars_reach.py` is the eye for it. `pick`
+and `place` are still Phase 4b. This module is the download, the body, the
+model, the arm/head servo, the senses' mounts and the viewer's mesh dump.
 
 MEASURED on this Mac, `scene_xml()` compiled (2026-09-17):
 
@@ -234,11 +237,17 @@ FOOTPRINT_M = 0.12
 
 # ------------------------------------------------- the v1 observation layout
 #
-# Phase 4's `MarsArmEnv` fills this; nothing reads it yet. It is declared HERE
-# and now because `obs_dim` is what the lab refuses a wrong policy by, what
-# the exporter shapes the graph from, and what the conformance suite checks —
-# so the body has to speak one width from the day it is listed, not one that
-# appears when the first env is written.
+# `robots/mars_env.MarsArmEnv` fills this, and its `_SLOTS` is asserted
+# against `MarsBody.contract()` at construction — name by name and width by
+# width — so the env may not have a layout of its own.
+#
+# It was declared HERE and BEFORE that env existed, which is the part worth
+# keeping: `obs_dim` is what the lab refuses a wrong policy by, what the
+# exporter shapes the graph from, and what the conformance suite checks, so
+# the body had to speak one width from the day it was listed rather than one
+# that appeared when the first env was written. It cost Phase 4a nothing to
+# fill a table it did not get to choose, which is the evidence that declaring
+# first was the right way round.
 #
 # One fixed layout per body, zero-padded, exactly as the duck's 61 floats are
 # (`contract.py`): a task that does not use a slot sends zeros rather than
@@ -869,8 +878,11 @@ class MarsBody(BodyBase):
         with "untested on hardware" in the same sentence because nothing in
         this repo has ever driven a MARS.
 
-        Declared before `MarsArmEnv` exists, for the reason the layout above
-        is: a body has to speak one contract from the day it is listed.
+        Declared before `MarsArmEnv` existed, for the reason the layout above
+        is: a body has to speak one contract from the day it is listed. Phase
+        4a's exports carry exactly this record, stamped into the ONNX's own
+        `metadata_props`, and `tests/test_mars_env.py` reads it back off a
+        trained file.
         """
         return declare(
             self,
@@ -909,27 +921,24 @@ class MarsBody(BodyBase):
     # ----------------------------------------------------------- training
 
     def env_class(self, task: str = "walk") -> type:
-        """There is no MARS env yet, and no walking one there ever will be.
+        """The env that trains `task` on MARS. Phase 4a: `reach`.
 
-        Phase 4 builds `MarsArmEnv` (gymnasium, its own base class — NOT
-        `MicroduckWalkEnv`) with `reach` -> `pick` -> `place`. Raising with
-        that name is the honest answer: a body that quietly returned the
-        duck's env would train an arm against foot-contact rewards.
+        `MarsArmEnv` is gymnasium and its OWN base class, not
+        `MicroduckWalkEnv` — see `robots/mars_env.py`. A body that quietly
+        returned the duck's env would train an arm against foot-contact
+        rewards, which is why the unknown-task branch names what there is
+        rather than falling back to anything.
+
+        Imported lazily, like the G1's: a machine with no MARS assets must
+        still be able to train the duck.
         """
-        raise NotImplementedError(
-            f"{self.id!r} has no env for task {task!r} — MARS does not walk, "
-            "and its arm env (MarsArmEnv: reach/pick/place) is Phase 4 of "
-            "docs/mars-roadmap.md")
-
-    def tasks(self) -> tuple:
-        """Nothing to teach yet.
-
-        The base class reads `behaviors.for_robot(self.id)`, which would also
-        answer with nothing; this says so without importing the recipe
-        registry, and is the line to DELETE when `behaviors/mars_tasks.py`
-        lands in Phase 4.
-        """
-        return ()
+        from .mars_env import TASKS, MarsArmEnv
+        if task in TASKS:
+            return MarsArmEnv
+        raise SystemExit(
+            f"unknown --task {task!r} for {self.id} (have: "
+            f"{', '.join(TASKS)}) — MARS does not walk, and `pick` / `place` "
+            "are later rungs of docs/mars-roadmap.md Phase 4")
 
     def shipped_policies(self) -> tuple[dict, ...]:
         """MARS ships no policy this lab can run.
@@ -943,14 +952,24 @@ class MarsBody(BodyBase):
         return ()
 
     def train_env_kwargs(self, args) -> dict:
-        """No trainer knobs until there is a trainer.
+        """No per-body knobs — `MarsArmEnv`'s own defaults are the recipe.
 
-        Phase 4's will not be a single `actuator=` string: joints 4-6 and the
-        head are XL330s, which is the servo BAM was identified on, while
-        joints 1-3 are XL430/XC430 with no fit here (`docs/mars-roadmap.md`
-        §6.6 — per-joint servo models). Pretending one switch covers the arm
-        is the thing to avoid.
+        Deliberately empty. `--actuator bam` is the one flag that must not be
+        allowed through, and it is REFUSED rather than dropped: joints 4-6 and
+        the head are XL330s, which is the servo BAM was identified on, while
+        joints 1-3 are XL430/XC430 with no fit here, so v1 drives every joint
+        with Innate's own PD (`docs/mars-roadmap.md` §6.6 — per-joint servo
+        models are the fix). Pretending one switch covers the arm is the thing
+        to avoid; so is accepting a flag and silently discarding it, which is
+        AGENTS.md's rule 0 ("a knob that changes nothing is broken, not
+        null"). The G1 refuses the same flag in the same place.
         """
+        if getattr(args, "actuator", None) == "bam":
+            raise SystemExit(
+                "--actuator bam is this repo's XL330 identification — it "
+                "describes MARS's joints 4-6 and head but NOT its XL430/XC430 "
+                "shoulder (joints 1-3), so v1 trains every joint on Innate's "
+                "own position PD (docs/mars-roadmap.md §6.6)")
         return {}
 
     # ---------------------------------------------------------- /sim world

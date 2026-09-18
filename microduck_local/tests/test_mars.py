@@ -372,21 +372,29 @@ def test_the_default_pose_is_innates_arm_home_in_joint_order():
 
 
 def test_the_answers_that_are_refusals_name_the_phase_that_lands_them():
-    """A body with no env, no tasks and no shipped policy.
+    """A body whose remaining gaps refuse by name.
 
     Each of these could return something plausible — the duck's env, an
     empty walker, a duck recipe — and each would be a wrong answer that only
     shows up as bad behaviour. Raising with the phase number is also how the
     next person finds out where the work goes.
 
-    `driver()` was on this list until Phase 3a landed
-    `robots/mars_drive.py`; it is now a real answer and
-    `tests/test_mars_drive.py` measures it, which is what a refusal turning
-    into an implementation is supposed to look like from here.
+    Two of these were refusals until the phase named in them landed, and the
+    progression is what this test is for: `driver()` became real in Phase 3a
+    (`robots/mars_drive.py`, measured next door), and `env_class` / `tasks`
+    in **Phase 4a** — `reach` now builds `MarsArmEnv` and the 🎓 panel lists
+    `mars_reach`, both measured in `tests/test_mars_env.py`. What is still a
+    refusal is `pick` and `place`, and they refuse by NAMING the ones that
+    exist rather than by falling back to anything.
     """
-    with pytest.raises(NotImplementedError, match="Phase 4"):
-        mars.MARS.env_class("reach")
-    assert mars.MARS.tasks() == ()
+    from microduck_local.robots.mars_env import MarsArmEnv
+
+    assert mars.MARS.env_class("reach") is MarsArmEnv
+    for absent in ("walk", "pick", "place"):
+        with pytest.raises(SystemExit, match="unknown --task"):
+            mars.MARS.env_class(absent)
+    assert [b.id for b in mars.MARS.tasks()] == ["mars_reach"]
+    # Still nothing: Innate's learned skills are ACT checkpoints, not ONNX.
     assert mars.MARS.shipped_policies() == ()
     assert mars.MARS.train_env_kwargs(None) == {}
 

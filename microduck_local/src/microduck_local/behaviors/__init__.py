@@ -27,10 +27,12 @@ from . import imitate as _imitate
 from . import kick as _kick
 from . import lastmetre as _lastmetre
 from . import locomotion as _locomotion
+from . import mars_tasks as _mars_tasks
 from . import poses as _poses
 
 _SUBMODULES = [_core, _poses, _headstand, _backflip, _airflip, _imitate, _kick,
-               _getup, _locomotion, _ball, _lastmetre, _g1_tasks, _envm]
+               _getup, _locomotion, _ball, _lastmetre, _g1_tasks, _mars_tasks,
+               _envm]
 
 # The BARE submodule names. `from . import core as _core` binds `_core` here
 # AND pins `core` on the package (the import system does that for every

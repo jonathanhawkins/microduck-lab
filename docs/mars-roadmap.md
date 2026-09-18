@@ -435,7 +435,7 @@ unchanged. **Four things measured, two of them bugs the phase found:**
   cannot strafe, so `idle_vy`'s gait-warming sidestep is inert) and does not
   need it: it has no gait to keep warm.
 
-### Phase 4 — arm policies: `MarsArmEnv`, `reach` → `pick`, the teach panel, ONNX  `[ ]`
+### Phase 4 — arm policies: `MarsArmEnv`, `reach` → `pick`, the teach panel, ONNX  `[~]`
 
 The "train it, make new policies" half. The policy is the arm.
 
@@ -467,6 +467,100 @@ The "train it, make new policies" half. The policy is the arm.
   `pick` ≥ **80 %** lifts over 20 episodes on the widest rung, deterministic
   ONNX, rendered and looked at (`render-rollout`), before any number is
   quoted.
+
+**4a DONE, and the bar is MISSED — the reach is solved, the HOLD is not
+(2026-09-17).** `robots/mars_env.py` (`MarsArmEnv`, its own `gym.Env`),
+`behaviors/mars_tasks.py` (`mars_reach` in the 🎓 panel),
+`MarsBody.env_class("reach")`, `train.MARS_TASKS`, the stamped export, and
+`scripts/probe_mars_reach.py` as the eye — `render-rollout` is a walker's tool
+(trunk height, foot contacts, a fall rule) so the arm got its own. 43 cases in
+`tests/test_mars_env.py`, each shown to fail on a planted break. The
+acceptance measurement was a CLI run under `MICRODUCK_RUNS_DIR` (the batteries
+exception), 1.5 M steps at 8 envs in 2.6 min, **8,200-9,900 steps/s** — MARS
+trains at about the duck's throughput, as Phase 0's cost story predicted.
+
+`reach` on the deterministic export, 8 seeds x 8 s:
+
+| | final median | best median | ≤ 2 cm | held 1 s | sat. | tail spread |
+|---|---|---|---|---|---|---|
+| null (untrained net) | 30.1 cm | 30.1 cm | 0/8 | 0/8 | 0% | 0.0 mm |
+| null (zero action) | 30.2 cm | 30.1 cm | 0/8 | 0/8 | 0% | 0.0 mm |
+| v1 | 2.62 cm | 1.10 cm | 1/8 | 0/8 | 64% | 9.5 mm |
+| **v2 (the pick)** | **2.02 cm** | **0.75 cm** | **3/8** | **0/8** | 58% | 11.8 mm |
+
+The contact sheet is unambiguous: the arm unfolds from HOME and puts the
+gripper ON the target inside 1 s, then **limit-cycles between 1.1 and 2.3 cm
+with a ~2 s period**, dipping inside the 2 cm ball for 1-5 control steps at a
+time where the success rule wants 25 consecutive. So this is not a reaching
+failure at all — it is a settling failure, and the bar as written (8/8 within
+2 cm) turns entirely on the last centimetre.
+
+Four things measured on the way, each of which changed the build:
+
+- **The action box's reachable set had to be measured before the reward was
+  written.** A shell solution costs up to **3.09 rad** on its worst joint
+  (median 2.01, p95 2.6-3.0; 60 targets a window, solved by coordinate
+  descent over the full ranges with self-colliding poses rejected), because
+  HOME parks the arm folded at joint1 = +1.445 rad — pointing 83° to the
+  robot's LEFT, while the task samples the front arc. Hence
+  `ACTION_SCALE_RAD = 3.0`. The shell itself is the arm's: residual 0.9 mm
+  median, 95% of draws inside 2 cm.
+- **An absolute joint target at 25 Hz is a 3 rad teleport, and the chassis is
+  in the way.** 60 of 60 random episodes ended in a self-collision inside
+  **1-5 control steps**. No reward fixes a rollout distribution that never
+  contains the skill, so the fix was the world: the commanded target is
+  rate-limited to **6.0 rad/s** `[datasheet — the XL430 shoulder pair's
+  61 rpm; not measured here]`, which is what the real servos could follow
+  anyway. Random episodes go 1.6 → 67.7 steps, and the ZERO action survives
+  all 200.
+- **"Terminate on any self-contact" terminates on the URDF's own error.**
+  Within ±0.1 rad of HOME, 15.3% of poses report a contact and **0.0% are
+  deeper than 5 mm** — all `link1↔link3` / `link2↔link4`, links two apart in
+  a chain folded tight, in boxes Innate already documents as overlapping
+  ~9 mm (`JOINT2_GUARD_MIN`). Driving the arm properly into the chassis is
+  20-60 mm. The predicate is therefore a **10 mm depth**, and HOME is clean.
+- **The bug that cost the first eval, and the transferable one.** SB3 clips a
+  Box action before the env sees it, so during training the raw and the
+  clipped action coincide and `last_action` is unambiguous. At inference
+  nothing clips: v1's exported mean reaches **|a| = 90 in a ±1 box**, and the
+  probe that handed the raw output straight to `step` wrote 86.6 into the
+  observation — scoring the same policy at 0.209 m instead of 0.026 m. **A
+  limit applied at both training and inference must come from one place**;
+  the env now clips what it OBSERVES (the penalties still price the raw).
+  The saturation itself is what `action_mag_penalty` was added for after v1:
+  it improved every accuracy number and did not fix the hold.
+
+**What 4b needs before `pick`:** fine control near the target, and none of it
+is reward work. The mean still sits on the box edge 58% of the time, so a
+rate-limited joint target can only alternate — it has no "stay". Three
+candidates, in order of cheapness: a **non-linear action map** (cubic, so the
+same box gives millimetre resolution near zero and full range at the edge); a
+**narrower action box as a second curriculum rung** once the arm is near (the
+physics ladder this file already plans for the block spawn); and
+`LOG_STD_MAX`, which is **std 0.6065 — 61% of a ±1 half-box against 15% of
+the duck's ±4**, so MARS's exploration pressure is 4× the duck's in the units
+that matter. That coupling between a body's action-box width and a global
+trainer constant is undocumented and should be written down wherever the
+fourth body's box is chosen.
+
+**3b's open question is still open, and 4a could not close it.** Phase 3b
+left "the world's option block costs MARS nothing… NOT tested for a GRASP,
+which is what those options were set for; re-measure in Phase 4". `reach`
+never closes the gripper on anything — there is no object in its scene — so
+nothing here exercises the elliptic cone or `impratio 10` either. It is
+`pick`, in a world model, that settles it.
+
+**Also for 4b, from the gripper slot's own measurement:** `gripper_load`
+carries the torque `arm_servo` wrote at joint6, and closing on AIR drives the
+blade into its own hard stop where the position error is zero, so the slot
+reads **0.0 N·m — identical to an open claw**. What distinguishes "holding" is
+that an object stops the blades SHORT of that stop, which shows up in
+`arm_qpos[5]` with `qfrc_constraint` as the force behind it. So `pick` wants
+the constraint torque as well as this slot, a pickable body in the scene (its
+own model, hence `MarsArmEnv(own_model=True)`), and the `target_seen` gate
+finally doing something — it is hard-wired to 1.0 today because `reach`'s
+target is privileged, and the slot exists so that adding the head detector
+does not change the layout.
 
 ### Phase 5 — a MARS brain: tidy with an arm, and `train-brain --robot mars`  `[ ]`
 

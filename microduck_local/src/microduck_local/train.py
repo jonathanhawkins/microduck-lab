@@ -33,6 +33,17 @@ G1_TASKS = ("walk", "stand", "squat", "front_kick", "punch", "imitate")
 # Every G1 task that is a HELD POSE rather than locomotion: long
 # episodes, and a drive command it is paid to ignore.
 HOLD_TASKS = ("stand", "squat", "front_kick", "punch", "imitate")
+# MARS does not walk at all: its tasks are ARM tasks (robots/mars_env.py).
+#
+# Kept as a literal beside G1_TASKS, and not read from the body, on purpose.
+# `parse_args` builds the `--task` help before `main` forks its workers, and
+# asking a body for its tasks imports the whole `behaviors` package (and
+# `walk_env` with it) to print `--help` — while this module's contract is that
+# nothing heavy is imported before the fork. The BODY is still the authority
+# at runtime (`env_class` -> `MarsBody.env_class` -> `mars_env.TASKS`), and
+# `tests/test_mars_env.py` pins this tuple against both `mars_env.TASKS` and
+# `behaviors.for_robot("mars")`, so the three cannot drift apart.
+MARS_TASKS = ("reach",)
 # What a `--robot` value may be besides a registry id. The default and the
 # empty string have always meant the duck; the registry itself is strict, so
 # these live at the CLI edge instead of loosening `registry.get`.
@@ -56,6 +67,23 @@ def _body(robot: str | None):
         raise SystemExit(
             f"unknown --robot {robot!r} (have: {', '.join(registry.ids())})"
             + (f"; `{hint}` adds it" if hint else "")) from e
+
+
+def is_pinned_command(task: str) -> bool:
+    """Does a run of `task` produce a policy the lab must NOT drive?
+
+    `viz_server.is_trick_duck` reads `run.json`'s `pinned_command`, and
+    without it the lab's demo script asks an idle for 0.9 m/s 27 s out of
+    every 30. A function rather than an inline tuple in `main` so that a test
+    can ask it: three tasks were added to that tuple over three phases and
+    nothing could check any of them without running a trainer.
+
+    `stand` and `imitate` are the G1's held poses — asked for a twist and
+    paid to ignore it. `reach` is stronger than ignoring: `MarsArmEnv` forces
+    the base pair of the action to zero for an arm task, so a drive command
+    was never in that policy's training distribution at all.
+    """
+    return task in ("stand", "imitate", "reach")
 
 
 def env_class(robot: str, task: str = "walk"):
@@ -305,7 +333,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "is the lab's channel for the same thing")
     ap.add_argument("--task", default="walk",
                     help="what to train on a non-duck body (g1: "
-                         f"{', '.join(G1_TASKS)}; a name that body does not "
+                         f"{', '.join(G1_TASKS)}; mars: "
+                         f"{', '.join(MARS_TASKS)}; a name that body does not "
                          "have lists the ones it does). 'stand' is the IDLE: "
                          "it ignores the drive command and holds its ground, "
                          "the role alpha_stand plays for the duck.")
@@ -313,7 +342,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="which body to train (default microduck). 'g1' needs "
                          "`uv run fetch-robot g1` and trains the "
                          "99-obs/29-action Unitree G1 — a lab contract, not a "
-                         "sim2real one.")
+                         "sim2real one. 'mars' needs `uv run fetch-robot mars` "
+                         "and trains Innate's MARS ARM (32-obs/8-action, "
+                         "25 Hz) — it does not walk, so --task is one of "
+                         f"{', '.join(MARS_TASKS)}.")
     ap.add_argument("--actuator", default=None, choices=("xml", "bam"),
                     help=f"servo model (default {DEFAULT_ACTUATOR}; "
                          "MICRODUCK_ACTUATOR overrides the default, an "
@@ -389,8 +421,18 @@ def main() -> None:
             venv.training = False
             # …and the twist command is never normalized at all, so a stage
             # that starts showing one cannot redefine the policy's inputs.
+            #
+            # A WALKER's command, that is. `twist_obs_slice` is a `RobotSpec`
+            # field — the walking env's half of the contract — and MARS is a
+            # `Body` without one: its 32 floats carry a MEASURED base twist,
+            # not a commanded one, and there is nothing in them to hold at
+            # mean 0 / var 1. Asked by capability rather than by id, per
+            # AGENTS.md's rule about guarding on `kind`/`hasattr` and never on
+            # a robot name.
             from .robots import spec as _spec_mod
-            _pass_through_command_dims(venv, _spec_mod.get(args.robot))
+            body = _spec_mod.get(args.robot)
+            if hasattr(body, "twist_obs_slice"):
+                _pass_through_command_dims(venv, body)
         model = PPO.load(str(prev / "model"), env=venv, device=args.device,
                          custom_objects={"policy_class": FastActorCriticPolicy})
         # Warm starts INHERIT log_std, so a chain ratchets it up run after run
@@ -448,10 +490,7 @@ def main() -> None:
         # ONNX that was never stamped.
         "contract": _body(args.robot).contract().as_dict(),
         "task": args.task,
-        # The lab stops driving a slot whose brain was trained to ignore the
-        # command (viz_server.is_trick_duck) — otherwise the demo script asks
-        # an idle for 0.9 m/s 27 s out of every 30.
-        "pinned_command": args.task in ("stand", "imitate"),
+        "pinned_command": is_pinned_command(args.task),
         "seed": args.seed, "env_kwargs": env_kwargs,
         "microduck_rl_sha": git_sha, "init_from": args.init_from,
     }
