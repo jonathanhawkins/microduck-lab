@@ -184,6 +184,320 @@ def test_a_mars_entrys_frame_block_says_what_it_is_and_what_it_senses(app, tmp_p
             assert frame["ducks"][0]["speed"] > 0.1, "the base actually moved"
 
 
+# -- the arm channels, and the scan's own two numbers -------------------------
+#
+# The /sim inspector renders ONE BLOCK PER SENSE CHANNEL the frame carries, so
+# every case below is about a key being present, absent, or carrying the number
+# the instrument is drawn against. Each was shown to FAIL on a planted break
+# before it was kept (`AGENTS.md`: "A/B new tests against planted
+# regressions"); the table is in the report.
+
+MARS_SCENARIO = "mars-room"
+
+
+def load_mars(c) -> dict:
+    """Put the tracked `mars-playroom` in the world, through the same door the
+    editor saves by — so these cases read the file on disk and not a fixture
+    that resembles it. Returns `POST /world/load`'s payload."""
+    raw = json.loads((Path(W.__file__).resolve().parents[2]
+                      / "scenarios" / "mars-playroom.json").read_text())
+    assert c.put(f"/scenarios/{MARS_SCENARIO}", json=raw).status_code == 200
+    r = c.post("/world/load", json={"scenario": MARS_SCENARIO})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def mars_frame(c, ticks: int = 14) -> dict:
+    """One /ws/sim frame with a couple of 6 Hz scans in it."""
+    with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+        frame = None
+        for _ in range(ticks):
+            frame = ws.receive_json()
+    return frame
+
+
+def leaf_shape(v, path: str = "") -> list[str]:
+    """Every leaf of a payload as `dotted.path:type`, lists as `path[n]:type`.
+
+    A SNAPSHOT instrument, not a pretty-printer: comparing this against a
+    pinned list catches a field added anywhere in the tree, one removed, and
+    one whose type changed — which is what "unchanged" has to mean for a wire
+    format a browser parses positionally.
+    """
+    if isinstance(v, dict):
+        out: list[str] = []
+        for k in sorted(v):
+            out += leaf_shape(v[k], f"{path}.{k}" if path else k)
+        return out
+    if isinstance(v, list):
+        inner = leaf_shape(v[0], "")[0].split(":")[-1] if v else "empty"
+        return [f"{path}[{len(v)}]:{inner}"]
+    return [f"{path}:{type(v).__name__}"]
+
+
+#: Every leaf of `wall-test`'s one duck, as `leaf_shape` reports it. MEASURED
+#: against the same probe run on the tree at the commit before the arm
+#: channels landed: the duck's whole frame block came back BYTE-IDENTICAL
+#: (`json.dumps(..., sort_keys=True)`, 10 steps, seed 0), so this is a pin on
+#: a verified baseline and not on today's output. The arm channels are for a
+#: body with a hand; a duck must not grow one, and `brain.inputs` must keep
+#: saying `tof`, because a duck's range sensor IS its 8x8.
+DUCK_FRAME_LEAVES = [
+    "beak:str", "bodies[17]:int",
+    "brain.beak:NoneType", "brain.cmd[3]:float", "brain.graph:str", "brain.head[4]:float",
+    "brain.inputs.det.age:float", "brain.inputs.det.max:float", "brain.inputs.det.n:int",
+    "brain.inputs.det.stale:bool",
+    "brain.inputs.tof.age:float", "brain.inputs.tof.max:float", "brain.inputs.tof.stale:bool",
+    "brain.kind:str", "brain.note:str", "brain.skill:NoneType", "brain.state:str",
+    "brainKind:str", "cmdSpeed:float", "detector:str", "falls:int", "headApplied:bool",
+    "holding:NoneType", "id:str", "lidar:NoneType", "mouth:float", "name:str",
+    "odom:str", "odomEst[3]:float", "policy:NoneType", "rew:float", "robot:str", "role:NoneType",
+    "sensors.det.age:float", "sensors.det.cam[7]:float", "sensors.det.fov[2]:float",
+    "sensors.det.items[0]:empty", "sensors.det.t:float",
+    "sensors.tof.age:float", "sensors.tof.mm[64]:int", "sensors.tof.t:float",
+    "skill:NoneType", "speed:float", "steerable:bool", "step:int", "team:NoneType",
+    "tof:str", "wallBumps:int", "wallTicks:int",
+]
+
+
+def test_a_duck_frame_block_is_unchanged_field_for_field(app):
+    """The regression guard for the arm channels: a DUCK's row must be exactly
+    what it was. Every leaf, by path and type, against `DUCK_FRAME_LEAVES`."""
+    with TestClient(app) as c:
+        assert c.post("/world/load", json={"scenario": "wall-test"}).status_code == 200
+        with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+            frame = None
+            for _ in range(8):
+                frame = ws.receive_json()
+        d = frame["ducks"][0]
+        assert leaf_shape(d) == DUCK_FRAME_LEAVES
+        # Named separately from the list above, because these three are the
+        # CLAIM and the list is the instrument: a duck has no claw, no arm and
+        # no scanner, so it ships none of their channels.
+        assert "gripper" not in d["sensors"] and "arm" not in d["sensors"]
+        assert "lidar" not in d["sensors"]
+        assert "lidar" not in d["brain"]["inputs"], "a duck's range sense is its ToF"
+        assert set(d["brain"]["inputs"]) == {"tof", "det"}
+
+
+@pytest.mark.skipif(
+    not __import__("microduck_local.robots.mars", fromlist=["x"]).mars_ready(),
+    reason="MARS assets not fetched")
+def test_a_mars_frame_carries_the_claw_as_a_reading(app):
+    """`sensors.gripper` — the load, the predicate, and the bar's own scale.
+
+    `holding` is the brain's (`Senses.holding` via `World.sense_grip`), not a
+    threshold re-applied in the frame builder, and on an untouched arm at HOME
+    it is False with the load at 0.0 N*m — which is the whole reason the flag
+    has to be sent: a close on AIR reads the same 0.0, so a bar alone cannot
+    answer it (`MarsDriver.gripper_load`'s table).
+    """
+    from microduck_local.robots import mars
+
+    with TestClient(app) as c:
+        load_mars(c)
+        g = mars_frame(c)["ducks"][0]["sensors"]["gripper"]
+        assert set(g) == {"load", "holding", "limit", "hold"}
+        assert g["holding"] is False, "the jaw is empty at ARM_HOME"
+        assert abs(g["load"]) < mars.HOLD_LOAD_NM
+        # The scale and the mark come off the BODY, so the viewer keeps no
+        # copy of another robot's constants.
+        assert g["limit"] == mars.GRIPPER_EFFORT_LIMIT == 2.0
+        assert g["hold"] == mars.HOLD_LOAD_NM == 1.0
+
+
+@pytest.mark.skipif(
+    not __import__("microduck_local.robots.mars", fromlist=["x"]).mars_ready(),
+    reason="MARS assets not fetched")
+def test_a_mars_frame_carries_the_arm_and_the_command_it_is_tracking(app):
+    """`sensors.arm` — seven joints of `q`, the same seven of `cmd`, limits.
+
+    The PAIR is the point: the gap between achieved and commanded is the servo
+    lag `brain/tidy_arm.py` pre-compensates, so a frame with `q` alone shows
+    nothing. Driven through the socket's own command path: an `Intent.arm` is
+    not reachable from here, but a gaze is, and `WorldRobot._push_arm` writes
+    the head component into the SAME driven set — so a head command moving
+    `cmd["joint_head"]` proves `cmd` is the driver's live target table and not
+    a copy of `ARM_HOME`.
+    """
+    from microduck_local.robots import mars
+
+    with TestClient(app) as c:
+        load_mars(c)
+        arm = mars_frame(c)["ducks"][0]["sensors"]["arm"]
+        assert set(arm) == {"q", "cmd", "limits"}
+        seven = set(mars.DRIVEN_JOINTS)
+        assert len(seven) == 7
+        assert set(arm["q"]) == set(arm["cmd"]) == set(arm["limits"]) == seven
+        # Rounded to 4 decimals — 1e-4 rad is 0.006 degrees, two orders below
+        # the backlash this is drawn to show.
+        assert all(round(v, 4) == v for v in arm["q"].values())
+        # Limits are THIS model's, which is what the servo clamps to.
+        assert arm["limits"]["joint6"] == [-0.085, 0.8727]
+        assert arm["limits"]["joint_head"] == [-0.3491, 0.3491]
+        for name, (lo, hi) in arm["limits"].items():
+            assert lo <= arm["q"][name] <= hi, name
+        # `cmd` TRACKS: hold the gaze down and the head's target follows it
+        # while the other six stay home.
+        with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+            for _ in range(4):
+                ws.receive_json()
+            for _ in range(20):
+                ws.send_text(json.dumps({"cmd": [0.0, 0.0, 0.0]}))
+                frame = ws.receive_json()
+        moved = frame["ducks"][0]["sensors"]["arm"]
+        assert moved["cmd"]["joint1"] == pytest.approx(mars.ARM_HOME["joint1"], abs=1e-3)
+        assert moved["cmd"]["joint_head"] == pytest.approx(0.0, abs=1e-3)
+        # …and the achieved angle is a MEASUREMENT, not the command echoed:
+        # the servo carries Innate's compliance, so the two differ somewhere.
+        assert any(abs(moved["q"][j] - moved["cmd"][j]) > 1e-6 for j in seven)
+
+
+@pytest.mark.skipif(
+    not __import__("microduck_local.robots.mars", fromlist=["x"]).mars_ready(),
+    reason="MARS assets not fetched")
+def test_the_scan_carries_the_two_numbers_its_plot_cannot_be_drawn_without(app):
+    """`sensors.lidar.minRange` and `.footprint`.
+
+    Both were hard-coded per robot id in the viewer before this. `minRange` is
+    the device's own floor — a return nearer than it is clipped and marked
+    invalid, so it arrives as a 0 and the plot must draw the blind disc.
+    `footprint` is how far out a return is the robot looking at its own arm,
+    dropped by the adapter every brain here reads; it comes off the BODY, and
+    the assertion is against the constants both consumers read.
+    """
+    from microduck_local.robots import mars
+    from microduck_local.sensors.lidar import DEFAULT_MIN_RANGE_M
+
+    with TestClient(app) as c:
+        load_mars(c)
+        lidar = mars_frame(c)["ducks"][0]["sensors"]["lidar"]
+        assert lidar["minRange"] == DEFAULT_MIN_RANGE_M == 0.15
+        assert lidar["footprint"] == mars.FOOTPRINT_M == 0.12
+        # Still the whole scan beside them.
+        assert len(lidar["mm"]) == 360 and lidar["maxRange"] == 6.0
+
+
+@pytest.mark.skipif(
+    not __import__("microduck_local.robots.mars", fromlist=["x"]).mars_ready(),
+    reason="MARS assets not fetched")
+def test_the_range_freshness_row_is_named_after_the_device_the_body_has(app):
+    """`brain.inputs.lidar` on a MARS, `brain.inputs.tof` on a duck, never both.
+
+    A row labelled `tof` on a robot with no ToF is a claim about the hardware
+    (`brain/runtime.age_inputs`). The AGE is checked as the SCAN CLOCK it is
+    meant to be — a sawtooth on the control grid that resets when a scan
+    lands, never older than one 6 Hz period — and not with a bound like
+    `0 <= age <= 1/6`, which a hard-coded 0.0 satisfies and which passed a
+    planted break (`AGENTS.md`'s "verify a filter against the complement", in
+    its test-shaped form).
+
+    NOT compared field-for-field against the frame's own `sensors.lidar.age`,
+    and the reason is a real one worth writing down: they are stamped at
+    different instants. The brain is stepped BEFORE the world advances, so its
+    row is the age as of `t - CTRL_DT`, and on the tick a scan lands the frame
+    reads 0.0 while the brain still holds the previous scan at 0.16 s. An
+    equality between them would be a lock on the poll ORDER, which is not what
+    this case is about.
+    """
+    with TestClient(app) as c:
+        load_mars(c)
+        ages, stale = [], []
+        with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+            for _ in range(24):
+                d = ws.receive_json()["ducks"][0]
+                row = d["brain"]["inputs"].get("lidar")
+                if row:
+                    ages.append(row["age"])
+                    stale.append(row["stale"])
+        inputs = d["brain"]["inputs"]
+        assert "lidar" in inputs, "a MARS's range sense is the scan"
+        assert "tof" not in inputs, "…and it has no ToF to report"
+        assert set(inputs["lidar"]) == {"age", "stale", "max"}
+        assert len(ages) >= 12, ages
+        # A LIVE number and not a constant, on the control grid, never older
+        # than one scan period.
+        assert max(ages) > 0.01, ages
+        assert max(ages) <= 1 / 6.0 + C.CTRL_DT, ages
+        assert all(a % C.CTRL_DT < 1e-3 or C.CTRL_DT - a % C.CTRL_DT < 1e-3 for a in ages), ages
+        # …and a SAWTOOTH: the age only ever RISES until a scan lands, then
+        # drops back inside one frame's worth. Deliberately not "rises by
+        # exactly one frame's worth": the send loop is wall-clock paced and
+        # the world steps on credit, so a busy box legitimately sends two
+        # frames of the same world tick and the age repeats. Pinning the step
+        # would make this case a CPU-contention detector — the thing the MARS
+        # notes in `docs/mars-roadmap.md` already warn about.
+        step = 2 * C.CTRL_DT
+        assert any(b < a for a, b in zip(ages, ages[1:])), ("never resets", ages)
+        for a, b in zip(ages, ages[1:]):
+            assert b >= a - 1e-9 or b < step + 1e-3, ages
+        assert not any(stale), "a 6 Hz scan is not stale against a 0.25 s gate"
+
+        # The duck is the other way round, in the same server.
+        assert c.post("/world/load", json={"scenario": "wall-test"}).status_code == 200
+        duck = mars_frame(c, ticks=8)["ducks"][0]["brain"]["inputs"]
+        assert "tof" in duck and "lidar" not in duck
+
+
+@pytest.mark.skipif(
+    not __import__("microduck_local.robots.mars", fromlist=["x"]).mars_ready(),
+    reason="MARS assets not fetched")
+def test_a_range_preset_reaches_a_mars_lidar_under_either_name(app):
+    """`set_noise` on the RANGE channel of a body whose range sensor is a scan.
+
+    `"tof"` is the scenario's field name for "how noisy is this robot's range
+    sense", so the panel's select sends it whatever device it is labelled
+    after — and before this branch existed the lab answered **409 "has no
+    ToF"** and logged "noise ignored", while the scenario's own field set the
+    same preset happily at load. `"lidar"` is an alias, and the EVENT names
+    whichever device actually changed.
+    """
+    with TestClient(app) as c:
+        load_mars(c)
+        r = c.post("/world/noise", json={"duck": "d0", "preset": "hostile"})
+        assert r.status_code == 200, r.text
+        assert r.json()["lidar"] == "hostile" and r.json()["tof"] is None
+        # The alias, and it lands on the same device.
+        r = c.post("/world/noise", json={"duck": "d0", "preset": "ideal", "sensor": "lidar"})
+        assert r.status_code == 200 and r.json()["lidar"] == "ideal"
+        assert c.get("/world").json()["ducks"][0]["lidar"] == "ideal"
+        # An unknown preset is still 422, and the detector still has its own
+        # branch on the same body.
+        assert c.post("/world/noise", json={"duck": "d0", "preset": "x"}).status_code == 422
+        assert c.post("/world/noise",
+                      json={"duck": "d0", "preset": "hostile", "sensor": "det"}).status_code == 200
+        # Over the SOCKET, which is the path the panel uses — and the event
+        # log says the DEVICE, not the wire name. Events are drained after
+        # every send (the loop clears them once a frame is on the wire), so
+        # they are collected across the frames rather than read off the last.
+        seen: list[str] = []
+        with c.websocket_connect("/ws/sim", headers=ORIGIN) as ws:
+            for _ in range(3):
+                ws.receive_json()
+            ws.send_text(json.dumps({"noise": {"duck": "d0", "preset": "datasheet"}}))
+            frame = None
+            for _ in range(5):
+                frame = ws.receive_json()
+                seen += frame["events"]
+        assert frame["ducks"][0]["lidar"] == "datasheet"
+        assert any("lidar noise" in e for e in seen), seen
+        assert not any("ignored" in e for e in seen), seen
+
+
+def test_a_duck_has_no_lidar_to_re_noise(app):
+    """The complement of the case above: `sensor: "lidar"` on a body that
+    carries none is a 409 and not a silent no-op, and a duck's plain `tof`
+    request still reaches its ToF."""
+    with TestClient(app) as c:
+        assert c.post("/world/load", json={"scenario": "wall-test"}).status_code == 200
+        r = c.post("/world/noise", json={"duck": "d0", "preset": "hostile", "sensor": "lidar"})
+        assert r.status_code == 409 and "lidar" in r.json()["detail"]
+        r = c.post("/world/noise", json={"duck": "d0", "preset": "hostile"})
+        assert r.status_code == 200 and r.json()["tof"] == "hostile"
+        assert c.post("/world/noise",
+                      json={"duck": "d0", "preset": "hostile", "sensor": "zz"}).status_code == 422
+
+
 def test_sim_socket_rejects_foreign_origins(app):
     with TestClient(app) as c:
         with pytest.raises(Exception):

@@ -1196,6 +1196,27 @@ cannot change an answer — the same thing 4b said of the contact conjunct.
   Phase 3b's `link2_elbow` finding, unaddressed. The full 360 scan rides on
   `Senses.lidar` for a brain that wants to do better.
 
+**5c — the frame now carries what the inspector draws (2026-09-18).** The
+`/sim` panel's LiDAR / gripper / arm blocks were rendering nothing because the
+stream did not carry them; the lab side landed as `sensors.gripper {load,
+holding, limit, hold}` (the driver's load and `Senses.holding`'s own predicate,
+read and not re-derived), `sensors.arm {q, cmd, limits}` (the `q` vs `cmd` gap
+IS this phase's sag measurement, now visible live), `sensors.lidar.minRange` /
+`.footprint` off the sensor and the BODY instead of the viewer's per-robot
+literals, `brain.inputs.lidar` in place of a `tof` row for a body whose range
+sensor is a scan (`age_inputs` keys on `Senses.lidar`), and a `lidar` branch in
+`world_server.set_noise` so the panel's range-preset select stops answering 409
+"has no ToF" (`"tof"` stays the wire name — the scenario has one range field —
+with `"lidar"` as an alias). `MarsBody` grew `hold_load_nm` /
+`gripper_limit_nm` and `WorldRobot` grew `gripper_load` / `arm_limits`, so the
+frame builder still names no robot. 7 new cases in `tests/test_world_server.py`,
+**32 planted breaks, 32 caught** — one of them only after the freshness case
+was found TOOTHLESS (`0 <= age <= 1/6` is satisfied by a hard-coded 0.0; it is
+now a sawtooth on the control grid bounded by the scan period) — and the
+duck's frame block is BYTE-IDENTICAL
+to the pre-change tree (`json.dumps(..., sort_keys=True)`, `wall-test`, 10
+steps, seed 0) with the three rollout fingerprints unchanged.
+
 ### Phase 6 — the way out: a skill template, and the docs  `[ ]`
 
 - `microduck_local/deploy/mars_skill_template.py`: an Innate code skill

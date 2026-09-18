@@ -981,6 +981,20 @@ class MarsBody(BodyBase):
     #: planar scanner has anything to say about it, and the one consumer
     #: (`world/arena.WorldRobot`) reads it with a `getattr` default of 0.
     footprint_m = FOOTPRINT_M
+    #: What a gripper READING means on this robot: the load past which the
+    #: claw counts as holding (`HOLD_LOAD_NM`) and the servo's own torque
+    #: clamp (`GRIPPER_EFFORT_LIMIT`), which is the full scale of any bar
+    #: drawn from it.
+    #:
+    #: Declared here for `footprint_m`'s reason, and it is the whole point of
+    #: the pair being attributes rather than an import: the `/sim` inspector's
+    #: load bar needs both numbers, and reading them out of `robots/mars.py`
+    #: inside `world_server.tof_payload` would put a robot's name back in the
+    #: frame builder — the one hack `docs/mars-roadmap.md` §6.5 exists to
+    #: delete. A body with no claw declares neither and `WorldRobot` answers
+    #: None, so the frame simply carries no `gripper` block.
+    hold_load_nm = HOLD_LOAD_NM
+    gripper_limit_nm = GRIPPER_EFFORT_LIMIT
 
     # 6 joint targets + (vx, wz). `BodyBase`'s default is one action per
     # joint, which is right for a body whose actions ARE its joints.

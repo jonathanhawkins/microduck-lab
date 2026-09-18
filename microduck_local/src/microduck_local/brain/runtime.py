@@ -219,8 +219,34 @@ def _round(v) -> float | None:
 
 
 def age_inputs(senses: Senses, tof_max: float, det_max: float) -> dict:
+    """The freshness row per input channel, for the `/sim` inspector.
+
+    **The range channel is named after the DEVICE the body has.** A duck's
+    range sense is its 8x8 ToF and reports as `tof`; a body carrying a planar
+    scanner reports as `lidar` and ships NO `tof` row, because on that body
+    there is no such sensor — the 8x8 the brain gates on was adapted from the
+    scan (`world/arena.World.senses_tof`) and a row labelled `tof` on a robot
+    with no ToF is a claim about the hardware, not a note about the stream.
+    The two are the same QUANTITY by construction: `senses_tof` keeps the
+    SCAN's timestamp through the adaptation, so `tof_age` and `lidar_age` are
+    one number and the gate `max` is this brain's own range-freshness bound
+    either way.
+
+    The scan decides it (`senses.lidar`), not a robot id, so no brain and
+    nothing here has to know which bodies carry one. A wheeled body whose
+    first scan has not landed yet has neither channel to report and falls
+    back to the `tof` row — which is honest ("range sense: never"), and at
+    6 Hz with `LidarSensor._next_t` starting at 0.0 it lasts until the first
+    poll of the first step.
+    """
+    if senses.lidar is not None:
+        rng = {"lidar": {"age": _round(senses.lidar_age),
+                         "stale": senses.fresh_lidar(tof_max) is None, "max": tof_max}}
+    else:
+        rng = {"tof": {"age": _round(senses.tof_age),
+                       "stale": senses.fresh_tof(tof_max) is None, "max": tof_max}}
     return {
-        "tof": {"age": _round(senses.tof_age), "stale": senses.fresh_tof(tof_max) is None, "max": tof_max},
+        **rng,
         "det": {"age": _round(senses.det_age), "stale": senses.fresh_det(det_max) is None, "max": det_max,
                 "n": 0 if senses.det is None else len(senses.det.detections)},
     }

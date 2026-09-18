@@ -14,7 +14,8 @@ HTTP:
   GET  /world                  {scenario, loading, ducks: [...]} — what is live now
   POST /world/load {"scenario": name}      compose + swap (a second or so;
                                the loop keeps streaming the old world meanwhile)
-  POST /world/noise {"duck": id, "preset": "ideal"|"datasheet"|"hostile"}
+  POST /world/noise {"duck": id, "preset": "ideal"|"datasheet"|"hostile",
+                     "sensor": "tof"|"lidar"|"det"|"odom"}
   POST /world/speed {"x": 0.25..8}         run the world that many times wall
                                speed (SPEED_CHOICES); `rtf` says what it got
   GET  /replay/ring?last=N     the last N frames the loop broadcast (a ring of
@@ -32,7 +33,7 @@ at 8x measured ~17 a second — because the loop is late, not because it is
 fast.)
   {t, tick, rtf, simSpeed, perf: {stepMs, sensorMs}, scenario, cmd, mode, events,
    ducks: [{id, robot, name, policy, falls, step, rew, speed, cmdSpeed, steerable,
-            brain: {kind, state, cmd, head, note, inputs: {tof: {age, stale}, det: {age, stale, n}, target?}},
+            brain: {kind, state, cmd, head, note, inputs: {tof|lidar: {age, stale, max}, det: {age, stale, n}, target?}},
             bodies: [[x,y,z,qw,qx,qy,qz] × 17] (world first, as GET /scene lists bodies),
             sensors: {tof: {t, mm[64], age}, det: {t, age, items: [{cls, name, bearing, elevation, width, range, conf}]}} | null}],
    objects: [{id, kind: "ball"|"box"|"person", pose, possessed?}], possessed: person id | null}
@@ -45,18 +46,29 @@ present), and it is what decides how the rest of the row reads:
   anything     a driver-stepped body (`world/arena.WorldRobot`) — MARS today.
   else         `bodies` is ITS scene's list, in `GET /scene?robot=<id>` order
                (18 for a MARS, world first); `sensors.lidar` carries one
-               360-ray scan and there is NO `sensors.tof` (the 8x8 its brains
-               read is adapted, and drawing it would be a sensor the robot
-               does not have — `tof_payload`); `falls` is always 0, because a
-               planar base cannot topple; `steerable` is true and WASD drives
-               it through the same `cmd`.
+               360-ray scan (`+ minRange`, `footprint`, `maxRange`, `mount` —
+               what a polar plot of it cannot be drawn honestly without) and
+               there is NO `sensors.tof` (the 8x8 its brains read is adapted,
+               and drawing it would be a sensor the robot does not have —
+               `tof_payload`); `brain.inputs` reports its range freshness
+               under `lidar` and not `tof`, for the same reason
+               (`brain/runtime.age_inputs`); a body with a HAND also ships
+               `sensors.gripper {load, holding, limit, hold}` and
+               `sensors.arm {q, cmd, limits}`, whose `q` vs `cmd` gap is the
+               servo lag a brain pre-compensates (`gripper_payload` /
+               `arm_payload`); `falls` is always 0, because a planar base
+               cannot topple; `steerable` is true and WASD drives it through
+               the same `cmd`.
 accepts:
   {"cmd": [vx, vy, wz]}   drive every duck (held OVERRIDE_HOLD_S); otherwise a duck with
                           a ToF wanders on the brain layer's Wander controller and a
                           blind duck follows the demo script
   {"reset": true}         respawn everything
   {"assign": {"duck": id, "policy": palette id}}
-  {"noise": {"duck": id, "preset": name, "sensor": "tof"|"det"}}
+  {"noise": {"duck": id, "preset": name, "sensor": "tof"|"lidar"|"det"|"odom"}}
+                          "tof" is the RANGE channel (the scenario's own field
+                          name): on a body whose range sensor is the scanner it
+                          sets the LIDAR's preset, and "lidar" is an alias
   {"brain": {"duck": id, "kind": "wander"|"follow"|"script"}}   swap a duck's brain
   {"possess": person id | null}   your cmd drives that person (ducks stay on their brains)
   {"head": {"duck": id, "apply": bool}}   let a brain's gaze intent reach the walker's command block
@@ -826,11 +838,109 @@ def lidar_preset_name(noise: LidarNoise) -> str:
     return "custom"
 
 
+ARM_PAYLOAD_DIGITS = 4
+
+
+def gripper_payload(w: World, d) -> dict | None:
+    """The claw as a READING, for a body that has one. None for the rest.
+
+    Four fields and each is somebody else's answer, read rather than redone:
+
+    * `load` — `WorldRobot.gripper_load`, which delegates to the driver that
+      owns the measurement (`MarsDriver.gripper_load`: the CONSTRAINT torque
+      at joint6, because the servo's own torque saturates on a close through
+      air and cannot tell "closing" from "holding"). SIGNED: closing is one
+      direction and opening the other, so a consumer takes the magnitude.
+    * `holding` — `d.holding is not None`, which is exactly the bool the brain
+      is handed as `Senses.holding`. **Not the threshold re-applied here**: it
+      is `MarsDriver.held_body`'s two-part predicate (load past the hold line
+      AND a blade contact with a body that is not part of the robot) already
+      resolved to a pickable id once this tick by `World.sense_grip`. The bar
+      alone cannot answer it — a close on AIR drives the blade into its own
+      hard stop and reads 0.0 N*m, identical to an open jaw.
+
+      What that does mean, precisely, is "holding a TOY": `sense_grip` maps
+      the held body through the room's pickables, so a claw clamped on the
+      basket rim shows a load past the mark and `holding` false. That is the
+      right flag to show BECAUSE it is the one the brain acts on, and the
+      frame carries the toy's id beside it (`duck_info`'s `holding`) for the
+      panel's badge.
+    * `limit` / `hold` — the servo's torque clamp and the hold threshold, off
+      the BODY (`MarsBody.gripper_limit_nm` / `hold_load_nm` through
+      `WorldRobot`). A bar needs a full scale and a mark, and shipping them
+      per frame is what keeps a viewer from keeping its own copy of another
+      robot's constants.
+
+    A driver with no claw answers None for the load and the body declares
+    neither constant, so this returns None and the channel is absent.
+    """
+    fn = getattr(d, "gripper_load", None)
+    if fn is None:
+        return None
+    load = fn(w.data)
+    if load is None:
+        return None
+    out = {"load": round(float(load), 4), "holding": d.holding is not None}
+    limit, hold = getattr(d, "gripper_limit_nm", None), getattr(d, "hold_load_nm", None)
+    if limit is not None:
+        out["limit"] = float(limit)
+    if hold is not None:
+        out["hold"] = float(hold)
+    return out
+
+
+def arm_payload(w: World, d) -> dict | None:
+    """The arm as a READING: achieved angles, commanded targets, travel.
+
+    `q` is `WorldRobot.arm_qpos` — what Innate's `/mars/arm/state` publishes —
+    and `cmd` is `arm_targets()`, the same numbers the driver clamped and
+    stored. **Both, and that is the point**: the gap between them is the only
+    thing in the frame that shows a servo lagging or loaded, and `brain/
+    tidy_arm.py` pre-compensates its descent against exactly this pair (the
+    measurement is on `Senses.arm`: at the pick pose joints 2/3 read 0.067 /
+    0.048 rad off the command, which is 28.5 mm of claw height — and Phase 5's
+    second bug was that most of it turned out to be the arm BLOCKED by the
+    block, not compliance, which is a thing you can only see by watching the
+    two together).
+
+    `limits` is (lo, hi) per joint off this model (`WorldRobot.arm_limits`),
+    so a bar is a fraction of real travel; a joint the model leaves unlimited
+    is simply absent from it. Rounded to 4 decimals — 1e-4 rad is 0.006
+    degrees, two orders below the backlash this is drawn to show, and it
+    keeps a 7-joint block around 200 bytes at 25 Hz.
+
+    None for a body with no arm.
+    """
+    qpos_fn = getattr(d, "arm_qpos", None)
+    if qpos_fn is None:
+        return None
+    q = qpos_fn(w.data)
+    if not q:
+        return None
+    out: dict = {"q": {k: round(float(v), ARM_PAYLOAD_DIGITS) for k, v in q.items()}}
+    cmd_fn = getattr(d, "arm_targets", None)
+    cmd = None if cmd_fn is None else cmd_fn()
+    if cmd:
+        out["cmd"] = {k: round(float(v), ARM_PAYLOAD_DIGITS) for k, v in cmd.items()}
+    lim_fn = getattr(d, "arm_limits", None)
+    lim = None if lim_fn is None else lim_fn()
+    if lim:
+        out["limits"] = {k: [round(float(lo), ARM_PAYLOAD_DIGITS),
+                             round(float(hi), ARM_PAYLOAD_DIGITS)] for k, (lo, hi) in lim.items()}
+    return out
+
+
 def tof_payload(w: World, d) -> dict | None:
-    """A robot's senses for the frame: the ToF matrix, the 360-degree scan and
-    the detector's frame (the page draws the detection rays and the
-    head-camera inset's boxes from it - bearing, elevation, apparent width,
-    and the field of view they sit in).
+    """A robot's senses for the frame: the ToF matrix, the 360-degree scan, the
+    detector's frame (the page draws the detection rays and the head-camera
+    inset's boxes from it - bearing, elevation, apparent width, and the field
+    of view they sit in), and — for a body with a hand — the claw and the arm.
+
+    ONE KEY PER CHANNEL THE BODY HAS, and never a placeholder for one it does
+    not: the /sim inspector renders a block per key present, so an absent key
+    is how it knows not to draw an instrument. A body with no claw ships no
+    `gripper` and the panel shows no load bar, rather than a 0.00 N*m reading
+    of a gripper that is not there.
 
     A wheeled body ships `lidar` and NO `tof`, deliberately. Its brains do
     read an 8x8 (`World.senses_tof` adapts the scan for them), but that frame
@@ -847,11 +957,40 @@ def tof_payload(w: World, d) -> dict | None:
         f = lidar.last
         out["lidar"] = {**f.as_payload(), "age": round(w.t - f.t, 4),
                         "maxRange": lidar.max_range,
+                        # The two numbers a polar plot of this scan cannot be
+                        # drawn HONESTLY without, and which the payload used
+                        # to leave the viewer to hard-code per robot id:
+                        #
+                        #   minRange  the device's own floor. A return nearer
+                        #             than this is clipped and marked invalid
+                        #             (`LidarSensor.scan`), so it arrives as a
+                        #             0 and the plot must draw the disc it
+                        #             cannot see inside of. A scanner with a
+                        #             different floor drew the wrong disc.
+                        #   footprint how far out a return is the robot
+                        #             looking at its own arm, dropped by the
+                        #             adapter every brain here reads
+                        #             (`World.senses_tof` passes exactly this
+                        #             to `tof_from_lidar`). Off the BODY
+                        #             (`WorldRobot.footprint_m` ->
+                        #             `MarsBody.footprint_m`), so the frame
+                        #             names no robot; 0.0 means "declared
+                        #             none, every return kept", which is the
+                        #             adapter's own default and not a missing
+                        #             measurement.
+                        "minRange": round(float(lidar.min_range), 4),
+                        "footprint": round(float(getattr(d, "footprint_m", 0.0)), 4),
                         # Where the scanner is in the base's HEADING frame, so
                         # the viewer can draw the scan from the aperture and
                         # not from the chassis origin — 76 mm apart on MARS.
                         "mount": (None if f.mount_pos is None
                                   else [round(float(v), 4) for v in f.mount_pos])}
+    gripper = gripper_payload(w, d)
+    if gripper is not None:
+        out["gripper"] = gripper
+    arm = arm_payload(w, d)
+    if arm is not None:
+        out["arm"] = arm
     if d.tof is not None and d.tof.last is not None:
         f = d.tof.last
         # No world points here: the page reconstructs each zone's point from the
@@ -888,7 +1027,10 @@ class SpeedReq(BaseModel):
 class NoiseReq(BaseModel):
     duck: str
     preset: str
-    sensor: str = "tof"        # "tof" | "det" | "odom"
+    # "tof" is the RANGE channel — the scenario's own field name — and on a
+    # body whose range sensor is the 360-degree scanner it sets the LIDAR's
+    # preset. "lidar" is an accepted alias for that; see `set_noise`.
+    sensor: str = "tof"        # "tof" | "lidar" | "det" | "odom"
 
 
 class BrainReq(BaseModel):
@@ -996,25 +1138,54 @@ def mount_world(app: FastAPI, *, load_infer: Callable[[str], Infer] | None,
 
     @app.post("/world/noise")
     def set_noise(req: NoiseReq) -> dict:
+        """Re-noise one sense channel of one body, live.
+
+        **`"tof"` is the RANGE channel and not the device.** It is the name
+        the scenario has (`world/scenario.Duck.tof` — "how noisy is this
+        robot's range sense" is one question per body, and a body has one
+        range sensor), so it is also the name the wire keeps: the /sim panel
+        labels its select after the device the body actually carries and sends
+        `tof` either way. On a body whose range sensor is the 360-degree
+        scanner this therefore sets the LIDAR's preset — before that branch
+        existed the request hit `d.tof is None` and came back 409 "has no
+        ToF", which put "noise ignored" in the event log every time someone
+        touched a MARS's select while the scenario's own field set it happily
+        at load.
+
+        `"lidar"` is accepted as an alias for the same thing, so a caller that
+        names the device it can see in the frame is not punished for it; the
+        EVENT names whichever device was actually re-noised, because "m0 tof
+        noise" on a robot with no ToF is the same lie the frame refuses to
+        tell.
+        """
         w = st.world
         if w is None or req.duck not in w.ducks:
             raise HTTPException(404, f"no duck {req.duck!r}")
         if req.preset not in TOF_PRESETS:
             raise HTTPException(422, f"preset must be one of {TOF_PRESETS}")
         d = w.ducks[req.duck]
+        channel = req.sensor
         if req.sensor == "det":
             if d.detector is None:
                 raise HTTPException(409, f"{req.duck} has no detector in this scenario")
             d.detector.noise = DetectorNoise.preset(req.preset)
-        elif req.sensor == "tof":
-            if d.tof is None:
-                raise HTTPException(409, f"{req.duck} has no ToF in this scenario")
-            d.tof.noise = TofNoise.preset(req.preset)
+        elif req.sensor in ("tof", "lidar"):
+            lidar = getattr(d, "lidar", None)
+            if d.tof is not None and req.sensor == "tof":
+                d.tof.noise = TofNoise.preset(req.preset)
+                channel = "tof"
+            elif lidar is not None:
+                lidar.noise = LidarNoise.preset(req.preset)
+                channel = "lidar"
+            else:
+                raise HTTPException(
+                    409, f"{req.duck} has no {'ToF or lidar' if req.sensor == 'tof' else 'lidar'} "
+                         "in this scenario")
         elif req.sensor == "odom":
             w.set_odom_preset(d, req.preset)
         else:
-            raise HTTPException(422, "sensor must be 'tof' or 'det'")
-        st.events.append(f"{req.duck} {req.sensor} noise → {req.preset}")
+            raise HTTPException(422, "sensor must be 'tof' (the range channel), 'lidar', 'det' or 'odom'")
+        st.events.append(f"{req.duck} {channel} noise → {req.preset}")
         return duck_info(w, d)
 
     @app.post("/world/brain")

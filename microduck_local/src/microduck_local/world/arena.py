@@ -78,6 +78,17 @@ def mars_joint_names(body) -> tuple[str, ...]:
     return names + ((head,) if head and head not in names else ())
 
 
+def _opt_float(v) -> float | None:
+    """`float(v)`, but None stays None.
+
+    For a body's OPTIONAL declarations (the claw's two constants): absent has
+    to survive as absent all the way to the wire, because a 0.0 full scale on
+    an inspector's bar is a division and a 0.0 threshold says every open jaw
+    is holding something. `float(getattr(..., None) or 0.0)` is the shape that
+    gets this wrong, so the conversion is one named function."""
+    return None if v is None else float(v)
+
+
 def _body_of(robot_id: str):
     """The `Body` a scenario entry names (`robots/registry.get`).
 
@@ -395,6 +406,15 @@ class WorldRobot:
         #: at itself — `robots/mars.FOOTPRINT_M`, measured there. A body that
         #: has not declared one keeps every return.
         self.footprint_m = float(getattr(body, "footprint_m", 0.0))
+        #: What a gripper reading MEANS on this body — the hold threshold and
+        #: the servo's torque clamp (`robots/mars.MarsBody.hold_load_nm` /
+        #: `gripper_limit_nm`). None for a body with no claw, which is what
+        #: makes the frame's `sensors.gripper` block absent rather than a pair
+        #: of zeros pretending to be a scale. Asked of the BODY for
+        #: `footprint_m`'s reason: the frame builder names no robot.
+        self.hold_load_nm: float | None = _opt_float(getattr(body, "hold_load_nm", None))
+        self.gripper_limit_nm: float | None = _opt_float(
+            getattr(body, "gripper_limit_nm", None))
         self.sensors: dict = dict(sensors or {})
         # The three channel names `Senses` has a field for. `tof` is None on
         # this body and stays None: a planar scan reaches the duck's ToF
@@ -568,6 +588,54 @@ class WorldRobot:
         # it and `Intent.arm` refuses it, so neither does this.
         return {name: float(data.qpos[adr[name][0]]) for name in mars_joint_names(self.body)
                 if name in adr}
+
+    def arm_limits(self) -> dict[str, tuple[float, float]] | None:
+        """(lo, hi) rad per driven joint, off THIS model.
+
+        The half of an arm reading that makes it mean something: an angle
+        without its travel is a number, and the `/sim` inspector draws each
+        joint as a fraction of the range it can actually reach. Read from
+        `jnt_range` rather than from a table in `robots/mars.py`, because the
+        MJCF is what the servo is clamped by (`MarsDriver.set_arm` clamps to
+        exactly this) — a table could disagree with the model and the bar
+        would be drawn against a limit the robot does not have.
+
+        A joint the model leaves UNLIMITED is omitted rather than given a
+        ±pi placeholder: a consumer can then say "no limits" for it instead of
+        drawing a full-scale bar that is a guess. `None` for a body with no
+        joint table, exactly as `arm_qpos`.
+        """
+        adr = getattr(self.driver, "adr", None)
+        if not adr:
+            return None
+        out: dict[str, tuple[float, float]] = {}
+        for name in mars_joint_names(self.body):
+            if name not in adr:
+                continue
+            j = self.model.joint(self.prefix + name)
+            if not bool(j.limited[0]):
+                continue
+            lo, hi = (float(v) for v in j.range)
+            if hi > lo:
+                out[name] = (lo, hi)
+        return out
+
+    def gripper_load(self, data: mujoco.MjData) -> float | None:
+        """The torque an object feeds back through the claw (N*m), or None.
+
+        Delegated the way `held_body` is, to the driver that owns the
+        measurement (`MarsDriver.gripper_load`: `qfrc_constraint` at joint6,
+        and its docstring has the table that decided it must not be the
+        servo's own `qfrc_applied`). Nothing re-derives the threshold here —
+        whether this counts as HOLDING is `held_body`'s answer, already
+        resolved into `self.holding` by `World.sense_grip` once a tick.
+
+        None (and not 0.0) for a driver with no claw: 0.0 N*m is what an open
+        jaw reads, so a body with no gripper at all reporting it would draw a
+        real instrument for hardware that does not exist.
+        """
+        fn = getattr(self.driver, "gripper_load", None)
+        return None if fn is None else float(fn(data))
 
     def held_body(self, data: mujoco.MjData) -> int:
         """Which body this robot's gripper has hold of, or -1.
