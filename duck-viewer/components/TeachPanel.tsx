@@ -16,18 +16,26 @@ import {
   MAX_STEP_BUDGET,
   MIN_STEP_BUDGET,
   clampStepBudget,
+  fetchLab,
   isRunPolicy,
   loadTeachRun,
+  policyTitle,
   resolveStageSteps,
   runNameOfPolicy,
   type BehaviorCard,
   type LabClient,
+  type Policy,
   type TermCard,
   type TrainingPayload,
 } from "@/lib/lab";
+import { resolveRobot, robotChipLabel, setActiveRobot, useActiveRobot } from "@/lib/activeRobot";
+import { fetchRobots, type RobotInfo } from "@/lib/anim";
+import { trickNoun } from "@/lib/robots";
 import { loadJSON, saveJSON } from "@/lib/persist";
+import { bestRunFor } from "@/lib/tricks";
 import { useSelectedDuck } from "@/lib/select";
 import { modalIsOpen, setTeachHeight, usePolicyOpen } from "@/lib/ui";
+import { pushToast } from "./Toasts";
 
 const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -47,14 +55,46 @@ type Msg =
   // log would keep advertising a plan the run never trained under.
   | { kind: "card"; card: BehaviorCard; stageSteps?: number[]; stepBudget?: number };
 
-const GREETING: Msg = {
-  kind: "note",
-  text: "Ask me to teach the duck a trick — try one of the suggestions below.",
-};
+const GREETING_TEXT = "Ask me to teach the duck a trick — try one of the suggestions below.";
+const GREETING: Msg = { kind: "note", text: GREETING_TEXT };
+
+/** "the duck" / "the G1" / "MARS" — how a sentence names this body.
+ *
+ *  A legged body is "the {noun}"; anything else is its noun alone, because
+ *  the nouns that arrive on a non-legged body are proper names ("MARS") and
+ *  "teach the MARS" reads as a typo. By KIND, never by id. */
+function robotPhrase(r: { noun?: string; title?: string; kind?: string }): string {
+  const noun = r.noun ?? r.title ?? "robot";
+  return trickNoun(r.kind) === "trick" ? `the ${noun}` : noun;
+}
+
+/** The greeting, for whichever robot the switch is on. The stored GREETING
+ *  text is only the marker; it is re-worded at render time so a chat log
+ *  saved before the switch still reads right.
+ *
+ *  "a trick" for a duck, "a task" for MARS: Innate's own vocabulary for
+ *  Innate's robot (docs/mars-roadmap.md §4 — in their stack a skill is a
+ *  task an arm performs, and "trick" promises the wrong thing). */
+function greetingFor(r: { noun?: string; title?: string; kind?: string }): string {
+  return `Ask me to teach ${robotPhrase(r)} a ${trickNoun(r.kind)} — try one of the suggestions below.`;
+}
 const MSG_CAP = 50;
 
-const SUGGESTIONS = ["stand still", "stand on one leg", "crouch down", "spin in place",
-                     "do a headstand"];
+// What a lab too old to send per-robot suggestions (GET /robots `teach`)
+// still gets: the duck, with the chips this panel always offered.
+const DUCK_ONLY: RobotInfo[] = [
+  {
+    id: "microduck",
+    title: "Microduck",
+    noun: "duck",
+    kind: "legged",
+    numJoints: 14,
+    ready: true,
+    teach: ["stand still", "stand on one leg", "crouch down", "spin in place", "do a headstand"].map(
+      (text) => ({ text, behavior: "", emoji: "", title: text })
+    ),
+  },
+];
 
 // --- instant hover tooltip ---------------------------------------------------
 // Native `title` attrs take ~1 s to appear and are easy to miss; this shows a
@@ -1120,6 +1160,25 @@ export function TeachPanel({
     return Array.isArray(stored) && stored.length ? stored.slice(-MSG_CAP) : [GREETING];
   });
   const [input, setInput] = useState("");
+  // WHICH BODY the next trick is for. Everything robot-specific below — the
+  // greeting, the chips, the placeholder — is read off the lab's /robots, so
+  // a third robot shows up here by registering recipes, not by editing this.
+  const [robots, setRobots] = useState<RobotInfo[]>(DUCK_ONLY);
+  // The robot is the ONE every panel shares (lib/activeRobot.ts): picking the
+  // G1 in the 🧠 palette, or clicking one on the stage, is already the answer
+  // to "teach which robot?". A choice the lab doesn't list (or can't teach)
+  // falls back to the first robot without overwriting it.
+  const activeRobot = useActiveRobot();
+  const robot = resolveRobot(robots, activeRobot) ?? DUCK_ONLY[0];
+  const noun = robot.noun ?? robot.title;
+  const suggestions = robot.teach ?? [];
+  // Our runs, for the ▶ beside a trick that already has a MEASURED best run —
+  // so watching what a trick looks like never means digging through 🧠.
+  const [policies, setPolicies] = useState<Policy[]>([]);
+  // "How long should it practice?" is folded to one line until asked for: the
+  // recipe's own plan is right for nearly everyone, and three rows about
+  // M steps used to stand between a newcomer and the trick chips.
+  const [budgetOpen, setBudgetOpen] = useState(false);
   const [training, setTraining] = useState<TrainingPayload | null>(null);
   // Read off the streamed roster rather than the trainer: the trainee duck in
   // the scene runs the newest snapshot, so this is the speed the user is
@@ -1145,6 +1204,32 @@ export function TeachPanel({
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => saveJSON("teachOpen", open), [open]);
+  useEffect(() => {
+    if (!open) return;
+    let stale = false;
+    fetchRobots()
+      .then((r) => {
+        // Only bodies with something to teach; an old lab (no `teach`) keeps DUCK_ONLY.
+        const teachable = r.filter((x) => x.teach?.length);
+        if (!stale && teachable.length) setRobots(teachable);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [open]);
+  // Refetched when a run finishes too: that is when a new best can appear.
+  const trainingStatus = training?.status;
+  useEffect(() => {
+    if (!open) return;
+    let stale = false;
+    fetchLab()
+      .then((lab) => !stale && setPolicies(lab.policies))
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [open, trainingStatus]);
   useEffect(() => saveJSON("teachWide", wide), [wide]);
   useEffect(() => saveJSON("teachMsgs", msgs.slice(-MSG_CAP)), [msgs]);
 
@@ -1229,6 +1314,15 @@ export function TeachPanel({
       .catch(() => {});
   }, [selectedDuck, clientRef]);
 
+  // Selecting a robot on the stage also answers "which robot?" — for this
+  // panel's chips, the 🧠 palette's list and 🎬 animate alike. Lives here
+  // because this panel is always mounted and already follows the selection.
+  useEffect(() => {
+    if (!selectedDuck) return;
+    const d = clientRef.current?.frame?.ducks.find((x) => x.id === selectedDuck);
+    if (d) setActiveRobot(d.robot || "microduck");
+  }, [selectedDuck, clientRef]);
+
   /** POST /teach and fold the response into the chat. The practice budget
    *  rides along on every launch path (typed trick, suggestion, retrain,
    *  fine-tune, start-from-stage) — it's one control, so it applies to
@@ -1242,6 +1336,7 @@ export function TeachPanel({
     stageSteps?: Record<string, number>;
     startStage?: number;
     initFrom?: string;
+    robot?: string;
   }) {
     try {
       const res = await fetch(`${LAB_HTTP}/teach`, {
@@ -1293,7 +1388,9 @@ export function TeachPanel({
     if (!trimmed) return;
     setInput("");
     setMsgs((m) => [...m, { kind: "user", text: trimmed }]);
-    await postTeach({ text: trimmed });
+    // Only a robot the lab listed is sent — an old lab rejects nothing it
+    // does not know, and the duck-only fallback leaves the old guess alone.
+    await postTeach({ text: trimmed, ...(robots !== DUCK_ONLY ? { robot: robot.id } : {}) });
   }
 
   /** Recipe buttons: resubmit the current behavior under its full effective
@@ -1544,7 +1641,7 @@ export function TeachPanel({
             </div>
           ) : m.kind === "note" ? (
             <div key={i} style={{ color: "#aab3c0", margin: "6px 0" }}>
-              {m.text}
+              {m.text === GREETING_TEXT ? greetingFor(robot) : m.text}
             </div>
           ) : (
             <div
@@ -1621,105 +1718,205 @@ export function TeachPanel({
       </div>
 
       <div style={{ padding: "8px 12px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-        {/* How long should it practice? Sits with the ask, because that's
-            when the question comes up — and it applies to whatever you start
-            next: a typed trick, a suggestion, retrain, fine-tune, or a
-            start-from-stage. */}
-        <div style={{ marginBottom: 6 }}>
+        {robots.length > 1 && (
           <div
-            style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}
+            role="radiogroup"
+            aria-label="robot to teach"
+            style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", marginBottom: 6 }}
           >
-            <Tip
-              tip={
-                <>
-                  <div>How long the duck gets to practice, in millions of tries.</div>
-                  <div style={{ color: "#8b93a3", marginTop: 3 }}>
-                    More practice usually means a better trick and a longer wait. Type
-                    any number between {fmtSteps(MIN_STEP_BUDGET)} and{" "}
-                    {fmtSteps(MAX_STEP_BUDGET)}, or tap a preset. A trick with stages
-                    splits this across them, keeping the recipe&apos;s proportions.
-                  </div>
-                </>
-              }
-            >
-              <span style={{ color: "#8b93a3", fontSize: 10 }}>practice for</span>
-            </Tip>
-            <MStepsInput
-              value={budgetShown}
-              placeholder="recipe"
-              onCommit={setBudgetSteps}
-            />
-            <span style={{ color: "#8b93a3", fontSize: 10 }}>M steps</span>
-            {offRecipe && (
-              <Tip tip="back to the practice plan the recipe ships with">
-                <button
-                  onClick={resetToRecipe}
-                  style={{
-                    background: "none",
-                    color: "#8b93a3",
-                    border: "1px dashed rgba(255,255,255,0.22)",
-                    borderRadius: 12,
-                    padding: "1px 7px",
-                    fontFamily: mono,
-                    fontSize: 10,
-                    cursor: "pointer",
-                  }}
-                >
-                  ↺ recipe
-                </button>
-              </Tip>
-            )}
-          </div>
-          <div
-            style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", marginTop: 3 }}
-          >
-            {BUDGET_PRESETS_M.map((m) => {
-              const on = budgetShown === m * 1e6;
+            <span style={{ color: "#8b93a3", fontSize: 10 }}>teach</span>
+            {robots.map((r) => {
+              const on = r.id === robot.id;
               return (
                 <button
-                  key={m}
-                  onClick={() => setBudgetSteps(m * 1e6)}
+                  key={r.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  onClick={() => setActiveRobot(r.id)}
+                  title={
+                    r.ready
+                      ? `teach ${robotPhrase(r)} a ${trickNoun(r.kind)}`
+                      : `${r.title} isn't downloaded yet — see 🧠 policies`
+                  }
                   style={{
                     background: on ? "#2a3548" : "#1c2230",
-                    color: on ? "#e8e6e1" : "#9fb4d8",
+                    color: on ? "#e8e6e1" : r.ready ? "#9fb4d8" : "#6b7280",
                     border: `1px solid ${on ? "#7db8d8" : "rgba(255,255,255,0.08)"}`,
                     borderRadius: 12,
-                    padding: "1px 7px",
+                    padding: "1px 8px",
                     fontFamily: mono,
                     fontSize: 10,
                     cursor: "pointer",
                   }}
                 >
-                  {m}M
+                  {robotChipLabel(r)}
                 </button>
               );
             })}
           </div>
-          <div style={{ color: "#8b93a3", fontSize: 10, marginTop: 2 }}>
-            {planTotal > 0
-              ? `${fmtSteps(planTotal)} practice steps in total`
-              : "each trick practices for as long as its own recipe says — set a number to change that"}
-          </div>
-          {plan.length > 1 && (
-            <div style={{ color: "#8b93a3", fontSize: 10 }}>
-              {plan.length} stages: {plan.map((s) => fmtSteps(s)).join(" / ")}
+        )}
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
+          {suggestions.map(({ text: s, title, emoji, behavior }) => {
+            const best = bestRunFor(policies, behavior, robot.id);
+            const chip: React.CSSProperties = {
+              background: "#1c2230", color: "#9fb4d8",
+              border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12,
+              padding: "2px 8px", fontFamily: mono, fontSize: 10, cursor: "pointer",
+            };
+            return (
+              <span key={s} style={{ display: "inline-flex", alignItems: "stretch" }}>
+                <button
+                  title={`teach ${robotPhrase(robot)}: ${title}`}
+                  onClick={() => submit(s)}
+                  style={best ? { ...chip, borderRadius: "12px 0 0 12px", borderRight: "none" } : chip}
+                >
+                  {emoji ? `${emoji} ${s}` : s}
+                </button>
+                {best && (
+                  <Tip
+                    tip={
+                      <>
+                        <div>▶ watch the best run so far — spawns a {noun} running it.</div>
+                        <div style={{ color: "#8b93a3", marginTop: 3 }}>
+                          {policyTitle(best)}
+                          {best.note ? ` — ${best.note}` : ""}
+                        </div>
+                      </>
+                    }
+                  >
+                    <button
+                      aria-label={`watch the best ${title} run`}
+                      onClick={() => {
+                        // Same message the palette's ▶ chip sends: a chain stage
+                        // spawns in showcase mode so the whole trick gets performed.
+                        clientRef.current?.sendSpawnDuck(best.id, !!best.chain);
+                        pushToast(`⚡ spawning ${policyTitle(best)}…`);
+                      }}
+                      style={{
+                        ...chip,
+                        color: "#d8cfa0",
+                        border: "1px solid rgba(216, 198, 125, 0.45)",
+                        borderRadius: "0 12px 12px 0",
+                        padding: "2px 7px 2px 5px",
+                        // The chip beside it is as tall as its emoji; match it.
+                        height: "100%",
+                      }}
+                    >
+                      ▶
+                    </button>
+                  </Tip>
+                )}
+              </span>
+            );
+          })}
+        </div>
+        {/* How long should it practice? LAST of the three questions (who, what,
+            how long) and folded to one line, because the recipe's own plan is
+            the right answer for nearly everyone. It applies to whatever you
+            start next: a typed trick, a suggestion, retrain, fine-tune, or a
+            start-from-stage. */}
+        <div style={{ marginBottom: 6 }}>
+          <button
+            type="button"
+            onClick={() => setBudgetOpen((v) => !v)}
+            aria-expanded={budgetOpen}
+            title="how long the next run practices — click to change it"
+            style={{
+              background: "none", border: "none", padding: 0, color: "#8b93a3",
+              fontFamily: mono, fontSize: 10, cursor: "pointer",
+            }}
+          >
+            <span style={{ fontSize: 8 }}>{budgetOpen ? "▾" : "▸"}</span> ⏱ practice:{" "}
+            <span style={{ color: offRecipe || budgetSteps != null ? "#e8e6e1" : "#9fb4d8" }}>
+              {planTotal > 0
+                ? `${fmtSteps(planTotal)} steps${plan.length > 1 ? ` · ${plan.length} stages` : ""}`
+                : "as long as the recipe says"}
+            </span>
+          </button>
+          {budgetOpen && (
+            <div style={{ marginTop: 4 }}>
+              <div
+                style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}
+              >
+                <Tip
+                  tip={
+                    <>
+                      <div>How long the {noun} gets to practice, in millions of tries.</div>
+                      <div style={{ color: "#8b93a3", marginTop: 3 }}>
+                        More practice usually means a better trick and a longer wait. Type
+                        any number between {fmtSteps(MIN_STEP_BUDGET)} and{" "}
+                        {fmtSteps(MAX_STEP_BUDGET)}, or tap a preset. A trick with stages
+                        splits this across them, keeping the recipe&apos;s proportions.
+                      </div>
+                    </>
+                  }
+                >
+                  <span style={{ color: "#8b93a3", fontSize: 10 }}>practice for</span>
+                </Tip>
+                <MStepsInput
+                  value={budgetShown}
+                  placeholder="recipe"
+                  onCommit={setBudgetSteps}
+                />
+                <span style={{ color: "#8b93a3", fontSize: 10 }}>M steps</span>
+                {offRecipe && (
+                  <Tip tip="back to the practice plan the recipe ships with">
+                    <button
+                      onClick={resetToRecipe}
+                      style={{
+                        background: "none",
+                        color: "#8b93a3",
+                        border: "1px dashed rgba(255,255,255,0.22)",
+                        borderRadius: 12,
+                        padding: "1px 7px",
+                        fontFamily: mono,
+                        fontSize: 10,
+                        cursor: "pointer",
+                      }}
+                    >
+                      ↺ recipe
+                    </button>
+                  </Tip>
+                )}
+              </div>
+              <div
+                style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", marginTop: 3 }}
+              >
+                {BUDGET_PRESETS_M.map((m) => {
+                  const on = budgetShown === m * 1e6;
+                  return (
+                    <button
+                      key={m}
+                      onClick={() => setBudgetSteps(m * 1e6)}
+                      style={{
+                        background: on ? "#2a3548" : "#1c2230",
+                        color: on ? "#e8e6e1" : "#9fb4d8",
+                        border: `1px solid ${on ? "#7db8d8" : "rgba(255,255,255,0.08)"}`,
+                        borderRadius: 12,
+                        padding: "1px 7px",
+                        fontFamily: mono,
+                        fontSize: 10,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {m}M
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ color: "#8b93a3", fontSize: 10, marginTop: 2 }}>
+                {planTotal > 0
+                  ? `${fmtSteps(planTotal)} practice steps in total`
+                  : "each trick practices for as long as its own recipe says — set a number to change that"}
+              </div>
+              {plan.length > 1 && (
+                <div style={{ color: "#8b93a3", fontSize: 10 }}>
+                  {plan.length} stages: {plan.map((s) => fmtSteps(s)).join(" / ")}
+                </div>
+              )}
             </div>
           )}
-        </div>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
-          {SUGGESTIONS.map((s) => (
-            <button
-              key={s}
-              onClick={() => submit(s)}
-              style={{
-                background: "#1c2230", color: "#9fb4d8",
-                border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12,
-                padding: "2px 8px", fontFamily: mono, fontSize: 10, cursor: "pointer",
-              }}
-            >
-              {s}
-            </button>
-          ))}
         </div>
         <form
           onSubmit={(e) => {
@@ -1730,7 +1927,7 @@ export function TeachPanel({
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="teach the duck a new policy…"
+            placeholder={`teach ${robotPhrase(robot)} a new policy…`}
             style={{
               width: "100%", boxSizing: "border-box", background: "#12151b",
               border: "1px solid rgba(255,255,255,0.12)", borderRadius: 6,

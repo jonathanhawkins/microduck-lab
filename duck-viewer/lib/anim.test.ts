@@ -26,6 +26,7 @@ import {
   clipRobot,
   effectorForBody,
   isIkResult,
+  isUntouched,
   keyAt,
   nearestFoot,
   newClip,
@@ -221,6 +222,35 @@ describe("newClip", () => {
   it("reads a clip that predates the field as the duck's", () => {
     expect(clipRobot(clip())).toBe("microduck");
     expect(clipRobot(clip({ robot: "g1" }))).toBe("g1");
+  });
+});
+
+describe("isUntouched", () => {
+  // The editor follows a robot switch made in ANOTHER panel only in this
+  // state — switching bodies starts a fresh clip, and an authored pose is
+  // expensive to redo.
+  const fresh = newClip(TOY);
+  const at0 = sampleClip(fresh, 0, 3);
+
+  it("is true for a fresh clip at its default pose", () => {
+    expect(isUntouched(fresh, at0, TOY)).toBe(true);
+  });
+  it("is true for the all-zero placeholder restored before the limits were known", () => {
+    const blind = { ...fresh, keys: [{ t: 0, joints: [0, 0, 0], rootPitch: 0 }] };
+    expect(isUntouched(blind, { joints: [0, 0, 0], rootPitch: 0 }, TOY)).toBe(true);
+  });
+  it("is false once a key was posed", () => {
+    const posed = { ...fresh, keys: [{ t: 0, joints: [0.1, -0.2, 0.4], rootPitch: 0 }] };
+    expect(isUntouched(posed, at0, TOY)).toBe(false);
+  });
+  it("is false for a pose on screen that was never keyed — it is still work", () => {
+    expect(isUntouched(fresh, { joints: [0.3, -0.2, 0], rootPitch: 0 }, TOY)).toBe(false);
+    expect(isUntouched(fresh, { ...at0, rootPitch: 0.5 }, TOY)).toBe(false);
+  });
+  it("is false with a second key, and when nothing can be judged", () => {
+    const two = { ...fresh, keys: [...fresh.keys, { t: 0.6, joints: [0.1, -0.2, 0], rootPitch: 0 }] };
+    expect(isUntouched(two, at0, TOY)).toBe(false);
+    expect(isUntouched(fresh, at0, null)).toBe(false);
   });
 });
 

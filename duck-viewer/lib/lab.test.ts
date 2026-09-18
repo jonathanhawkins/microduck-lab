@@ -9,7 +9,7 @@
 // must keep reading exactly as they always did.
 
 import { describe, expect, it } from "vitest";
-import { chainPick, policyTitle, type Policy } from "./lab";
+import { chainPick, DEFAULT_ROBOTS, policyTitle, robotsInFrame, type Policy } from "./lab";
 
 function stage(label: string, extra: Partial<Policy> = {}): Policy {
   return {
@@ -65,5 +65,33 @@ describe("chainPick", () => {
   it("returns the only stage of a one-stage chain either way", () => {
     expect(chainPick([stage("c-s1")]).label).toBe("c-s1");
     expect(chainPick([stage("c-s1", { pick: true })]).label).toBe("c-s1");
+  });
+});
+
+describe("DEFAULT_ROBOTS", () => {
+  it("describes the duck fully, so a lab too old to send `robots` is not crippled", () => {
+    // The palette, the 🎓 panel and the 🎬 panel all read these fields now.
+    // A missing `animate` used to be harmless (every listed body was posable);
+    // with the flag in play, an undescribed duck would drop out of the editor.
+    expect(DEFAULT_ROBOTS).toHaveLength(1);
+    const [duck] = DEFAULT_ROBOTS;
+    expect(duck).toMatchObject({ id: "microduck", kind: "legged", ready: true, animate: true });
+  });
+});
+
+describe("robotsInFrame", () => {
+  it("names one mesh set per body on the stage, not one per row", () => {
+    // The viewer fetches GET /scene?robot= once per distinct body; a duck
+    // roster must still ask for exactly one.
+    expect(robotsInFrame([{ robot: "mars" }, { robot: "mars" }, {}])).toEqual(["mars", "microduck"]);
+    expect(robotsInFrame([{}, {}])).toEqual(["microduck"]);
+  });
+
+  it("passes a discovered id through untouched", () => {
+    // "menagerie:unitree_go2" has to survive as a whole: it is what
+    // GET /scene?robot= is asked for, and half of it names nothing.
+    expect(robotsInFrame([{ robot: "menagerie:unitree_go2" }])).toEqual([
+      "menagerie:unitree_go2",
+    ]);
   });
 });

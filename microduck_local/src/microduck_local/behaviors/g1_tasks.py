@@ -23,6 +23,7 @@ def _env_owned(env):  # noqa: ARG001 — see the module docstring
 
 G1_STAND = Behavior(
     id="g1_stand",
+    suggest="stand still",
     emoji="🧍",
     title="Stand still (G1)",
     description="Hold a still, upright stance and ignore the drive command.",
@@ -83,6 +84,7 @@ G1_STAND = Behavior(
 
 G1_SQUAT = Behavior(
     id="g1_squat",
+    suggest="hold a squat",
     emoji="🏋️",
     title="Hold a squat (G1)",
     description="Sink into a squat about 20 cm below standing and hold it.",
@@ -164,6 +166,7 @@ _STRIKE_SHARED = (
 
 G1_FRONT_KICK = Behavior(
     id="g1_front_kick",
+    suggest="front kick",
     emoji="🦵",
     title="Front kick (G1)",
     description="Mae geri — throw a high front kick, then come back to a "
@@ -235,6 +238,7 @@ G1_FRONT_KICK = Behavior(
 
 G1_PUNCH = Behavior(
     id="g1_punch",
+    suggest="throw a punch",
     emoji="🥊",
     title="Straight punch (G1)",
     description="Choku zuki — drive one arm forward to full extension and "

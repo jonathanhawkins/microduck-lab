@@ -74,8 +74,23 @@ the UI deliberately doesn't expose them.)
 
 ## The panels
 
+**One robot, everywhere.** With a second body in the lab (the Unitree G1) the
+🧠 palette, 🎓 teach and 🎬 animate each carry a `🦆 duck` / `🤖 G1` switch —
+and they are ONE switch (`lib/activeRobot.ts`): pick the G1 in any of them, or
+click a G1 on the stage, and the palette lists G1 policies, teach offers G1
+tricks and animate poses a G1. Two deliberate exceptions: the palette's `all`
+is its own list-only override, and animate follows a switch made elsewhere
+only while its clip is untouched — switching bodies starts a fresh clip, so
+an authored pose pins the editor to its body. A one-robot lab shows no switch.
+
 - **🧠 policies** (top-right): every assignable brain — shipped Pollen
-  policies, local runs, checkpoints. Drag a chip onto a duck (or click to arm,
+  policies, local runs, checkpoints. **Our runs are grouped by the trick they
+  practised** (the lab's `trick` field): each trick shows its measured pick
+  (`describe-run --pick`) and its newest run, and keeps the rest behind
+  "▸ N more" — a seed battery no longer buries everything else. Only a
+  measurement outranks recency. Long titles keep their END visible
+  ("Last …, seed 2)"), because that is where a battery's runs differ; a
+  filter shows every match, folded or not. Drag a chip onto a duck (or click to arm,
   then click a duck) to hot-swap its brain mid-stride; drag it to empty floor
   — or just **double-click the chip** — to spawn a fresh duck running that
   policy; drop it (or armed-click) **on the 🎓 teach panel** to load that
@@ -86,8 +101,14 @@ the UI deliberately doesn't expose them.)
   once. It always confirms first (naming the run dirs and the space it
   frees), and the lab refuses outright while that run's job is still
   training. Shipped Pollen policies have no ✕ — they aren't ours to delete.
-- **🎓 teach the duck** (bottom-right): chat a trick ("stand on one leg"), see
-  the reward recipe in plain English, watch the live score curve + per-term
+- **🎓 teach** (bottom-right): the front door — no stored run needed. The
+  footer asks in the order a person decides: **who** (the robot switch),
+  **what** (one chip per recipe that names a `suggest` phrase, with its
+  emoji; a trick that already has a MEASURED best run grows a `▶` that spawns
+  a robot running it, so "what does this look like?" never means digging
+  through the palette), then **how long** (`⏱ practice:` — one folded line,
+  because the recipe's own plan is right for nearly everyone). Or chat a
+  trick ("stand on one leg"), see the reward recipe in plain English, watch the live score curve + per-term
   bars while the 🎓 trainee duck improves snapshot by snapshot. When a run
   ends, the recipe's **weight sliders unlock**: drag them and either
   "↻ retrain" (fresh) or "✨ fine-tune" (keep what it learned, adjust) —

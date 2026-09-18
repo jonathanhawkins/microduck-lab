@@ -415,6 +415,11 @@ class MjcfBody(BodyBase):
             lab_spacing_m=spacing,
             scene_fn=scene.fn(robot_xml),
             stand_keyframe=scene.keyframe,
+            # No env, so no default task: `env_class` raises for every task
+            # on a level-0 body, and a `None` here is what tells the lab to
+            # idle a slot kinematically at the keyframe instead of asking.
+            # See `robots/body.BodyBase.default_task`.
+            default_task=None,
             robot_xml=robot_xml,
             visual_group=group,
             extra={

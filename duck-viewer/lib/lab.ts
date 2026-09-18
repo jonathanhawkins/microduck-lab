@@ -46,8 +46,10 @@ export interface DuckFrame {
    *  its first snapshot, or a server predating the field). Lets selection
    *  load the duck's run into the teach panel. */
   policy?: string | null;
-  /** Which body to draw for this row ("microduck" | "g1"). Absent on servers
-   *  that predate robot selection — those rosters are all ducks. */
+  /** Which body to draw for this row — any registry id ("microduck", "g1",
+   *  "mars", "menagerie:unitree_go2"); the meshes come from
+   *  GET /scene?robot=<id>. Absent on servers that predate robot selection
+   *  — those rosters are all ducks. */
   robot?: RobotId;
   falls: number;
   step: number;
@@ -211,7 +213,11 @@ export interface Frame {
 export interface Policy {
   id: string; // e.g. "pollen:alpha_stand"
   label: string; // e.g. "alpha_stand"
-  group: "pollen" | "runs" | "checkpoints" | "g1";
+  /** Which palette section this chip belongs to. "runs" and "checkpoints"
+   *  are ours; every other value is a SHIPPED group a body declared
+   *  ("pollen", "g1") and is described by `Lab.shipped`. A string, not a
+   *  union, for the same reason as `RobotId`. */
+  group: string;
   path: string;
   /** Newest-artifact timestamp, epoch SECONDS (run policies only) — the
    *  server sorts the "runs" group newest-first by it; the panel renders it
@@ -243,14 +249,28 @@ export interface Policy {
    *  taking the tail. At most one stage of a chain carries it; a chain whose
    *  stages were never compared carries none. */
   pick?: boolean;
+  /** The recipe this run practised, as a behaviors id ("backflip",
+   *  "g1_front_kick") — what "Our runs" groups by and what a 🎓 chip looks its
+   *  best run up under (lib/tricks.ts). Absent on a run the lab could not
+   *  place, and on every run of a lab that predates the field. */
+  trick?: string;
+}
+
+/** What a trick id is called in a heading (GET /policies `tricks`). */
+export interface TrickName {
+  title: string;
+  emoji?: string;
 }
 
 /** The chip prefix that says a policy is not a duck. Empty for the duck, so
  *  a one-robot lab's palette reads exactly as it always has — and empty
  *  inside a section that is already one robot ("Unitree G1 (shipped)"), where
  *  repeating it on every chip is noise. */
-export function robotTag(robot?: RobotId | string, group?: Policy["group"]): string {
-  if (group === "g1") return "";
+export function robotTag(robot?: RobotId | string, group?: string): string {
+  // A SHIPPED section is one body's by construction (a body declares its own
+  // group), so the prefix is noise there whichever body it is — this used to
+  // name the G1's group, which a third body's section would have missed.
+  if (group && !OUR_GROUPS.includes(group)) return "";
   return !robot || robot === "microduck" ? "" : `${robot} · `;
 }
 
@@ -357,9 +377,17 @@ export function formatBytes(n: number): string {
   return `${n} B`;
 }
 
-/** Which body a roster slot (or a palette entry) is. The lab was one robot
- *  deep; a G1 policy is 99 obs / 29 actions and cannot run in a duck. */
-export type RobotId = "microduck" | "g1";
+/** Which body a roster slot (or a palette entry) is — any id the lab's
+ *  registry knows (`robots/registry.ids()`): "microduck", "g1", "mars", or a
+ *  discovered one like "menagerie:unitree_go2".
+ *
+ *  A UNION of two literals until Phase 1b, which is what made every third
+ *  body a pass over this file and six components. It is a string because the
+ *  set lives on the server: a body can arrive from a pip-installed plugin or
+ *  from a Menagerie download, and TypeScript cannot know either. Kept as a
+ *  named alias rather than inlined so the places that mean "a robot id" still
+ *  say so. */
+export type RobotId = string;
 
 export async function fetchScene(robot: RobotId = "microduck"): Promise<Scene> {
   const q = robot && robot !== "microduck" ? `?robot=${encodeURIComponent(robot)}` : "";
@@ -402,16 +430,113 @@ export async function loadTeachRun(
   return res.json();
 }
 
-export async function fetchPolicies(): Promise<Policy[]> {
+/** A body the lab can load (GET /policies `robots`). `ready` is false until
+ *  its assets are on disk; `setup` is then the command that fetches them. */
+export interface LabRobot {
+  id: RobotId;
+  label: string;
+  /** What a sentence — and every robot switch — calls it ("G1", "MARS"). */
+  noun?: string;
+  /** What SHAPE of robot this is: "legged" | "wheeled" | "generic". Lets the
+   *  UI pick an emoji and a verb ("teach the duck a trick" / "teach MARS a
+   *  task") without a table of ids. Absent on a lab that predates it. */
+  kind?: string;
+  ready: boolean;
+  setup?: string;
+  /** A POST /robots/{id}/fetch download is running / last one failed. */
+  fetching?: boolean;
+  fetchError?: string;
+  /** Can the 🎬 pose editor open this body? A CAPABILITY, not a kind: the
+   *  editor is a walker's tool (effectors, soles, a base link), and the
+   *  server answers it by asking the body (lab/robots._animates). Absent on
+   *  an older lab, where the panel's own list was the filter. */
+  animate?: boolean;
+}
+
+/** One shipped section of the palette (GET /policies `shipped`): the `group`
+ *  key its chips carry, the heading to show, and which body it belongs to.
+ *  The viewer used to hold this list itself, so a third body would have been
+ *  a fourth literal in this file. */
+export interface ShippedGroup {
+  key: string;
+  title: string;
+  robot: RobotId;
+}
+
+/** Start downloading a robot's assets on the lab (the G1 ~140 MB, MARS
+ *  7.2 MB, a Menagerie model its own size). Returns at once; poll fetchLab()
+ *  until the robot reports `ready`. */
+export async function fetchRobot(id: RobotId): Promise<void> {
+  const res = await fetch(`${LAB_HTTP}/robots/${encodeURIComponent(id)}/fetch`, { method: "POST" });
+  if (!res.ok) throw new Error(`robot fetch failed: ${res.status}`);
+}
+
+/** The robots an older lab (no `robots` field) implies: the duck only. */
+export const DEFAULT_ROBOTS: LabRobot[] = [
+  { id: "microduck", label: "Microduck", noun: "duck", kind: "legged", ready: true, animate: true },
+];
+
+/** Which robot a policy drives — an entry without `robot` is the duck's. */
+export function policyRobotId(p: Pick<Policy, "robot">): string {
+  return p.robot || "microduck";
+}
+
+export interface Lab {
+  policies: Policy[];
+  robots: LabRobot[];
+  /** The palette's shipped sections, in registry order. Empty from an older
+   *  lab, and `shippedGroups` then derives them from the chips themselves. */
+  shipped: ShippedGroup[];
+  /** Names for the trick ids the policies carry; empty from an older lab. */
+  tricks: Record<string, TrickName>;
+}
+
+export async function fetchLab(): Promise<Lab> {
   const res = await fetch(`${LAB_HTTP}/policies`);
   if (!res.ok) throw new Error(`policies fetch failed: ${res.status}`);
-  const data: { policies: Policy[] } = await res.json();
+  const data: {
+    policies: Policy[];
+    robots?: LabRobot[];
+    shipped?: ShippedGroup[];
+    tricks?: Record<string, TrickName>;
+  } = await res.json();
+  const policies = dedupePolicies(data.policies);
+  return {
+    policies,
+    robots: data.robots?.length ? data.robots : DEFAULT_ROBOTS,
+    shipped: data.shipped?.length ? data.shipped : shippedGroups(policies),
+    tricks: data.tricks ?? {},
+  };
+}
+
+/** The shipped sections implied by a chip list, for a lab too old to send
+ *  them: every group that is neither ours ("runs", "checkpoints") in the
+ *  order it first appears. The heading is the group key itself, which is
+ *  what those labs' own palettes fell back to for an unknown group. */
+export function shippedGroups(policies: Policy[]): ShippedGroup[] {
+  const out: ShippedGroup[] = [];
+  for (const p of policies) {
+    if (OUR_GROUPS.includes(p.group) || out.some((g) => g.key === p.group)) continue;
+    out.push({ key: p.group, title: `${p.group} (shipped)`, robot: policyRobotId(p) });
+  }
+  return out;
+}
+
+/** The palette sections that are OURS rather than a body's shipped drop.
+ *  Everything else on a chip's `group` names a shipped section. */
+export const OUR_GROUPS = ["runs", "checkpoints"];
+
+export async function fetchPolicies(): Promise<Policy[]> {
+  return (await fetchLab()).policies;
+}
+
+function dedupePolicies(policies: Policy[]): Policy[] {
   // Keep the first of each id: the server can emit duplicates (two checkpoints
   // of one run in the same 1k-step bucket share a "run@Nk" id), and duplicate
   // ids would collide as React keys in the palette. Either chip sends the same
   // assign/spawn message anyway, so dropping repeats loses nothing.
   const seen = new Set<string>();
-  return data.policies.filter((p) => {
+  return policies.filter((p) => {
     if (seen.has(p.id)) return false;
     seen.add(p.id);
     return true;
@@ -543,6 +668,15 @@ export class LabClient {
           spawn_duck: { policy: policyId, ...(showcase && { showcase: true }) },
         })
       );
+  }
+  /** Put a BODY on the stage with no policy — it idles (an arm holds HOME
+   *  under its zero action, a level-0 body holds its keyframe). The only way
+   *  on for a body that ships nothing to assign: MARS before anyone has
+   *  trained it, and every Menagerie model. Server refusals (roster full, no
+   *  such body) come back as one-shot event toasts. */
+  sendSpawnRobot(robot: string) {
+    if (this.ws?.readyState === WebSocket.OPEN)
+      this.ws.send(JSON.stringify({ spawn_robot: { robot } }));
   }
   /** Drain event lines accumulated since the last call (oldest first). */
   takeEvents(): string[] {

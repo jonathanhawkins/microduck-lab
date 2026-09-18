@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 import types
 from pathlib import Path
 
@@ -776,3 +777,344 @@ def test_a_finished_train_run_leaves_a_done_marker(tmp_path):
     # and it must come AFTER the model is saved, or a reader can see `done`
     # before the artifact it promises exists
     assert src.index('model.save') < src.index('"done": True')
+
+
+# ======================================================================
+# A THIRD BODY, AND A CATALOGUE OF THEM (docs/mars-roadmap.md Phase 1b/2b)
+#
+# Everything above this line was written with two walkers on the roster, and
+# every one of those cases is an `if robot == "g1"` that was replaced by a
+# registry lookup. These are the cases that say the replacement is generic:
+# MARS is a WHEELED body with an arm env, no drive channel and no shipped
+# policy, and a Menagerie model is level 0 — an MJCF and an id, no env at all.
+# ======================================================================
+
+from microduck_local.lab import robots as LR  # noqa: E402 — beside its tests
+from microduck_local.robots import registry as REG  # noqa: E402
+
+GO2 = "menagerie:unitree_go2"
+
+needs_mars = pytest.mark.skipif(
+    "mars" not in REG.registry(), reason="MARS assets missing — uv run fetch-robot mars")
+needs_go2 = pytest.mark.skipif(
+    GO2 not in REG.registry(),
+    reason=f"Go2 missing — uv run fetch-robot {GO2}")
+
+
+@needs_mars
+def test_a_mars_slot_builds_the_arm_env_and_idles():
+    """The slot's env is the BODY's, for the body's own default task.
+
+    `Duck._make_env` asked for `task="walk"` when nobody said otherwise, and
+    "walk" is not a question MARS can be asked — `MarsBody.env_class("walk")`
+    rightly raises rather than handing an arm a walker's env. The body
+    answers `default_task` now, and for MARS that is `reach`.
+
+    It IDLES on a zero action, and that is a property of the action map
+    rather than of zero: MARS's default map is `delta`, where a = 0 is exact
+    (docs/mars-roadmap.md 4a-2 — an ABSOLUTE map has no fixed point, which is
+    why it could reach a target and never sit still on it). So the arm holds
+    where HOME put it.
+    """
+    from microduck_local.robots.mars_env import MarsArmEnv
+
+    d = V.Duck("d0", "MARS", V._zero_infer_for("mars"), seed=1, robot="mars")
+    assert isinstance(d.env, MarsArmEnv)
+    assert d.env.task == "reach"
+    assert d.env.observation_space.shape == (32,)
+    start = np.array(d.env.data.qpos[d.env._arm_qadr], float)
+    for _ in range(25):                         # one second of control steps
+        d.tick()
+    held = np.array(d.env.data.qpos[d.env._arm_qadr], float)
+    assert float(np.abs(held - start).max()) < 0.05, (
+        "the zero action did not hold the arm — a lab slot with no policy "
+        f"drifted {np.abs(held - start).max():.4f} rad")
+    assert d.falls == 0
+
+
+@needs_mars
+def test_a_wheeled_slot_is_not_steered_and_reports_no_speed():
+    """`set_cmd` and `sample_speed` are asked of the ENV, not of the id.
+
+    An arm env has no `twist_cmd` (its base is disabled for every arm task —
+    rolling the whole robot at the target is the cheapest way to satisfy a
+    reach and not the thing being taught) and no `heading_lin_vel`. Both are
+    read inside the 50 Hz loop, where an AttributeError stops the sim for the
+    WHOLE roster, so a body with no drive channel must be a no-op and not a
+    raise. A made-up 0.00 m/s would be worse than "—": it is a reading the
+    robot never took.
+    """
+    d = V.Duck("d0", "MARS", V._zero_infer_for("mars"), seed=1, robot="mars")
+    assert d.steers() is False
+    d.set_cmd(np.array([0.9, 0.0, 0.3], np.float32))    # what lab_loop hands it
+    d.tick()
+    d.reset()                                            # and the episode edge
+    assert d.forward_speed() is None
+
+
+@needs_go2
+def test_a_level_0_slot_idles_kinematically_at_its_keyframe():
+    """A body read from an MJCF has no env, and must not be given one.
+
+    Choosing one would mean choosing a policy convention nobody declared
+    (`MjcfBody.env_class` raises and names the level that lands it), and
+    handing the slot the duck's env is the failure the whole split exists to
+    prevent — it arrives as a wrong picture and a wrong policy rather than as
+    an error. So the slot holds the pose its author keyframed, and `step()`
+    advances nothing: a Go2 stepped at `home` with no controller folds onto
+    the floor in about a second, which is every stranger's robot drawn as a
+    heap.
+    """
+    d = V.Duck("d0", "Go2", V._zero_infer_for(GO2), seed=1, robot=GO2)
+    assert isinstance(d.env, LR.KinematicIdle)
+    assert d.steers() is False
+    base_z = float(d.env.data.xpos[1][2])
+    for _ in range(100):
+        d.tick()
+    assert float(d.env.data.xpos[1][2]) == pytest.approx(base_z, abs=1e-9)
+    assert base_z > 0.05, "the body is on the floor — that is not its keyframe"
+    assert d.falls == 0
+    # and the poses it streams line up with the scene the viewer fetches
+    assert len(d.pose_payload()) == len(LR.scene_body_names(GO2))
+
+
+# -------------------------------------------- the guard: a contract, not a width
+
+def _contract_run(tmp_path, name: str, robot: str):
+    """A run dir that RECORDS its contract, as `train.py` writes one."""
+    d = tmp_path / "runs" / name
+    d.mkdir(parents=True)
+    (d / "policy.onnx").write_bytes(b"not really onnx")
+    contract = REG.get(robot).contract()
+    (d / "run.json").write_text(json.dumps(
+        {"run_name": name, "robot": robot, "contract": contract.as_dict()}))
+    return d
+
+
+@needs_mars
+@pytest.mark.parametrize("policy_robot,slot_robot", [("microduck", "mars"),
+                                                     ("mars", "microduck")])
+def test_a_recorded_contract_refuses_the_wrong_body_by_ID(tmp_path, policy_robot,
+                                                          slot_robot):
+    """§6.3: the four width guards become one contract comparison.
+
+    A width is a PROXY — two bodies with the same observation width cross
+    silently — and the arrival of a 32-float body makes that a question of
+    when rather than whether. Here the widths differ too, so the refusal is
+    checked on its MESSAGE: it must name the two contract ids, which is the
+    thing a width can never say.
+    """
+    run = _contract_run(tmp_path, f"{policy_robot}-run", policy_robot)
+    want = REG.get(policy_robot).contract()
+    mine = REG.get(slot_robot).contract()
+    why = LR.policy_refusal(run / "policy.onnx", slot_robot,
+                            want_obs=want.obs_dim, have_obs=want.obs_dim)
+    assert why and want.id in why and mine.id in why, why
+    # …and the SAME file on its own body is waved through.
+    assert LR.policy_refusal(run / "policy.onnx", policy_robot,
+                             want_obs=want.obs_dim,
+                             have_obs=want.obs_dim) is None
+
+
+def test_a_file_with_nothing_to_say_is_still_refused_by_its_width(tmp_path):
+    """The last-ditch check on the FILE, kept exactly as it was (§6.3).
+
+    It is what catches a policy that records no contract at all — every run
+    trained before the stamp existed, and every shipped drop that was never
+    ours. A shipped G1 `walker.onnx` is the case that makes the ORDER matter:
+    it has no metadata and no run directory, so `resolve()` would call it a
+    duck and refuse it on its own body; only the self-describing rungs may
+    decide, and everything else falls through to the width.
+    """
+    run = _run(tmp_path, "nameless", None)
+    assert LR.policy_refusal(run / "policy.onnx", "microduck", 99, 61)
+    assert LR.policy_refusal(run / "policy.onnx", "microduck", 61, 61) is None
+    # no width claimed at all (an in-process checkpoint): nothing to compare
+    assert LR.policy_refusal(run / "policy.onnx", "microduck", None, 61) is None
+    # THE CASE THAT FIXES THE ORDER, and the one a `resolve()` here breaks: a
+    # SHIPPED drop — a bare .onnx with no metadata and no run.json anywhere
+    # near it, which is what Lucky Robots' G1 walker is. `resolve()`'s last
+    # rung says "a file with nothing to say has always been a duck", which is
+    # the right answer for naming a policy's body and the WRONG one for
+    # judging it: it would refuse the G1's own walker on a G1 slot. Only the
+    # self-describing rungs may decide, and this file has none.
+    shipped = tmp_path / "shipped"
+    shipped.mkdir()
+    (shipped / "walker.onnx").write_bytes(b"not really onnx")
+    assert LR.policy_refusal(shipped / "walker.onnx", "g1", 99, 99) is None
+    assert LR.policy_refusal(shipped / "walker.onnx", "g1", 61, 99)
+
+
+# ------------------------------------------------------------- the endpoints
+
+@needs_mars
+def test_scene_endpoint_serves_the_mars_meshes(tmp_path, monkeypatch):
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
+    get_scene = _endpoint(V.make_app([]), "/scene", "GET")
+    sc = get_scene(robot="mars")
+    assert len(sc["meshes"]) == 9, "mars.urdf ships nine visual STLs"
+    assert sc["bodies"][1] == "base_link"
+    # the colours the SERVER painted (robots/mars.style_visual_geoms), so the
+    # viewer needs no table of its own: Innate orange somewhere on the arm.
+    assert any(g["rgba"][0] > 0.8 and g["rgba"][1] < 0.6 for g in sc["geoms"])
+
+
+@needs_go2
+def test_scene_endpoint_serves_a_discovered_bodys_meshes(tmp_path, monkeypatch):
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
+    get_scene = _endpoint(V.make_app([]), "/scene", "GET")
+    sc = get_scene(robot=GO2)
+    assert len(sc["meshes"]) == 16, "the Go2's visual group holds 16 meshes"
+    assert sc["geoms"] and sc["bodies"]
+
+
+def test_an_unfetched_bodys_scene_404s_with_the_command_that_fixes_it(
+        tmp_path, monkeypatch):
+    """"unknown robot" and "you have not downloaded it yet" are different
+    problems, and the palette's ⤓ answers only one of them."""
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
+    get_scene = _endpoint(V.make_app([]), "/scene", "GET")
+    # (a) the body is in the registry but its ASSETS are gone. `visual_scene`
+    # would raise deep inside a mesh read; the gate is `Body.ready()`.
+    body = REG.registry().get("mars")
+    if body is not None:
+        monkeypatch.setattr(type(body), "ready", lambda self: False)
+        with pytest.raises(HTTPException) as e:
+            get_scene(robot="mars")
+        assert e.value.status_code == 404
+        assert "fetch-robot mars" in str(e.value.detail), e.value.detail
+    # (b) nothing fetched at all — the id is still KNOWN (registry.ids lists a
+    # built-in whose assets are absent), so the answer is still the command.
+    monkeypatch.setattr(REG, "registry", lambda: {})
+    with pytest.raises(HTTPException) as e:
+        get_scene(robot="mars")
+    assert e.value.status_code == 404
+    assert "fetch-robot mars" in str(e.value.detail)
+    # (c) and a body nobody has ever heard of is a different sentence
+    with pytest.raises(HTTPException) as e:
+        get_scene(robot="wombat")
+    assert "unknown robot" in str(e.value.detail)
+
+
+@needs_mars
+@needs_go2
+def test_get_robots_describes_every_body_the_registry_knows(tmp_path, monkeypatch):
+    """It answered `"ready": True if rid == "microduck" else bool(g1_ready())`
+    — so a third body inherited the G1's download state — and then
+    hand-patched an absent G1 back onto the end of its own list."""
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
+    rows = {r["id"]: r for r in _endpoint(V.make_app([]), "/robots", "GET")()["robots"]}
+    assert {"microduck", "g1", "mars", GO2} <= set(rows)
+    assert rows["microduck"]["kind"] == "legged" and rows["microduck"]["animate"] is True
+    # The G1 is a lazy proxy too (`robots/g1._LazyG1Spec`), and recognising a
+    # proxy by `_resolve` on its TYPE caught it as well — which answered
+    # `animate: false` and took the humanoid out of the 🎬 editor it has
+    # always been in. The question is "is this id a CATALOGUE's", not "is
+    # this object a proxy".
+    assert rows["g1"]["animate"] is True
+    # MARS: a wheeled body the 🎬 editor cannot pose — `PoseScratch` wants
+    # effectors, soles and a base link, and pose_scratch("mars") died on the
+    # last of those the moment a third body was registered.
+    assert rows["mars"]["kind"] == "wheeled"
+    assert rows["mars"]["animate"] is False
+    assert rows["mars"]["noun"] == "MARS"
+    # a discovered model is level 0: its own kind, nothing to teach
+    assert rows[GO2]["kind"] == "generic"
+    assert rows[GO2]["animate"] is False
+    assert rows[GO2]["teach"] == []
+
+
+@needs_mars
+def test_the_pose_editor_refuses_a_body_it_cannot_pose(tmp_path, monkeypatch):
+    """The door locked as well as unlisted: `pose_scratch("mars")` raised
+    `AttributeError: 'MarsBody' object has no attribute 'base_body'`, which
+    is a 500 with a traceback for a question that has a good answer."""
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
+    get_joints = _endpoint(V.make_app([]), "/joints", "GET")
+    assert get_joints()["joints"]                         # the duck still poses
+    with pytest.raises(HTTPException) as e:
+        get_joints(robot="mars")
+    assert e.value.status_code == 404
+
+
+@needs_mars
+def test_the_palette_shows_no_mars_group_but_tags_a_mars_run(tmp_path, monkeypatch):
+    """MARS ships no policy this lab can run — Innate's learned skills are ACT
+    checkpoints trained from demonstrations, not ONNX, and `innate-os` vendors
+    none. So its shipped SECTION disappears rather than showing an empty
+    heading; a run trained here is tagged with the body all the same."""
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    _run(tmp_path, "mars-reach-delta", "mars")
+    groups = {g["key"]: g for g in LR.shipped_groups()}
+    assert "mars" not in groups
+    assert "pollen" in groups and groups["pollen"]["robot"] == "microduck"
+    entry = next(p for p in V.discover_policies() if p["id"] == "run:mars-reach-delta")
+    assert entry["robot"] == "mars"
+
+
+@needs_mars
+def test_posting_a_fetch_runs_that_bodys_own_download(tmp_path, monkeypatch):
+    """One endpoint, any body: it used to 404 for everything but the G1."""
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
+    fetch_robot = _endpoint(V.make_app([]), "/robots/{robot}/fetch", "POST")
+    called: list[str] = []
+    body = REG.get("mars")
+    monkeypatch.setattr(type(body), "fetch",
+                        lambda self: called.append(self.id) or Path("."))
+    assert fetch_robot("mars")["state"] == "fetching"
+    for _ in range(200):                       # the download runs in a thread
+        if called:
+            break
+        time.sleep(0.01)
+    assert called == ["mars"]
+    assert LR.fetch_state("mars")["state"] == "idle"
+    # and the state is PER BODY — one shared flag showed a MARS download as
+    # a G1 one.
+    assert LR.fetch_state("g1")["state"] == "idle"
+    with pytest.raises(HTTPException):
+        fetch_robot("wombat")
+
+
+@needs_mars
+def test_the_teach_panel_offers_mars_its_own_two_tasks():
+    """A recipe with no `suggest` phrase is trainable but INVISIBLE, so a
+    MARS roster showed an empty 🎓 panel while both tasks existed."""
+    assert [s["behavior"] for s in LR.teach_suggestions("mars")] == [
+        "mars_reach", "mars_pick"]
+
+
+@needs_go2
+def test_a_level_0_body_has_nothing_to_teach():
+    """And is therefore given no chip at all, rather than the duck's."""
+    assert LR.teach_suggestions(GO2) == []
+
+
+# --------------------------------------------------- a body with no policy
+
+@needs_mars
+def test_a_body_that_ships_nothing_can_still_be_put_on_the_stage(tmp_path,
+                                                                 monkeypatch):
+    """`spawn_duck` needs a palette id, and the two bodies that ship NO
+    policy — MARS before anybody trains it, every Menagerie model — are
+    exactly the ones most worth looking at first. `spawn_robot` is that
+    door; the slot idles."""
+    monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
+    app = V.make_app([])
+    st = app.state.lab
+    asyncio.run(app.state.do_spawn_robot("mars"))
+    assert [d.robot for d in st.ducks] == ["mars"]
+    st.ducks[0].tick()                                  # the loop's own call
+    asyncio.run(app.state.do_spawn_robot("wombat"))     # not a body
+    assert len(st.ducks) == 1
+    assert any("wombat" in e for e in st.events)
+    # a restart brings it back: restore_ducks used to drop every row with no
+    # brain recorded, which silently emptied the stage.
+    restored = V.restore_ducks(Path(V.lab_state_path()))
+    assert [d.robot for d in restored] == ["mars"]

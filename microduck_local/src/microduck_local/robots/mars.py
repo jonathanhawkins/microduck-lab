@@ -1232,6 +1232,13 @@ MARS = MarsBody(
     lab_spacing_m=LAB_SPACING_M,
     scene_fn=scene_xml,
     stand_keyframe=HOME_KEY,
+    # A lab slot with no task named runs `reach`: MARS does not walk, so
+    # `BodyBase`'s "walk" default would reach `env_class`'s raise for every
+    # roster slot rather than for a typo. `reach` and not `pick` because it
+    # is the cheaper scene (5 ms, no free body) and the honest starting rung
+    # — the ⭐ in the panel goes to whichever a measurement earns
+    # (docs/mars-roadmap.md §5, open decision 2).
+    default_task="reach",
 )
 
 

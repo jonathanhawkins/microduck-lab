@@ -116,6 +116,9 @@ class Body(Protocol):
     # the suite cannot check, so the contract says so here.
     scene_fn: Callable[[], Path]
     stand_keyframe: str
+    # Which `env_class` task a slot that was given no task runs. See the
+    # field on `BodyBase` for why it is data and not a guess.
+    default_task: str | None
 
     @property
     def num_actions(self) -> int: ...
@@ -193,6 +196,18 @@ class BodyBase:
     # on — and kept under that name because the walking env, the 🎬 pose
     # editor, `render-rollout` and the conformance suite all read it already.
     stand_keyframe: str = "STAND"
+    # Which task `env_class()` is asked for when nobody said. DATA, because
+    # the three answers are three different statements about a body and none
+    # of them is derivable from the others: a walker's default is `"walk"`
+    # (the lab has always built a walk env for a roster slot with no task);
+    # MARS's is `"reach"`, because "walk" is not a thing it can be asked and
+    # `env_class("walk")` rightly raises; a level-0 body's is `None`, which
+    # says it has NO env at all — `robots/mjcf_body.py` reads an MJCF and
+    # never chooses a policy convention, so a slot for one idles
+    # kinematically at its keyframe rather than being handed somebody else's
+    # env (`lab/robots.KinematicIdle`). Guessing it from `kind` would put the
+    # duck's env behind a string the viewer also renders with.
+    default_task: str | None = "walk"
 
     # ------------------------------------------------------------------ data
 
@@ -497,7 +512,7 @@ def conforms(body: object) -> tuple[str, ...]:
 WANTED: Sequence[str] = (
     "id", "title", "noun", "kind", "joint_names", "joint_groups",
     "default_pose", "obs_dim", "num_actions", "lab_spacing_m",
-    "scene_fn", "stand_keyframe",
+    "scene_fn", "stand_keyframe", "default_task",
     "contract",
     "ready", "fetch", "setup_hint", "visual_scene", "look",
     "env_class", "tasks", "shipped_policies", "train_env_kwargs",

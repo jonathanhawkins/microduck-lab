@@ -33,6 +33,7 @@ import {
   fetchJoints,
   fetchRobots,
   isIkResult,
+  isUntouched,
   keyAt,
   listClips,
   loadClip,
@@ -62,6 +63,8 @@ import {
   type RobotInfo,
   type StoredClip,
 } from "@/lib/anim";
+import { robotChipLabel, setActiveRobot, useActiveRobot } from "@/lib/activeRobot";
+import { robotEmoji } from "@/lib/robots";
 import { LAB_HTTP } from "@/lib/lab";
 import { loadJSON, saveJSON } from "@/lib/persist";
 import {
@@ -78,10 +81,6 @@ import { pushToast } from "./Toasts";
 
 const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
 const TRACK_PAD = 10; // px inset of the timeline track inside its box
-
-/** The chip for a body in the header's robot switch. */
-const ROBOT_ICON: Record<string, string> = { microduck: "🦆", g1: "🤖" };
-const robotIcon = (id: string) => ROBOT_ICON[id] ?? "🤖";
 
 /** "left_hip_pitch" and "left_hip_pitch_joint" both read as "hip pitch" in
  *  a section that already says which leg. */
@@ -186,7 +185,24 @@ export function AnimPanel() {
     setRobot(id);
     setMeta(null);
     setPlaying(false);
+    // A body chosen HERE — the switch, or a clip loaded for another body — is
+    // the robot the person is working with: the 🧠 palette and 🎓 teach follow.
+    setActiveRobot(id);
   }, []);
+
+  // …and this editor follows a robot chosen THERE (palette, teach, a click on
+  // the stage), but only with nothing to lose: switching bodies starts a
+  // fresh clip, so an authored pose pins the editor to its own body.
+  const activeRobot = useActiveRobot();
+  useEffect(() => {
+    if (!open || activeRobot === robot || meta?.robot !== robot) return;
+    // …and only onto a body this editor can actually pose: a MARS selected
+    // in the 🧠 palette must not drag the 🎬 editor onto a body with no
+    // effectors and no soles, which is a panel of empty sliders.
+    if (!robots.some((r) => r.id === activeRobot && r.ready && r.animate !== false)) return;
+    if (!isUntouched(clipRef.current, poseRef.current, meta)) return;
+    switchRobot(activeRobot as RobotId);
+  }, [open, activeRobot, robot, robots, meta, switchRobot]);
 
   // --- joint metadata (limits, defaults, body map) -------------------------
   // Fetched for the current robot whenever it is not the one the metadata
@@ -520,7 +536,7 @@ export function AnimPanel() {
       if (clipRobot(c) !== robot) switchRobot(clipRobot(c));
       else setPose(sampleClip(c, 0, meta?.numJoints));
       setBrowsing(false);
-      pushToast(`📂 loaded “${name}”${clipRobot(c) !== robot ? ` (${robotIcon(clipRobot(c))} ${clipRobot(c)})` : ""}`);
+      pushToast(`📂 loaded “${name}”${clipRobot(c) !== robot ? ` (${robotEmoji(clipRobot(c))} ${clipRobot(c)})` : ""}`);
     } catch (e) {
       pushToast(`⚠ ${String((e as Error)?.message ?? e)}`);
     }
@@ -632,9 +648,14 @@ export function AnimPanel() {
 
   const jointRows = (group: string) =>
     (meta?.joints ?? []).filter((j) => j.group === group);
-  // The switch shows every body the lab lists; a lab without /robots lists
-  // none and the editor is the duck's, as it always was.
-  const robotChips = robots.length ? robots : [];
+  // The switch shows every body this editor can POSE — `animate`, which the
+  // lab answers by asking the body (a `PoseScratch` needs effectors, soles
+  // and a base link, and `pose_scratch("mars")` died on the last of those
+  // the moment a wheeled body was registered). A lab too old to send the
+  // flag listed only posable bodies anyway, so an absent one means yes.
+  // A lab without /robots lists none and the editor is the duck's, as it
+  // always was.
+  const robotChips = robots.filter((r) => r.animate !== false);
   const effectors = meta?.effectors ?? [];
   const selectedEffector = animStore.selectedEffector;
 
@@ -710,13 +731,13 @@ export function AnimPanel() {
               title={
                 r.ready
                   ? `pose the ${r.title} (${r.numJoints} joints)`
-                  : "uv run fetch-g1"
+                  : `uv run fetch-robot ${r.id}`
               }
               onClick={() => {
                 if (r.id !== robot) switchRobot(r.id);
               }}
             >
-              {robotIcon(r.id)} {r.title}
+              {robotChipLabel(r)}
             </button>
           );
         })}

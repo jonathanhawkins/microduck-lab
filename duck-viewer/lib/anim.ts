@@ -41,13 +41,36 @@ export interface EffectorMeta {
   chain: number[];
 }
 
-/** One row of GET /robots: a body the editor can pose. `ready` is false
- *  for a G1 whose assets are not fetched on this lab (`uv run fetch-g1`). */
+/** One row of GET /robots: every body the lab knows. `ready` is false for a
+ *  body whose assets are not fetched on this lab (`uv run fetch-robot <id>`).
+ *
+ *  NOT every row is posable — see `animate`. The endpoint used to list only
+ *  bodies the 🎬 editor could open because every body was a walker; with a
+ *  wheeled one registered, `pose_scratch("mars")` died on a missing
+ *  `base_body`, so the capability is a flag on the row now. */
 export interface RobotInfo {
   id: RobotId;
   title: string;
   numJoints: number;
   ready: boolean;
+  /** What a sentence calls it: "teach the {noun} a trick". Older labs omit it. */
+  noun?: string;
+  /** "legged" | "wheeled" | "generic" — what SHAPE of robot this is, so the
+   *  copy can say "a trick" or "a task" without a table of ids. */
+  kind?: string;
+  /** Can the 🎬 pose editor open it? A CAPABILITY (effectors, soles, a base
+   *  link), not a kind. Absent on a lab that predates the flag, where every
+   *  listed body was posable by construction. */
+  animate?: boolean;
+  /** The 🎓 panel's suggestion chips, from this robot's own recipes. */
+  teach?: TeachSuggestion[];
+}
+
+export interface TeachSuggestion {
+  text: string; // sent as /teach text — the lab guarantees it matches `behavior`
+  behavior: string;
+  emoji: string;
+  title: string;
 }
 
 export interface JointsMeta {
@@ -133,6 +156,25 @@ export function newClip(meta: JointsMeta | null, name = "untitled"): Clip {
     keys: [{ t: 0, joints: p.joints, rootPitch: p.rootPitch }],
     robot: meta?.robot ?? "microduck",
   };
+}
+
+/** True while the editor holds nothing a person made: one key, and both it
+ *  and the pose on screen still read as the body's default (or as the all-zero
+ *  placeholder a clip restored before the limits were known carries). This is
+ *  the ONLY state in which the editor may follow a robot switch made in
+ *  another panel — switching bodies starts a fresh clip, and an authored pose
+ *  is expensive to redo. Without the body's metadata nothing can be judged,
+ *  so the answer is no. */
+export function isUntouched(clip: Clip, pose: Pose, meta: JointsMeta | null): boolean {
+  if (!meta || clip.keys.length !== 1) return false;
+  const d = defaultPose(meta);
+  const same = (p: Pose) =>
+    (p.rootPitch ?? 0) === d.rootPitch &&
+    p.joints.length === d.joints.length &&
+    p.joints.every((v, i) => v === d.joints[i]);
+  const zero = (p: Pose) => (p.rootPitch ?? 0) === 0 && p.joints.every((v) => v === 0);
+  const key = clip.keys[0];
+  return (same(key) || zero(key)) && (same(pose) || zero(pose));
 }
 
 export function clampJoint(meta: JointsMeta | null, i: number, v: number): number {

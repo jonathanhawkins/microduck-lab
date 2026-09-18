@@ -687,9 +687,13 @@ class G1Body(RobotSpec):
         36-obs arm overlay stays out of the palette instead of becoming a
         chip that can never be assigned. Empty, and the group disappears,
         on a machine that never fetched the assets.
+
+        `groupTitle` is the palette's section heading, carried on the entry
+        so the viewer needs no table of its own (`lab/robots.shipped_groups`).
         """
         return tuple(
             {"id": f"g1:{e['name']}", "label": e["name"], "group": "g1",
+             "groupTitle": f"{self.title} (shipped)",
              "path": e["path"], "robot": self.id, "note": e.get("note", "")}
             for e in shipped_policies() if e["usable"])
 

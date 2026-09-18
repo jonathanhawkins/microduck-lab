@@ -208,10 +208,10 @@ that met every number with its back twisted, a kick that held one leg when it
 had been asked to recover.
 
 If the backend is holding stale code, restart it (it does not hot-reload the
-env modules) and then POST:
+env modules; the viewer does, so leave it running) and then POST:
 
 ```bash
-bash .claude/skills/restart-servers/restart.sh
+bash .claude/skills/restart-servers/restart.sh --backend-only
 ```
 
 ### "Has the trainer finished?" — ask the lab, never the process table

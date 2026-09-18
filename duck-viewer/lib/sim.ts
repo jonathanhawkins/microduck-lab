@@ -31,7 +31,15 @@ export interface ScenarioBall { pos: [number, number]; radius: number; mass: num
 export interface ScenarioDuck {
   id: string;
   spawn: [number, number, number];
+  /** Which BODY this entry is — any registry id, "microduck" when absent
+   *  (`world/scenario.Duck.robot`). A room can hold a duck and a MARS, and
+   *  the stage draws each from `GET /scene?robot=<id>`. */
+  robot?: string;
   policy: string | null;
+  /** The entry's RANGE-SENSOR preset. On a duck it names the 8x8 ToF's
+   *  noise; on a wheeled body it names the LIDAR's — one field, because the
+   *  question it answers ("how noisy is this robot's range sense") is the
+   *  same one (`world/scenario.Duck`'s own docstring). */
   tof: TofPreset | null;
   detector?: TofPreset | null;
   brain?: string | null;
@@ -371,6 +379,10 @@ export interface BrainInputs {
 export interface SimDuck {
   id: string;
   name: string;
+  /** Which BODY to draw this entry as — any registry id, "microduck" when
+   *  absent. `bodies` below is then ITS scene's list, in
+   *  `GET /scene?robot=<id>` order (18 poses for a MARS, world first). */
+  robot?: string;
   /** Soccer: the team's colorway (what the duck is painted) and its job. */
   team?: TeamName | null;
   role?: RoleName | null;
@@ -412,7 +424,61 @@ export interface SimDuck {
   };
   headApplied: boolean;
   bodies: number[][];
-  sensors: { tof?: TofPayload; det?: DetPayload } | null;
+  sensors: { tof?: TofPayload; det?: DetPayload; lidar?: LidarPayload } | null;
+}
+
+/** The scan as points on a small square, for the inspector's ring.
+ *
+ *  `size` is the box's side in px; the robot sits at its centre and a return
+ *  at `maxRange` lands on the inscribed circle.
+ *
+ *  The bearings are the ROBOT's, CCW from its own +x (`sensors/ray.planar_fan`
+ *  with `ccw`, which is Innate's convention), so the drawing is drawn in the
+ *  robot's frame: **forward is UP**, its left is left, and what is behind it
+ *  is below. Plotting +x rightward instead would be a world-frame picture of
+ *  a robot-frame measurement — it would only look right while the robot faced
+ *  +x, and would silently lie the moment it turned.
+ *
+ *  Skips every **0**, which is the payload's "no reading" and not a
+ *  zero-range one (`sensors/lidar.LidarFrame.as_payload`): drawing those
+ *  would put a dense blob of false contacts on the robot's own origin, which
+ *  is the most misleading thing a range drawing can do. A reading longer
+ *  than `maxRange` is CLAMPED rather than dropped — the direction is real
+ *  even where the distance saturates.
+ */
+export function lidarRingPoints(
+  f: Pick<LidarPayload, "a0" | "da" | "mm" | "maxRange">,
+  size: number
+): { x: number; y: number }[] {
+  const max = f.maxRange && f.maxRange > 0 ? f.maxRange : 6;
+  const r0 = size / 2;
+  const out: { x: number; y: number }[] = [];
+  f.mm.forEach((mm, i) => {
+    if (!mm) return; // 0 = no reading
+    const r = (Math.min(mm / 1000, max) / max) * r0;
+    const a = f.a0 + i * f.da;
+    // Forward (a = 0) is up; +a is CCW, which on a forward-up plot is left.
+    out.push({ x: r0 - r * Math.sin(a), y: r0 - r * Math.cos(a) });
+  });
+  return out;
+}
+
+/** One 360-degree planar scan (`sensors/lidar.LidarFrame.as_payload`).
+ *
+ *  Millimetre integers in the ToF's own convention — **0 means no reading**,
+ *  an invalid ray and not a zero-range one — with the bearings rebuilt from
+ *  `a0 + i * da` rather than shipped as 360 floats the consumer already
+ *  knows. `mount` is where the scanner sits in the base's HEADING frame, so
+ *  a drawing starts at the aperture and not at the chassis origin: 76 mm
+ *  apart on MARS, which is a third of the robot's length. */
+export interface LidarPayload {
+  t: number;
+  a0: number;
+  da: number;
+  mm: number[];
+  age?: number;
+  maxRange?: number;
+  mount?: [number, number, number] | null;
 }
 export interface SimObject {
   id: string; kind: "ball" | "box" | "person" | "toy"; pose: number[];

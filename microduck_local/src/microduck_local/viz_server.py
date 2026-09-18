@@ -10,7 +10,9 @@ HTTP (default 127.0.0.1:8788):
   GET  /scene       visual geometry pulled from the compiled MuJoCo model
                     (the jenga-stacker extract_visual_scene trick)
   GET  /policies    everything assignable: shipped Pollen policies, local runs,
-                    checkpoints — for the viewer's drag-and-drop palette
+                    checkpoints — for the viewer's drag-and-drop palette. Runs
+                    carry `trick` (the recipe they practised, see run_trick);
+                    `tricks` names those ids and `robots` lists the bodies
   DELETE /runs/{name}  permanently delete a training run's directory (policy,
                     checkpoints, progress log). `?chain=true` treats {name} as
                     a curriculum-chain prefix and deletes every stage of it in
@@ -121,6 +123,11 @@ accepts:
   {"spawn_duck": {"policy": "pollen:alpha_stand"}}   add a fresh duck running
                            that palette policy (cap 20 ducks); accepts the
                            same optional "showcase" flag as assign
+  {"spawn_robot": {"robot": "mars"}}   add a slot for a BODY with no policy —
+                           it idles (an arm holds HOME under its zero action,
+                           a level-0 body holds its keyframe). The only way
+                           onto the stage for a body that ships nothing to
+                           assign, which is MARS and every Menagerie model.
 
 The roster persists to lab-state.json next to runs/ (override the path with
 the LAB_STATE_PATH env var) and is restored on startup, at which point the CLI
@@ -178,6 +185,7 @@ from . import contract as C
 from . import motion as motion_mod
 from . import run_record
 from .brain.learned import brains_dir
+from .lab import robots as lab_robots
 from .pose import (  # noqa: F401 — the private names are re-exports for tests
     IkTarget,
     PoseScratch,
@@ -201,7 +209,11 @@ SEND_EVERY = 2          # broadcast at 25 Hz
 SPEED_WINDOW = 25
 EPISODE_RESET_S = 30.0  # periodic reset so wandering ducks regroup
 OVERRIDE_HOLD_S = 6.0
-POLICIES_DIR = Path(__file__).resolve().parents[3] / "microduck" / "policies"
+# Re-exported: it moved to `lab/robots.py` so a BODY can read it without
+# importing this server (`robots/microduck.MicroduckBody.shipped_policies`,
+# which used to, under a `PHASE 1B:` note). The name stays here because
+# `Duck.tick` and a handful of tests address it as `viz_server.POLICIES_DIR`.
+POLICIES_DIR = lab_robots.POLICIES_DIR
 # Authored keyframe clips (the 🎬 animate panel), beside runs/ — same
 # overridable-path convention as RUNS_DIR/LAB_STATE_PATH so tests and scratch
 # servers never write into the real workspace.
@@ -324,12 +336,17 @@ def _zero_infer_for(robot: str = "microduck"):
     if robot in (None, "", "microduck"):
         return _zero_infer
     from .robots import spec as _spec
-    n = _spec.get(robot).num_actions
-    zeros = np.zeros(n, dtype=np.float32)
+    body = _spec.get(robot)
+    # A zero action is not always "do nothing", and on MARS it is exactly
+    # the right nothing: its default action map is `delta`, so a = 0 holds
+    # the commanded arm target where it is (docs/mars-roadmap.md 4a-2 — an
+    # absolute map has no fixed point, which is why it could never sit
+    # still). That is the idle a MARS slot runs before its first snapshot.
+    zeros = np.zeros(body.num_actions, dtype=np.float32)
 
     def infer(obs: np.ndarray) -> np.ndarray:
         return zeros
-    infer.obs_dim = _spec.get(robot).obs_dim
+    infer.obs_dim = body.obs_dim
     return infer
 
 
@@ -434,20 +451,34 @@ class Duck:
                  else shared_model_scope(exclusive=False))
         with scope:
             if self.robot != "microduck":
-                # Another body: its own env class (99-obs G1, robots/g1_env).
-                # `task` picks WHICH — the idle previews in the stand env, so
-                # the trainee mirrors what the trainer is practising.
-                from .train import env_class
+                # Another body: its own env class (99-obs G1, robots/g1_env;
+                # 32-obs MARS, robots/mars_env) — or, for a body at level 0
+                # of docs/mars-roadmap.md §7.1, no env at all and a
+                # kinematic idle at its keyframe (lab/robots.slot_env).
+                #
+                # `task` picks WHICH env: the caller's when a teach job named
+                # one (the trainee mirrors what the trainer is practising),
+                # otherwise the BODY's `default_task` — "walk" is not a
+                # question MARS can be asked, and `env_class("walk")` rightly
+                # raises rather than handing an arm a walker's env.
                 kw.pop("actuator", None)
                 kw["actuator_force"] = "xml"
-                task = kw.pop("task", "walk")
-                return env_class(self.robot, task)(**common, **kw)
+                return lab_robots.slot_env(self.robot, seed,
+                                           {**common, **kw})
             if behavior_id:
                 return behaviors_mod.BehaviorEnv(
                     behavior_id, standing_spawns=standing, **common, **kw)
             return MicroduckWalkEnv(**common, **kw)
 
     def set_cmd(self, cmd: np.ndarray) -> None:
+        # A body with no drive channel is not steered rather than crashed:
+        # `MarsArmEnv` has no `twist_cmd` (its base is disabled for every arm
+        # task — rolling the whole robot at the target is the cheapest way to
+        # satisfy a reach and not the thing being taught), and a level-0
+        # body's `KinematicIdle` has none either. This runs inside the 50 Hz
+        # loop, where an AttributeError stops the sim for the WHOLE roster.
+        if not self.steers():
+            return
         tw = np.asarray(cmd, np.float32).copy()
         # Deployment heading-hold, same 3 lines the robot runtime would run:
         # the policy is compass-blind (61 obs carry no yaw), so an unsteered
@@ -476,6 +507,18 @@ class Duck:
         if self.robot == "microduck":
             self.env.head_cmd[:] = 0.0
             self.env.body_cmd[:] = 0.0
+
+    def steers(self) -> bool:
+        """Does this slot's env take a drive command at all?
+
+        Asked of the ENV, not of the robot id: a walking env carries
+        `twist_cmd` and an arm env does not, and a level-0 body's
+        `KinematicIdle` has no channel to steer. Answering by capability is
+        what keeps WASD from raising inside the 50 Hz loop for a body nobody
+        thought about — the failure mode a hard-coded id list has here is a
+        dead lab, not a dead duck (`lab_loop`'s exception is unretrieved).
+        """
+        return hasattr(self.env, "twist_cmd")
 
     def set_robot(self, robot: str) -> None:
         """Move this roster slot to another body.
@@ -660,7 +703,11 @@ class Duck:
             self.reset()
 
     def reset(self) -> None:
-        cmd = self.env.twist_cmd.copy()
+        # The shared drive command survives the episode — for a body that has
+        # one. An arm env and a kinematic idle have none (see `steers`), and
+        # reading `twist_cmd` off them here would raise inside the 50 Hz loop
+        # at the first episode boundary rather than at the first keypress.
+        cmd = self.env.twist_cmd.copy() if self.steers() else None
         self._hold_yaw = None   # new episode, new heading anchor
         self.handed = False   # each episode starts on the trick's own brain
         # Speed is reported PER EPISODE: carrying the last half second of a
@@ -668,7 +715,8 @@ class Duck:
         # duck standing still at 0.3 m/s.
         self.speed_hist.clear()
         self.obs, _ = self.env.reset()
-        self.set_cmd(cmd)  # resets resample commands; keep the shared one
+        if cmd is not None:
+            self.set_cmd(cmd)  # resets resample commands; keep the shared one
 
     def sample_speed(self) -> None:
         """Record this step's forward speed, in the HEADING frame.
@@ -684,7 +732,15 @@ class Duck:
 
         Reached through the module (not a `from … import`) so the hot
         reload in POST /teach keeps this binding live.
+
+        A body whose env has no heading frame records NOTHING, and
+        `forward_speed()` then shows "—": `heading_lin_vel` is
+        `MicroduckWalkEnv`'s, an arm env has no trunk to measure and a
+        `KinematicIdle` never moves, so a zero here would be a made-up
+        reading rather than a missing one.
         """
+        if not hasattr(self.env, "heading_lin_vel"):
+            return
         self.speed_hist.append(float(behaviors_mod._base_vel(self.env)[0]))
 
     def forward_speed(self) -> float | None:
@@ -750,12 +806,14 @@ def _robot_scene_to_env(model, robot: str) -> tuple[tuple[int, int], ...]:
     against the scene's body list positionally, so a robot whose training
     scene and visual scene were compiled from different files (they are —
     the visual one has no floor) must still line up name by name.
-    """
-    if robot != "g1":
-        raise KeyError(f"no visual scene for robot {robot!r}")
-    from .robots.g1 import visual_scene
 
-    names = visual_scene()["bodies"]
+    Generic since Phase 1b: the names come from the BODY's own
+    `visual_scene()` (`lab/robots.scene_body_names`), so MARS's 18 bodies and
+    a Menagerie quadruped's line up exactly as the G1's did, with no branch
+    here. A body whose assets are gone raises, which is the same
+    `KeyError`-shaped absence the `g1` check used to produce.
+    """
+    names = lab_robots.scene_body_names(robot)
     by_name = {model.body(b).name: b for b in range(model.nbody)}
     out: list[tuple[int, int]] = []
     for name in names:
@@ -840,18 +898,46 @@ def _run_size(run: Path) -> int:
 _CHAIN_RE = re.compile(r"^(teach-.+)-s(\d+)$")
 
 
-def policy_robot(path: str | Path | None) -> str:
-    """Which body a policy drives: the run's own run.json, else the duck.
+# --- robots: every answer below is the registry's, via lab/robots.py -------
+#
+# `docs/mars-roadmap.md` counted 15 `"g1"` literals in this file, and §6.4's
+# fix is that a body ANSWERS instead of being branched on. What remains here
+# are thin re-exports, kept under the names the rest of this module, the
+# tests and the viewer's HTTP surface already address.
 
-    The palette shows both robots' runs; a chip that lands on the wrong
-    body would load happily and behave like noise (99 obs read as 61).
-    """
-    if not path:
-        return "microduck"
-    p = Path(path)
-    d = p if p.is_dir() else p.parent
-    from .export_onnx import run_robot
-    return run_robot(d)
+#: Which body a policy drives — see `lab/robots.policy_robot` (it resolves the
+#: policy's own CONTRACT now, which is what lets a stamped .onnx answer for
+#: itself after it has been moved away from its run directory).
+policy_robot = lab_robots.policy_robot
+
+#: One-click asset downloads, PER BODY (`POST /robots/{id}/fetch`). It was one
+#: module-level dict called `_G1_FETCH`, so a MARS download would have shown
+#: up in the palette as a G1 one.
+start_fetch = lab_robots.start_fetch
+
+#: What a SENTENCE calls a body ("teach the {noun} a trick").
+robot_noun = lab_robots.robot_noun
+
+#: The palette's robot switch. Every `registry.ids()` entry, `ready` per body.
+available_robots = lab_robots.available_robots
+
+
+#: The RECIPE a run practised, as a behaviors id — what the palette groups
+#: "Our runs" by. Through `Body.tasks()` now, so a body's recipes are the
+#: body's (`lab/robots.run_trick`).
+run_trick = lab_robots.run_trick
+
+
+def trick_names(policies: list[dict]) -> dict[str, dict]:
+    """Heading text for every trick id `policies` mentions: the recipe's own
+    title and emoji. An id with no recipe behind it (a bare task name, a
+    recipe since deleted) is left out and the palette shows the id."""
+    out: dict[str, dict] = {}
+    for tid in {p["trick"] for p in policies if p.get("trick")}:
+        b = behaviors_mod.BEHAVIORS.get(tid)
+        if b is not None:
+            out[tid] = {"title": b.title, "emoji": b.emoji}
+    return out
 
 
 def discover_policies() -> list[dict]:
@@ -862,27 +948,14 @@ def discover_policies() -> list[dict]:
     (1-based) so the panel can group a curriculum chain as one family.
     `sizeBytes` (run entries) is what deleting the run would free — the
     palette's delete confirmation shows it."""
-    out: list[dict] = []
-    if POLICIES_DIR.exists():
-        for p in sorted(POLICIES_DIR.glob("*.onnx")):
-            out.append({"id": f"pollen:{p.stem}", "label": p.stem,
-                        "group": "pollen", "path": str(p),
-                        "robot": "microduck"})
-    # The G1's own shipped drop (`uv run fetch-g1`). Only the ones that speak
-    # this robot's observation are listed — `shipped_policies` reads each
-    # graph, so a 101-obs croucher or a 36-obs arm overlay stays out of the
-    # palette instead of becoming a chip that can never be assigned. Empty,
-    # and the group disappears, on a machine that never fetched the assets.
-    try:
-        from .robots.g1 import shipped_policies
-        for e in shipped_policies():
-            if not e["usable"]:
-                continue
-            out.append({"id": f"g1:{e['name']}", "label": e["name"],
-                        "group": "g1", "path": e["path"], "robot": "g1",
-                        "note": e.get("note", "")})
-    except Exception as exc:                        # assets missing / unreadable
-        print(f"[lab] no G1 policies in the palette: {type(exc).__name__}: {exc}")
+    # Every body's SHIPPED drop, from the body (`Body.shipped_policies`).
+    # This was two hand-written blocks — a `pollen` glob and a `g1`
+    # try/except — and a third body would have been a third. A body that
+    # ships nothing contributes nothing and its section disappears from the
+    # palette, which is MARS's case: Innate's learned skills are ACT
+    # checkpoints trained from demonstrations, not ONNX, and `innate-os`
+    # vendors none.
+    out: list[dict] = list(lab_robots.shipped_entries())
     run_entries: list[dict] = []
     ckpt_entries: list[dict] = []
     if RUNS_DIR.exists():
@@ -909,6 +982,9 @@ def discover_policies() -> list[dict]:
                     entry["note"] = str(label["note"])
                 if label.get("pick"):
                     entry["pick"] = True
+                trick = run_trick(run, entry["robot"])
+                if trick:
+                    entry["trick"] = trick
                 m = _CHAIN_RE.match(run.name)
                 if m:
                     entry["chain"] = m.group(1)
@@ -1952,6 +2028,13 @@ def restore_ducks(path: Path) -> list[Duck]:
                 infer = load_policy_infer(entry["policy"])
             elif entry.get("onnxPath"):
                 infer = _onnx_infer(Path(entry["onnxPath"]))
+            elif entry.get("robot") and entry["robot"] != "microduck":
+                # A slot put on the stage with no brain (`spawn_robot`): MARS
+                # before anything is trained on it, a Menagerie model at
+                # level 0. Its idle IS the zero action, so there is nothing
+                # to load and dropping the row would silently empty the
+                # stage across a restart.
+                infer = _zero_infer_for(str(entry["robot"]))
             else:
                 raise ValueError("no brain recorded")
         except Exception as e:
@@ -1967,12 +2050,20 @@ def restore_ducks(path: Path) -> list[Duck]:
         # preview env when the behavior can't be resolved any more (the flag
         # then quietly drops rather than mislabeling the env).
         skw = showcase_env_kwargs(run_path) if entry.get("showcase") else None
-        duck = Duck(str(entry["id"]), str(entry["label"]), infer, seed=i,
-                    policy_id=entry.get("policy"),
-                    onnx_path=entry.get("onnxPath"),
-                    robot=str(entry.get("robot") or policy_robot(run_path)),
-                    env_kwargs=(skw if skw is not None
-                                else env_kwargs_for_policy_path(run_path)))
+        try:
+            duck = Duck(str(entry["id"]), str(entry["label"]), infer, seed=i,
+                        policy_id=entry.get("policy"),
+                        onnx_path=entry.get("onnxPath"),
+                        robot=str(entry.get("robot") or policy_robot(run_path)),
+                        env_kwargs=(skw if skw is not None
+                                    else env_kwargs_for_policy_path(run_path)))
+        except Exception as e:
+            # Its BODY can't be built — a G1 saved on a machine whose G1
+            # assets are gone. Skip it like an unloadable brain: one missing
+            # robot must not stop the whole lab from starting.
+            print(f"[lab] skipping {entry.get('id')} from {path.name}: "
+                  f"{type(e).__name__}: {e}")
+            continue
         duck.showcase = skw is not None
         ho = handoff_for(run_path) if skw is not None else None
         duck.handoff_infer, duck.handoff_label = ho if ho else (None, None)
@@ -2002,6 +2093,9 @@ class TeachReq(BaseModel):
     # initFrom.
     startStage: int | None = None
     initFrom: str | None = None               # run name under runs/ to fine-tune
+    # Which body to teach, as the panel's robot switch says. None = the old
+    # rule (the trainee's body, else a one-robot roster, else the duck).
+    robot: str | None = None
     # TOTAL practice budget for the whole job, in steps — the panel's "how
     # long should it practice?" control. None means "unchanged": the user's
     # last sticky choice for this behavior, or the recipe's declared budgets
@@ -2117,11 +2211,14 @@ def match_teach_text(text: str, robot: str = "microduck"
     return behaviors_mod.match_behavior(text, robot), None
 
 
-def imitation_behavior(robot: str = "microduck"):
-    """The recipe that tracks a saved clip on `robot`: the duck's `imitate`,
-    another body's `<robot>_imitate` task. None if that body has none."""
-    bid = "imitate" if robot == "microduck" else f"{robot}_imitate"
-    return behaviors_mod.BEHAVIORS.get(bid)
+#: The 🎓 panel's suggestion chips for a body, through `Body.tasks()`
+#: (`lab/robots.teach_suggestions`). A body with nothing to teach — a
+#: Menagerie model at level 0 — gets an empty list and therefore no chip,
+#: rather than the duck's.
+teach_suggestions = lab_robots.teach_suggestions
+
+#: The recipe that tracks a saved clip on a body (the duck's `imitate`).
+imitation_behavior = lab_robots.imitation_behavior
 
 
 class LabState:
@@ -2312,17 +2409,72 @@ def on_stage_handoff(st: "LabState") -> None:
         h.rebuild_env(kw)
 
 
+def env_kwargs_for_task_run(run: Path) -> dict:
+    """Lab-preview env for a WALK/TASK run of another body, from its run.json.
+
+    A `train-walk --robot g1 --task …` run writes no behavior.json, so the
+    lookup below returned {} and `Duck._make_env` fell through to
+    `task="walk"`: the G1's measured-best front kick (`g1_imitate` on the
+    "g1-front-kick" clip) was stepped in G1WalkEnv, where the three command
+    slots carry a locomotion twist instead of the clip's clock. The policy
+    read each held twist as ONE frozen phase — filmed on the lab page it
+    kicked once after a reset and then stood in a split stance; measured
+    headless, 2 lifts in 12 s against 4 (one per 3 s loop) in its own env.
+    The same hole swallowed every task env that owns those slots (stand,
+    squat, front_kick, punch). Mirrors `trainee_env_kwargs`' other-body
+    branch: `task` (read by Duck._make_env), the clip, the episode length.
+
+    {} for the duck, a walk run, an unknown task or a clip that is gone —
+    the slot then previews in the walk env as before, because a raise here
+    lands in a spawn/assign/restore path and an unbuildable env there costs
+    the whole roster, not one chip."""
+    try:
+        rj = json.loads((run / "run.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(rj, dict):
+        return {}
+    robot, task = rj.get("robot") or "microduck", rj.get("task")
+    if robot == "microduck" or task in (None, "", "walk"):
+        return {}
+    from .train import env_class
+    try:
+        env_class(robot, str(task))
+    except (SystemExit, Exception):  # noqa: BLE001  (env_class raises SystemExit on an unknown task)
+        return {}
+    kw: dict = {"task": str(task)}
+    ekw = rj.get("env_kwargs") if isinstance(rj.get("env_kwargs"), dict) else {}
+    clip = ekw.get("clip_name")
+    if clip:
+        from . import motion
+        try:
+            motion.load_clip(str(clip))
+        except Exception:  # noqa: BLE001  (a deleted/renamed clip must not kill a restore)
+            return {}
+        kw["clip_name"] = str(clip)
+    elif str(task) == "imitate":
+        return {}                       # G1ImitateEnv raises without a clip
+    try:
+        ep = float(ekw.get("max_episode_s") or 0.0)
+    except (TypeError, ValueError):
+        ep = 0.0
+    if ep > 0.0:
+        kw["max_episode_s"] = ep
+    return kw
+
+
 def env_kwargs_for_policy_path(path: str | None) -> dict:
     """Same, derived from a run artifact's sibling behavior.json (assigned or
-    restored teach-run policies)."""
+    restored teach-run policies) — or, for another body's walk/task run,
+    from its run.json (`env_kwargs_for_task_run`)."""
     if not path:
         return {}
-    bj = Path(path).parent / "behavior.json"
+    run = Path(path).parent
     try:
-        behavior_id = json.loads(bj.read_text()).get("behavior")
+        behavior_id = json.loads((run / "behavior.json").read_text()).get("behavior")
         return env_kwargs_for_behavior(behaviors_mod.BEHAVIORS[behavior_id])
     except (OSError, KeyError, json.JSONDecodeError):
-        return {}
+        return env_kwargs_for_task_run(run)
 
 
 def showcase_env_kwargs(path: str | None) -> dict | None:
@@ -2564,52 +2716,39 @@ def spawn_duck_error(st: LabState, policy_id: str | None) -> str | None:
     return None
 
 
-def extract_scene() -> dict:
-    """Visual geometry for Three.js, straight from the compiled model
-    (jenga-stacker's extract_visual_scene, deduplicated by mesh id)."""
-    import mujoco
+#: The DUCK's mesh dump for the viewer. It moved to `lab/robots.py` so
+#: `robots/microduck.MicroduckBody.visual_scene` can call it without
+#: importing this server (that method carried a `PHASE 1B:` note saying the
+#: import pointed the wrong way). Re-exported under the name `make_app` and
+#: two test modules already address.
+extract_scene = lab_robots.extract_scene
 
-    from .world.compose import MOUTH_GROUP, scene_model
 
-    # NOT `from_xml_path(SCENE_WALK_XML)`: the viewer draws every duck from
-    # this one scene, and the world stream indexes its body list positionally,
-    # so this model has to carry the hinged `mouth` body too.
-    m = scene_model()
-    mesh_ids: dict[int, int] = {}
-    meshes: list[dict] = []
-    geoms: list[dict] = []
-    for i in range(m.ngeom):
-        # Group 2 is where the upstream export puts the visual shells; the
-        # hinged bill sits in MOUTH_GROUP so no range sensor sees it, and the
-        # viewer has to ask for it by name.
-        if m.geom_type[i] != mujoco.mjtGeom.mjGEOM_MESH or m.geom_group[i] not in (2, MOUTH_GROUP):
-            continue
-        mid = int(m.geom_dataid[i])
-        if mid not in mesh_ids:
-            va, vn = int(m.mesh_vertadr[mid]), int(m.mesh_vertnum[mid])
-            fa, fn = int(m.mesh_faceadr[mid]), int(m.mesh_facenum[mid])
-            mesh_ids[mid] = len(meshes)
-            meshes.append({
-                "v": np.round(m.mesh_vert[va:va + vn], 4).reshape(-1).tolist(),
-                "f": m.mesh_face[fa:fa + fn].reshape(-1).tolist(),
-            })
-        # Material name + rgba ride along so the viewer can paint per-part
-        # colors (eye ring, mouth, shells) instead of guessing per body.
-        mat_id = int(m.geom_matid[i])
-        rgba = m.mat_rgba[mat_id] if mat_id >= 0 else m.geom_rgba[i]
-        geoms.append({
-            "mesh": mesh_ids[mid],
-            "body": int(m.geom_bodyid[i]),
-            "pos": [round(float(x), 5) for x in m.geom_pos[i]],
-            "quat": [round(float(x), 5) for x in m.geom_quat[i]],  # wxyz
-            "mat": m.material(mat_id).name if mat_id >= 0 else "",
-            "rgba": [round(float(x), 4) for x in rgba],
-        })
-    return {
-        "bodies": [m.body(b).name for b in range(m.nbody)],
-        "meshes": meshes,
-        "geoms": geoms,
-    }
+def spawn_robot_error(st: LabState, robot: str | None) -> str | None:
+    """Why {"spawn_robot": ...} can't be honored (None = go).
+
+    A slot with no POLICY, which `spawn_duck` cannot express: it needs a
+    palette id, and the two bodies that ship no policy at all are exactly the
+    ones a person most needs to be able to put on the stage — MARS before
+    anybody has trained it anything, and every Menagerie model (level 0 of
+    docs/mars-roadmap.md §7.1 is "you can see it", and there is nothing to
+    assign). The slot idles: an arm env holds HOME under a zero action (its
+    default map is `delta`, so zero means stay), a level-0 body holds its
+    keyframe (`lab/robots.KinematicIdle`).
+    """
+    if not robot:
+        return "spawn_robot needs a robot id"
+    if len(st.ducks) >= MAX_DUCKS:
+        return f"lab is full ({MAX_DUCKS} ducks) — remove one first"
+    if robot not in registry_ids():
+        return f"no robot {robot!r} — have {', '.join(registry_ids())}"
+    return None
+
+
+def registry_ids() -> tuple[str, ...]:
+    """Every body id this install knows, fetched or not (`registry.ids`)."""
+    from .robots import registry as _registry
+    return _registry.ids()
 
 
 # ------------------------------------------------- keyframe animation (🎬)
@@ -2673,9 +2812,24 @@ def robot_of(robot: str | None) -> str:
 
 def scratch_for(robot: str | None) -> PoseScratch:
     """pose_scratch(), with a missing body reported as a 404 rather than a
-    500 (the G1's assets are optional — `uv run fetch-g1`)."""
+    500 (the G1's assets are optional — `uv run fetch-g1`).
+
+    A body the editor cannot pose is a 404 too, and by CAPABILITY rather
+    than by id: `PoseScratch` is a walker's tool — effectors, soles, a base
+    body — so `pose_scratch("mars")` died with `AttributeError: 'MarsBody'
+    object has no attribute 'base_body'`, a 500 with a traceback in the log
+    for a question that has a perfectly good answer (`docs/mars-roadmap.md`
+    §2a found this the moment a third body was registered). `GET /robots`
+    carries the same flag as `animate`, so the panel never offers the body
+    in the first place; this is the door being locked as well as unlisted.
+    """
+    rid = robot_of(robot)
     try:
-        return pose_scratch(robot_of(robot))
+        if not lab_robots.available_animate(rid):
+            raise HTTPException(
+                404, f"the 🎬 editor cannot pose a {lab_robots.robot_noun(rid)}"
+                     " — it poses walkers (effectors, soles, a base link)")
+        return pose_scratch(rid)
     except KeyError as e:
         raise HTTPException(404, str(e))
     except FileNotFoundError as e:
@@ -3015,21 +3169,47 @@ def make_app(ducks: list[Duck]):
     def get_scene(robot: str = "microduck") -> dict:
         """Visual meshes for a body in the roster.
 
-        The duck's scene is precompiled at startup; another robot's is built
-        on demand and cached (the G1's mesh dump is ~21 MB of millimetre
-        ints — see robots/g1.extract_visual_scene)."""
+        The duck's scene is precompiled at startup; every other body builds
+        its own on demand and caches it (`Body.visual_scene` — the G1's mesh
+        dump is ~21 MB of millimetre ints, MARS's is 9 meshes of STL, a
+        Menagerie model's is whatever its visual group holds).
+
+        The 404 carries the SETUP HINT, because "unknown robot" and "you have
+        not downloaded it yet" are different problems and the palette's ⤓
+        button is the answer to only one of them."""
         if robot in ("", "microduck", "duck"):
             return scene
-        if robot == "g1":
-            from .robots.g1 import g1_ready, visual_scene
-            if not g1_ready():
-                raise HTTPException(404, "G1 assets missing — run `uv run fetch-g1`")
-            return visual_scene()
-        raise HTTPException(404, f"unknown robot {robot!r}")
+        try:
+            return lab_robots.robot_scene(robot)
+        except FileNotFoundError as e:              # known body, no assets
+            raise HTTPException(404, str(e))
+        except KeyError:
+            raise HTTPException(404, f"unknown robot {robot!r}")
 
     @app.get("/policies")
     def get_policies() -> dict:
-        return {"policies": discover_policies()}
+        policies = discover_policies()
+        # `shipped` names the palette's shipped SECTIONS and their headings.
+        # The viewer used to hold that list itself, so a third body would
+        # have meant a fourth literal in a TypeScript file.
+        return {"policies": policies, "robots": available_robots(),
+                "shipped": lab_robots.shipped_groups(),
+                "tricks": trick_names(policies)}
+
+    @app.post("/robots/{robot}/fetch")
+    def fetch_robot(robot: str) -> dict:
+        """Download a robot's assets from the palette. Returns at once; poll
+        GET /policies until the robot reports `ready`.
+
+        Any body with a `fetch()`: the G1's ~140 MB clone, MARS's 7.2 MB of
+        STLs, or a Menagerie model — a `menagerie:<name>` id routes to the
+        NAMESPACE's own download, because at that moment there is no body in
+        the cache to ask (`lab/robots.start_fetch`, and `fetch_robot.py`'s
+        CLI has the same branch for the same reason)."""
+        try:
+            return lab_robots.start_fetch(robot)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
 
     @app.delete("/runs/{name}")
     def delete_run(name: str, chain: bool = False) -> dict:
@@ -3224,20 +3404,22 @@ def make_app(ducks: list[Duck]):
 
     @app.get("/robots")
     def get_robots() -> dict:
-        """Every body the editor can pose: the duck always, the G1 once its
-        assets are fetched (`ready`), so the panel can offer a body switch
-        without the viewer knowing what is installed."""
-        from .robots import spec as S
-        from .robots.g1 import g1_ready
-        out = []
-        for rid, spec in S.registry().items():
-            out.append({"id": rid, "title": spec.title or rid,
-                        "numJoints": spec.num_joints,
-                        "ready": True if rid == "microduck" else bool(g1_ready())})
-        if not any(r["id"] == "g1" for r in out):
-            out.append({"id": "g1", "title": "Unitree G1", "numJoints": 29,
-                        "ready": False})
-        return {"robots": out}
+        """Every body, for the 🎬 editor and the 🎓 panel.
+
+        `ready` is each body's own answer now (`Body.ready`). It used to be
+        `True if rid == "microduck" else bool(g1_ready())`, so the moment a
+        THIRD body was registered it inherited the G1's download state — and
+        the endpoint then hand-patched an absent G1 back onto the end of the
+        list it had just built, because `registry()` drops a body whose
+        assets are missing.
+
+        `animate` says whether the 🎬 pose editor can open it: `PoseScratch`
+        is a WALKER's tool (effectors, soles, a base body) and
+        `pose_scratch("mars")` raised `AttributeError: no attribute
+        'base_body'` — so the panel filters by CAPABILITY, which is what the
+        flag carries (`lab/robots._animates`). `kind` lets the viewer pick an
+        emoji and a verb without a table of ids."""
+        return {"robots": lab_robots.robot_entries()}
 
     @app.get("/joints")
     def get_joints(robot: str = "microduck") -> dict:
@@ -3460,6 +3642,14 @@ def make_app(ducks: list[Duck]):
                   if d.id != "trainee"}
         robot = (getattr(trainee, "robot", None)
                  or (robots.pop() if len(robots) == 1 else "microduck"))
+        # The panel's robot switch is an explicit choice and beats the guess
+        # — a lab holding a duck AND a G1 could otherwise only ever teach
+        # whichever body the trainee happened to be.
+        if req.robot:
+            if not behaviors_mod.for_robot(req.robot):
+                return {"matched": False,
+                        "message": f"I don't have any recipes for {req.robot!r} yet."}
+            robot = req.robot
         # A clip names its own body. "⚡ train this" on a G1 clip is a G1
         # task whatever the roster is standing on — the job rebuilds the
         # trainee onto the clip's body, as it does for any other task.
@@ -3872,6 +4062,11 @@ def make_app(ducks: list[Duck]):
                     sc = bool(sd.get("showcase")) if isinstance(sd, dict) else False
                     asyncio.create_task(do_spawn_duck(str(pid) if pid else "",
                                                       showcase=sc))
+                if "spawn_robot" in msg:
+                    sr = msg["spawn_robot"]
+                    rid = sr.get("robot") if isinstance(sr, dict) else sr
+                    asyncio.create_task(
+                        do_spawn_robot(str(rid) if rid else ""))
         except WebSocketDisconnect:
             pass
         finally:
@@ -3913,14 +4108,19 @@ def make_app(ducks: list[Duck]):
             label = showcase_label(policy_id, bool(skw.get("spotter")))
             duck.rebuild_env(skw)
         duck.showcase = skw is not None
-        # The obs the policy wants vs the obs this body produces. A 99-d G1
-        # brain in a 61-d duck env used to load, run and emit nonsense.
-        want_obs = getattr(infer, "obs_dim", None)
-        have_obs = int(duck.env.observation_space.shape[0])
-        if want_obs is not None and int(want_obs) != have_obs:
+        # Does this policy speak this body? The policy's own CONTRACT when
+        # the file (or its run) records one, and the graph's width as the
+        # last-ditch check on a file that says nothing — one call now, where
+        # this was four copies of a width compare (docs/mars-roadmap.md
+        # §6.3). A 99-d G1 brain in a 61-d duck env used to load, run and
+        # emit nonsense; two bodies of the SAME width would still have
+        # crossed silently, which is what the contract id fixes.
+        why = lab_robots.policy_refusal(
+            path, duck.robot, getattr(infer, "obs_dim", None),
+            int(duck.env.observation_space.shape[0]))
+        if why:
             st.events.append(
-                f"assign failed: {policy_id} wants {want_obs} obs, "
-                f"{duck_id} ({duck.robot}) produces {have_obs}")
+                f"assign failed: {policy_id} {why} ({duck_id})")
             return
         duck.swap_policy(label, infer, policy_id=policy_id)
         ho = handoff_for(path) if skw is not None else None
@@ -3965,15 +4165,15 @@ def make_app(ducks: list[Duck]):
                           seed=100 + n, onnx_path=onnx_path, robot=robot,
                           env_kwargs=trainee_env_kwargs(
                               job.behavior, job.stage_env()))
-            # The same width guard do_assign/do_spawn_duck carry: a mismatch
-            # is a message, not an ONNX raise inside the 50 Hz loop — which
-            # stops the loop for every duck, not just this one.
-            want_obs = getattr(infer, "obs_dim", None)
-            have_obs = int(helper.env.observation_space.shape[0])
-            if want_obs is not None and int(want_obs) != have_obs:
+            # The same contract check do_assign/do_spawn_duck carry: a
+            # mismatch is a message, not an ONNX raise inside the 50 Hz loop
+            # — which stops the loop for every duck, not just this one.
+            why = lab_robots.policy_refusal(
+                onnx_path, robot, getattr(infer, "obs_dim", None),
+                int(helper.env.observation_space.shape[0]))
+            if why:
                 st.events.append(
-                    f"helper {n} not spawned: the run's brain wants "
-                    f"{want_obs} obs, a {robot} produces {have_obs}")
+                    f"helper {n} not spawned: the run's brain {why}")
                 return
             st.ducks.append(helper)
             save_lab_state(st.ducks)
@@ -4037,12 +4237,11 @@ def make_app(ducks: list[Duck]):
                     policy_id=policy_id, robot=robot,
                     env_kwargs=(skw if skw is not None
                                 else env_kwargs_for_policy_path(path)))
-        want_obs = getattr(infer, "obs_dim", None)
-        have_obs = int(duck.env.observation_space.shape[0])
-        if want_obs is not None and int(want_obs) != have_obs:
-            st.events.append(
-                f"spawn failed: {policy_id} wants {want_obs} obs, a {robot} "
-                f"produces {have_obs}")
+        why = lab_robots.policy_refusal(
+            path, robot, getattr(infer, "obs_dim", None),
+            int(duck.env.observation_space.shape[0]))
+        if why:
+            st.events.append(f"spawn failed: {policy_id} {why}")
             return
         duck.showcase = skw is not None
         ho = handoff_for(path) if skw is not None else None
@@ -4054,8 +4253,37 @@ def make_app(ducks: list[Duck]):
     # The roster mutations the WebSocket drives, reachable without a socket:
     # the same handlers, so a test exercises what the viewer actually calls
     # (see app.state.lab above).
+    async def do_spawn_robot(robot: str) -> None:
+        """Put one `robot` on the stage with NO policy — it idles.
+
+        The palette's ＋ for a body that has nothing to assign yet: MARS
+        before anyone has trained it, and every Menagerie model. Without it
+        the only way onto the stage was a policy chip, so the two bodies most
+        worth LOOKING at first were the two that could not be shown at all.
+        """
+        err = spawn_robot_error(st, robot)
+        if err:
+            st.events.append(f"spawn_robot ignored: {err}")
+            return
+        n = next_duck_slot(st.ducks)
+        try:
+            duck = Duck(f"d{n}", f"{lab_robots.robot_title(robot)}",
+                        _zero_infer_for(robot), seed=37 + n, robot=robot)
+        except Exception as e:
+            # Assets gone, an MJCF that will not compile: LOUD, because this
+            # coroutine runs under create_task with nobody awaiting it and a
+            # silent raise is a button that does nothing and says nothing.
+            st.events.append(
+                f"{robot} not spawned: {type(e).__name__}: {e}")
+            return
+        st.ducks.append(duck)
+        save_lab_state(st.ducks)
+        st.events.append(f"spawned d{n} — a {lab_robots.robot_noun(robot)} "
+                         "with no brain yet")
+
     app.state.do_assign = do_assign
     app.state.do_spawn_duck = do_spawn_duck
+    app.state.do_spawn_robot = do_spawn_robot
     app.state.do_spawn_helper = do_spawn_helper
 
     async def apply_snapshot() -> None:
@@ -4084,15 +4312,22 @@ def make_app(ducks: list[Duck]):
             # anywhere. Helpers follow the job's body now (see /teach), so
             # this should never fire; it costs one compare and it is the
             # difference between one parked duck and a dead lab.
-            have_obs = int(d.env.observation_space.shape[0])
-            if want_obs is not None and int(want_obs) != have_obs:
+            #
+            # `live.onnx` IS stamped with its contract (`export()` writes the
+            # metadata props, and the trainer's snapshot goes through the
+            # same exporter), so the first rung of `policy_refusal` does the
+            # work here and the width is the backstop.
+            why = lab_robots.policy_refusal(
+                live, d.robot, want_obs,
+                int(d.env.observation_space.shape[0]))
+            if why:
                 if d.id not in snapshot_skipped:
                     # Once per duck per job: this runs at every snapshot, and
                     # a line per snapshot would bury the rest of the chat.
                     snapshot_skipped.add(d.id)
                     st.events.append(
-                        f"{d.id} ({d.robot}) is not following this run — it "
-                        f"produces {have_obs} obs, the brain wants {want_obs}")
+                        f"{d.id} ({d.robot}) is not following this run — "
+                        f"the brain {why}")
                 continue
             # display_title(), not behavior.title: an imitation run is about a
             # SPECIFIC authored clip, and the launch label already says so —
@@ -4233,7 +4468,7 @@ def make_app(ducks: list[Duck]):
                         # Where this slot stands on the floor, MuJoCo XY m.
                         "offset": [round(v, 4) for v in slots[i]],
                         # Which body the viewer should draw for this row
-                        # ("microduck" | "g1"); the meshes come from
+                        # (any registry id); the meshes come from
                         # GET /scene?robot=<id>.
                         "robot": getattr(d, "robot", "microduck"),
                         # Brain provenance ("run:<name>", "ckpt:…", "pollen:…",
@@ -4241,7 +4476,13 @@ def make_app(ducks: list[Duck]):
                         # run into the teach panel (POST /teach/load).
                         "policy": d.policy_id,
                         "falls": d.falls,
-                        "steerable": not is_trick_duck(d),
+                        # `steers()` FIRST: a trick policy is one a duck
+                        # ignores commands on, but an arm env and a
+                        # kinematic idle have no command channel at all, so
+                        # the honest answer for them is the same "no" for a
+                        # different reason — and asking the id instead of the
+                        # env is what would put `twist_cmd` on a MARS.
+                        "steerable": d.steers() and not is_trick_duck(d),
                         "step": d.env.step_count,
                         "rew": round(d.reward_ema, 2),
                         "speed": d.forward_speed(),
@@ -4252,8 +4493,9 @@ def make_app(ducks: list[Duck]):
                         # the row. None for trick ducks: they run a pinned-
                         # zero twist, so "0.00 asked for" under a backflip
                         # is noise, not information.
-                        "cmdSpeed": (None if is_trick_duck(d) else
-                                     round(float(d.env.twist_cmd[0]), 3)),
+                        "cmdSpeed": (round(float(d.env.twist_cmd[0]), 3)
+                                     if d.steers() and not is_trick_duck(d)
+                                     else None),
                         "spawn": getattr(d.env, "last_spawn", None),
                         "assist": bool(getattr(d.env, "spotter_active", False)),
                         "handed": bool(getattr(d, "handed", False)),

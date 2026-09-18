@@ -30,6 +30,7 @@ import { getCapture } from "@/lib/record";
 import { getSelectedDuck, setSelectedDuck } from "@/lib/select";
 import { modalIsOpen } from "@/lib/ui";
 import { buildBodyGeometries, Duck } from "./Duck";
+import { robotLook } from "@/lib/robots";
 import CameraKeys, { type ControlsLike } from "./CameraKeys";
 import { useTruckSwipe } from "./useTruckSwipe";
 import { Hud } from "./Hud";
@@ -82,7 +83,14 @@ function Ducks({
     for (const [id, s] of Object.entries(scenes)) {
       if (!s) continue;
       try {
-        out[id as RobotId] = buildBodyGeometries(s);
+        // The body's own look: "duck" merges and vertex-colours as it always
+        // has, "g1" takes its material table, and every OTHER body is
+        // "generic" — welded, smoothed, painted from the scene dump's own
+        // rgba. That is the line that puts a MARS or a Menagerie model on
+        // the stage without a component of its own (lib/robots.robotLook).
+        const look = robotLook(id);
+        out[id as RobotId] =
+          look === "duck" ? buildBodyGeometries(s) : buildBodyGeometries(s, null, { look });
       } catch (e) {
         // A mesh set that fails to build must not take the stage with it:
         // this runs during render, so an uncaught throw here would unmount

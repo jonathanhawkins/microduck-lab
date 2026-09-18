@@ -519,13 +519,15 @@ class LazyBody:
     deferred. `_resolve()` is named the same as the G1's because
     `tests/test_body_conformance._resolved()` already looks for it.
 
-    **The four cheap fields are REAL attributes**, set from the manifest and
-    the name: `id`, `title`, `noun` and `kind` are what a palette chip, a
-    `--robot` listing and an `if kind ==` ask, and none of them needs a
-    compile. Everything else goes through `__getattr__` and resolves.
+    **The five cheap fields are REAL attributes**, set from the manifest and
+    the name: `id`, `title`, `noun`, `kind` and `default_task` are what a
+    palette chip, a `--robot` listing, an `if kind ==` and the lab's roster
+    builder ask, and none of them needs a compile. Everything else goes
+    through `__getattr__` and resolves.
     """
 
-    __slots__ = ("id", "title", "noun", "kind", "_name", "_dest")
+    __slots__ = ("id", "title", "noun", "kind", "default_task", "_name",
+                 "_dest")
 
     def __init__(self, name: str, dest: Path | None,
                  manifest: Mapping[str, Any]):
@@ -541,6 +543,10 @@ class LazyBody:
         # knowable without opening the model, and the conformance suite's
         # kind rosters are built without compiling anything.
         self.kind = "generic"
+        # Same reasoning: a body read from an MJCF has no env for any task
+        # (`MjcfBody.env_class` raises), so the lab's roster builder can know
+        # to idle a slot for one kinematically without opening the model.
+        self.default_task = None
 
     def _resolve(self):
         return body(self._name, self._dest)

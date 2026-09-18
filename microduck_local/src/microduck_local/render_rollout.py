@@ -363,6 +363,20 @@ class Probe:
 DUCK_STAND_Z = 0.133
 
 
+def offscreen_renderer(model, width: int, height: int):
+    """A `mujoco.Renderer` at the size asked for, on any body.
+
+    The offscreen buffer is a property of the MODEL: the duck's MJCF declares a
+    large one, the G1's and a composed world's default to 640x480, and a wider
+    `--width` aborted inside the Renderer. Grow it, never shrink it.
+    """
+    import mujoco
+
+    vis = model.vis.global_
+    vis.offwidth, vis.offheight = max(vis.offwidth, width), max(vis.offheight, height)
+    return mujoco.Renderer(model, height=height, width=width)
+
+
 def make_camera(name: str, distance: float, stand_z: float | None = None):
     """A free camera framed for the body being rendered.
 
@@ -697,9 +711,10 @@ def main() -> None:
     ap.add_argument("--task", default=None,
                     help="which env to render another body in (g1: walk, "
                          "stand); default: the run's own run.json")
-    ap.add_argument("--robot", default=None, choices=("microduck", "g1"),
+    from .robots import registry as _registry
+    ap.add_argument("--robot", default=None, choices=_registry.ids(),
                     help="which body the policy drives; default: read from the "
-                         "run's run.json (export_onnx.run_robot)")
+                         "policy's own contract (robots/policy_contract.resolve)")
     ap.add_argument("--camera", default="side", choices=sorted(CAMERAS))
     ap.add_argument("--distance", type=float, default=CAM_DISTANCE)
     ap.add_argument("--fps", type=int, default=30,
@@ -719,8 +734,28 @@ def main() -> None:
     if args.seconds is not None:
         overrides.setdefault("MICRODUCK_EPISODE_S", str(args.seconds))
 
-    from .export_onnx import run_robot
-    robot = args.robot or run_robot(Path(args.policy).parent)
+    # The policy's own contract, not its directory: `resolve` asks the ONNX's
+    # `metadata_props` FIRST, which is the only rung that survives the file
+    # being copied out of its run (robots/policy_contract.py). An explicit
+    # --robot still wins — that is what the flag is for, an old .onnx moved
+    # away from the run that knows it.
+    from .robots import registry as _registry
+    from .robots.policy_contract import resolve as _resolve_contract
+    robot = args.robot or _resolve_contract(Path(args.policy)).robot
+    # A body with no legs has nothing this renderer measures: every frame's
+    # caption is trunk height, foot contacts and a fall rule, and the camera
+    # frames a standing robot. MARS got its own eyes for exactly this reason
+    # (docs/mars-roadmap.md 4a), so say which one rather than drawing a
+    # meaningless sheet or dying in `Probe` on a missing foot geom.
+    kind = str(getattr(_registry.registry().get(robot), "kind", "legged"))
+    if kind != "legged":
+        probe = {"wheeled": "scripts/probe_mars_reach.py (or "
+                            "scripts/probe_mars_pick.py for a `pick` run)"}.get(
+            kind, "a probe of its own — this renderer measures legs")
+        raise SystemExit(
+            f"render-rollout renders LEGGED bodies: every caption here is "
+            f"trunk height, foot contacts and a fall rule, and a {robot} has "
+            f"none of them. Use {probe}.")
     behavior = args.behavior or behavior_from_policy(args.policy)
     if robot != "microduck":
         # Another body walks its own env; there are no trick recipes for it.
@@ -751,7 +786,7 @@ def main() -> None:
     probe = Probe(env)
     cam = make_camera(args.camera, args.distance,
                       stand_z=getattr(env, "stand_z", None))
-    renderer = mujoco.Renderer(env.model, height=height, width=width)
+    renderer = offscreen_renderer(env.model, width, height)
 
     ctrl_hz = 1.0 / C.CTRL_DT
     stride = max(1, round(ctrl_hz / max(args.fps, 1)))

@@ -76,6 +76,11 @@ class Behavior:
     # argv TrainingJob launches instead of `train_behavior` (None = the duck's).
     robot: str = "microduck"
     trainer: tuple[str, ...] | None = None
+    # The phrase the 🎓 panel offers as a one-click suggestion chip for this
+    # robot ("stand on one leg"). Empty = not suggested (still teachable by
+    # typing). It must MATCH this recipe (tests/test_teach_robots.py), so a
+    # chip can never launch a different trick than the one it names.
+    suggest: str = ""
 
     @property
     def task(self) -> str:

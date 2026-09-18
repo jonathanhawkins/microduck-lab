@@ -129,32 +129,36 @@ class MicroduckBody(RobotSpec):
     def visual_scene(self) -> dict:
         """The duck's mesh dump for the viewer.
 
-        Re-exported, not reimplemented: `viz_server.extract_scene` builds it
+        Re-exported, not reimplemented: `lab.robots.extract_scene` builds it
         from `world.compose.scene_model()` — which carries the hinged mouth
         body the plain walk scene does not, and the world stream indexes that
         body list positionally. Two copies of that would be a silently
         mis-indexed duck.
 
-        PHASE 1B: this import is the wrong direction (a body reaching into the
-        4,500-line lab server). `extract_scene` belongs in `lab/robots.py`
-        with the rest of the robot HTTP surface — `docs/mars-roadmap.md` §6.4.
+        The import used to point at `viz_server`, which was the wrong
+        direction (a body reaching into the 4,500-line lab server) and was
+        marked PHASE 1B. `lab/robots.py` exists now, and the two answers that
+        name a duck ASSET live there — `docs/mars-roadmap.md` §6.4.
         """
-        from ..viz_server import extract_scene
+        from ..lab.robots import extract_scene
         return extract_scene()
 
     def shipped_policies(self) -> tuple[dict, ...]:
         """Pollen's reference policies, as palette entries.
 
-        PHASE 1B: `POLICIES_DIR` is read from `viz_server` for the same reason
-        as `visual_scene` — one definition of where the Hub download landed,
-        in the file that owns it today.
+        The group key is `pollen`, NOT this body's id, because a shipped
+        group is named for whoever shipped it: these are Pollen's reference
+        policies for the Microduck (the Hub drop `scripts/setup.sh` fetches),
+        and "Microduck (shipped)" would claim them for this repo. The section
+        HEADING rides along on each entry so the palette needs no table of
+        its own — `lab/robots.shipped_groups` reads it.
         """
-        from ..viz_server import POLICIES_DIR
+        from ..lab.robots import POLICIES_DIR
         if not POLICIES_DIR.exists():
             return ()
         return tuple({"id": f"pollen:{p.stem}", "label": p.stem,
-                      "group": "pollen", "path": str(p),
-                      "robot": self.id}
+                      "group": "pollen", "groupTitle": "Pollen (shipped)",
+                      "path": str(p), "robot": self.id}
                      for p in sorted(POLICIES_DIR.glob("*.onnx")))
 
     def env_class(self, task: str = "walk") -> type:

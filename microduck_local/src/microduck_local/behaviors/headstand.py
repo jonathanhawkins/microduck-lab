@@ -598,6 +598,7 @@ def _hs_gain_term(key):
 
 _register(Behavior(
     id="headstand",
+    suggest="do a headstand",
     emoji="🙃",
     title="Do a headstand",
     description=(

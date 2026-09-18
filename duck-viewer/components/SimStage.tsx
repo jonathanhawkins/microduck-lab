@@ -25,10 +25,11 @@ import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
-import { mergeGeometries, mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { goalDefenders, PICKABLE_COLORS, PICKABLE_SIZES, rugSize, TEAM_COLORWAYS,
   type Scenario, type SimClient, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
 import type { Scene } from "@/lib/lab";
+import { g1PartKind, weldAndSmooth, type G1PartKind } from "./G1Look";
 
 // -- palette -----------------------------------------------------------------
 // Kept close to the page's UI accents (amber / teal) so the stage and the
@@ -762,17 +763,49 @@ const Z_BLOB = 0.0016;
 
 /** Free objects (balls, boxes with mass, toys, persons) posed from the frame
  *  stream, plus the instanced contact blobs under them and under every duck. */
-/** A G1 person: one group per body, one mesh per MJCF geom.
- *  STL/OBJ CAD duplicates verts per face; weld those, then smooth normals
- *  so it matches the original model instead of looking low-poly. */
-function G1Person({ id, scene, client }: { id: string; scene: Scene; client: SimClient }) {
+/** Any non-duck body in the room: one group per body, one mesh per MJCF geom,
+ *  posed positionally from the frame stream.
+ *
+ *  STL/OBJ CAD duplicates verts per face; weld those, then smooth normals so
+ *  it matches the original model instead of looking low-poly.
+ *
+ *  `from` says which list of the frame carries this thing's poses — a G1 in a
+ *  room is still a `Person` (`objects`, kept for old scenarios), while a MARS
+ *  or a Menagerie model is a roster entry (`ducks`). Both stream `bodies` in
+ *  their own `GET /scene?robot=<id>` order, which is the whole reason one
+ *  component can draw either.
+ *
+ *  `look` picks the material: "g1" keeps its part-kind table (a glossy visor,
+ *  dark metal, a flat logo, a clear-coated shell), and everything else paints
+ *  each geom in its own streamed `rgba` — MARS's Innate orange on a charcoal
+ *  chassis comes from the server (`robots/mars.style_visual_geoms`), and a
+ *  Menagerie model arrives in its MJCF's colours. */
+export function RobotBody({
+  id,
+  scene,
+  client,
+  from = "objects",
+  look = "g1",
+}: {
+  id: string;
+  scene: Scene;
+  client: SimClient;
+  from?: "objects" | "ducks";
+  look?: "g1" | "generic";
+}) {
   const tree = useMemo(() => {
+    // Vertices arrive in metres, or in millimetre ints with a `vertScale`
+    // (the G1's dump is 21 MB that way instead of 78 MB of floats). Scaling
+    // here is what keeps a body from arriving 1000x too big, off camera,
+    // with nothing in the console.
+    const vs = scene.vertScale ?? 1;
     const meshGeos = scene.meshes.map((m) => {
-      let g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.Float32BufferAttribute(m.v, 3));
-      g.setIndex(m.f);
-      g = mergeVertices(g, 4e-4);
-      g.computeVertexNormals();
+      const raw = new THREE.BufferGeometry();
+      const v = vs === 1 ? m.v : m.v.map((x) => x * vs);
+      raw.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
+      raw.setIndex(m.f);
+      const g = weldAndSmooth(raw);
+      raw.dispose();
       return g;
     });
     const col = new THREE.Color();
@@ -788,24 +821,23 @@ function G1Person({ id, scene, client }: { id: string; scene: Scene; client: Sim
           geo.applyMatrix4(mat4);
           if (g.rgba) col.setRGB(g.rgba[0], g.rgba[1], g.rgba[2], THREE.SRGBColorSpace);
           else col.set("#888888");
-          const meshName = (g.name ?? "").toLowerCase();
-          const lum = 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b;
-          const kind = /head/.test(meshName) ? "visor"
-            : /logo/.test(meshName) ? "logo"
-            : (g.mat === "black" || lum < 0.25) ? "dark"
-            : "body";
+          const kind: G1PartKind | "own" =
+            look === "g1" ? g1PartKind(g.name, g.mat, col) : "own";
           return { geo, color: "#" + col.getHexString(), kind };
         }),
     );
     meshGeos.forEach((g) => g.dispose());
     return byBody;
-  }, [scene]);
+  }, [scene, look]);
   const refs = useRef<(THREE.Group | null)[]>([]);
   const tmpP = useMemo(() => new THREE.Vector3(), []);
   const tmpQ = useMemo(() => new THREE.Quaternion(), []);
   useFrame((_, dt) => {
-    const o = client.frame?.objects.find((x) => x.id === id);
-    const bodies = o?.bodies;
+    const f = client.frame;
+    const bodies =
+      from === "ducks"
+        ? f?.ducks.find((x) => x.id === id)?.bodies
+        : f?.objects.find((x) => x.id === id)?.bodies;
     if (!bodies) return;
     const a = 1 - Math.exp(-POSE_SMOOTH_HZ * simRate.speed * Math.min(dt, 0.1));
     bodies.forEach((pose, b) => {
@@ -824,7 +856,11 @@ function G1Person({ id, scene, client }: { id: string; scene: Scene; client: Sim
           <group key={scene.bodies[i]} ref={(el) => { refs.current[i] = el; }}>
             {parts.map((p, k) => (
               <mesh key={k} geometry={p.geo} castShadow={false} receiveShadow={false}>
-                {p.kind === "visor" ? (
+                {p.kind === "own" ? (
+                  // The body's OWN colour, straight from the scene dump.
+                  <meshStandardMaterial color={p.color} roughness={0.42} metalness={0.2}
+                    envMapIntensity={0.9} />
+                ) : p.kind === "visor" ? (
                   <meshPhysicalMaterial color={p.color} roughness={0.08} metalness={0.85}
                     clearcoat={1} clearcoatRoughness={0.06} envMapIntensity={1.6} />
                 ) : p.kind === "logo" ? (
@@ -976,7 +1012,7 @@ export function Dynamics({ scenario, client, g1Scene }: {
         </group>
       ))}
       {g1Scene && persons.filter((q) => q.kind === "g1").map((q) => (
-        <G1Person key={q.id} id={q.id} scene={g1Scene} client={client} />
+        <RobotBody key={q.id} id={q.id} scene={g1Scene} client={client} />
       ))}
       {scenario.balls.map((ball, i) => (
         <group key={`ball${i}`} ref={setRef(`ball${i}`)}>

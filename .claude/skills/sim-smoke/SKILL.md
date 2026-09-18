@@ -47,8 +47,9 @@ and presets, and `curl -s :8788/replay/ring | tail -c 600` for the last
 recorded frames (once record/replay exists).
 
 Gotchas: never `pkill -f duck-lab` from an agent shell (the pattern matches
-your own command line and kills your shell; the restart script's own command
-line does not contain it); the container has no EGL, so do not set
+your own command line and kills your shell — and every other lab on the
+machine, including another session's scratch lab on its own port;
+`restart.sh` stops only the process listening on :8788); the container has no EGL, so do not set
 `MUJOCO_GL=egl` here; headless software GL is slower than a Mac GPU, so give
 the page a few seconds. If a bring-up call ever overruns the tool timeout and
 is backgrounded, the servers now survive its reaping — that is the point of

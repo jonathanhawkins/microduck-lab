@@ -152,7 +152,7 @@ runs onnxruntime, streams `/cmd_vel` and `/mars/arm/commands`); an Innate
 
 ## 2. Phases, each with the command and the number that settles it
 
-### Phase 1 — the seam: `Body` + registry, no behaviour change  `[~]`
+### Phase 1 — the seam: `Body` + registry, no behaviour change  `[x]`
 
 - Add `robots/body.py`, `robots/registry.py`; make `RobotSpec` a `Body`;
   move the G1's fetch/ready/scene/look/tasks/attach/driver behind it (they all
@@ -192,7 +192,47 @@ for 1b: `viz_server.py` (15 literals), `render_rollout.py`, the viewer — and
 `MicroduckBody.visual_scene()/shipped_policies()` import from `viz_server`
 in the wrong direction until `lab/robots.py` exists (marked `PHASE 1B:`).
 
-### Phase 2 — MARS on the stage: download, spec, look  `[~]`
+**1b DONE (2026-09-18)** — the LAB SERVER and the VIEWER. `lab/robots.py`
+(the whole robot HTTP surface: `available_robots`, `robot_entries`,
+`start_fetch`/`fetch_state` PER BODY, `robot_scene`, `scene_body_names`,
+`shipped_entries`/`shipped_groups`, `run_trick`, `teach_suggestions`,
+`policy_robot`, `policy_refusal`, `slot_env`, `KinematicIdle`) plus
+`extract_scene` and `POLICIES_DIR`, so `robots/microduck.py`'s two
+`PHASE 1B:` imports now point at the lab's package instead of at the 4,500-line
+server. `"g1"` literals in `viz_server.py`: **10 → 0** (two remain in the
+file and both are PROSE — this note's own count, and a comment naming an
+example id); in the viewer, **58 → 0** outside comments. `render_rollout.py`
+takes its `--robot` choices from `registry.ids()` and resolves the body from
+the policy's own CONTRACT. Duck/BAM/G1 rollout fingerprints unchanged
+(`3dfe999d8b52e4c3` / `64870f60588a8737` / `c3c8547d6d790171`).
+
+Three things the phase found, each of which changed the build:
+
+- **`Body.default_task` had to be DATA.** `Duck._make_env` asked for
+  `task="walk"` when nobody said otherwise, and "walk" is not a question MARS
+  can be asked — `MarsBody.env_class("walk")` rightly raises. The three
+  answers are three different statements and none is derivable from the
+  others: `"walk"` for a walker, `"reach"` for MARS, and **`None` for a
+  level-0 body, which means it has no env at all**. Guessing it from `kind`
+  would have put the duck's env behind a string the viewer also renders with.
+- **Recognising a lazy proxy by `_resolve` on its TYPE catches the G1 too.**
+  `robots/g1._LazyG1Spec` is a proxy as much as `menagerie.LazyBody` is, and
+  the listing helper that skipped proxies to avoid a 155 ms compile answered
+  `animate: false` for the G1 — taking the humanoid out of the 🎬 editor it
+  has always been in. The question is "is this id a CATALOGUE's", which
+  `registry.namespace_of` already answers, and a test pins it.
+- **`resolve()` is the wrong reader for the assign guard.** §6.3 left "the
+  four width guards become one contract comparison", and the obvious call is
+  `resolve()` — but its last rung says a file with nothing to say has always
+  been a duck, which is right for NAMING a policy's body and wrong for
+  judging it: a shipped G1 `walker.onnx` has no metadata and no run
+  directory, so `resolve()` calls it a duck and the guard refuses the G1's
+  own walker on a G1 slot. `policy_refusal` reads `recorded()` — the
+  self-describing rungs only — and keeps the graph WIDTH as the last-ditch
+  check on the file, exactly as §6.3 worded it. That first version passed
+  every test until a planted break said otherwise.
+
+### Phase 2 — MARS on the stage: download, spec, look  `[x]`
 
 - `robots/mars.py`: `MarsSpec` — `CACHE_DIR = .cache/innate_mars/`,
   `INNATE_OS_SHA` pinned, joint names in the order Innate's `/mars/arm/state`
@@ -281,6 +321,59 @@ third body in the registry:
   it. Nothing else in the tree breaks on a non-walker entry: `train
   --robot mars` raises NotImplementedError naming Phase 4, the palette's
   shipped groups come back empty, and the stage pitch is per body already.
+
+**2b DONE (2026-09-18)** — MARS ON THE STAGE AND IN THE BROWSER, and so is
+every Menagerie model. Both of the literals above were WRONG and both are
+fixed: `GET /robots` answers each body's own `ready()`, and it carries an
+`animate` flag — the capability filter the editor needed, answered by asking
+the body (`hasattr(body, "base_body")`, which is exactly what `RobotSpec`
+adds to `Body`) rather than by an `isinstance` the G1's lazy proxy would fail.
+`GET /joints?robot=mars` is a 404 with a sentence now, not a 500 with a
+traceback.
+
+What a person can now do, and what it took:
+
+- **A lab slot per body.** A MARS slot builds `MarsArmEnv` for the body's own
+  `default_task`, and its ZERO action holds the arm at HOME — a property of
+  the `delta` map, not of zero (4a-2). MEASURED on the stage from the lab's
+  own pose stream: the gripper's worst-axis span over the last ~0.5 s of an
+  episode is **0.0–0.2 mm** across three episodes, so `mars-reach-delta`
+  arrives and HOLDS rather than limit-cycling. A level-0 body's slot has no
+  env at all (`lab/robots.KinematicIdle`) and holds its keyframe: `step()`
+  advances nothing, deliberately, because a Go2 stepped at `home` with no
+  controller folds onto the floor in about a second and every stranger's
+  robot would be drawn as a heap.
+- **`spawn_robot`, a door that did not exist.** `spawn_duck` needs a palette
+  id, and the two bodies that ship NO policy — MARS before anyone trains it,
+  every Menagerie model — are exactly the ones most worth looking at first.
+  The palette offers "＋ put a {noun} on the stage" for any ready body with
+  nothing to assign, and the slot survives a restart (`restore_ducks` used to
+  drop every row with no brain recorded).
+- **One material table, no component per robot.** `look()` is "duck", "g1" or
+  **"generic"**: welded and smoothed like the G1, painted per geom from the
+  scene dump's own `rgba`. MARS arrives Innate orange on a charcoal chassis
+  because the SERVER painted it (`style_visual_geoms`), and a Go2 arrives in
+  its MJCF's colours — 0 lines of viewer code know either.
+- **The 🎓 panel says "task", not "trick", for a non-legged body** — Innate's
+  vocabulary for Innate's robot (§4) — and its two recipes needed a `suggest`
+  phrase before they were VISIBLE at all: `teach_suggestions` lists only
+  recipes that name one, so a MARS roster showed an empty panel while both
+  tasks existed. A `TEACH_STEPS_OVERRIDE=6000` job on a scratch lab trains
+  through the existing `TrainingJob`, the trainee slot builds the arm env,
+  and a snapshot lands on it: "Trainee updated to 8k steps", with the
+  `live.onnx` stamped `mars-arm-32-v1` and refused on a duck or G1 slot BY ID.
+- **`/sim` draws it and the inspector plots the scan.** A room entry whose
+  `robot` is not the duck is drawn by `RobotBody` (the `G1Person` pattern
+  generalised) from `GET /scene?robot=<id>`, one scene per robot. The
+  inspector shows the 360-ray lidar as a forward-up ring — the honest sensor
+  to draw, since a wheeled body ships `lidar` and no `tof` and the stage hangs
+  a ToF cone off the head camera. In `mars-playroom` it reads 360/360 rays and
+  the room's four walls as a closed rectangle.
+
+Still open after 2b: `scripts/setup.sh --with-mars`, `docs/media/lab-mars.png`
+(the shots live in the session scratchpad), and the ＋ term picker, which
+offers a MARS recipe the DUCK's catalogue terms — that is §6.1's
+`RewardTerm.bodies` tag and not a 2b fix.
 
 ### Phase 3 — MARS in a room: drive it, sense with it, give it the existing brains  `[x]`
 

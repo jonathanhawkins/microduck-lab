@@ -59,6 +59,12 @@ MARS_REACH = Behavior(
     keywords=("reach", "reach a point", "touch that", "point at it",
               "put your gripper there", "arm to the target", "reach out",
               "extend the arm", "touch the spot"),
+    # The 🎓 panel's chip. A recipe with no `suggest` is trainable but
+    # INVISIBLE — `teach_suggestions` lists only recipes that name a phrase —
+    # so a MARS roster showed an empty panel while both tasks existed.
+    # "a task", not "a trick": MARS's vocabulary is Innate's
+    # (docs/mars-roadmap.md §4, "vocabulary drift").
+    suggest="reach a point",
     robot="mars",
     # `train-walk --robot mars --task reach`; TrainingJob appends --run-name,
     # --envs, --steps, --snap-steps and --init-from.
@@ -131,6 +137,7 @@ MARS_PICK = Behavior(
     keywords=("pick", "pick it up", "pick up the block", "grab it", "grasp",
               "grab the block", "lift it", "pick that up", "take it",
               "close the gripper on it"),
+    suggest="pick up the block",
     robot="mars",
     # `train-walk --robot mars --task pick`; TrainingJob appends --run-name,
     # --envs, --steps, --snap-steps and --init-from, and exports each stage's

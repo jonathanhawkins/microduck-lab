@@ -48,6 +48,7 @@ import {
   headCameraPose,
   tofZonePoints,
   CAM_FOV_DEG,
+  lidarRingPoints,
   TOF_PRESETS,
   SIM_SPEEDS,
   SIM_SPEED_DEFAULT,
@@ -57,6 +58,7 @@ import {
   teamColor,
   teamSwatch,
   type FrameEvent,
+  type LidarPayload,
   type SimFrame,
   type ScenarioListing,
   type SimDuck,
@@ -65,6 +67,8 @@ import {
 } from "@/lib/sim";
 import { camAspect, renderInset } from "@/lib/inset";
 import { buildBodyGeometries, Duck, type BodyGeometry } from "./Duck";
+import { RobotBody } from "./SimStage";
+import { robotLook } from "@/lib/robots";
 import CameraKeys from "./CameraKeys";
 import { useTruckSwipe } from "./useTruckSwipe";
 import { CaptureCanvas, Snapshotter } from "./Capture";
@@ -165,10 +169,24 @@ const CAM_MAX_DIST = 12;
  *  baked into the vertex-color channel, and there are at most four teams, so
  *  a 3v3 pitch costs two geometry sets and a room costs one. (Per duck is
  *  what lost the WebGL context at eight ducks before the bodies were merged.) */
-function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
+function SimDucks({
+  scene,
+  client,
+  robotScenes,
+}: {
+  scene: Scene;
+  client: SimClient;
+  /** Mesh sets for the NON-duck bodies in the room, by robot id. A room can
+   *  hold a MARS beside its ducks (world/scenario.Duck.robot), and each is
+   *  drawn from its own `GET /scene?robot=<id>` — one scene per robot, not
+   *  one per entry. */
+  robotScenes: Record<string, Scene>;
+}) {
   const plain = useMemo(() => buildBodyGeometries(scene), [scene]);
   const byTeam = useRef(new Map<string, BodyGeometry[]>());
-  const [roster, setRoster] = useState<{ id: string; name: string; team: string | null }[]>([]);
+  const [roster, setRoster] = useState<
+    { id: string; name: string; team: string | null; robot: string }[]
+  >([]);
   const sig = useRef("");
   const refs = useRef(new Map<string, React.MutableRefObject<DuckFrame | null>>());
   useEffect(() => {
@@ -186,10 +204,19 @@ function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
   useFrame(() => {
     const f = client.frame;
     if (!f) return;
-    const s = f.ducks.map((d) => `${d.id}\t${d.name}\t${d.team ?? ""}`).join("\n");
+    const s = f.ducks
+      .map((d) => `${d.id}\t${d.name}\t${d.team ?? ""}\t${d.robot ?? ""}`)
+      .join("\n");
     if (s !== sig.current) {
       sig.current = s;
-      setRoster(f.ducks.map((d) => ({ id: d.id, name: d.name, team: d.team ?? null })));
+      setRoster(
+        f.ducks.map((d) => ({
+          id: d.id,
+          name: d.name,
+          team: d.team ?? null,
+          robot: d.robot || "microduck",
+        }))
+      );
       const sel = getSelectedDuck();
       if (sel && !f.ducks.some((d) => d.id === sel)) setSelectedDuck(null);
     }
@@ -201,6 +228,24 @@ function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
   return (
     <>
       {roster.map((d) => {
+        if (d.robot !== "microduck") {
+          // Another body in the room. Its poses are already in the frame's
+          // `ducks` list in ITS scene's order, so the only thing missing is
+          // the mesh set — and until that arrives (a fetch away) it draws
+          // nothing rather than borrowing the duck's meshes, which would put
+          // a duck's parts on a MARS's joints.
+          const rs = robotScenes[d.robot];
+          return rs ? (
+            <RobotBody
+              key={d.id}
+              id={d.id}
+              scene={rs}
+              client={client}
+              from="ducks"
+              look={robotLook(d.robot) === "g1" ? "g1" : "generic"}
+            />
+          ) : null;
+        }
         let ref = refs.current.get(d.id);
         if (!ref) {
           ref = { current: null };
@@ -209,6 +254,50 @@ function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
         return <Duck key={d.id} duckId={d.id} bodies={bodiesFor(d.team)} frameRef={ref} offset={[0, 0]} label={d.name} />;
       })}
     </>
+  );
+}
+
+/** The 360-degree scan, as a small forward-up plot in the inspector.
+ *
+ *  A wheeled body ships `lidar` and no `tof` on purpose: its brains DO read
+ *  an 8x8 (the arena adapts the scan for them), but that frame is a fiction
+ *  of 64 bearing bins with no elevation and no mount pose, and the stage
+ *  draws a ToF as a cone hung off the HEAD CAMERA — it would draw a sensor
+ *  the robot does not have, pointing where it is not (world_server's own
+ *  note). The scan is the honest thing to show, so this shows it.
+ *
+ *  SVG, not a canvas or scene overlay: it is ~360 points redrawn at the
+ *  inspector's own React rate, inside a panel that is already DOM, and it
+ *  costs the 50 Hz frame loop nothing. */
+function LidarRing({ scan }: { scan: LidarPayload }) {
+  const size = 112;
+  const pts = lidarRingPoints(scan, size);
+  const age = scan.age === undefined ? null : Math.round(scan.age * 1000);
+  return (
+    <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        style={{ background: "#0d1218", borderRadius: 6, border: "1px solid rgba(255,255,255,.08)" }}
+      >
+        <circle cx={size / 2} cy={size / 2} r={size / 2 - 1} fill="none" stroke="rgba(255,255,255,.10)" />
+        <circle cx={size / 2} cy={size / 2} r={size / 4} fill="none" stroke="rgba(255,255,255,.06)" />
+        {/* the robot, nose up — so the plot can be read against the stage */}
+        <path
+          d={`M ${size / 2} ${size / 2 - 7} L ${size / 2 - 4} ${size / 2 + 4} L ${size / 2 + 4} ${size / 2 + 4} Z`}
+          fill="#43c2b8"
+          opacity={0.8}
+        />
+        {pts.map((q, i) => (
+          <circle key={i} cx={q.x} cy={q.y} r={0.9} fill="#e8b24a" opacity={0.85} />
+        ))}
+      </svg>
+      <div style={{ color: "#9aa5b1", fontSize: 10, lineHeight: 1.5 }}>
+        <div>lidar · {pts.length}/{scan.mm.length} rays</div>
+        <div>{(scan.maxRange ?? 6).toFixed(1)} m ring{age === null ? "" : ` · ${age} ms`}</div>
+      </div>
+    </div>
   );
 }
 
@@ -1196,6 +1285,12 @@ function DuckVoices({ client, sound }: { client: SimClient; sound: boolean }) {
 export default function SimViewer() {
   const [scene, setScene] = useState<Scene | null>(null);
   const [g1Scene, setG1Scene] = useState<Scene | null>(null);
+  // Mesh sets for the non-duck BODIES a room holds (a MARS in the playroom,
+  // a Menagerie model on a floor), by robot id. Filled on demand from the
+  // frame stream — the same pattern the lab page uses — and never keyed on
+  // the scenario, because a `/world/load` while a 21 MB fetch is in flight
+  // would resolve it into a dead closure and throw the meshes away.
+  const [robotScenes, setRobotScenes] = useState<Record<string, Scene>>({});
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [scenarios, setScenarios] = useState<ScenarioListing[]>([]);
@@ -1333,6 +1428,39 @@ export default function SimViewer() {
     saveJSON("duckLabels", showLabels);
     setDuckLabels(showLabels);
   }, [showLabels]);
+
+  // One mesh set per NON-DUCK body on the stage, loaded from the frame the
+  // way the lab page does it: a poll rather than an effect keyed on the
+  // scenario, so a scenario swap mid-fetch cannot strand the result, and a
+  // body whose assets this lab does not have (a 404 every time) is retried a
+  // few times and then left alone instead of polled forever.
+  const robotScenesRef = useRef(new Set<string>());
+  const robotSceneFails = useRef(new Map<string, number>());
+  useEffect(() => {
+    let stopped = false;
+    const tick = () => {
+      const f = clientRef.current?.frame;
+      if (!f) return;
+      for (const d of f.ducks) {
+        const id = d.robot || "microduck";
+        if (id === "microduck" || robotScenesRef.current.has(id)) continue;
+        if ((robotSceneFails.current.get(id) ?? 0) >= 5) continue;
+        robotScenesRef.current.add(id);
+        fetchScene(id)
+          .then((sc) => !stopped && setRobotScenes((prev) => ({ ...prev, [id]: sc })))
+          .catch(() => {
+            robotSceneFails.current.set(id, (robotSceneFails.current.get(id) ?? 0) + 1);
+            robotScenesRef.current.delete(id);     // retry on the next tick
+          });
+      }
+    };
+    const iv = setInterval(tick, 1000);
+    tick();
+    return () => {
+      stopped = true;
+      clearInterval(iv);
+    };
+  }, []);
 
   useEffect(() => {
     const client = new SimClient(setConnected);
@@ -1636,7 +1764,9 @@ export default function SimViewer() {
           <Statics scenario={shown} />
           {editor && <EditorFloor state={editor} onClick={(x, y) => setEditor((st) => (st ? applyFloorClick(st, x, y) : st))} />}
           {client && <Dynamics scenario={scenario} client={client} g1Scene={g1Scene} />}
-          {scene && client && <SimDucks scene={scene} client={client} />}
+          {scene && client && (
+            <SimDucks scene={scene} client={client} robotScenes={robotScenes} />
+          )}
           {scene && client && <TofOverlay scene={scene} client={client} enabled={showTof} />}
           {scene && client && <DetOverlay scene={scene} client={client} enabled={showTof} />}
           {client && <ChaseOverlay client={client} enabled={showTof} />}
@@ -1895,6 +2025,7 @@ export default function SimViewer() {
                     <input type="checkbox" checked={selDuck.headApplied} onChange={(e) => client?.sendHead(selDuck.id, e.target.checked)} /> head
                   </label>
                 </div>
+                {selDuck.sensors?.lidar && <LidarRing scan={selDuck.sensors.lidar} />}
                 {selDuck.brain.inputs && (selDuck.brain.inputs.tof || selDuck.brain.inputs.det) && (
                   <div style={{ marginTop: 4, display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 8px", color: "#9aa5b1" }}>
                     {(["tof", "det"] as const).map((k) => {

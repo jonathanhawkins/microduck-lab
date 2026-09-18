@@ -4,9 +4,9 @@
 import { describe, expect, it } from "vitest";
 
 import { applyFloorClick, makePitch, makeRoom } from "@/components/SimEditor";
-import { goalDefenders, groupLearned, LEARNED_GROUPS, PITCH_TEAMS, RUG_LONG_MAX, RUG_SHORT_MAX,
-  rugSize, SIM_SPEEDS, SIM_SPEED_DEFAULT, simRate, SimClient, speedLabel, speedShortfall, stepSpeed,
-  type LearnedInfo, type Scenario } from "./sim";
+import { goalDefenders, groupLearned, LEARNED_GROUPS, lidarRingPoints, PITCH_TEAMS, RUG_LONG_MAX,
+  RUG_SHORT_MAX, rugSize, SIM_SPEEDS, SIM_SPEED_DEFAULT, simRate, SimClient, speedLabel,
+  speedShortfall, stepSpeed, type LearnedInfo, type Scenario } from "./sim";
 
 const b = (name: string, group: string | null, title: string | null = null): LearnedInfo => ({
   name, group, title, description: null,
@@ -279,5 +279,47 @@ describe("rugSize", () => {
       expect(w).toBeLessThan(rw);
       expect(h).toBeLessThan(rh);
     }
+  });
+});
+
+describe("lidarRingPoints", () => {
+  const scan = (mm: number[], a0 = 0, da = Math.PI / 2, maxRange = 6) => ({ a0, da, mm, maxRange });
+
+  it("puts the robot's FORWARD at the top of the drawing", () => {
+    // MuJoCo bearings are CCW from +x and SVG's y grows downward. A return
+    // dead ahead at half range must land ABOVE the centre; getting the sign
+    // wrong draws a room mirrored front-to-back, which reads as plausible.
+    const [p] = lidarRingPoints(scan([3000]), 100);
+    expect(p.x).toBeCloseTo(50, 6);
+    expect(p.y).toBeCloseTo(25, 6); // above centre (y = 50)
+  });
+
+  it("rebuilds every bearing from a0 + i·da", () => {
+    // 4 rays a quarter turn apart: ahead, left, behind, right.
+    const pts = lidarRingPoints(scan([6000, 6000, 6000, 6000], 0, Math.PI / 2, 6), 100);
+    expect(pts).toHaveLength(4);
+    expect(pts[0].x).toBeCloseTo(50, 6); // ahead → top
+    expect(pts[0].y).toBeCloseTo(0, 6);
+    expect(pts[1].x).toBeCloseTo(0, 6); // the robot's LEFT → left
+    expect(pts[1].y).toBeCloseTo(50, 6);
+    expect(pts[2].y).toBeCloseTo(100, 6); // behind → bottom
+    expect(pts[3].x).toBeCloseTo(100, 6); // the robot's right → right
+  });
+
+  it("drops a 0 — that is NO READING, not a contact on the robot", () => {
+    // The payload's own convention (sensors/lidar.LidarFrame.as_payload).
+    // Drawing them puts a blob of false contacts on the origin.
+    expect(lidarRingPoints(scan([0, 0, 0, 0]), 100)).toEqual([]);
+    expect(lidarRingPoints(scan([0, 3000]), 100)).toHaveLength(1);
+  });
+
+  it("clamps past max range instead of dropping the direction", () => {
+    const [p] = lidarRingPoints(scan([99000]), 100);
+    expect(p.y).toBeCloseTo(0, 6); // on the inscribed circle, not beyond it
+  });
+
+  it("falls back to a 6 m scale for a lab that sends no maxRange", () => {
+    const [p] = lidarRingPoints({ a0: 0, da: 0, mm: [6000] }, 100);
+    expect(p.y).toBeCloseTo(0, 6);
   });
 });
