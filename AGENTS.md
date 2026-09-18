@@ -70,6 +70,10 @@ by `setup.sh`; upstream no longer vendors them).
   (living room, playroom, soccer pitch) to video + a contact sheet + an events
   log, headless under a seed, and read what the ducks did. Debug the `/sim`
   page with this, not by describing what a browser tab looked like.
+- `docs/mars-roadmap.md` — the plan for a THIRD body, Innate's MARS (a
+  wheeled base with a 6-DoF arm): what is measured, the `Body`/`RobotSpec`
+  split that makes the next robot a registry entry, and the phases with
+  the number that settles each. Read it before adding any robot.
 - `docs/roadmap.md` — the working list of experiments: what to run next, the
   command for each, and the number that would settle it. Read it before
   starting anything open-ended, and **write the answer back into the item**

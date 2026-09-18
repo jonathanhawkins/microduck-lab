@@ -7095,6 +7095,11 @@ tests):
 
 ## Later / parked
 
+- **A third body: the Innate MARS** (wheeled base + 6-DoF arm). Planned in
+  [`docs/mars-roadmap.md`](mars-roadmap.md): Phase 0 measured (the Apache-2.0
+  URDF loads under the lab's attach pattern at 11 DoF, 0.78x a duck per step);
+  the design is a `Body`/`RobotSpec` split so the walker seam stops being the
+  only door in. Nothing else built.
 - **Port `find_ball` to an mjlab cfg** and retrain on GPU in upstream
   `microduck_rl`. That stack, not this one, is the sim2real recipe. Blocked on
   the items above: there is no point porting a recipe whose back-bucket
