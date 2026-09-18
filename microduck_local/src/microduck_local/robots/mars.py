@@ -24,12 +24,15 @@ rather than cloned (the repo is 185 MB). Everything in `robot_spec()` and
 `joint2_min_target`), and every constant taken from it names the function it
 came from, so a drive or a grasp that is wrong here is wrong there too.
 
-**What is NOT here.** The base drive (their velocity PD through
-`xfrc_applied`, station keeping, the `cmd_vel` watchdog) is Phase 3, in
-`robots/mars_drive.py` with the sense and intent channels; the arm env, the
-tasks and the obs builder are Phase 4. This module is the download, the body,
-the model, the arm/head servo the hold test needs, and the viewer's mesh
-dump.
+**What is NOT here.** The base drive — their velocity PD through
+`xfrc_applied`, station keeping and the `cmd_vel` watchdog — lives in
+`robots/mars_drive.py`, which `driver()` hands out (Phase 3a); its 360-degree
+lidar is `sensors/lidar.py`. Read that module before changing `ARM_HOME` or
+the planar base: one constant of Innate's could NOT be ported verbatim (their
+`KP_YAW` is unstable at this repo's 5 ms step) and the reason is measured
+there. The arm env, the tasks and the obs builder are still Phase 4. This
+module is the download, the body, the model, the arm/head servo, and the
+viewer's mesh dump.
 
 MEASURED on this Mac, `scene_xml()` compiled (2026-09-17):
 
@@ -896,19 +899,21 @@ class MarsBody(BodyBase):
         spec.attach(robot_spec(), prefix=prefix, frame=frame)
 
     def driver(self, model, prefix: str):
-        """Phase 3: `robots/mars_drive.py`.
+        """One `MarsDriver` on this model — `robots/mars_drive.py`.
 
         Innate's base velocity PD (KP forward 200 / lateral 40 / yaw 3),
         station keeping after 0.4 s of quiet, the 0.5 s `cmd_vel` watchdog
-        and `arm_servo` — ported with their constants named, so a drive that
-        is wrong here is wrong there too. Deliberately not written in this
-        phase: a driver needs the sense and intent channels that
-        `world/arena.WorldDuck` still hard-codes to the duck.
+        and `arm_servo`, with their constants named. `G1Walker`'s slot in the
+        contract, filled by a controller rather than an ONNX session, which
+        is the whole reason a wheeled body moves in a room before anything is
+        trained.
+
+        Imported here rather than at module level: `mars_drive` imports this
+        module for the joint names and the servo, and a top-level import
+        would be a cycle.
         """
-        raise NotImplementedError(
-            f"{self.id!r} has no driver() yet — Phase 3 of "
-            "docs/mars-roadmap.md adds robots/mars_drive.py (innate's base "
-            "PD + station keeping + watchdog + arm_servo)")
+        from .mars_drive import MarsDriver
+        return MarsDriver(model, prefix)
 
 
 MARS = MarsBody(

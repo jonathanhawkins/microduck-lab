@@ -15,11 +15,13 @@ from .detector import (
     DetectorSpec,
     Target,
 )
+from .lidar import LidarFrame, LidarNoise, LidarSensor
 from .ray import RayFan, RayHits, planar_fan, tof_fan
 from .tof import TofFrame, TofNoise, TofSensor, TofSpec
 
 __all__ = [
     "DETECT_CLASSES", "Detection", "DetectionFrame", "Detector", "DetectorNoise", "DetectorSpec", "Target",
+    "LidarFrame", "LidarNoise", "LidarSensor",
     "RayFan", "RayHits", "planar_fan", "tof_fan",
     "TofFrame", "TofNoise", "TofSensor", "TofSpec",
 ]

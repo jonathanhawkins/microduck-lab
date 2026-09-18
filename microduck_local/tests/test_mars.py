@@ -13,8 +13,9 @@ things `robots/mars.py` inherited from somebody else's repo:
   silent when it does not (no meshes; no `ee_link`; 31 g of missing markers);
 * Innate's contact tuning, where every constant is load-bearing for a grasp;
 * the arm servo, and the joint2 guard that keeps the arm out of the head;
-* the answers that are deliberately refusals — no env, no driver, no tasks,
-  no shipped policies — so a phase that lands one has to come here and say so.
+* the answers that are deliberately refusals — no env, no tasks, no shipped
+  policies — so a phase that lands one has to come here and say so (Phase 3a
+  landed `driver()`, and this file says so in two places rather than one).
 
 Network: none. `mars._download` is the seam; every fetch case replaces it,
 and the cases that need real bytes are skipped without the assets.
@@ -371,20 +372,42 @@ def test_the_default_pose_is_innates_arm_home_in_joint_order():
 
 
 def test_the_answers_that_are_refusals_name_the_phase_that_lands_them():
-    """A body with no env, no driver, no tasks and no shipped policy.
+    """A body with no env, no tasks and no shipped policy.
 
     Each of these could return something plausible — the duck's env, an
     empty walker, a duck recipe — and each would be a wrong answer that only
     shows up as bad behaviour. Raising with the phase number is also how the
     next person finds out where the work goes.
+
+    `driver()` was on this list until Phase 3a landed
+    `robots/mars_drive.py`; it is now a real answer and
+    `tests/test_mars_drive.py` measures it, which is what a refusal turning
+    into an implementation is supposed to look like from here.
     """
     with pytest.raises(NotImplementedError, match="Phase 4"):
         mars.MARS.env_class("reach")
-    with pytest.raises(NotImplementedError, match="Phase 3"):
-        mars.MARS.driver(None, "m0/")
     assert mars.MARS.tasks() == ()
     assert mars.MARS.shipped_policies() == ()
     assert mars.MARS.train_env_kwargs(None) == {}
+
+
+@needs_mars
+def test_the_body_hands_out_a_driver_for_the_prefix_it_is_asked_about():
+    """`Body.driver(model, prefix)` — the seam `/sim` steps a MARS through.
+
+    Here rather than in `tests/test_mars_drive.py` because what is being
+    checked is the BODY's answer: that the registry's MARS returns a driver
+    bound to the model and prefix it was given, so a room with two of them
+    gets two independent controllers. The drive itself is measured next door.
+    """
+    m = mars.model()
+    drv = mars.MARS.driver(m, "")
+    assert type(drv).__name__ == "MarsDriver"
+    assert drv.model is m and drv.prefix == ""
+    assert drv.base_id == mujoco.mj_name2id(
+        m, mujoco.mjtObj.mjOBJ_BODY, mars.BASE_BODY)
+    with pytest.raises(KeyError, match="attached under this prefix"):
+        mars.MARS.driver(m, "m0/")     # nothing is attached under m0/ here
 
 
 # ------------------------------------------------------- the URDF rewrites

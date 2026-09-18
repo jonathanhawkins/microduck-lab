@@ -282,7 +282,7 @@ third body in the registry:
   --robot mars` raises NotImplementedError naming Phase 4, the palette's
   shipped groups come back empty, and the stage pitch is per body already.
 
-### Phase 3 — MARS in a room: drive it, sense with it, give it the existing brains  `[ ]`
+### Phase 3 — MARS in a room: drive it, sense with it, give it the existing brains  `[~]`
 
 This is where MARS earns its place fastest, because the room-and-brain
 layer was built around a twist-emitting brain over a reflex tier, and for a
@@ -311,6 +311,67 @@ before anything moves.
   arm parked at home; `follow-me` with a MARS follower holds the follow band
   at the duck's measured level (**≥ 0.95 in-band**, `eval-brain`); a
   `docs/media/sim-mars-wander.gif`.
+
+**3a DONE (2026-09-17)** — the STANDALONE half: `robots/mars_drive.py`
+(`MarsDriver` — Innate's base velocity PD, station keeping, the `cmd_vel`
+watchdog, the safety governor and `arm_servo`, `MarsBody.driver()` now returns
+one) and `sensors/lidar.py` (`LidarSensor`/`LidarFrame`/`LidarNoise` on
+`ray.RayFan`), each unit-tested in MARS's own scene: `tests/test_mars_drive.py`
+28 cases + `tests/test_lidar.py` 18 cases, 0.7 s, and all 20 planted breaks
+caught. `world/`, the lab server and the viewer are untouched (Phase 3b).
+Measured:
+
+- **Innate's `KP_YAW = 3` is UNSTABLE at this repo's 5 ms step** and it is the
+  one constant that could not be ported verbatim. `xfrc_applied` is an
+  explicit force, so the velocity loop `v += (KP*dt/M)(v* - v)` needs
+  `KP*dt/M < 2`; the apparent inertia at the base DoFs (`mj_fullM`, the base
+  3x3's Schur complement, arm folded at HOME) is 1.315 kg / 1.297 kg /
+  **0.005761 kg*m^2**, so their yaw gain is 1.04 at their 2 ms and **2.60 at
+  ours**. Unguarded it diverges: 1.0 rad/s commanded for 3 s ends at yaw
+  7.13 rad with |wz| peaking at 13.3 rad/s, and a straight 0.3 m/s line
+  wanders 229 mm sideways. `_stable_gain` clamps each gain to
+  `GAIN_LIMIT * M / dt` with GAIN_LIMIT 1.0 (deadbeat, factor 2 in hand):
+  forward 200 and lateral 40 are untouched at either timestep, yaw becomes
+  1.152 at 5 ms and 2.88 (96 % of theirs) at 2 ms. The empirical boundary —
+  KP_YAW 2.0 tracks, 2.5 diverges — is the 2.0 bound to two digits. The yaw
+  inertia is small because mars.urdf carries placeholder inertias, so a
+  revision with real ones will raise the clamp on its own.
+- **The drive cannot ride the 50 Hz control tick.** At a 20 ms tick the
+  forward loop's gain is 3.04 and a 0.3 m/s run ends going backwards at
+  2.6 m/s; at 10 ms it rings. Phase 3b must call `step()` every physics step.
+  It costs 6.3-6.6 us of a ~14 us step — **66-71 k steps/s driven against
+  119-127 k bare over four runs, 0.56x either way**, two driven MARSes in one
+  model 36,400-37,000 — and decimating the drive would only buy ~1.5 us.
+- **The lidar must exclude `base_link`, not its mount.** `base_laser` is a
+  jointless frame INSIDE `base_turret`, the box modelling the scanner's own
+  housing, and that box is a geom of `base_link` — so with `RayFan`'s own
+  default (exclude the mount) **all 360 rays return 0.039-0.101 m** and the
+  frame is full, plausible and useless. Innate's `lidar_scan` excludes
+  `self._base_id` for the same reason. `RayFan` grew one optional
+  `exclude_body=` (default unchanged) and the sensor defaults it to the
+  mount's PARENT, resolved from the model so a prefix needs no id table.
+- **`planar_fan` could not author a full turn.** Left-first across 360 deg
+  puts ray 0 on -x, repeats +-180 as two rays and leaves NO ray on +x. One
+  optional `ccw=` flag (default unchanged, the old sector test still green)
+  gives Innate's convention: `arange(n) * 2*pi/n` CCW from +x.
+- **The laser sits 76.4 mm BEHIND the base origin**, so a 2 m wall reads
+  2.0264 m and a consumer that assumed the base frame would put every
+  obstacle 76 mm nearer than it is — a third of the robot's length.
+  `LidarFrame.mount_pos` carries the offset in the base's heading frame.
+- **The scan sees the robot's own folded arm**: 4 rays of 360, at 7-10 deg,
+  from 0.1562 m off `link5`, and nothing else of the chassis. Documented, not
+  masked — the shadow moves with the arm, so ignoring returns inside the
+  footprint belongs to the consumer. One 360-ray scan is 30.4 us; polled at
+  6 Hz it is 1.7 us a step.
+- Drive numbers: 0.3 m/s x 5 s -> x 1.4994 m, y -6.7 mm, yaw -0.0045 rad;
+  1.0 rad/s x 3 s -> 2.9995 rad; cmd 2.0 m/s -> 0.8000 m/s; the watchdog has
+  |v| < 0.02 m/s 0.52 s after the last command; a 0.5 m/s shove peaks 0.9 mm
+  and settles 0.2 mm out; the arm holds 0.0034 rad while driving.
+- **The one-shot shove does not test station keeping.** The drive's own
+  forward damper sheds a velocity injection in ~7 ms, so that case passes at
+  0.91 mm with the hold stubbed out. A 200 ms *sustained* push is the
+  discriminating one: 51 mm out, back to 5.6 mm with the hold and still
+  51 mm without it.
 
 ### Phase 4 — arm policies: `MarsArmEnv`, `reach` → `pick`, the teach panel, ONNX  `[ ]`
 
