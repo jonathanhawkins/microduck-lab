@@ -20,9 +20,14 @@ Measured 2026-09-17 on an Apple M-series Mac:
     after 2 s at ARM_HOME: max |q - home| = 0.0034 rad
     mars 92,700 physics steps/s   duck 72,700   (single env, 2 ms step)
 """
-import sys, time, math
+import sys
+import time
 from pathlib import Path
-import mujoco, numpy as np
+
+import mujoco
+import numpy as np
+
+from microduck_local import contract as C
 
 S = Path(sys.argv[1])
 urdf = S / "mars_description/urdf/mars.urdf"
@@ -36,9 +41,14 @@ base = robot.body("base_link")
 for name, jt, ax in (("base_x", mujoco.mjtJoint.mjJNT_SLIDE, (1,0,0)),
                      ("base_y", mujoco.mjtJoint.mjJNT_SLIDE, (0,1,0)),
                      ("base_yaw", mujoco.mjtJoint.mjJNT_HINGE, (0,0,1))):
-    j = base.add_joint(); j.name = name; j.type = jt; j.axis = ax
+    j = base.add_joint()
+    j.name = name
+    j.type = jt
+    j.axis = ax
 for name in ("base_wheel_left", "base_wheel_right"):
-    g = robot.geom(name); g.condim = 1; g.priority = 1
+    g = robot.geom(name)
+    g.condim = 1
+    g.priority = 1
 robot.add_exclude(bodyname1="link61", bodyname2="link62")
 
 # --- the lab's pattern: attach under a prefix into a world with a floor ---
@@ -58,12 +68,15 @@ mass = float(sum(model.body_mass))
 print(f"total mass {mass:.3f} kg")
 # AABB of the whole body at qpos0 (lab spacing needs this)
 mujoco.mj_forward(model, data)
-lo = np.full(3, np.inf); hi = np.full(3, -np.inf)
+lo = np.full(3, np.inf)
+hi = np.full(3, -np.inf)
 for g in range(model.ngeom):
     if model.geom_contype[g] == 0 and model.geom_conaffinity[g] == 0:
         continue
-    c = data.geom_xpos[g]; r = model.geom_rbound[g]
-    lo = np.minimum(lo, c - r); hi = np.maximum(hi, c + r)
+    c = data.geom_xpos[g]
+    r = model.geom_rbound[g]
+    lo = np.minimum(lo, c - r)
+    hi = np.maximum(hi, c + r)
 print("collision AABB extent (x,y,z) ~", np.round(hi - lo, 3), " (rbound-based, conservative)")
 
 # --- PD servo to ARM_HOME, innate's gains, driven through qfrc_applied ---
@@ -80,24 +93,26 @@ def servo():
         tau = KP * (tgt - data.qpos[q]) - KD * data.qvel[d]
         data.qfrc_applied[d] = max(-EFF, min(EFF, tau))
     # mimic finger
-    q6, d6 = adr["joint6"]; qm, dm = adr["joint6M"]
+    q6, _d6 = adr["joint6"]
+    qm, dm = adr["joint6M"]
     tau = KP * (-data.qpos[q6] - data.qpos[qm]) - KD * data.qvel[dm]
     data.qfrc_applied[dm] = max(-2.0, min(2.0, tau))
 # settle 2 s, then time 5 s of physics
 for _ in range(1000):
-    servo(); mujoco.mj_step(model, data)
+    servo()
+    mujoco.mj_step(model, data)
 err = max(abs(data.qpos[adr[n][0]] - t) for n, t in ARM_HOME.items())
 print(f"after 2 s: max |q - home| = {err:.4f} rad; base z drift = {data.qpos[adr['joint1'][0]-3+0]:.4f} (base_x)")
 n = 2500
 t0 = time.perf_counter()
 for _ in range(n):
-    servo(); mujoco.mj_step(model, data)
+    servo()
+    mujoco.mj_step(model, data)
 dt = time.perf_counter() - t0
 print(f"mars: {n/dt:,.0f} physics steps/s (single env, 2 ms step, PD in python)")
 print("contacts now:", data.ncon, " base pose:", np.round(data.qpos[:3], 4))
 
 # --- the duck for scale, same harness ---
-from microduck_local import contract as C
 duck = mujoco.MjModel.from_xml_path(str(C.MICRODUCK.scene_fn()))
 dd = mujoco.MjData(duck)
 mujoco.mj_resetDataKeyframe(duck, dd, duck.key("STAND").id)
