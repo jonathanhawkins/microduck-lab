@@ -134,6 +134,161 @@ ACTION_CLIP = 1.0
 #: channel it should be shared rather than copied.
 MAX_TARGET_RATE_RAD_S = 6.0
 
+# ------------------------------------------------------- the action map
+#
+# WHAT AN ACTION MEANS. Phase 4a shipped one map — a rate-limited ABSOLUTE
+# joint target, `HOME + a * ACTION_SCALE_RAD` — and its acceptance measurement
+# is what put these three here. `mars-reach-v2` reached the target inside 1 s
+# and then limit-cycled between 1.1 and 2.3 cm forever: 3/8 seeds ended inside
+# 2 cm, 0/8 held it for the second the task asks for, with 58% of the six arm
+# dims sitting on the +-1 box edge.
+#
+# The mechanism is in the map rather than in the pay, which is why no reward
+# term appears below. A rate-limited absolute target has NO FIXED POINT the
+# policy can name: `a` says where to go, the target walks there at 6 rad/s,
+# and holding still requires `a` to keep pointing exactly at wherever the
+# target already is — a moving quantity the policy has to re-hit every 40 ms.
+# A saturated mean cannot even try: on the box edge it can only slew up or
+# slew down, so it alternates. AGENTS.md's "reward design cannot fix an
+# exploration gap" has a sibling here — a reward cannot pay for a behaviour
+# the action space has no way to express.
+#
+#: The maps `MarsArmEnv(action_mode=...)` implements.
+#:
+#:   * `"delta"` — `target += a * DELTA_RAD_PER_STEP` from the CURRENT
+#:     commanded target. `a = 0` is an exact fixed point, so "stay" exists.
+#:   * `"cubic"` — `target = HOME + sign(a)|a|^3 * scale`. Absolute, and odd
+#:     and monotone so +-1 still spans the box, but the interior is stretched:
+#:     millimetres of effector travel per unit action near zero against the
+#:     full reach at the edge.
+#:   * `"absolute"` — Phase 4a's, kept so its numbers stay reproducible and so
+#:     a narrower box (`action_scale_rad`) remains expressible.
+ACTION_MODES: tuple[str, ...] = ("absolute", "delta", "cubic")
+
+#: rad the commanded target moves per unit of action in `"delta"` mode.
+#:
+#: DERIVED from the rate limit, not typed, and the equality is the point:
+#: `MAX_TARGET_RATE_RAD_S * CTRL_DT` is exactly what one control step is
+#: allowed to move a target, so a full-scale delta asks for precisely the
+#: fastest legal step and every value in between is a real command.
+#:
+#: Both directions of getting this wrong are failures this repo has a rule
+#: for. LARGER, and the rate limiter silently truncates the top of the action
+#: box: a band of actions would all produce the identical motion and
+#: `last_action` would report a number the arm never followed — a knob that
+#: changes nothing is broken, not null (AGENTS.md rule 0). SMALLER, and the
+#: arm can no longer slew as fast as the servos it is modelling: MEASURED, a
+#: shell solution's worst joint travels 2.62 rad at p95 (`scratchpad/
+#: probe_box_reach2.py`, the solver `ACTION_SCALE_RAD` was chosen with), which
+#: is 11 control steps of 0.24 rad — 0.44 s of an 8 s episode — and halving
+#: the step doubles that for nothing.
+#:
+#: The reachable set (AGENTS.md, "check a knob's reachable set first"): 200
+#: control steps x 0.24 rad is 48 rad of travel per joint against a 2.62 rad
+#: p95 requirement, so `"delta"` can reach every pose `"absolute"` can. It
+#: costs travel TIME, not reach.
+DELTA_RAD_PER_STEP = MAX_TARGET_RATE_RAD_S * CTRL_DT
+
+#: `"absolute"`'s box narrowed to what Phase 4a's plan called a second
+#: curriculum rung — and it is here as a REFUTED option, with the measurement
+#: that refuted it, rather than as a recommended setting.
+#:
+#: The idea was the physics ladder: warm-start v2 into a 1.0 rad box so the
+#: same +-1 action buys 3x the resolution near the target. MEASURED FIRST
+#: (`scratchpad/probe_box_reach2.py`, the coordinate-descent solver from the
+#: probe that chose 3.0, 40 draws from this env's own shell):
+#:
+#:     box            residual median   p90      <=2cm   the 8 eval targets
+#:     FULL range          0.14 cm    3.67 cm     72%    -
+#:     HOME +- 3.0         0.15 cm    3.15 cm     78%    8/8 inside 0.3 mm
+#:     HOME +- 2.0         2.30 cm    6.91 cm     48%    -
+#:     HOME +- 1.0        12.96 cm   24.96 cm      0%    0/8 (5.0-27.8 cm)
+#:
+#: HOME parks the arm folded at joint1 = +1.445 rad pointing 83 deg to the
+#: robot's LEFT while the task samples the front arc, so a 1.0 rad box cannot
+#: get the gripper to a single one of the eight targets the A/B scores. Its
+#: run would have reported ~13 cm and said nothing about the hold: a
+#: structural null, expected rather than informative, and the reason this
+#: phase spent its third run on a second training SEED instead. Narrowing the
+#: box only helps if its centre follows the arm — which is `"delta"`.
+RUNG_SCALE_RAD = 1.0
+
+# ------------------------------------------- the A/B, and what it decided
+#
+# **VERDICT (Phase 4a-2, 2026-09-18).** Matched runs: 1.5 M steps, 8 envs,
+# seed 0, `--robot mars --task reach`, nothing else changed. Scored on the
+# DETERMINISTIC export over 8 seeds x 8 s with `scripts/probe_mars_reach.py`,
+# which builds its env from the run's own map because the same six floats
+# mean an increment under one and a position under another.
+#
+#                              final    best    <=2cm  held  sat   tail   hits
+#     null (zero action)       30.2 cm  30.1 cm  0/8   0/8    0%   0.0 mm  0/8
+#     absolute (4a v2)          2.02 cm  0.75 cm 3/8   0/8   58%  11.8 mm  0/8
+#     cubic                     7.62 cm  5.33 cm 0/8   0/8   58%  22.9 mm  2/8
+#     delta, train seed 0       1.13 cm  0.42 cm 5/8   5/8   58%   5.3 mm  0/8
+#     delta, train seed 1       2.38 cm  1.23 cm 3/8   2/8   55%   7.0 mm  0/8
+#
+# **`"delta"` wins and is the default.** It is the first map under which the
+# task's own success rule fires at all — 0/8 held becomes 5/8 and 2/8 — and
+# the contact sheets are qualitatively different, not just better: v2 crossed
+# the 2 cm ball for 1-5 control steps at a time on a ~2 s cycle, while the
+# delta sheet sits at 0.5-0.7 cm from t = 2 s to the end of the episode with
+# the near-streak climbing past 150 of the 25 it needs. `at_target` doubles
+# (+110 -> +212) because holding is what that term pays for. The tail spread
+# halves, 11.8 -> 5.3 mm.
+#
+# The 8/8 BAR IS STILL OPEN, and two honest caveats come with the win:
+#
+#   * **Training-seed variance is large here.** Seed 1 of the same recipe
+#     holds 2/8 against seed 0's 5/8 — wider than the 8-seed eval spread,
+#     which is `AGENTS.md`'s "eval seeds do not measure training runs" landing
+#     exactly as advertised. So "delta holds about half the seeds" is the
+#     claim, and any future change to this task needs two training seeds
+#     before it is credited. `absolute` has only ONE training seed here (4a's
+#     v2), so the comparison rests on delta's 0/8 -> {5,2}/8 being a
+#     structural change rather than on a paired statistic: an absolute map's
+#     0 is not variance, it is the absence of a fixed point.
+#   * **What still misses is not the hold.** On seed 0's run the three failures
+#     are the two shell EDGES and one drift: seed 4's target sits at 0.386 m
+#     of the 0.40 m shell AND 0.343 m of its 0.35 m ceiling (the arm reaches
+#     it stretched out and stalls 2.7-3.4 cm short, though the solver gets
+#     within 3 mm, so it is the policy and not the geometry); seed 1 is at
+#     +54 deg of the +-60 deg arc; seed 6 reaches 0.2 cm and then drifts out
+#     to 2.1 cm. Two edges and a drift is a PHYSICS-LADDER shape — ladder the
+#     shell, which `behaviors/mars_tasks.py` already names as the rung to add
+#     — and not a reward one.
+#
+# **`"cubic"` LOSES, and it loses for a reason worth keeping.** It is the
+# worst of the three: 0/8 inside 2 cm, 7.62 cm median, and the only variant
+# that self-collides (2/8). Its sheet shows it PARKING — 2.9-3.2 cm for six
+# straight seconds, stable and wrong — so the map did buy a settled pose; it
+# just cannot get the pose close. The mechanism is the same saturation
+# statistic read the other way: `|a|^3` means an action must run to the box
+# edge to travel at all (|0.5|^3 * 3.0 rad is 0.375 rad, an eighth of what
+# `absolute` gives at the same output), so the policy lives at |a| ~ 1 — where
+# the cubic slope is 9.0 rad per unit action against `absolute`'s 3.0. It sold
+# the interior resolution it was bought for in exchange for THREE TIMES the
+# coarseness where the policy actually operates. `at_target` collapses to
+# +5.9. The lesson generalises past this arm: stretching an action map's
+# interior only helps if the policy's operating point is IN the interior, and
+# 58% of dims on the box edge was the measurement saying it is not.
+#
+# **What the saturation number stopped being.** All three maps sit at 55-58%
+# of arm dims on the box edge, and delta holds anyway — so edge-sitting is
+# not itself the fault. Under `delta` a saturated action means "slew at the
+# fastest legal rate", which is the right command while travelling and simply
+# is not what the policy emits once it arrives. Phase 4a read 58% as the
+# mechanism; it was a SYMPTOM of the absent fixed point, and the fixed point
+# was the mechanism. (`AGENTS.md`'s "KL was a symptom, not the cause", again.)
+#
+# The trained per-dim action std says the same thing from the optimizer's
+# side. `train.LOG_STD_MAX` caps std at 0.6065, and under `absolute` it BINDS
+# on 6 of 8 dims (v2: 0.584-0.612) and under `cubic` on 4 of 8 — but `delta`
+# pulls the three shoulder dims down on its own, to 0.451 / 0.530 / 0.489.
+# Only under delta does noise cost anything: it integrates into target drift,
+# so there is gradient pressure to be quiet near the target. Under an
+# absolute map noise is re-decided every step and costs nothing to hold.
+
 #: The reach task's target shell, in the BASE frame, relative to the SHOULDER
 #: (joint1's anchor, measured off the model at HOME — never hand-carried).
 #: The plan's numbers, kept because the measurement says the arm owns them:
@@ -261,6 +416,17 @@ SELF_COLLISION_PENALTY = -2.0
 #: caller should ask; this is what its refusal names.
 TASKS: tuple[str, ...] = ("reach",)
 
+#: The map `reach` trains under unless a caller says otherwise.
+#:
+#: `"delta"` since Phase 4a-2 (was `"absolute"`, Phase 4a): it is the only map
+#: measured to hold the target at all — 5/8 and 2/8 seeds on two training
+#: seeds against 0/8 for both absolute maps. The full A/B table and both
+#: caveats are in the verdict block under `ACTION_MODES`. Changing this
+#: changes what every float a MARS policy emits MEANS, so it also changes
+#: `MarsBody.contract().deploy` — which is why that sentence is built from
+#: this constant rather than typed.
+DEFAULT_ACTION_MODE = "delta"
+
 
 class MarsArmEnv(gym.Env):
     """Reach a sampled point with MARS's gripper. Its own base class.
@@ -306,11 +472,37 @@ class MarsArmEnv(gym.Env):
         own_model: bool = False,
         spawn_yaw: float = 0.0,
         use_base: bool | None = None,
+        action_mode: str = DEFAULT_ACTION_MODE,
+        action_scale_rad: float | None = None,
     ):
         if task not in TASKS:
             raise SystemExit(
                 f"unknown --task {task!r} for mars (have: {', '.join(TASKS)}) — "
                 "pick/place are later rungs of docs/mars-roadmap.md Phase 4")
+        if action_mode not in ACTION_MODES:
+            raise SystemExit(
+                f"unknown action_mode {action_mode!r} for mars (have: "
+                f"{', '.join(ACTION_MODES)}) — what an action MEANS is this "
+                "env's half of the contract, so a name it does not implement "
+                "is refused rather than quietly defaulted")
+        self.action_mode = str(action_mode)
+        # The box's WIDTH in rad, orthogonal to the MAP above. `"delta"` has no
+        # use for it — its step is `DELTA_RAD_PER_STEP` and its box is not
+        # centred on HOME at all — so passing one is REFUSED rather than
+        # ignored: a knob that changes nothing is broken, not null (AGENTS.md
+        # rule 0), and accepting a width here would let a caller believe it had
+        # narrowed a box it had not.
+        if action_scale_rad is not None and self.action_mode == "delta":
+            raise SystemExit(
+                "action_scale_rad has no meaning in action_mode='delta': the "
+                "step is DELTA_RAD_PER_STEP, derived from "
+                "MAX_TARGET_RATE_RAD_S. Narrow a box with "
+                "action_mode='absolute' or 'cubic'")
+        self.action_scale_rad = float(ACTION_SCALE_RAD if action_scale_rad
+                                      is None else action_scale_rad)
+        if self.action_scale_rad <= 0.0:
+            raise SystemExit("action_scale_rad must be positive rad, got "
+                             f"{self.action_scale_rad}")
         for name, value in (("actuator", actuator),
                             ("actuator_force", actuator_force)):
             if value is not None and str(value).lower() == "bam":
@@ -489,6 +681,34 @@ class MarsArmEnv(gym.Env):
         return np.array([dx * cos + dy * sin, -dx * sin + dy * cos,
                          point_world[2]])
 
+    def joint_target(self, act_arm: np.ndarray) -> np.ndarray:
+        """Where the six arm actions ASK the commanded target to go, in rad.
+
+        The map, and only the map — the rate limit is applied by `step`, in
+        one place, for every mode. Clipped to the URDF ranges here so that
+        "where the action asks" is always a legal pose and the rate-limited
+        walk toward it stays legal the whole way (a convex step from a point
+        inside the box toward a point inside it).
+
+        `ACTION_MODES` documents the three and why they exist.
+        """
+        if self.action_mode == "delta":
+            # INCREMENTAL, so `a = 0` is an exact fixed point and the policy
+            # has a "stay". The integrator is the commanded target rather than
+            # the measured `arm_qpos`: integrating the measurement would let a
+            # servo lagging under load drag the command with it, and the
+            # observation already carries where the arm actually got to.
+            want = self._cmd_target + act_arm * DELTA_RAD_PER_STEP
+        elif self.action_mode == "cubic":
+            # Odd and strictly monotone, so +-1 still spans exactly what
+            # `"absolute"` spans and the sign of an action still means the
+            # direction it always meant — only the interior is stretched.
+            want = self._home + (np.sign(act_arm) * np.abs(act_arm) ** 3
+                                 * self.action_scale_rad)
+        else:
+            want = self._home + act_arm * self.action_scale_rad
+        return np.clip(want, self._jnt_lo, self._jnt_hi)
+
     def effector(self) -> np.ndarray:
         """The gripper's tool point (`ee_link`) in world coordinates."""
         return np.array(self.data.xpos[self._ee_body])
@@ -594,6 +814,18 @@ class MarsArmEnv(gym.Env):
         # every caller to. The action-rate PENALTY still prices the raw
         # output, which is walk_env's reason for keeping it (a duck reached
         # mean |a| 29 once the reward stopped seeing what it asked for).
+        #
+        # WHAT THE SIX ARM FLOATS MEAN depends on `action_mode`, and the slot
+        # is the same +-1 either way — which is exactly why it has to be
+        # written down. Under `"absolute"`/`"cubic"` they are a POSITION
+        # (`joint_target` maps them to a target about HOME), so the slot tells
+        # the policy where it last pointed. Under `"delta"` they are a
+        # VELOCITY — the increment applied to the commanded target — so the
+        # slot tells it how fast it was last moving, and WHERE the arm is
+        # comes from `arm_qpos` instead. The layout does not change (the
+        # contract's 32 floats are unmoved); the units do, and
+        # `MarsBody.contract().deploy` carries the sentence so a code skill
+        # reading only the .onnx applies the same map.
         obs[mars.OBS_LAST_ACTION] = self.last_action.clip(-ACTION_CLIP,
                                                           ACTION_CLIP)
         self.target_base = self._to_base(self.target)
@@ -647,12 +879,19 @@ class MarsArmEnv(gym.Env):
         self.last_action = raw.copy()
         act = raw.clip(-ACTION_CLIP, ACTION_CLIP)
 
-        want = np.clip(self._home + act[mars.ACT_ARM] * ACTION_SCALE_RAD,
-                       self._jnt_lo, self._jnt_hi)
+        want = self.joint_target(act[mars.ACT_ARM])
         # The rate limit (see MAX_TARGET_RATE_RAD_S): the commanded target
         # WALKS to where the action asks, at the speed the servos have. The
         # path stays inside [lo, hi] because it is a convex step from a point
         # inside it toward a point inside it.
+        #
+        # Applied for EVERY action mode, from this one place, which is the
+        # `_get_obs` lesson generalised: a limit that two modes each enforced
+        # their own way is a limit two modes can disagree about. In `"delta"`
+        # it is provably non-binding — `DELTA_RAD_PER_STEP` IS
+        # `self.target_step_rad`, so a full-scale delta asks for exactly the
+        # fastest legal step — and it is kept rather than branched around so
+        # that changing `MAX_TARGET_RATE_RAD_S` cannot leave one mode behind.
         self._cmd_target = self._cmd_target + np.clip(
             want - self._cmd_target, -self.target_step_rad,
             self.target_step_rad)
@@ -695,6 +934,10 @@ class MarsArmEnv(gym.Env):
             # `reach`; saying so here is what keeps a silently-ignored knob
             # from looking like a working one (AGENTS.md rule 0).
             "base_enabled": self.use_base,
+            # What an action MEANT this episode, beside the numbers it
+            # produced. A probe or a sheet that reports a distance without it
+            # is comparing two different controllers by name only.
+            "action_mode": self.action_mode,
             "self_collision": self._self_hit,
             "terms": terms,
         }
@@ -735,16 +978,40 @@ class MarsArmEnv(gym.Env):
         return float(sum(terms.values())), terms
 
 
+def action_map_sentence(mode: str) -> str:
+    """What `actions[0:6]` MEAN under `mode`, in one clause, from the constants.
+
+    `MarsBody.contract().deploy` embeds this, so the caveat leaves the
+    building with the .onnx instead of living in a docstring the person
+    holding the file will never open. Built here because the numbers are
+    here: a sentence typed into the contract would be a second copy of
+    `DELTA_RAD_PER_STEP` to keep in step.
+    """
+    if mode == "delta":
+        return (f"an INCREMENT on the commanded joint target: add "
+                f"a * {DELTA_RAD_PER_STEP:g} rad per {1.0 / CTRL_DT:g} Hz "
+                "step to the target you last sent, clamp to the URDF joint "
+                "ranges, and send that (a = 0 means hold). The consumer "
+                "keeps the integrator; arm_qpos[0:6] is where the arm got to")
+    if mode == "cubic":
+        return (f"an ABSOLUTE joint target, ARM_HOME + sign(a)*|a|^3 * "
+                f"{ACTION_SCALE_RAD:g} rad, clamped to the URDF joint ranges")
+    return (f"an ABSOLUTE joint target, ARM_HOME + a * {ACTION_SCALE_RAD:g} "
+            "rad, clamped to the URDF joint ranges")
+
+
 def make_mars_env(**kwargs) -> MarsArmEnv:
     """Factory with the training defaults (`train-walk --robot mars`)."""
     kwargs.setdefault("max_episode_s", EPISODE_S)
     return MarsArmEnv(**kwargs)
 
 
-__all__ = ["ACTION_CLIP", "ACTION_MAG_W", "ACTION_RATE_W", "ACTION_SCALE_RAD",
-           "CTRL_DT", "DECIMATION", "EPISODE_S", "JOINT_VEL_W",
-           "MAX_TARGET_RATE_RAD_S", "NEAR_SIGMA_M", "REACH_HEIGHT_M",
-           "REACH_MIN_HORIZ_M", "REACH_RADIUS_M", "REACH_YAW_RAD",
-           "SELF_COLLISION_DEPTH_M", "SELF_COLLISION_PENALTY",
-           "SUCCESS_HOLD_S", "SUCCESS_RADIUS_M", "TASKS", "W_NEAR",
-           "W_PROGRESS", "MarsArmEnv", "make_mars_env"]
+__all__ = ["ACTION_CLIP", "ACTION_MAG_W", "ACTION_MODES", "ACTION_RATE_W",
+           "ACTION_SCALE_RAD", "CTRL_DT", "DECIMATION",
+           "DEFAULT_ACTION_MODE", "DELTA_RAD_PER_STEP", "EPISODE_S",
+           "JOINT_VEL_W", "MAX_TARGET_RATE_RAD_S", "NEAR_SIGMA_M",
+           "REACH_HEIGHT_M", "REACH_MIN_HORIZ_M", "REACH_RADIUS_M",
+           "REACH_YAW_RAD", "RUNG_SCALE_RAD", "SELF_COLLISION_DEPTH_M",
+           "SELF_COLLISION_PENALTY", "SUCCESS_HOLD_S", "SUCCESS_RADIUS_M",
+           "TASKS", "W_NEAR", "W_PROGRESS", "MarsArmEnv",
+           "action_map_sentence", "make_mars_env"]

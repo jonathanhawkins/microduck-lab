@@ -49,7 +49,12 @@ MARS_REACH = Behavior(
         "route: driving a link into its own body ends the episode and forfeits "
         "the rest of the hold. Its wheels are switched off for this one — "
         "rolling the whole robot at the target would be the cheapest way to "
-        "satisfy the score and not the thing being taught."
+        "satisfy the score and not the thing being taught. What it steers are "
+        "NUDGES to each joint rather than absolute angles, and that turned out "
+        "to be the whole difference: given an angle to aim at, the arm reached "
+        "the target but could never sit still on it — no command meant 'stay' — "
+        "so it hovered a centimetre or two away for the rest of the episode. A "
+        "nudge has a zero, and zero means hold."
     ),
     keywords=("reach", "reach a point", "touch that", "point at it",
               "put your gripper there", "arm to the target", "reach out",

@@ -23,7 +23,9 @@ in the phase report.
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -47,6 +49,16 @@ INTO_THE_HEAD = (0.73, 0.08, -0.40, -0.15, -0.94, -0.75)
 #: "the servo reaches the commanded pose" fixture.
 SAFE_AND_MOVING = (-0.40, 0.34, -0.60, 0.88, -0.27, -0.79)
 SAFE_EE = np.array([0.2343, -0.0146, 0.1782])
+
+#: An ABSOLUTE-mode action that puts the gripper ON seed 0's target, found by
+#: coordinate descent over the joint ranges and converted with
+#: `(q - HOME) / ACTION_SCALE_RAD` (`scratchpad/probe_seed0_action.py`). Held
+#: for a whole 8 s episode it MEASURES 1.02 cm final in the 3.0 rad box —
+#: the ideal pose is 0.01 cm, and the gap is the position servo's droop under
+#: gravity — against 31.33 cm in `RUNG_SCALE_RAD`'s 1.0 rad box. One action,
+#: two boxes: that pair is what makes the rung's refutation a behaviour
+#: instead of a comparison between two constants.
+REACHES_SEED0 = (-0.642, 0.841, -0.990, 0.299, 0.426, 0.004)
 
 
 def _env(**kw) -> MarsArmEnv:
@@ -255,8 +267,14 @@ def test_a_constant_action_drives_the_gripper_to_the_pose_it_names():
     The target is the env's own measurement of where the action lands, so this
     is a closed loop on the whole chain — action -> scale -> clip -> rate
     limit -> `MarsDriver.set_arm` -> `mars.arm_servo` -> physics -> `ee_link`.
+
+    Pinned to `action_mode="absolute"`: "a constant action names a pose" is
+    that map's defining property and the reason `SAFE_AND_MOVING` is a usable
+    fixture at all. Under the default (`delta`) a constant action is a
+    constant VELOCITY and this arm would keep going — which the action-map
+    section is where to read about.
     """
-    env = _env()
+    env = _env(action_mode="absolute")
     env.reset(seed=0)
     env.target = SAFE_EE.copy()             # a reachable point, 19.5 cm out
     env._prev_dist = env.distance()
@@ -306,6 +324,268 @@ def test_the_action_scale_and_clip_span_the_joint_ranges():
     assert ME.ACTION_SCALE_RAD / headroom.min() > 3.0     # joint6, saturated
     # every joint's WIDER side is at least 78% covered by a full action
     assert (ME.ACTION_SCALE_RAD / headroom).min() > 0.78
+
+
+# ----------------------------------------------------------- the action map
+#
+# Phase 4a-2. What an action MEANS is the env's half of the contract, and the
+# three maps exist because Phase 4a's single map had no way to express
+# "stay": the policy reached the target in 1 s and then limit-cycled forever
+# with 58% of its arm dims on the box edge. So these tests are about
+# EXPRESSIVENESS — a fixed point that exists, an interior that is finer than
+# its edge — and not about any number a trained policy produced.
+
+def test_a_zero_delta_action_holds_the_commanded_target_exactly():
+    """`delta`'s whole reason: `a = 0` is a fixed point, to the last bit.
+
+    Exact equality, not a tolerance, because the claim is that the map has a
+    fixed point and not that it drifts slowly — a target that creeps 1e-4 rad
+    a step has moved 0.02 rad over a hold, which is the scale of the 2 cm
+    ball the task is trying to sit in.
+
+    The contrast is the test: the SAME zero action under the other two maps
+    means HOME, whatever the target already is. So this is about delta's
+    algebra and not about an env that happens to be frozen.
+
+    The contrast is asserted on the MAP rather than by racing two episodes:
+    a 0.7 action on all six joints is a legal delta but an absolute pose that
+    drives the arm into its own chassis, so the two modes cannot be handed
+    the same episode and compared at the end.
+    """
+    env = _env(action_mode="delta")
+    env.reset(seed=0)
+    _hold(env, (0.7,) * 6, 10)                  # get away from HOME first
+    parked = env._cmd_target.copy()
+    assert np.abs(parked - env._home).max() > 1.0, "the arm never left HOME"
+    _hold(env, (0.0,) * 6, 40)                  # 1.6 s of "stay"
+    assert np.array_equal(env._cmd_target, parked)
+    # zero is the IDENTITY on the commanded target, not a pose named HOME
+    assert np.array_equal(env.joint_target(np.zeros(6)), env._cmd_target)
+
+    for mode in ("absolute", "cubic"):
+        other = _env(action_mode=mode)
+        other.reset(seed=0)
+        other._cmd_target = parked.copy()       # pretend it got there too
+        at_zero = other.joint_target(np.zeros(6))
+        assert np.allclose(at_zero, other._home), mode
+        assert np.abs(at_zero - parked).max() > 1.0, \
+            f"{mode}'s zero action should mean HOME, not 'stay'"
+
+
+def test_the_delta_step_is_exactly_what_the_rate_limit_allows():
+    """`DELTA_RAD_PER_STEP` is DERIVED from `MAX_TARGET_RATE_RAD_S`, and the
+    equality is load-bearing in both directions: larger and the rate limiter
+    silently truncates the top of the action box (a band of actions all
+    meaning the same motion — AGENTS.md rule 0); smaller and the arm cannot
+    slew as fast as the servos it models.
+
+    Asserted against the constants rather than against 0.24, per this file's
+    rule about tests that pin a number they do not name.
+    """
+    assert ME.DELTA_RAD_PER_STEP == ME.MAX_TARGET_RATE_RAD_S * ME.CTRL_DT
+    env = _env(action_mode="delta")
+    env.reset(seed=0)
+    assert ME.DELTA_RAD_PER_STEP == env.target_step_rad
+    before = env._cmd_target.copy()
+    env.step(np.full(8, -1.0, np.float32))
+    moved = np.abs(env._cmd_target - before)
+    # a full-scale delta asks for the fastest legal step and GETS it — the
+    # limiter must not be shaving anything off. `rel=1e-6` because the action
+    # is float32 (what SB3 and onnxruntime both hand over), so a full-scale
+    # step lands at 0.23999999 rather than at 0.24.
+    assert moved.max() == pytest.approx(ME.DELTA_RAD_PER_STEP, rel=1e-6)
+    # ...and the map is linear in the action, so half the ask moves half as
+    # far. (Under `absolute` a -0.5 action is a POSITION and would move the
+    # full limit again, which is the difference this asserts.)
+    fresh = _env(action_mode="delta")
+    fresh.reset(seed=0)
+    start = fresh._cmd_target.copy()
+    fresh.step(np.full(8, -0.5, np.float32))
+    assert np.abs(fresh._cmd_target - start).max() == pytest.approx(
+        0.5 * ME.DELTA_RAD_PER_STEP, rel=1e-6)
+
+
+def test_the_cubic_map_is_odd_monotone_and_spans_the_same_box():
+    """`cubic` buys resolution near zero without giving up any reach.
+
+    Three claims, and the first two are what make it a usable
+    reparameterisation rather than a different task: the sign of an action
+    still means the direction it always meant (ODD), more action is still
+    more travel (MONOTONE), and +-1 still commands exactly what `absolute`'s
+    +-1 commands (SAME BOX) — so the reachable set measured for
+    `ACTION_SCALE_RAD` carries over unchanged.
+
+    Oddness is checked where the URDF clip provably does not bind. The clip
+    is NOT odd (joint1 has 0.126 rad of headroom above HOME against 3.02
+    below it), and asserting oddness through it would be asserting something
+    false about a map that is fine.
+    """
+    cubic, linear = _env(action_mode="cubic"), _env(action_mode="absolute")
+    home = cubic._home
+
+    small = 0.3          # |0.3|^3 * 3.0 = 0.081 rad, inside every headroom
+    for a in (0.05, 0.1, small):
+        up = cubic.joint_target(np.full(6, a)) - home
+        down = cubic.joint_target(np.full(6, -a)) - home
+        assert np.allclose(up, -down, atol=1e-12), f"not odd at {a}"
+        assert np.all(np.abs(up) == pytest.approx(
+            a ** 3 * ME.ACTION_SCALE_RAD, rel=1e-9))
+
+    grid = np.linspace(-1.0, 1.0, 41)
+    curve = np.array([cubic.joint_target(np.full(6, a)) for a in grid])
+    assert np.all(np.diff(curve, axis=0) >= -1e-12), "not monotone"
+
+    for sign in (+1.0, -1.0):
+        assert np.allclose(cubic.joint_target(np.full(6, sign)),
+                           linear.joint_target(np.full(6, sign)))
+
+    # and the point of it: the interior is strictly finer. At |a| = 0.1 a
+    # 0.01 change of action moves a joint 0.99 mrad against `absolute`'s
+    # 30.0 mrad (MEASURED, scratchpad/probe_modes.py) — 1/30th of the step,
+    # which is the millimetre-scale authority the limit cycle needed.
+    def per_unit(env, a):
+        """The widest joint's travel for a 0.01 change of action at `a`.
+
+        The WIDEST, not joint 1: HOME leaves joint1 only 0.126 rad of room
+        above it, so at any `a >= 0.05` the linear map is already clipped
+        there and reports zero travel — which would make `absolute` look
+        finer than `cubic` by measuring a joint that cannot move at all.
+        """
+        base = np.full(6, a)
+        out = []
+        for j in range(6):
+            bumped = base.copy()
+            bumped[j] += 0.01
+            out.append(abs(float(env.joint_target(bumped)[j]
+                                 - env.joint_target(base)[j])))
+        return max(out)
+
+    assert per_unit(cubic, 0.1) < per_unit(linear, 0.1) / 20.0
+    assert per_unit(cubic, 0.1) == pytest.approx(0.00099, abs=2e-5)
+    assert per_unit(linear, 0.1) == pytest.approx(0.03, rel=1e-6)
+
+
+def test_the_rung_is_a_narrower_box_and_cannot_reach_the_shell():
+    """`RUNG_SCALE_RAD` is kept as a REFUTED option, and this is the refutation.
+
+    The plan's second curriculum rung was a 1.0 rad box for fine control near
+    the target. HOME parks the arm folded at joint1 = +1.445 rad pointing
+    83 deg to the robot's LEFT while the task samples the front arc, so a box
+    that narrow cannot get the gripper to the targets at all — AGENTS.md's
+    "check a knob's reachable set first", which is why no training run was
+    spent on it.
+
+    Measured as a BEHAVIOUR, not as a comparison of constants: one action,
+    two boxes, two episodes (`REACHES_SEED0`).
+    """
+    assert ME.RUNG_SCALE_RAD < ME.ACTION_SCALE_RAD
+    wide = _env(action_mode="absolute")
+    rung = _env(action_mode="absolute", action_scale_rad=ME.RUNG_SCALE_RAD)
+    assert rung.action_scale_rad == ME.RUNG_SCALE_RAD
+    assert wide.action_scale_rad == ME.ACTION_SCALE_RAD
+    # narrower on every joint whose headroom is wider than the rung
+    span_wide = np.abs(wide.joint_target(np.full(6, -1.0)) - wide._home)
+    span_rung = np.abs(rung.joint_target(np.full(6, -1.0)) - rung._home)
+    assert np.all(span_rung <= span_wide + 1e-12)
+    assert span_rung.max() == pytest.approx(ME.RUNG_SCALE_RAD)
+
+    for env, reaches in ((wide, True), (rung, False)):
+        env.reset(seed=0)
+        info = _hold(env, REACHES_SEED0, env.max_steps)
+        assert info["self_collision"] is None
+        if reaches:
+            assert info["dist"] <= ME.SUCCESS_RADIUS_M, \
+                f"the wide box misses seed 0 by {info['dist'] * 100:.1f} cm"
+        else:
+            assert info["dist"] > 10 * ME.SUCCESS_RADIUS_M, \
+                f"the rung reached {info['dist'] * 100:.1f} cm — re-measure"
+
+
+def test_the_observed_last_action_is_what_the_mode_says():
+    """The slot is the same +-1 in every mode; the UNITS are not.
+
+    Under `absolute`/`cubic` the six floats are a POSITION: the target they
+    name is a function of the ACTION ALONE, so where the arm already is
+    cannot change what a given action means. Under `delta` they are an
+    INCREMENT: the same action names a different target from every starting
+    point, offset by exactly the distance between those starting points. A
+    consumer that guessed wrong would integrate a position or hold a rate,
+    which is why `MarsBody.contract().deploy` carries the sentence.
+
+    Asserted on the map and not on two consecutive steps: the commanded
+    target is rate-limited, so an `absolute` action repeated while the target
+    is still SLEWING toward it moves the target again — which says nothing
+    about the units.
+    """
+    want = np.zeros(mars.NUM_ACTIONS, np.float32)
+    want[mars.ACT_ARM] = (0.4, -0.3, 0.2, -0.1, 0.5, -0.2)
+    for mode in ME.ACTION_MODES:
+        env = _env(action_mode=mode)
+        env.reset(seed=0)
+        obs, _r, _t, _tr, info = env.step(want)
+        # the slot is the +-1 the policy emitted, in every mode
+        assert np.allclose(obs[mars.OBS_LAST_ACTION], want, atol=1e-6), mode
+        assert info["action_mode"] == mode
+
+        here = env._cmd_target.copy()
+        there = np.clip(here + 0.3, env._jnt_lo, env._jnt_hi)
+        arm = np.asarray(want[mars.ACT_ARM], np.float64)
+        env._cmd_target = here.copy()
+        from_here = env.joint_target(arm)
+        env._cmd_target = there.copy()
+        from_there = env.joint_target(arm)
+        if mode == "delta":
+            assert not np.allclose(from_here, from_there), \
+                "delta's action should be an increment, not a position"
+            # ...and the two answers are the two starting points, shifted by
+            # the same increment — on every joint the URDF clip left alone.
+            # (The clip is not translation-invariant: joint1 sits 0.126 rad
+            # below its stop at HOME, so it saturates in both calls.)
+            free = ((from_here > env._jnt_lo + 1e-9)
+                    & (from_here < env._jnt_hi - 1e-9)
+                    & (from_there > env._jnt_lo + 1e-9)
+                    & (from_there < env._jnt_hi - 1e-9))
+            assert free.sum() >= 3, "the shift clipped on nearly every joint"
+            assert np.allclose((from_there - from_here)[free],
+                               (there - here)[free])
+        else:
+            assert np.allclose(from_here, from_there), \
+                f"{mode}'s action should name a target on its own"
+
+        # ...and in EVERY mode the action itself has to matter. Without this
+        # a delta map that multiplied the action by zero would satisfy
+        # everything above: it depends on the commanded target, it has a
+        # fixed point, and the slot still echoes what the policy asked for.
+        env._cmd_target = here.copy()
+        quieter = arm * 0.5
+        assert not np.allclose(env.joint_target(arm),
+                               env.joint_target(quieter)), \
+            f"{mode} ignores half its own action"
+        if mode == "delta":
+            full, half = env.joint_target(arm), env.joint_target(quieter)
+            unclipped = ((full > env._jnt_lo + 1e-9)
+                         & (full < env._jnt_hi - 1e-9))
+            assert np.allclose((full - half)[unclipped],
+                               (0.5 * arm * ME.DELTA_RAD_PER_STEP)[unclipped])
+        env._cmd_target = here
+
+
+def test_an_unknown_mode_and_a_meaningless_box_width_are_refused():
+    """Rule 0 twice over: a map this env does not implement, and a box width
+    in the one mode that has no box. Both would otherwise be accepted and
+    discarded, which looks exactly like working."""
+    with pytest.raises(SystemExit, match="unknown action_mode"):
+        _env(action_mode="incremental")
+    with pytest.raises(SystemExit, match="no meaning in action_mode='delta'"):
+        _env(action_mode="delta", action_scale_rad=1.0)
+    # ...asked of a mode that HAS a box, since `delta` refuses any width
+    with pytest.raises(SystemExit, match="must be positive"):
+        _env(action_mode="absolute", action_scale_rad=0.0)
+    # ...and the modes it DOES implement all construct
+    for mode in ME.ACTION_MODES:
+        assert _env(action_mode=mode).action_mode == mode
+    assert ME.DEFAULT_ACTION_MODE in ME.ACTION_MODES
+    assert _env().action_mode == ME.DEFAULT_ACTION_MODE
 
 
 # --------------------------------------------------------- the base is off
@@ -431,8 +711,13 @@ def test_the_finger_pair_is_excluded_by_the_MODEL_not_by_the_env():
 
 def test_progress_pays_for_closing_and_nothing_for_parking():
     """The task term is a CHANGE in distance, so a stalled arm earns zero and
-    an episode's total is only how much ground it made up."""
-    env = _env()
+    an episode's total is only how much ground it made up.
+
+    `action_mode="absolute"`, for the fixture's sake: the PARKED half of this
+    holds one constant action and expects the arm to stop, which is the
+    absolute map's property. The term's algebra is the same under every map.
+    """
+    env = _env(action_mode="absolute")
     env.reset(seed=0)
     env.target = SAFE_EE.copy()
     env._prev_dist = start = env.distance()
@@ -654,6 +939,124 @@ def test_bam_is_refused_for_mars_at_the_cli_and_in_the_env():
     # the default path asks for nothing and gets nothing
     assert mars.MARS.train_env_kwargs(
         T.parse_args(["--robot", "mars", "--task", "reach"])) == {}
+
+
+def test_the_action_mode_reaches_the_env_through_the_cli():
+    """`--action-mode` is MARS's one per-body trainer knob, and it has to
+    arrive as an env kwarg (so `run.json` records it) rather than as a new
+    environment variable — `docs/mars-roadmap.md` §6.8.
+
+    What an action MEANS is not recoverable from a policy file, so a run that
+    does not carry it is a run nobody can reproduce.
+    """
+    def kwargs(*argv):
+        return T.env_kwargs_from_args(T.parse_args(
+            ["--robot", "mars", "--task", "reach", *argv]))
+
+    # left out entirely when the flag is, so the ENV owns the default
+    assert kwargs() == {"domain_rand": True, "obs_noise": True}
+    for mode in ME.ACTION_MODES:
+        kw = kwargs("--action-mode", mode)
+        assert kw["action_mode"] == mode
+        assert "action_scale_rad" not in kw
+        assert MarsArmEnv(seed=0, **kw).action_mode == mode
+    # 'rung' is not a fourth MAP: it is `absolute` in a narrower box
+    rung = kwargs("--action-mode", "rung")
+    assert rung["action_mode"] == "absolute"
+    assert rung["action_scale_rad"] == ME.RUNG_SCALE_RAD
+    built = MarsArmEnv(seed=0, **rung)
+    assert built.action_scale_rad == ME.RUNG_SCALE_RAD
+
+    # ...and a body with no such knob REFUSES it rather than dropping it
+    for robot in ("microduck", "g1"):
+        with pytest.raises(SystemExit, match="MARS's arm action map"):
+            T.env_kwargs_from_args(T.parse_args(
+                ["--robot", robot, "--action-mode", "delta"]))
+
+
+def test_the_contract_says_what_an_action_MEANS():
+    """The deploy sentence has to carry the action map off the premises.
+
+    An ONNX graph cannot say whether its six arm floats are a position or an
+    increment — the numbers are the same +-1 either way — and a code skill
+    that guesses wrong drives a different controller. `deploy` is the only
+    part of an exported file that can say, so it says: the default map by
+    name, the arithmetic, the clip, and where a run that overrode the default
+    recorded that (its `run.json`), because this record is the BODY's and not
+    the run's.
+    """
+    deploy = mars.MARS.contract().deploy
+    assert "untested on hardware" in deploy
+    assert ME.DEFAULT_ACTION_MODE in deploy
+    assert "run.json" in deploy and "action_mode" in deploy
+    assert "+-1" in deploy                       # clip first, or it wanders
+
+    # the sentence is BUILT from the env's constants, so it cannot drift
+    for mode in ME.ACTION_MODES:
+        said = ME.action_map_sentence(mode)
+        assert said and said != ME.action_map_sentence(
+            next(m for m in ME.ACTION_MODES if m != mode))
+    delta_said = ME.action_map_sentence("delta")
+    assert "INCREMENT" in delta_said
+    assert f"{ME.DELTA_RAD_PER_STEP:g}" in delta_said
+    assert f"{ME.ACTION_SCALE_RAD:g}" in ME.action_map_sentence("absolute")
+    assert "|a|^3" in ME.action_map_sentence("cubic")
+    # ...and whichever map is the default, the contract quotes THAT one
+    assert ME.action_map_sentence(ME.DEFAULT_ACTION_MODE) in deploy
+
+
+def test_the_probe_scores_a_policy_under_the_map_it_trained_with(tmp_path):
+    """`probe_mars_reach` builds its env from the RUN's map, not the default.
+
+    The same six floats mean an increment under `delta` and a position under
+    `absolute`, so an env built with the wrong map scores a controller that
+    was never trained and prints a number that is meaningless rather than
+    merely bad. This is Phase 4a's unclipped-action eval again (the probe
+    that handed the raw ONNX output to `step` scored a 2.6 cm policy at
+    20.9 cm), and the fix is the same shape: take the limit from the one
+    place that recorded it.
+    """
+    import sys
+    from argparse import Namespace
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import probe_mars_reach as P
+
+    bare = Namespace(action_mode=None, action_scale_rad=None)
+    run = tmp_path / "a-run"
+    run.mkdir()
+    onnx = run / "policy.onnx"
+    onnx.write_bytes(b"not really onnx")
+
+    # no run.json at all: the env's own default, which is what it would
+    # have got before this existed
+    assert P.run_action_kwargs(onnx, bare) == {
+        "action_mode": ME.DEFAULT_ACTION_MODE}
+
+    (run / "run.json").write_text(json.dumps(
+        {"robot": "mars", "task": "reach",
+         "env_kwargs": {"domain_rand": True, "action_mode": "cubic",
+                        "action_scale_rad": 1.5}}))
+    assert P.run_action_kwargs(onnx, bare) == {
+        "action_mode": "cubic", "action_scale_rad": 1.5}
+
+    # an explicit flag still wins — one policy under two maps is a fair
+    # question to ask
+    assert P.run_action_kwargs(
+        onnx, Namespace(action_mode="absolute", action_scale_rad=None)) == {
+            "action_mode": "absolute", "action_scale_rad": 1.5}
+    # ...and a width is not carried into the one mode that refuses it
+    assert P.run_action_kwargs(
+        onnx, Namespace(action_mode="delta", action_scale_rad=None)) == {
+            "action_mode": "delta"}
+    # whatever it returns, the env must accept it
+    for argv in (bare, Namespace(action_mode="delta", action_scale_rad=None)):
+        MarsArmEnv(seed=0, **P.run_action_kwargs(onnx, argv))
+
+    # a run.json that will not parse is a question, not a claim: fall back
+    (run / "run.json").write_text("{ this is not json")
+    assert P.run_action_kwargs(onnx, bare) == {
+        "action_mode": ME.DEFAULT_ACTION_MODE}
 
 
 def test_head_range_is_still_refused_and_the_duck_is_untouched():

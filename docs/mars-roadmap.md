@@ -543,6 +543,109 @@ that matter. That coupling between a body's action-box width and a global
 trainer constant is undocumented and should be written down wherever the
 fourth body's box is chosen.
 
+*(All three of those candidates were measured in 4a-2, directly below. The
+short version before you act on this paragraph: the non-linear map LOST, the
+narrower box was structurally excluded and never trained, `LOG_STD_MAX`
+needed no change — and a fourth option nobody had listed, an INCREMENTAL
+action, is what worked.)*
+
+**4a-2 DONE — the action map was the mechanism, and `delta` is the default
+now. The 8/8 bar is still open (2026-09-18).** Three variants as env options
+(`MarsArmEnv(action_mode=..., action_scale_rad=...)`, reached from the CLI by
+`--action-mode` and recorded in `run.json`'s `env_kwargs`), matched at 1.5 M
+steps / 8 envs / seed 0, scored on the deterministic export over 8 seeds × 8 s
+with `scripts/probe_mars_reach.py` — which now builds its env from the run's
+own map, because the same six floats are an increment under one map and a
+position under another.
+
+| variant | final median | best | ≤ 2 cm | **held 1 s** | sat. | tail spread | self-hits | sheet |
+|---|---|---|---|---|---|---|---|---|
+| null (zero action) | 30.2 cm | 30.1 cm | 0/8 | 0/8 | 0% | 0.0 mm | 0/8 | `scratchpad/mars-null-eval/` |
+| **absolute** — 4a's v2, the baseline | 2.02 cm | 0.75 cm | 3/8 | **0/8** | 58% | 11.8 mm | 0/8 | `scratchpad/mars-reach-v2-eval/` |
+| **B. cubic** `HOME + sign(a)|a|³·3.0` | 7.62 cm | 5.33 cm | 0/8 | **0/8** | 58% | 22.9 mm | 2/8 | `scratchpad/mars-reach-cubic-eval/` |
+| **A. delta** `target += a·0.24`, seed 0 | **1.13 cm** | 0.42 cm | **5/8** | **5/8** | 58% | 5.3 mm | 0/8 | `scratchpad/mars-reach-delta-eval/` |
+| A. delta, training seed 1 | 2.38 cm | 1.23 cm | 3/8 | **2/8** | 55% | 7.0 mm | 0/8 | `scratchpad/mars-reach-delta-s1-eval/` |
+
+**The mechanism was a missing fixed point, not saturation.** A rate-limited
+ABSOLUTE target cannot be told to stay: the action names a destination, the
+target walks there at 6 rad/s, and holding still needs the action to keep
+pointing at wherever the target already is — a moving quantity, re-hit every
+40 ms. `delta` integrates instead (`a = 0` is exact), and it is the first map
+the task's own success rule fires on at all. The sheets are qualitatively
+different, not just better: v2 crossed the 2 cm ball for 1–5 control steps at
+a time on a ~2 s cycle, while the delta sheet reads 0.5–0.7 cm from t = 2 s to
+the end with the near-streak climbing past 150 of the 25 it needs.
+`at_target` doubles, +110 → +212. **All three maps sit at 55–58% of dims on
+the box edge and `delta` holds anyway** — so 4a's 58% was a symptom, and under
+`delta` a saturated action means "slew at the fastest legal rate", which is
+the right command while travelling and simply is not what the policy emits
+once it arrives. (`AGENTS.md`'s "KL was a symptom, not the cause".)
+
+Corroboration from the optimizer's side: `train.LOG_STD_MAX` caps std at
+0.6065 and the cap BINDS on 6 of 8 dims under `absolute` (v2: 0.584–0.612) and
+4 of 8 under `cubic`, but `delta` pulls its three shoulder dims down by itself
+to 0.451 / 0.530 / 0.489. Only under `delta` does noise cost anything — it
+integrates into target drift, so there is gradient pressure to be quiet near
+the target. So `LOG_STD_MAX`, the third candidate 4a listed, needed no change;
+the map made the cap stop binding where it mattered. The box-width/`LOG_STD_MAX`
+coupling 4a asked to be written down still should be, for the fourth body.
+
+**Cubic is a real negative result.** Worst of the three, and the only one that
+self-collides. `|a|³` means an action must run to the box edge to travel at
+all (`|0.5|³·3.0` = 0.375 rad, an eighth of the linear map at the same output),
+so the policy lives at `|a| ≈ 1` — where the cubic slope is 9.0 rad per unit
+action against the linear 3.0. It sold the interior resolution it was bought
+for (0.99 mrad per 0.01 of action at `|a| = 0.1`, against 30.0 linear) in
+exchange for 3× the coarseness where the policy actually operates. Its sheet
+shows it PARKING stably at 2.9–3.2 cm, so the map does settle — it just cannot
+settle close. **Stretching an action map's interior only helps if the policy's
+operating point is in the interior, and 58% on the edge was the measurement
+saying it is not.**
+
+**The narrower box (4a's second candidate) was never trained, and that is the
+result.** `ACTION_SCALE_RAD` 3.0 → 1.0 is structurally excluded, measured
+before spending a run on it (`AGENTS.md`, "check a knob's reachable set
+first"; `scratchpad/probe_box_reach2.py`, the coordinate-descent solver the
+3.0 was chosen with, 40 draws from the env's own shell):
+
+| box | residual median | p90 | ≤ 2 cm | the 8 eval targets |
+|---|---|---|---|---|
+| full joint ranges | 0.14 cm | 3.67 cm | 72% | — |
+| HOME ± 3.0 (today) | 0.15 cm | 3.15 cm | 78% | **8/8 inside 0.3 mm** |
+| HOME ± 2.0 | 2.30 cm | 6.91 cm | 48% | — |
+| HOME ± 1.0 (the rung) | 12.96 cm | 24.96 cm | **0%** | **0/8** (5.0–27.8 cm) |
+
+HOME parks the arm folded at joint1 = +1.445 rad, 83° to the robot's LEFT,
+while the task samples the front arc — so a 1.0 rad box cannot reach a single
+one of the eight targets the A/B scores. Its run would have printed ~13 cm and
+said nothing about the hold: an expected null, not an informative one. The
+third run went to a second training SEED instead. `RUNG_SCALE_RAD` stays as a
+refuted option with that table on it, and the useful reading is that narrowing
+a box only helps when its centre follows the arm — which is what `delta` is.
+The same table also confirms the bar is **geometrically attainable** on these
+eight seeds (8/8 inside 0.3 mm), so nothing about the shell excuses a miss.
+
+**What 4b still owes, from 4a-2's own numbers:**
+
+- **Two training seeds, always.** Seed 1 of the identical delta recipe holds
+  2/8 against seed 0's 5/8 — wider than the 8-seed eval spread, which is
+  "eval seeds don't measure training runs" landing exactly as written. The
+  claim is "delta holds about half the seeds". `absolute` has only one
+  training seed here, so the comparison rests on 0/8 → {5,2}/8 being
+  structural rather than on a paired statistic: an absolute map's zero is the
+  absence of a fixed point, not variance.
+- **What still misses is not the hold — it is the shell's edges.** On seed 0's
+  run: seed 4's target is at 0.386 m of the 0.40 m shell AND 0.343 m of its
+  0.35 m ceiling (the arm arrives stretched out and stalls 2.7–3.4 cm short,
+  though the solver gets within 3 mm — so the policy, not the geometry);
+  seed 1 is at +54° of the ±60° arc; seed 6 reaches 0.2 cm then drifts to
+  2.1 cm. Two edges and a drift is a **physics-ladder** shape — ladder the
+  target shell, which `behaviors/mars_tasks.py` already names as the rung to
+  add — and not a reward one.
+- The `reach` reward was not touched in this phase, by design: the mechanism
+  was in the action space, and a reward cannot pay for a behaviour the action
+  space has no way to express.
+
 **3b's open question is still open, and 4a could not close it.** Phase 3b
 left "the world's option block costs MARS nothing… NOT tested for a GRASP,
 which is what those options were set for; re-measure in Phase 4". `reach`

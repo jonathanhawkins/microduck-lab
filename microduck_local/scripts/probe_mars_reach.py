@@ -148,6 +148,50 @@ def build_sheet(tiles, captions, header, footer, out_path: Path) -> None:
     img.save(out_path)
 
 
+def run_action_kwargs(policy: Path | None, args) -> dict:
+    """The action map to build the scoring env with.
+
+    A MARS policy's floats mean something different under each map — `delta`'s
+    six arm actions are increments where `absolute`'s are positions — so an
+    env built with the WRONG map scores a different controller than the one
+    that was trained, and the number it prints is meaningless rather than bad.
+    This is the same failure as Phase 4a's unclipped-action eval (the probe
+    that handed the raw ONNX output to `step` scored a 2.6 cm policy at
+    20.9 cm), so the map comes from the run's own record rather than from a
+    default: `run.json`'s `env_kwargs` is where `train.py` writes it.
+
+    An explicit flag still wins — scoring one policy under two maps is a
+    legitimate question — and a loose .onnx with no run directory falls back
+    to `mars_env`'s default, which is what it would have got anyway.
+    """
+    import json
+
+    from microduck_local.robots import mars_env as ME
+
+    kw: dict = {}
+    if policy is not None:
+        meta = Path(policy).resolve().parent / "run.json"
+        if meta.exists():
+            try:
+                recorded = (json.loads(meta.read_text()).get("env_kwargs")
+                            or {})
+            except (OSError, ValueError):
+                recorded = {}
+            for key in ("action_mode", "action_scale_rad"):
+                if key in recorded:
+                    kw[key] = recorded[key]
+    if args.action_mode is not None:
+        kw["action_mode"] = args.action_mode
+    if args.action_scale_rad is not None:
+        kw["action_scale_rad"] = args.action_scale_rad
+    # `delta` refuses a width it has no use for, so do not hand it one that
+    # only came along for the ride.
+    if kw.get("action_mode") == "delta":
+        kw.pop("action_scale_rad", None)
+    kw.setdefault("action_mode", ME.DEFAULT_ACTION_MODE)
+    return kw
+
+
 def rollout(env, act_fn, seed: int, renderer=None, cam=None,
             frame_every: int | None = None):
     """One deterministic episode. Returns (record, tiles, captions)."""
@@ -211,6 +255,13 @@ def main() -> None:
                     help="score the ZERO action instead of a policy — the "
                          "arm parked at ARM_HOME, which is what the reward "
                          "has to beat before anything is credited to it")
+    ap.add_argument("--action-mode", default=None,
+                    help="the action map to score under (mars_env.ACTION_MODES). "
+                         "Default: the one the policy's own run.json trained "
+                         "with — see `run_action_kwargs`")
+    ap.add_argument("--action-scale-rad", type=float, default=None,
+                    help="override the absolute/cubic box width in rad "
+                         "(default: the run's, else mars_env.ACTION_SCALE_RAD)")
     ap.add_argument("--width", type=int, default=420)
     ap.add_argument("--height", type=int, default=340)
     ap.add_argument("--cam-distance", type=float, default=1.05)
@@ -222,7 +273,9 @@ def main() -> None:
 
     from microduck_local.robots.mars_env import MarsArmEnv
 
-    env = MarsArmEnv(seed=args.seed0)
+    action_kwargs = run_action_kwargs(
+        Path(args.policy) if args.policy else None, args)
+    env = MarsArmEnv(seed=args.seed0, **action_kwargs)
     if args.null:
         label = "NULL (zero action: the arm parked at ARM_HOME)"
 
@@ -286,8 +339,12 @@ def main() -> None:
         for k, v in r["terms"].items():
             terms[k] = terms.get(k, 0.0) + v / len(records)
 
+    box = ("" if env.action_mode == "delta"
+           else f" box +-{env.action_scale_rad:g} rad")
     summary = [
         f"policy: {label}",
+        f"action map: {env.action_mode}{box}  "
+        f"(from {'--action-mode' if args.action_mode else 'the run'})",
         f"seeds {args.seed0}..{args.seed0 + args.seeds - 1}  "
         f"final dist: median {np.median(finals):.4f}  mean {finals.mean():.4f}  "
         f"min {finals.min():.4f}  max {finals.max():.4f} m",

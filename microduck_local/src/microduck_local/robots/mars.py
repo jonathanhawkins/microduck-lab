@@ -883,7 +883,20 @@ class MarsBody(BodyBase):
         4a's exports carry exactly this record, stamped into the ONNX's own
         `metadata_props`, and `tests/test_mars_env.py` reads it back off a
         trained file.
+
+        **`deploy` names the ACTION MAP, and it has to.** The eight floats a
+        MARS policy emits are +-1 under every map this lab trains — what
+        changes is whether the six arm floats are a joint POSITION about
+        ARM_HOME or an INCREMENT on a commanded target (`mars_env`'s
+        `ACTION_MODES`; Phase 4a-2 measured the second one into the default).
+        No part of an ONNX graph says which, the numbers look identical
+        either way, and a consumer that holds a rate or integrates a position
+        drives a different controller. The sentence is built from
+        `mars_env`'s own constants rather than typed, so the file and the
+        code cannot drift; a run that overrode the default records it in
+        `run.json`'s `env_kwargs`, which is the one place to check.
         """
+        from .mars_env import DEFAULT_ACTION_MODE, action_map_sentence
         return declare(
             self,
             id=CONTRACT_ID,
@@ -891,7 +904,14 @@ class MarsBody(BodyBase):
             slots=_obs_slots(),
             deploy="code skill: an Innate Python skill running the ONNX and "
                    "streaming /mars/arm/commands + /cmd_vel at 25 Hz — "
-                   "untested on hardware")
+                   "untested on hardware. Clip the output to +-1 first "
+                   "(nothing clips at inference and the policy never saw an "
+                   "unclipped value); then actions[6:8] are (vx m/s, "
+                   "wz rad/s), zero for arm-only tasks, and actions[0:6] are "
+                   f"— under this lab's DEFAULT map, {DEFAULT_ACTION_MODE} — "
+                   f"{action_map_sentence(DEFAULT_ACTION_MODE)}. A run that "
+                   "trained a different map says so in its run.json "
+                   "env_kwargs.action_mode; check there before deploying one")
 
     # ------------------------------------------------------------- assets
 
@@ -952,17 +972,27 @@ class MarsBody(BodyBase):
         return ()
 
     def train_env_kwargs(self, args) -> dict:
-        """No per-body knobs — `MarsArmEnv`'s own defaults are the recipe.
+        """One per-body knob: `--action-mode`, MARS's arm action map.
 
-        Deliberately empty. `--actuator bam` is the one flag that must not be
-        allowed through, and it is REFUSED rather than dropped: joints 4-6 and
-        the head are XL330s, which is the servo BAM was identified on, while
-        joints 1-3 are XL430/XC430 with no fit here, so v1 drives every joint
-        with Innate's own PD (`docs/mars-roadmap.md` §6.6 — per-joint servo
-        models are the fix). Pretending one switch covers the arm is the thing
-        to avoid; so is accepting a flag and silently discarding it, which is
-        AGENTS.md's rule 0 ("a knob that changes nothing is broken, not
-        null"). The G1 refuses the same flag in the same place.
+        `--actuator bam` is the flag that must not be allowed through, and it
+        is REFUSED rather than dropped: joints 4-6 and the head are XL330s,
+        which is the servo BAM was identified on, while joints 1-3 are
+        XL430/XC430 with no fit here, so v1 drives every joint with Innate's
+        own PD (`docs/mars-roadmap.md` §6.6 — per-joint servo models are the
+        fix). Pretending one switch covers the arm is the thing to avoid; so
+        is accepting a flag and silently discarding it, which is AGENTS.md's
+        rule 0 ("a knob that changes nothing is broken, not null"). The G1
+        refuses the same flag in the same place.
+
+        `--action-mode` is here rather than in a new environment variable
+        because it belongs in the run's `env_kwargs` (§6.8: new per-body knobs
+        go in the recipe's `env` dict and the run's record, both of which
+        already exist and are recorded). What an action MEANS is not
+        recoverable from a policy file, so it has to be on the run.
+
+        Left out entirely when the flag is, so the env's own
+        `DEFAULT_ACTION_MODE` stays the single definition of the default and
+        a run that did not ask is not recorded as having asked.
         """
         if getattr(args, "actuator", None) == "bam":
             raise SystemExit(
@@ -970,7 +1000,20 @@ class MarsBody(BodyBase):
                 "describes MARS's joints 4-6 and head but NOT its XL430/XC430 "
                 "shoulder (joints 1-3), so v1 trains every joint on Innate's "
                 "own position PD (docs/mars-roadmap.md §6.6)")
-        return {}
+        kw: dict = {}
+        mode = getattr(args, "action_mode", None)
+        if mode:
+            from .mars_env import RUNG_SCALE_RAD
+            if mode == "rung":
+                # The CLI's fourth name is not a fourth MAP: it is `absolute`
+                # in a narrower box, which is the one combination worth naming
+                # because Phase 4a's plan named it. `RUNG_SCALE_RAD` carries
+                # the measurement that refuted it.
+                kw["action_mode"] = "absolute"
+                kw["action_scale_rad"] = RUNG_SCALE_RAD
+            else:
+                kw["action_mode"] = mode
+        return kw
 
     # ---------------------------------------------------------- /sim world
 

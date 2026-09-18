@@ -331,6 +331,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="g1 --task imitate: the clip (clips/<name>.json, "
                          "authored in the 🎬 panel) to track; MICRODUCK_CLIP "
                          "is the lab's channel for the same thing")
+    ap.add_argument("--action-mode", default=None,
+                    choices=("absolute", "delta", "cubic", "rung"),
+                    help="mars: what the six arm actions MEAN. 'delta' "
+                         "integrates the commanded target so a=0 holds it; "
+                         "'cubic' keeps an absolute target but stretches the "
+                         "box's interior; 'absolute' is Phase 4a's linear "
+                         "map; 'rung' is 'absolute' in a narrower box "
+                         "(mars_env.RUNG_SCALE_RAD — measured unable to reach "
+                         "the shell, kept only so its null is reproducible). "
+                         "Default: mars_env.DEFAULT_ACTION_MODE.")
     ap.add_argument("--task", default="walk",
                     help="what to train on a non-duck body (g1: "
                          f"{', '.join(G1_TASKS)}; mars: "
@@ -373,6 +383,17 @@ def env_kwargs_from_args(args: argparse.Namespace) -> dict:
         v = [float(x) for x in args.head_range.split(",")]
         assert len(v) == 8, "--head-range needs 8 numbers"
         kw["head_cmd_ranges"] = tuple((v[i], v[i + 1]) for i in range(0, 8, 2))
+    # `--action-mode` is MARS's action map (`robots/mars_env.ACTION_MODES`).
+    # Refused for a body that has no such knob rather than dropped, which is
+    # `--head-range`'s rule above and AGENTS.md's rule 0: a flag accepted and
+    # discarded looks exactly like one that worked, and this one decides what
+    # every float the policy emits means.
+    if getattr(args, "action_mode", None):
+        if robot != "mars":
+            raise SystemExit(
+                "--action-mode is MARS's arm action map; "
+                f"{robot} has one linear joint-target map "
+                "(robots/spec.py's action_scale)")
     kw.update(_body(robot).train_env_kwargs(args))
     return kw
 
