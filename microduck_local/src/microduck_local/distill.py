@@ -233,6 +233,11 @@ def fit(obs: np.ndarray, act: np.ndarray, out: Path, epochs: int = 40,
         except ValueError:
             prev = {}
     prev.update({"run_name": out.name, "robot": robot, "task": task,
+                 # The same contract record `train.py` writes
+                 # (robots/policy_contract.py): a clone is a policy like any
+                 # other and leaves here through the same exporter, so it has
+                 # to say what it speaks. `robot` stays for the old readers.
+                 "contract": registry.get(robot).contract().as_dict(),
                  "distilled_from": True,
                  # an idle ignores the drive command; the lab must stop
                  # sending one (viz_server.is_trick_duck)

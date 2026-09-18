@@ -505,6 +505,63 @@ G1's says "lab"; MARS's says "code skill". **Settles:** the four width
 guards become one contract comparison, and `eval-walk some.onnx` with no
 run directory still knows its body.
 
+**PRODUCER SIDE DONE (2026-09-17)** — `robots/policy_contract.py`:
+`PolicyContract(id, robot, obs_dim, act_dim, rate_hz, slots, deploy)` with
+`Slot(name, start, stop)`, and `resolve(run_dir_or_onnx)` as the ONE
+precedence in the tree — the ONNX's own `metadata_props`, then `run.json`'s
+`"contract"`, then `run.json`'s `"robot"` through the registry, then the duck
+(a file with nothing to say has always been a duck). A DIRECTORY is asked
+`run.json` first, deliberately: naming the run asks what the run drives, and
+the lab resolves every run in the palette on a timer where 300 bytes of JSON
+beats a protobuf parse per run per poll. `declare()` takes the dims FROM the
+body so they cannot drift, and `__post_init__` refuses a table that does not
+tile `[0, obs_dim)` exactly — so a bad layout is a construction error at the
+first `fetch-robot` listing. The three contracts:
+
+```
+microduck-61-v1  obs[1,61] -> actions[1,14] at 50 Hz   drop-in: the robot's own contract
+g1-lucky-99-v1   obs[1,99] -> actions[1,29] at 50 Hz   lab contract: base lin vel is not observed
+mars-arm-32-v1   obs[1,32] -> actions[1,8]  at 25 Hz   code skill, untested on hardware
+```
+
+Written by `export()` (into `metadata_props`, before its own onnxruntime
+cross-check, so every export proves the stamp is free), by `train.py` and
+`distill.py` into `run.json` (`"robot"` kept beside it — an addition, not a
+migration), and as `contract_id` alone into `record.json`, which is what a
+person reads. Read by `export_onnx.run_robot()` (now `resolve(...).robot`)
+and by `eval-walk`, which refuses a `--robot` that contradicts a contract the
+file RECORDED and still honours it for a file that declares nothing — the
+flag's only real use is an old `.onnx` moved away from its run. `export-walk`
+prints `describe()` so the deploy caveat leaves the building with the file;
+`fetch-robot` lists each body's id beside its state.
+
+MEASURED: the stamp is free — graph protos byte-identical once the props are
+stripped, onnxruntime outputs bit-identical over 200 random observations,
++456 bytes. 50 new cases in `tests/test_policy_contract.py`, every positive
+shown to fail on a planted break (25/25 caught); the duck's table is pinned
+by reading all EIGHT slots back off a live `MicroduckWalkEnv` and the G1's
+four off a live `G1WalkEnv`, because a swap of two same-width slots still
+tiles perfectly and only an env can tell them apart. Two of those plants
+first went MISSED and fixed the tests: at the STAND keyframe `base_lin_vel`
+and `base_ang_vel` are both three zeros, so the G1 case now steps 40 times
+before it reads (the "perturb what the dynamics can feel" rule), and the
+rung-1 case had been competing the metadata against a robot NAME instead of
+a recorded contract, which the reversed precedence also satisfied. The
+conformance suite's exporter round-trip now asserts the stamp, so "supported"
+includes "its exports are self-describing". The duck/BAM/G1 rollout
+fingerprints are unchanged.
+
+**Left for 1b** (`viz_server.py` is contended): `policy_robot()` at
+viz_server.py:843 becomes `resolve(path)` — it already takes either a run dir
+or a file, which is the shape `resolve` accepts — and the four width guards
+(`do_assign` :3918, `do_spawn_helper` :3971, `do_spawn_duck` :4040,
+`apply_snapshot` :4078, each comparing `infer.obs_dim` against
+`duck.env.observation_space.shape[0]`) become one `matches()` against the
+body's contract, with the graph width kept as the last-ditch check that the
+FILE is what its metadata claims. `render_rollout.main()` :723 calls
+`run_robot(Path(args.policy).parent)` and its `--robot` choices are still the
+literal `("microduck", "g1")`.
+
 ### 6.4 The registry, and the lab file it lives in  (do first — §1 Phase 1)
 
 `viz_server.py` is 4,540 lines: the 50 Hz loop, the socket, HTTP, teach

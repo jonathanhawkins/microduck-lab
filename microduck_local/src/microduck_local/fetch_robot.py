@@ -32,12 +32,21 @@ def main(argv: list[str] | None = None) -> None:
         print("bodies this install knows:")
         for body_id in registry.ids():
             hint = registry.setup_hint(body_id)
+            # The CONTRACT ID beside the state, because "which robot do I
+            # have" and "what do its policies speak" are the same question
+            # asked twice — and this is the one listing a person runs before
+            # handing a .onnx to someone (robots/policy_contract.py).
+            contract_id = ""
             try:
-                state = "ready" if registry.get(body_id).ready() else "not fetched"
+                body = registry.get(body_id)
+                state = "ready" if body.ready() else "not fetched"
+                contract_id = body.contract().id
             except KeyError:
                 state = "not fetched"
-            print(f"  {body_id:<12} {state}"
-                  + (f"   ({hint})" if hint else "   (ships with the checkout)"))
+            except NotImplementedError:
+                contract_id = "no contract declared"
+            print(f"  {body_id:<12} {state:<12} {contract_id:<18}"
+                  + (f"({hint})" if hint else "(ships with the checkout)"))
         return
 
     try:

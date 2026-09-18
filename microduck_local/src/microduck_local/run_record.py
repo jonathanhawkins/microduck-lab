@@ -136,6 +136,31 @@ def read_label(run_dir: Path) -> dict[str, Any]:
     return out
 
 
+def _contract_id(run_json: dict[str, Any], robot: str) -> str | None:
+    """The policy contract this run speaks, by id — or None.
+
+    `run.json`'s own `"contract"` first, because the trainer wrote it from
+    the body a moment earlier and reading it costs nothing. The registry is
+    the fallback, for a record written from an OLD run.json
+    (`describe-run --backfill`) that records only a robot name.
+
+    Never raises, and never guesses. A body whose assets are absent cannot
+    be loaded (`registry.get` raises with the fetch command) — and a LABEL
+    must not be able to take down the run it labels, which is this module's
+    rule from its first line (`read_record` swallowing a corrupt file for
+    the same reason). A record with no `contract_id` reads as "not
+    recorded", which is exactly what every run before this key says too.
+    """
+    declared = run_json.get("contract")
+    if isinstance(declared, dict) and declared.get("id"):
+        return str(declared["id"])
+    try:
+        from .robots import registry
+        return str(registry.get(robot).contract().id)
+    except Exception:
+        return None
+
+
 def default_record(run_name: str, run_json: dict[str, Any],
                    behavior_title: str | None = None,
                    stage_env: dict[str, str] | None = None) -> dict[str, Any]:
@@ -150,6 +175,7 @@ def default_record(run_name: str, run_json: dict[str, Any],
     """
     robot = str(run_json.get("robot") or "microduck")
     task = str(run_json.get("task") or "walk")
+    contract_id = _contract_id(run_json, robot)
     kw = run_json.get("env_kwargs") or {}
     clip = kw.get("clip_name") or run_json.get("clip")
     title = behavior_title or (f"{task} ({robot})" if robot != "microduck" else task)
@@ -174,6 +200,13 @@ def default_record(run_name: str, run_json: dict[str, Any],
         "description": "; ".join(bits) + ".",
         "run_name": run_name,
         "robot": robot,
+        # The contract ID ONLY, where `run.json` carries the whole record
+        # (`robots/policy_contract.py`). Two files, two audiences: `run.json`
+        # is what the exporter and the lab read, and this is what a PERSON
+        # reads — the id is the part that is legible in a palette tooltip,
+        # and a slot table there would be noise. Absent (None) rather than
+        # guessed when the body cannot be loaded — see `_contract_id`.
+        "contract_id": contract_id,
         "task": task,
         "clip": clip,
         "init_from": Path(str(init)).name if init else None,

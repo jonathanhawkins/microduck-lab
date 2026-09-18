@@ -59,6 +59,7 @@ import numpy as np
 
 from .. import contract as C
 from .body import BodyBase
+from .policy_contract import PolicyContract, Slot, declare
 
 _ROOT = Path(__file__).resolve().parents[3]  # microduck_local/
 
@@ -207,6 +208,39 @@ NUM_ACTIONS = 8
 #: Innate's policy-defined skills tick at 25 Hz, so a lab policy and a real
 #: code skill run the same clock (docs/mars-roadmap.md Phase 4).
 CONTROL_HZ = 25.0
+#: MARS's policy contract id (`robots/policy_contract.py`). "arm" and not
+#: "walk" because that is the whole design decision of §1: the thing this
+#: harness calls a policy does not exist for a wheeled body, and what it has
+#: instead is an arm. `v1` is the layout declared above, unfilled — the id
+#: exists from the day the body is listed so that the FIRST exported MARS
+#: policy is self-describing, rather than a 32-wide file that has to be
+#: recognised by its width.
+CONTRACT_ID = "mars-arm-32-v1"
+
+
+def _obs_slots() -> tuple[Slot, ...]:
+    """The v1 layout, straight off the `OBS_*` slices above.
+
+    Built from the slices rather than re-typed, so the table and the
+    constants Phase 4's `MarsArmEnv` will index with cannot disagree — the
+    duck's and the G1's tables are derived from their joint counts for the
+    same reason.
+
+    `reserved` is a NAMED slot, not a gap: `PolicyContract.tiles()` refuses
+    an undescribed float, and "four zeros a task may claim" is information
+    that a hole in the table would throw away.
+    """
+    return (
+        Slot("arm_qpos", OBS_ARM_QPOS.start, OBS_ARM_QPOS.stop),
+        Slot("arm_qvel", OBS_ARM_QVEL.start, OBS_ARM_QVEL.stop),
+        Slot("head_pitch", OBS_HEAD_PITCH.start, OBS_HEAD_PITCH.stop),
+        Slot("gripper_load", OBS_GRIPPER_LOAD.start, OBS_GRIPPER_LOAD.stop),
+        Slot("last_action", OBS_LAST_ACTION.start, OBS_LAST_ACTION.stop),
+        Slot("target_base", OBS_TARGET_BASE.start, OBS_TARGET_BASE.stop),
+        Slot("target_seen", OBS_TARGET_SEEN.start, OBS_TARGET_SEEN.stop),
+        Slot("base_twist", OBS_BASE_TWIST.start, OBS_BASE_TWIST.stop),
+        Slot("reserved", OBS_RESERVED.start, OBS_RESERVED.stop),
+    )
 
 # --------------------------------------------- innate's contact tuning
 #
@@ -758,6 +792,31 @@ class MarsBody(BodyBase):
     def num_actions(self) -> int:
         return NUM_ACTIONS
 
+    def contract(self) -> PolicyContract:
+        """A CODE SKILL contract, and untested on hardware — it says both.
+
+        The vocabulary matters here (`docs/mars-roadmap.md` §1): in Innate's
+        stack a *learned skill* is an ACT checkpoint trained from teleop
+        demonstrations with both cameras in, at 25 Hz. A policy trained in
+        this lab is NOT one of those, and calling it one would promise a
+        provenance it does not have. What it is is a *code skill* — their own
+        Python plugin, running onnxruntime and streaming
+        `/mars/arm/commands` + `/cmd_vel` — so that is what `deploy` says,
+        with "untested on hardware" in the same sentence because nothing in
+        this repo has ever driven a MARS.
+
+        Declared before `MarsArmEnv` exists, for the reason the layout above
+        is: a body has to speak one contract from the day it is listed.
+        """
+        return declare(
+            self,
+            id=CONTRACT_ID,
+            rate_hz=CONTROL_HZ,
+            slots=_obs_slots(),
+            deploy="code skill: an Innate Python skill running the ONNX and "
+                   "streaming /mars/arm/commands + /cmd_vel at 25 Hz — "
+                   "untested on hardware")
+
     # ------------------------------------------------------------- assets
 
     def ready(self) -> bool:
@@ -867,7 +926,8 @@ MARS = MarsBody(
 )
 
 
-__all__ = ["ARM_HOME", "ARM_JOINTS", "ASSETS", "CACHE_DIR", "HEAD_JOINT",
-           "INNATE_OS_SHA", "MARS", "OBS_DIM", "MarsBody", "arm_servo",
+__all__ = ["ARM_HOME", "ARM_JOINTS", "ASSETS", "CACHE_DIR", "CONTRACT_ID",
+           "HEAD_JOINT", "INNATE_OS_SHA", "MARS", "OBS_DIM", "MarsBody",
+           "arm_servo",
            "fetch", "mars_ready", "model", "robot_spec", "scene_xml",
            "servo_addresses", "visual_scene"]

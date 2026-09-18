@@ -1024,6 +1024,14 @@ def test_a_random_weight_policy_round_trips_through_the_exporter(robot, tmp_path
     assert [int(d) for d in inp.shape] == [1, spec.obs_dim]
     assert [int(d) for d in outp.shape] == [1, spec.num_actions]
 
+    # …and the file SAYS what it is. Part of the conformance bar on purpose
+    # (docs/mars-roadmap.md §6.3): a body is supported when its exports can
+    # be handed to someone without their run directory and still land on the
+    # right body. `tests/test_policy_contract.py` is where the record itself
+    # is under test; here it only has to be present and to be this body's.
+    from microduck_local.robots.policy_contract import PolicyContract
+    assert PolicyContract.from_onnx(onnx_path) == spec.contract()
+
     loaded = PPO.load(str(run / "model"), device="cpu")
     with open(run / "vecnormalize.pkl", "rb") as f:
         vn = pickle.load(f)

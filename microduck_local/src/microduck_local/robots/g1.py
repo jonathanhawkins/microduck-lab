@@ -38,6 +38,7 @@ import onnxruntime as ort
 
 from .. import contract as C
 from ..world.compose import duck_prefix
+from .policy_contract import PolicyContract, Slot, declare
 from .spec import RobotSpec
 
 _PKG = Path(__file__).resolve().parent / "unitree_g1"
@@ -70,6 +71,12 @@ OBS_LIN_VEL = slice(0, 3)
 OBS_ANG_VEL = slice(3, 6)
 OBS_GRAVITY = slice(6, 9)
 CMD_DIM = 3
+#: The G1's policy contract id (`robots/policy_contract.py`). "lucky" names
+#: whose layout it is: LuckyRobots' 99-d order, kept verbatim so their
+#: `walker.onnx` is both a golden test and a teacher. A local re-layout would
+#: be `g1-lucky-99-v2` and would cost us both of those, which is why the
+#: provenance is in the id rather than only in a comment.
+CONTRACT_ID = "g1-lucky-99-v1"
 SCENE_NAME = "scene_walk_g1.xml"
 SCENE_NAME_HANDS = "scene_walk_g1_hands.xml"   # control arm: fingers not frozen
 STAND_KEY = "STAND"
@@ -116,6 +123,31 @@ PUSH_VEL_RANGE = (-0.4, 0.4)
 # and it keeps each leg's world-pitch sum at zero, so the feet stay flat.
 JOINT_GROUPS = (("left leg",) * 6 + ("right leg",) * 6 + ("waist",) * 3
                 + ("left arm",) * 7 + ("right arm",) * 7)
+
+
+def _obs_slots(num_joints: int) -> tuple[Slot, ...]:
+    """The 99-float layout, as `robots/g1_env.G1WalkEnv._get_obs` writes it.
+
+    Read off that method's slice assignments — which are themselves written
+    in terms of `nj` — and anchored on the three named slices above, so the
+    table and the code that fills it move together:
+
+        obs[0:3]  lin        obs[9:38]  joint_pos   obs[67:96] last_action
+        obs[3:6]  gyro       obs[38:67] joint_vel   obs[96:99] twist_cmd
+        obs[6:9]  gravity
+
+    `tests/test_policy_contract.py` pins two of these against a live G1 env.
+    """
+    n = int(num_joints)
+    return (
+        Slot("base_lin_vel", OBS_LIN_VEL.start, OBS_LIN_VEL.stop),
+        Slot("base_ang_vel", OBS_ANG_VEL.start, OBS_ANG_VEL.stop),
+        Slot("projected_gravity", OBS_GRAVITY.start, OBS_GRAVITY.stop),
+        Slot("joint_pos_rel", 9, 9 + n),
+        Slot("joint_vel", 9 + n, 9 + 2 * n),
+        Slot("last_action", 9 + 2 * n, 9 + 3 * n),
+        Slot("twist_cmd", 9 + 3 * n, 9 + 3 * n + CMD_DIM),
+    )
 
 
 def _effectors():
@@ -602,6 +634,33 @@ class G1Body(RobotSpec):
     '_g1_body_cls.<locals>.G1Body'" — and a vec-env worker ships specs.
     `tests/test_registry.py` pins that the import stays cache-free.
     """
+
+    def contract(self) -> PolicyContract:
+        """A LAB contract, and the file says so.
+
+        The 99 floats are the LuckyRobots layout `walker.onnx` was trained
+        against, and their first three are base LINEAR velocity — which no
+        real humanoid observes without state estimation. That is the whole
+        `deploy` sentence, and it is the reason this record exists in the
+        file rather than only in `g1_env.py`'s docstring: a `.onnx` someone
+        is handed is exactly where the caveat used to get lost.
+
+        The slot table is derived from `self.num_joints` (29 with the hands
+        frozen), so a config revision that changes the joint count fails at
+        construction against `obs_dim` instead of quietly mislabelling the
+        table — `declare()` explains why the dims come from the body.
+        """
+        return declare(
+            self,
+            id=CONTRACT_ID,
+            # `G1WalkEnv` subclasses `MicroduckWalkEnv`, so it inherits the
+            # duck's DECIMATION x PHYSICS_DT clock: 50 Hz. Read from there
+            # rather than written as 50 because that coupling is real, and a
+            # change to it would silently change what this file promises.
+            rate_hz=round(1.0 / C.CTRL_DT, 6),
+            slots=_obs_slots(self.num_joints),
+            deploy="lab contract: base linear velocity is not observed on "
+                   "hardware without state estimation")
 
     def ready(self) -> bool:
         """The MJCF, the meshes and the walker ONNX, not just the scene:

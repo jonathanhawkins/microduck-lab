@@ -37,9 +37,11 @@ def main() -> None:
     ap.add_argument("--actuator", default=None, choices=("xml", "bam"),
                     help="Override actuator; run defaults to bam")
     ap.add_argument("--robot", default=None, choices=registry.ids(),
-                    help="which body the policy drives; default: read from the "
-                         "run's run.json next to the .onnx. Behaviors are duck "
-                         "recipes and are refused for another body.")
+                    help="which body the policy drives; default: the policy's "
+                         "own contract (its ONNX metadata, else the run.json "
+                         "next to it). Refused when it contradicts a contract "
+                         "the file RECORDED. Behaviors are duck recipes and "
+                         "are refused for another body.")
     ap.add_argument("--push", action="store_true",
                     help="Shove the base every 3-6 s (the training env's pushes, "
                          "2026-09-06). Off here by default so eval numbers stay "
@@ -55,8 +57,31 @@ def main() -> None:
     # the knob armed for whatever runs next (it did, in the test suite).
     from pathlib import Path as _Path
 
-    from .export_onnx import run_robot
-    robot = args.robot or run_robot(_Path(args.onnx_path).parent)
+    from .robots.policy_contract import recorded, resolve
+
+    # The POLICY's own contract, from the file itself where it has one:
+    # `eval-walk some.onnx` far from its run directory used to default to the
+    # duck and had to be told otherwise (robots/policy_contract.resolve).
+    onnx_path = _Path(args.onnx_path)
+    contract = resolve(onnx_path)
+    robot = args.robot or contract.robot
+    if args.robot:
+        # The flag against the file. Refused only when the file RECORDED a
+        # contract — a stamped ONNX, or a run.json that declares one — since
+        # then the file cannot be wrong about itself and building the other
+        # body's env would feed the policy an observation of the wrong shape
+        # (or, one day, the right shape and the wrong meaning, which is the
+        # cross a width never catches). A policy that declares nothing is
+        # still the caller's to name: that is what --robot was added for.
+        declared = recorded(onnx_path)
+        want = registry.get(args.robot).contract()
+        if declared is not None and not declared.matches(want):
+            raise SystemExit(
+                f"{args.onnx_path} records contract {declared.id} "
+                f"({declared.obs_dim} obs / {declared.act_dim} actions); "
+                f"--robot {args.robot} speaks {want.id} ({want.obs_dim} obs / "
+                f"{want.act_dim} actions) — one of the two is wrong, and this "
+                "is the check that used to be a width")
     if robot != "microduck" and args.behavior:
         raise SystemExit(
             f"--behavior is a Microduck reward recipe; {robot} has none yet")

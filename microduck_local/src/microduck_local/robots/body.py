@@ -93,6 +93,7 @@ class Body(Protocol):
     @property
     def num_actions(self) -> int: ...
 
+    def contract(self) -> Any: ...   # robots/policy_contract.PolicyContract
     def ready(self) -> bool: ...
     def fetch(self) -> Path: ...
     def setup_hint(self) -> str: ...
@@ -174,6 +175,32 @@ class BodyBase:
         """One action per joint. A body whose action vector is not its joint
         vector overrides this — MARS's is 6 joints plus a base twist."""
         return len(self.joint_names)
+
+    # -------------------------------------------------------- the contract
+
+    def contract(self) -> Any:
+        """What this body's policies SAY THEY ARE: a `PolicyContract`.
+
+        No generic answer, and deliberately not a synthesised one. An id and
+        a width could be spelled from `self.id` and `self.obs_dim`, but the
+        two things that make a contract worth carrying cannot be guessed: the
+        control RATE (the walkers tick at 50 Hz, MARS's skills at 25, and a
+        policy run at the wrong one is a different controller) and the
+        DEPLOY sentence (whether putting this on hardware is the robot's own
+        contract, a lab convenience, or an untested code skill). A guessed id
+        over a wrong rate is precisely the silent cross that
+        `robots/policy_contract.py` exists to stop, so a body that has not
+        declared its contract says so.
+
+        The slot table is the other half: it must be read off the env that
+        FILLS the observation, which only the body's own module knows.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} does not declare its policy contract — implement "
+            "contract() returning a robots/policy_contract.PolicyContract "
+            "(robots/microduck.py, robots/g1.py and robots/mars.py are the "
+            "three shapes: a deployment contract, a lab contract and a code "
+            "skill)")
 
     # ---------------------------------------------------------------- assets
 
@@ -307,6 +334,7 @@ WANTED: Sequence[str] = (
     "id", "title", "noun", "kind", "joint_names", "joint_groups",
     "default_pose", "obs_dim", "num_actions", "lab_spacing_m",
     "scene_fn", "stand_keyframe",
+    "contract",
     "ready", "fetch", "setup_hint", "visual_scene", "look",
     "env_class", "tasks", "shipped_policies", "train_env_kwargs",
     "attach", "driver",

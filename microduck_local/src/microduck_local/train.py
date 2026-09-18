@@ -440,6 +440,13 @@ def main() -> None:
     run_meta = {
         "run_name": args.run_name, "envs": args.envs, "steps": args.steps,
         "robot": args.robot,
+        # WHAT THIS RUN'S POLICIES SPEAK (robots/policy_contract.py). "robot"
+        # stays beside it, untouched, because every reader in the tree and
+        # every run already on disk is keyed on the name — the contract is an
+        # addition, not a migration. This is the record `export-walk` checks
+        # its own export against, and the one that answers for a checkpoint
+        # ONNX that was never stamped.
+        "contract": _body(args.robot).contract().as_dict(),
         "task": args.task,
         # The lab stops driving a slot whose brain was trained to ignore the
         # command (viz_server.is_trick_duck) — otherwise the demo script asks
