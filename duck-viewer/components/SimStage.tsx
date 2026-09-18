@@ -800,7 +800,15 @@ export function RobotBody({
   // /sim has no stage lights of its own, so it takes the full reflection —
   // the 0.35 the lab uses would leave the chassis flat here (the same split
   // `useG1Materials` documents).
-  const marsMaterials = useMarsMaterials(look === "mars", { envScale: 1 });
+  // The room keeps the ORANGE / BLACK (graphite) shell even though the lab
+  // stage defaults to Innate's White: MEASURED on the live pages (2026-09-18),
+  // white on the playroom's pale wood floor sits at 0.95x the background —
+  // 3.7 luma points from the floor, 3 from the wall — where graphite sat at
+  // 0.47x, a 41-point step. On the dark lab stage the same white is 8.6x the
+  // background, which is why it is the default there. A per-slot colorway
+  // field would replace both defaults; until then each page picks the shell
+  // its floor can show.
+  const marsMaterials = useMarsMaterials(look === "mars", { envScale: 1, colorway: "orange-black" });
   const tree = useMemo(() => {
     // Vertices arrive in metres, or in millimetre ints with a `vertScale`
     // (the G1's dump is 21 MB that way instead of 78 MB of floats). Scaling

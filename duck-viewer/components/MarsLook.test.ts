@@ -134,12 +134,72 @@ describe("MARS_COLORWAYS", () => {
     }
   });
 
-  it("defaults to Innate's orange/black hero", () => {
-    expect(MARS_DEFAULT_COLORWAY).toBe("orange-black");
-    expect(marsColorway().id).toBe("orange-black");
-    expect(marsColorway(null).id).toBe("orange-black");
-    expect(marsColorway("no-such-shell").id).toBe("orange-black");
-    expect(marsColorway("white").id).toBe("white");
+  it("defaults to Innate's White shell, the one you can FIND on the stage", () => {
+    // Not the orange/black press photo any more: on the lab's #101216 floor
+    // the white shell is the one that reads at a glance from across the grid
+    // (measured on the live page — the far slot's chassis crop went 0.241 ->
+    // 0.697, 3.1x the background to 8.6x). The hero is still in the table.
+    expect(MARS_DEFAULT_COLORWAY).toBe("white");
+    expect(marsColorway().id).toBe("white");
+    expect(marsColorway(null).id).toBe("white");
+    expect(marsColorway("no-such-shell").id).toBe("white");
+    expect(marsColorway("orange-black").id).toBe("orange-black");
+  });
+
+  it("keeps the default body an OFF-white, cool, and never #fff", () => {
+    // A pure white clear-coated shell has nowhere for a highlight to GO: the
+    // seam glints merge into the panel they are meant to cut, and on /sim's
+    // pale room the whole chassis went to one blob (sd 0.038 across the crop).
+    // The band is the off-whites; White sits at its floor.
+    const body = MARS_COLORWAYS.white.body;
+    expect(body).not.toBe("#ffffff");
+    expect(srgbLuma(body)).toBeGreaterThanOrEqual(srgbLuma("#e8eaee") - 1e-6);
+    expect(srgbLuma(body)).toBeLessThanOrEqual(srgbLuma("#f2f2f0") + 1e-6);
+    // COOL, not warm: /sim's floor is #d0ac86 wood under a #cfcabb wall, so a
+    // cool shell keeps a hue difference there even where the luminances cross.
+    const c = new THREE.Color(body);
+    expect(c.b).toBeGreaterThan(c.r);
+  });
+
+  it("steps the white arm 10-15 % below the white body", () => {
+    // Innate's store White is a white arm on a white body, and drawn that way
+    // the arm's joints and the two gripper fingers vanish into the chassis
+    // they fold against. Below 10 % there is no part line; above 15 % the arm
+    // stops reading as the same shell and starts reading as a grey spare.
+    const w = MARS_COLORWAYS.white;
+    const step = 1 - srgbLuma(w.accent) / srgbLuma(w.body);
+    expect(step).toBeGreaterThan(0.1);
+    expect(step).toBeLessThan(0.15);
+  });
+
+  it("cuts the reflection map on the light shell, and only on it", () => {
+    // The inversion of this file's founding finding: a DARK shell reads by its
+    // specular top, a near-white one is flattened by it (the wash lands on the
+    // shadowed faces, where there is no diffuse signal to compete with it).
+    expect(MARS_COLORWAYS.white.reflect).toBeLessThan(0.5);
+    for (const id of ["orange-black", "blue-white", "black"]) {
+      expect(MARS_COLORWAYS[id].reflect, id).toBeUndefined();
+    }
+    // …and it has to REACH the material, on every part kind: one part of a
+    // shell lit differently from the next is worse than either setting.
+    const refl = MARS_COLORWAYS.white.reflect as number;
+    for (const k of ["chassis", "head", "arm", "gripper"] as const) {
+      const dark = makeMarsMaterial(k, MARS_COLORWAYS["orange-black"], { envScale: 1 }) as THREE.MeshPhysicalMaterial;
+      const light = makeMarsMaterial(k, MARS_COLORWAYS.white, { envScale: 1 }) as THREE.MeshPhysicalMaterial;
+      expect(light.envMapIntensity, k).toBeCloseTo(dark.envMapIntensity * refl, 6);
+      expect(light.envMapIntensity, k).toBeGreaterThan(0); // not "off"
+    }
+  });
+
+  it("leaves the other three shells exactly as they shipped", () => {
+    // The white shell is the only thing the default change was allowed to
+    // touch; `toEqual` also fails if one of them grows a `reflect`.
+    expect(MARS_COLORWAYS["orange-black"]).toEqual(
+      { id: "orange-black", label: "Orange / Black", accent: "#ff8a1f", body: "#3b3f47" });
+    expect(MARS_COLORWAYS["blue-white"]).toEqual(
+      { id: "blue-white", label: "Blue / White", accent: "#2f34e6", body: "#e7e9ee" });
+    expect(MARS_COLORWAYS["black"]).toEqual(
+      { id: "black", label: "Black", accent: "#5b616b", body: "#3b3f47" });
   });
 
   it("keeps every chassis above the dark-stage luminance floor", () => {
