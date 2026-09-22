@@ -24,6 +24,7 @@ from test_lab import fake_popen  # noqa: F401 — fixture: fakes the trainer
 
 from microduck_local import viz_server as V
 from microduck_local.robots.g1 import g1_ready
+from microduck_local.robots.mars import mars_ready
 
 needs_g1 = pytest.mark.skipif(not g1_ready(), reason="G1 assets missing — uv run fetch-g1")
 
@@ -794,8 +795,15 @@ from microduck_local.robots import registry as REG  # noqa: E402
 
 GO2 = "menagerie:unitree_go2"
 
+# REGISTERED is not READY. `mars` is a registry BUILTIN, so `"mars" in
+# registry()` is true on a fresh clone that has never downloaded a byte, and
+# this guard skipped nothing: CI went red on five cases with
+# `FileNotFoundError: Innate MARS assets not in .../innate_mars` (2026-09-22).
+# Ask the body whether its assets are on disk, the way every other MARS test
+# file does. Verified against the complement — `MICRODUCK_MARS_DIR` pointed at
+# an empty directory must SKIP these, not fail them.
 needs_mars = pytest.mark.skipif(
-    "mars" not in REG.registry(), reason="MARS assets missing — uv run fetch-robot mars")
+    not mars_ready(), reason="MARS assets missing — uv run fetch-robot mars")
 needs_go2 = pytest.mark.skipif(
     GO2 not in REG.registry(),
     reason=f"Go2 missing — uv run fetch-robot {GO2}")

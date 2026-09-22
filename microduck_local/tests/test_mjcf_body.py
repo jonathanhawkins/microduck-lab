@@ -479,6 +479,7 @@ def test_a_model_with_no_geoms_cannot_be_measured_and_says_so(tmp_path):
 
 # ------------------------------------------- 5. the visual group, detected
 
+@needs_g1
 def test_the_visual_group_is_read_off_the_model_for_both_real_bodies(
         duck_body, g1_body):
     """MEASURED: the duck's visuals are group 2 and so are the G1's.
@@ -545,6 +546,7 @@ def _write_tri_stl(path: Path) -> None:
 
 # ------------------------------------------------------- 6. two in a model
 
+@needs_g1
 def test_two_of_these_attach_under_two_prefixes_beside_a_duck(duck_body,
                                                               g1_body):
     """The lab and `/sim` put N robots in ONE compiled model.
@@ -613,6 +615,7 @@ def test_a_relative_meshdir_would_not_survive_the_move(duck_body, tmp_path):
 
 # ------------------------------------------------------- 7. what it says
 
+@needs_g1
 def test_the_contract_tiles_and_names_the_level(duck_body, g1_body):
     """A level-0 body speaks ONE contract from the day it is listed.
 
