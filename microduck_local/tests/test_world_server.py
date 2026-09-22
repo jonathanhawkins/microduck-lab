@@ -110,6 +110,31 @@ def test_pitch_2v2_builtin_reports_formation_roles(app):
             "d0": "defender", "d1": "striker", "d2": "defender", "d3": "striker"}
 
 
+
+def until(ws, pred, budget: int = 80):
+    """Read frames until `pred(frame)` holds, up to `budget` of them.
+
+    **A fixed frame count after a send is a RACE, not a wait.** The socket's
+    receive task and the 50 Hz send loop are different asyncio tasks, so "the
+    4th frame after my command" assumes the server drained the message in
+    under four frames — true on an idle laptop, not on a loaded runner. macOS
+    CI failed here on 2026-09-22 (`mode` still `'auto'` four frames after a
+    manual `cmd`) on a commit whose Linux job was green, and the same test
+    passes 3/3 locally; the hold is 6 wall seconds, so nothing had expired.
+
+    The budget is what keeps a real regression a FAILURE rather than a hang:
+    the last frame read is returned either way and the caller asserts on it
+    exactly as before, so a command that never lands still goes red — it just
+    is not decided by how busy the box was.
+    """
+    frame = None
+    for _ in range(budget):
+        frame = ws.receive_json()
+        if pred(frame):
+            return frame
+    return frame
+
+
 def test_load_world_and_stream_frames(app):
     with TestClient(app) as c:
         assert c.get("/world").json()["scenario"] is None
@@ -142,18 +167,15 @@ def test_load_world_and_stream_frames(app):
             assert d["brain"]["kind"] == "wander" and d["brain"]["state"] in ("cruise", "steer", "spin", "blind", "unstick")
             # Drive and reset go through the socket.
             ws.send_text(json.dumps({"cmd": [0.2, 0.0, 0.0]}))
-            for _ in range(4):
-                frame = ws.receive_json()
+            frame = until(ws, lambda f: f["mode"] == "manual")
             assert frame["mode"] == "manual" and frame["cmd"][0] == 0.2
             assert frame["ducks"][0]["cmdSpeed"] == 0.2
             assert frame["ducks"][0]["brain"]["kind"] == "manual"
             ws.send_text(json.dumps({"noise": {"duck": "d0", "preset": "hostile"}}))
-            for _ in range(3):
-                frame = ws.receive_json()
+            frame = until(ws, lambda f: f["ducks"][0]["tof"] == "hostile")
             assert frame["ducks"][0]["tof"] == "hostile"
             ws.send_text(json.dumps({"reset": True}))
-            for _ in range(2):
-                frame = ws.receive_json()
+            frame = until(ws, lambda f: f["ducks"][0]["step"] < 5)
             assert frame["ducks"][0]["step"] < 5
         assert c.get("/world").json()["ducks"][0]["tof"] == "hostile"
         r = c.post("/world/noise", json={"duck": "d0", "preset": "ideal"})
@@ -213,8 +235,7 @@ def test_a_mars_entrys_frame_block_says_what_it_is_and_what_it_senses(app, tmp_p
             assert d["headApplied"] is True
             # WASD reaches it through the same command as a duck.
             ws.send_text(json.dumps({"cmd": [0.3, 0.0, 0.0]}))
-            for _ in range(6):
-                frame = ws.receive_json()
+            frame = until(ws, lambda f: f["mode"] == "manual")
             assert frame["mode"] == "manual"
             assert frame["ducks"][0]["cmdSpeed"] == pytest.approx(0.3)
             assert frame["ducks"][0]["speed"] > 0.1, "the base actually moved"
@@ -599,15 +620,14 @@ def test_follow_me_scenario_persons_brains_and_possess(app):
             # Possess the person: the manual command drives IT, the duck keeps its brain.
             ws.send_text(json.dumps({"possess": "p0"}))
             ws.send_text(json.dumps({"cmd": [0.4, 0.0, 0.0]}))
-            for _ in range(6):
-                frame = ws.receive_json()
+            frame = until(ws, lambda f: f["possessed"] == "p0" and f["mode"] == "manual")
             assert frame["possessed"] == "p0" and frame["mode"] == "manual"
             assert frame["ducks"][0]["brain"]["kind"] == "learned:follow-v4"
             ws.send_text(json.dumps({"brain": {"duck": "d0", "kind": "wander"}}))
             ws.send_text(json.dumps({"possess": None}))
             ws.send_text(json.dumps({"noise": {"duck": "d0", "preset": "hostile", "sensor": "det"}}))
-            for _ in range(4):
-                frame = ws.receive_json()
+            frame = until(ws, lambda f: f["possessed"] is None
+                          and f["ducks"][0]["detector"] == "hostile")
             # Released: the manual command (still held) steers the ducks; the
             # brain behind it is now wander.
             assert frame["possessed"] is None and frame["ducks"][0]["brain"]["kind"] == "manual"
@@ -655,8 +675,7 @@ def test_tether_latency_delays_intents_and_maps_stream(app):
             if m is not None:
                 assert m["nx"] * m["ny"] == len(m["cells"]) and set(m["cells"]) <= set("012")
             ws.send_text(json.dumps({"tether": 0}))
-            for _ in range(4):
-                frame = ws.receive_json()
+            frame = until(ws, lambda f: f["tetherMs"] == 0.0)
             assert frame["tetherMs"] == 0.0
 
 
