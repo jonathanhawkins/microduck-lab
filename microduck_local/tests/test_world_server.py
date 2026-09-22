@@ -42,6 +42,42 @@ def test_builtin_scenarios_validate_and_list(app):
         assert c.get("/scenarios/..%2Fetc").status_code in (400, 404)
 
 
+def test_the_listing_says_which_BODIES_a_room_holds(app):
+    """`ducks` is a total; `robots` is what the room actually contains.
+
+    The /sim picker read the total and called every entry a duck, so
+    `mars-follow` — one MARS and no duck at all — announced itself as
+    "1 ducks". The breakdown carries the lab's own noun for each body so a
+    menu does not need a table of its own, and it is sorted commonest first
+    so the headline body leads.
+    """
+    with TestClient(app) as c:
+        rows = {s["name"]: s for s in c.get("/scenarios").json()["scenarios"]}
+        duck_room = rows["living-room"]
+        assert duck_room["robots"] == [
+            {"id": "microduck", "n": duck_room["ducks"], "noun": "duck"}]
+        for row in rows.values():
+            assert sum(r["n"] for r in row["robots"]) == row["ducks"]
+            counts = [r["n"] for r in row["robots"]]
+            assert counts == sorted(counts, reverse=True), row["name"]
+            assert all(r["noun"] for r in row["robots"]), row["name"]
+
+
+@pytest.mark.skipif(
+    not __import__("microduck_local.robots.mars", fromlist=["x"]).mars_ready(),
+    reason="MARS assets not fetched")
+def test_a_room_of_MARS_is_not_a_room_of_ducks(app, tmp_path):
+    """The case the bug was reported on, end to end through the endpoint."""
+    with TestClient(app) as c:
+        raw = c.get("/scenarios/wall-test").json()
+        raw["ducks"][0]["robot"] = "mars"
+        raw["ducks"][0]["policy"] = None
+        assert c.put("/scenarios/one-mars", json=raw).status_code == 200
+        row = {s["name"]: s for s in c.get("/scenarios").json()["scenarios"]}["one-mars"]
+        assert row["ducks"] == 1, "the total still counts the entry"
+        assert row["robots"] == [{"id": "mars", "n": 1, "noun": "MARS"}]
+
+
 def test_user_scenarios_save_validate_delete(app, tmp_path):
     with TestClient(app) as c:
         raw = c.get("/scenarios/wall-test").json()
@@ -253,7 +289,7 @@ DUCK_FRAME_LEAVES = [
     "holding:NoneType", "id:str", "lidar:NoneType", "mouth:float", "name:str",
     "odom:str", "odomEst[3]:float", "policy:NoneType", "rew:float", "robot:str", "role:NoneType",
     "sensors.det.age:float", "sensors.det.cam[7]:float", "sensors.det.fov[2]:float",
-    "sensors.det.items[0]:empty", "sensors.det.t:float",
+    "sensors.det.items[0]:empty", "sensors.det.selfBody:int", "sensors.det.t:float",
     "sensors.tof.age:float", "sensors.tof.mm[64]:int", "sensors.tof.t:float",
     "skill:NoneType", "speed:float", "steerable:bool", "step:int", "team:NoneType",
     "tof:str", "wallBumps:int", "wallTicks:int",

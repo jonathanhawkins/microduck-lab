@@ -254,11 +254,13 @@ Three things the phase found, each of which changed the build:
 - `mars.visual_scene()`: the same mm-int mesh dump `g1.extract_visual_scene`
   does; the viewer's `MarsLook` paints links 1/3/5 Innate orange and the base
   charcoal (their `style_robot_geoms`), hides the frame-marker links.
+  **SUPERSEDED 2026-09-21 — see the shell note at the end of §6.4.**
 - A lab slot with a MARS and no policy sits at `ARM_HOME` on the stage;
   the ▶ chips of duck/G1 policies are refused on it by obs width (10-ish ≠
   61 ≠ 99 — `test_lab_robots` already pins the mechanism).
 - **Settles:** from a fresh checkout, `uv run fetch-robot mars` lands in
-  **< 30 s** on home broadband; `GET /scene?robot=mars` serves 9 meshes; a
+  **< 30 s** on home broadband; `GET /scene?robot=mars` serves 9 meshes (14
+  since the cuts below); a
   roster of `duck, g1, mars` renders with no overlap (`tests/test_lab_robots.py`
   re-measures the width like it does for the G1); a screenshot in
   `docs/media/lab-mars.png` (`.claude/skills/capture-viewer-screenshots`).
@@ -369,6 +371,88 @@ What a person can now do, and what it took:
   generic paint FAILS ON A STAGE, and it is still a kind → material table
   shared by the lab stage and `/sim`, not a component per robot. A Go2 and
   every other Menagerie model stay `"generic"`.
+  **CORRECTED AGAIN 2026-09-21: the shell is the ROBOT's, not the stage's.**
+  Picking a colorway per floor — orange/black on `/sim`'s pale wood, white on
+  the lab's dark stage — answered "can you see it" and got "which robot is
+  that" wrong: the same MARS was a different machine in each tab, and neither
+  was the one on the owner's desk. Both pages now default to Innate's
+  **Blue / White** (`MARS_DEFAULT_COLORWAY`), the shell their own product
+  shots show: a white chassis and a white arm, BLACK tyres, their deep blue
+  (sampled `rgb(51, 97, 177)`) on the head bar and the two gripper fingers.
+  Two things had to change under it:
+  - **The paint moved onto the SPEC** (`robots/mars.paint_shell`, called from
+    `robot_spec`) from the viewer's dump. A look only the dump could see left
+    every `render-rollout` / `record-world` sheet of a MARS in the URDF's
+    uniform grey — and, worse, drawing the URDF's 46 collision boxes over
+    the robot, because MuJoCo's importer leaves them in group 0. The sweep
+    into `COLLISION_GROUP` is in the same function. What stays in
+    `MarsLook.tsx` is what a per-geom rgba cannot carry: the clearcoat, the
+    metalness, the rubber, and each page's `envScale`.
+  - **The black parts needed meshes of their own.** Three of them are not
+    parts in the description at all: `base.STL` is the box, the turret, the
+    neck and both wheels in ONE shell, and `link2`/`link3.STL` are the arms
+    with their shoulder and elbow servo cases fused in. So "black wheels"
+    and "black joints" were not colours any geom could be given. Each is
+    cut, by the method the part allows:
+      - `split_base_mesh` cuts along the mesh's own CONNECTED COMPONENTS,
+        with the drive cylinders only saying which component. MEASURED, a
+        cylinder test instead would drag 143 wheel-arch triangles onto the
+        tyres.
+      - `split_housing_mesh` cuts on a PLANE — the far face of the URDF's own
+        collision box for the housing (`HOUSING_CUTS`) — because Innate
+        prints each case as one part with the arm it drives and there is no
+        seam to follow. Two things are derived rather than typed: the plane,
+        from that box, and the AXIS, from the mesh. MEASURED, `link2` runs
+        156 mm along its z and `link3` 164 mm along its x, so a hard-coded
+        axis cuts one of them across the middle. The elbow case is 57 % of
+        link3's triangles but 47 % of its length — a moulded box is
+        tessellated far more finely than a 15 cm shaft — so every test of
+        these cuts measures LENGTH.
+      - `split_head_mesh` uses BOTH, on one mesh, because `head.STL` offers
+        both. Innate's face is two things: the two camera barrels are a
+        printed part and come out as a SHELL (found by asking which shell
+        the head's own camera FRAMES sit in, not by index), while the black
+        panel is not a part at all — it is the flat front of the blue shell,
+        so it comes out by NORMAL: the triangles facing the way the cameras
+        look, within 10 mm of the head's frontmost point. MEASURED, that is
+        124 of 7 770, in a 7 mm band with nothing between 46.2 and 53.1 mm,
+        so the depth lands in an empty gap. The bevel does not face that
+        way, which is what leaves the blue border the real head has.
+    The dump now carries 14 meshes. `base_wheels` is a new `wheel` kind;
+    `link2_servo` and `link3_servo` are a new `servo` kind, matched BEFORE
+    the rule that would otherwise take them (`base`, and `^link[1-5]$`)
+    since their body names are `base_link`, `link2` and `link3`. The `_servo`
+    suffix rather than the collision box's own name, because MuJoCo keeps one
+    namespace per element kind and a geom named `link2_shoulder` beside the
+    box of that name is refused at compile.
+    `head_face` and `head_eyes` are two more, `face` and `lens`, matched
+    before the `head` rule since both names begin with it. Their colours are
+    CONSTANTS rather than colorway fields, like the servo black: the panel
+    and the lenses are moulded on every shell Innate sells. Both are
+    sampled off the same front shot — panel rgb(31, 35, 42), a blue-black,
+    and lens rgb(72, 72, 77), neutral and lighter than the panel, which is
+    the whole reason the lenses are a kind of their own.
+  - **The dump's LATTICE is a resolution, and MARS is a small robot.**
+    `extract_visual_scene` ships integer multiples of `vertScale` so the JSON
+    stays small, and a millimetre is free on a 1.3 m G1. MEASURED on MARS,
+    whose head is 121 mm across with 1-2 mm bevels, the same lattice moves a
+    vertex **0.50 mm on average and 0.85 mm at worst** — the head arrived in
+    the browser looking melted, with a stair-stepped silhouette and streaky
+    normals on faces that are flat in MuJoCo. `vert_scale` is an argument
+    now, MARS asks for 0.1 mm (`VERT_SCALE_M`), the error drops to 0.05 mm
+    and the dump grows 6 % (3.80 → 4.02 MB). Two things in the viewer follow
+    from it: the weld tolerance is `vertScale / 2` rather than a flat 0.4 mm
+    (which on a 0.1 mm lattice would pull four points into one, welding the
+    finer dump straight back into the coarse one's shape), and the MARS look
+    takes CREASED normals at 40° — welding stops the faceted look but then
+    `computeVertexNormals` averages across the bevels too, which is the other
+    half of what fluted the head bar. Both are opt-in per look; the G1 is
+    unmeasured and unchanged.
+  - **`link1` and `link4` are bare servo, not shell.** The arm's first joint
+    (the black box in its bracket beside the right wheel) and the wrist are
+    moulded cases on every shell Innate sells, never painted, so `servo`
+    parts do not follow the colorway at all. Each is already a whole mesh,
+    which is why those two needed no cut.
 - **The 🎓 panel says "task", not "trick", for a non-legged body** — Innate's
   vocabulary for Innate's robot (§4) — and its two recipes needed a `suggest`
   phrase before they were VISIBLE at all: `teach_suggestions` lists only
@@ -1217,6 +1301,21 @@ duck's frame block is BYTE-IDENTICAL
 to the pre-change tree (`json.dumps(..., sort_keys=True)`, `wall-test`, 10
 steps, seed 0) with the three rollout fingerprints unchanged.
 
+**5c follow-up — the tether never aged the scan (2026-09-21).** Reviewing 5c
+found the new `brain.inputs.lidar` row lying under any tether:
+`Tether.senses_in` had a clause per sensor frame and `lidar` was in neither,
+so the row kept the age stamped when the snapshot was taken. MEASURED at 250
+ms against a 6 Hz scan: the row read 0.00-0.16 s while the frame the brain
+held was 0.14-0.30 s old, and `stale` stayed false at 0.30 s against a 0.25 s
+gate — and before the one-way lag elapsed the cold-start clause nulled
+`tof`/`det` but handed the brain the LIVE scan. Both clauses now carry
+`lidar`, which makes `eval-tidy --robot mars --tether-ms` and the `/sim`
+tether slider honest. One case in `tests/test_tidy.py`, A/B'd against the
+break planted three ways; its first version was TOOTHLESS against the
+cold-start half (`if s.lidar is None` never runs when the link leaks, and the
+leaked frame ages consistently), so it asserts the complement — `t < half`
+means no scan at all.
+
 ### Phase 6 — the way out: a skill template, and the docs  `[ ]`
 
 - `microduck_local/deploy/mars_skill_template.py`: an Innate code skill
@@ -1228,6 +1327,27 @@ steps, seed 0) with the three rollout fingerprints unchanged.
 - README: "A third robot: the Innate MARS" beside the G1 section; the
   command crib in `AGENTS.md`; `scripts/setup.sh` gains an optional
   `--with-mars`; this file gets its answers written back.
+
+**6a DONE — the README half (2026-09-22).** `README.md` has
+"A third robot: Innate's MARS" between the G1 section and `/train`, a bullet
+in *What's new*, MARS in the hero blurb, the `Body`-registry line in *What's
+in the box*, `fetch-robot mars` in the quick start, and the `/sim` section's
+worlds / senses / brains lists widened (`mars-playroom`, `mars-follow`; `T`
+draws the selected body's OWN range sensor; `tidy_arm`). It quotes what was
+measured INCLUDING the misses — `reach` at 5/8 against a bar of 8/8, `pick` at
+11/20 against 80 %, the placeholder inertias, and that the deploy template of
+this phase does not exist — so the section does not read better than the runs
+do. Every command in it was run before it was written: `fetch-robot mars`
+(11 files verified, Apache-2.0 line printed), `eval-tidy --robot mars`,
+`resolve_scenario` on both worlds, `env_class('mars', ...)`, and
+`record-world mars-playroom --brain d0=tidy_arm`, whose sheet is also the
+check on the README's claim that the spec-side paint makes a rendered MARS the
+same robot the browser draws (white chassis, blue head bar, black tyres).
+The stale bullet in `docs/roadmap.md`'s *Later / parked* ("Nothing else
+built") is corrected in the same pass. **Still open in Phase 6:** the Innate
+code-skill template, `scripts/setup.sh --with-mars`, and
+`docs/media/lab-mars.png` — the README section carries no image, which is the
+one thing every other robot section here has.
 
 ---
 

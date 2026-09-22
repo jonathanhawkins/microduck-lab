@@ -50,7 +50,7 @@ Maya/Blender-style: drag to orbit, scroll/two-finger-vertical to zoom,
 **two-finger horizontal swipe** to slide laterally (natural-scrolling
 direction; browser back-swipe is suppressed over the scene, and panels keep
 native scrolling — one swipe is locked to one axis, `lib/swipe.ts`),
-**A/D** slide, **W/S·↑↓** dolly, **←/→** orbit, **Q/E** rise/fall,
+**A/D** slide, **W/S·↑↓** dolly, **←/→** orbit, **E** up / **Q** down,
 **Shift+R** reset view — all held keys move smoothly (velocity × dt).
 The one non-camera key is **R**, which **restarts the sim** (`{"reset": true}`
 to the lab): every duck's episode drops back to step zero at the same moment,

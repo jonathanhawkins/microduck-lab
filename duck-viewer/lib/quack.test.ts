@@ -30,6 +30,37 @@ function run(
   return out;
 }
 
+describe("only a duck quacks", () => {
+  // The table is keyed by the brain GRAPH, and a graph is a brain rather
+  // than a body: point the `follow` brain at a MARS — which `mars-follow`
+  // does, in a room with no duck in it at all — and it quacked.
+  it("is silent for a body that is not the duck", () => {
+    expect(voiceFor("follow", "approach")).not.toBeNull();
+    expect(voiceFor("follow", "approach", "microduck")).not.toBeNull();
+    expect(voiceFor("follow", "approach", null)).not.toBeNull();
+    for (const robot of ["mars", "g1", "unitree_go2"]) {
+      expect(voiceFor("follow", "approach", robot), robot).toBeNull();
+      expect(voiceFor("learned", "tracking", robot), robot).toBeNull();
+    }
+  });
+
+  it("never schedules a voice for one, however long it follows", () => {
+    // Through the director, not just the table: a MARS that is following
+    // must never reach the queue, and a duck beside it must still speak.
+    const v = new Voices();
+    const crew = [
+      { id: "d0", robot: "mars", graph: "follow", state: "approach" },
+      { id: "d1", robot: "microduck", graph: "follow", state: "approach" },
+    ];
+    const said: string[] = [];
+    for (let i = 0; i < 400; i++) {
+      for (const ev of v.update(crew, i * 0.05, i * 0.05)) said.push(ev.id);
+    }
+    expect(said.length).toBeGreaterThan(5);      // the duck did speak
+    expect(said).not.toContain("d0");            // …and MARS never did
+  });
+});
+
 describe("voiceFor", () => {
   it("gives the follow graph a voice per state", () => {
     expect(voiceFor("follow", "approach")?.kind).toBe("chirp");

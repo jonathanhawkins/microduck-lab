@@ -17,7 +17,7 @@ import { useThree } from "@react-three/fiber";
 import { useMemo } from "react";
 import * as THREE from "three";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+import { mergeVertices, toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 
 export const G1_KINDS = ["body", "dark", "visor", "logo"] as const;
 export type G1PartKind = (typeof G1_KINDS)[number];
@@ -35,11 +35,52 @@ export function g1PartKind(meshName: string | undefined, mat: string | undefined
   return "body";
 }
 
-/** Weld a CAD mesh's per-face duplicate vertices, then smooth its normals. */
-export function weldAndSmooth(g: THREE.BufferGeometry): THREE.BufferGeometry {
-  const welded = mergeVertices(g, 4e-4);
-  welded.computeVertexNormals();
-  return welded;
+/** The weld tolerance, in METRES, for a dump quantised to `vertScale`.
+ *
+ *  A dump of integer lattice points (`vertScale` under 1) has its duplicate
+ *  vertices EXACTLY equal, so half a lattice step catches every one of them
+ *  and can never merge two distinct points. That upper bound is the reason
+ *  this is a function rather than a constant: MARS's dump is on a 0.1 mm
+ *  lattice (a millimetre one made its head arrive melted — robots/mars.py
+ *  VERT_SCALE_M), and the flat 0.4 mm this used to weld at would have pulled
+ *  four lattice points into one on the very bevels the finer dump exists to
+ *  keep. A dump in float metres (`vertScale` 1, the duck) has no lattice, so
+ *  it keeps the measured 0.4 mm. */
+export function weldTolerance(vertScale = 1): number {
+  return vertScale > 0 && vertScale < 1 ? vertScale / 2 : 4e-4;
+}
+
+/** Above this angle between two faces, a welded edge is a CREASE and keeps
+ *  its hard edge instead of being smoothed across. 40° is below the 45°
+ *  bevels on MARS's shells and above the steps a tessellated cylinder takes,
+ *  so a bevel stays a bevel and a wheel stays round.
+ *
+ *  Only a look that asks for it gets it — see `weldAndSmooth`. */
+export const CREASE_ANGLE_DEG = 40;
+
+/** Weld a CAD mesh's per-face duplicate vertices, then give it normals.
+ *
+ *  `creaseDeg` decides WHICH normals, and it is the difference between a CAD
+ *  part and a melted one. Welding is what stops `computeVertexNormals` giving
+ *  every triangle its own flat normal (the faceted look this file was written
+ *  for); but once welded, that same call averages across every edge, INCLUDING
+ *  the ones the part means to keep. MEASURED on MARS: its head bar came out
+ *  fluted down the bevelled end, with a highlight smeared across a face that
+ *  is flat in MuJoCo. `toCreasedNormals` splits the vertices back apart at
+ *  edges sharper than `creaseDeg`, so a bevel reads as a bevel and a barrel
+ *  still reads as round.
+ *
+ *  Left off by default: the G1's shells are smooth where MARS's are boxy, and
+ *  nothing has been measured there. It is one argument away when someone
+ *  looks. */
+export function weldAndSmooth(g: THREE.BufferGeometry, tol = 4e-4,
+                              creaseDeg?: number): THREE.BufferGeometry {
+  const welded = mergeVertices(g, tol);
+  if (creaseDeg === undefined) {
+    welded.computeVertexNormals();
+    return welded;
+  }
+  return toCreasedNormals(welded, (creaseDeg * Math.PI) / 180);
 }
 
 /** The material for one part kind. `vertexColors` takes the geom's own colour

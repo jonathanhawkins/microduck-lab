@@ -435,15 +435,27 @@ def test_the_discardvisual_rewrite_keeps_all_nine_meshes():
     Without Innate's embedded compiler override the robot still simulates —
     it just has no shell, which reaches a person as an invisible robot on the
     stage and nothing anywhere as an error.
+
+    Fourteen meshes rather than the description's nine: `add_cut_meshes`
+    cuts the tyres out of `base.STL`, the shoulder's and elbow's servo cases
+    out of `link2`/`link3.STL`, and the face panel and camera lenses out of
+    `head.STL` — the five meshes in a MARS this repo made.
     """
     m = mars.robot_spec().compile()
-    assert m.nmesh == 9
+    assert m.nmesh == 14, (
+        "the description's 9, plus the tyres out of base.STL, the shoulder "
+        "and elbow cases out of link2/link3.STL, and the face and lenses "
+        "out of head.STL")
     visual = [i for i in range(m.ngeom)
               if int(m.geom_group[i]) == mars.VISUAL_GROUP]
     collision = [i for i in range(m.ngeom) if int(m.geom_contype[i]) == 1]
-    assert len(visual) == 12, "9 meshes + the 3 marker spheres"
+    assert len(visual) == 17, "14 meshes + the 3 marker spheres"
     assert len(collision) == 46
     assert set(visual) & set(collision) == set()
+    # `paint_shell` swept every one of those out of the group MuJoCo's own
+    # renderers draw — without it a MARS renders as 46 black boxes.
+    assert all(int(m.geom_group[i]) == mars.COLLISION_GROUP
+               for i in collision)
 
 
 @needs_mars
@@ -813,31 +825,304 @@ def test_the_sag_model_is_off_by_default_and_moves_the_arm_when_on():
 
 @needs_mars
 def test_the_visual_dump_paints_innates_colours_and_leaves_out_the_rest():
-    """`style_robot_geoms`' intent, applied to the dump the browser draws.
+    """`paint_shell`'s intent, arriving in the dump the browser draws.
 
-    The lab ships a colour per geom, so this is how a MARS arrives orange
-    without the viewer knowing anything about MARS. What must NOT be in the
-    dump is as important: 46 collision boxes and 3 frame-marker spheres,
-    which would draw as a robot inside a pile of blocks.
+    The lab ships a colour per geom, so this is how a MARS arrives in
+    Innate's White shell without the viewer knowing anything about MARS —
+    white body and arm, BLACK tyres, blue on the head bar and the two
+    gripper fingers. What must NOT be in the dump is as important: 46
+    collision boxes and 3 frame-marker spheres, which would draw as a robot
+    inside a pile of blocks.
     """
     scene = mars.MARS.visual_scene()
     by_name = {g["name"]: g for g in scene["geoms"]}
-    assert len(scene["geoms"]) == len(scene["meshes"]) == 9
+    assert len(scene["geoms"]) == len(scene["meshes"]) == 14
     assert set(by_name) == {"base", "head", "link1", "link2", "link3",
-                            "link4", "link5", "link61", "link62"}
-    for link in ("link1", "link3", "link5"):
-        assert by_name[link]["rgba"] == list(mars.BRIGHT_ORANGE), link
-    for link in ("base", "head", "link2", "link4"):
-        rgb = by_name[link]["rgba"][:3]
-        assert rgb == [mars.CHARCOAL] * 3, f"{link} is {rgb}, not charcoal"
-        assert by_name[link]["rgba"][3] == 1.0
-    # Every geom names a body in the dump's own list, and the mm-int verts
+                            "link4", "link5", "link61", "link62",
+                            *mars.MESH_PAINT}
+    # Black: the tyres, and the arm's first servo — one colour, because the
+    # tread and the servo case are the same moulded black on the real robot.
+    for name in (*mars.BLACK_MESHES, *mars.BLACK_LINKS):
+        assert by_name[name]["rgba"] == list(mars.INNATE_BLACK), name
+    for link in ("head", "link61", "link62"):
+        assert by_name[link]["rgba"] == list(mars.INNATE_BLUE), link
+    # The head's own two cut parts, which the blue must NOT have reached.
+    assert by_name[mars.FACE_MESH]["rgba"] == list(mars.FACE_BLACK)
+    assert by_name[mars.EYES_MESH]["rgba"] == list(mars.EYE_GREY)
+    for link in ("base", "link2", "link3", "link5"):
+        assert by_name[link]["rgba"] == list(mars.SHELL_WHITE), link
+    # Every geom names a body in the dump's own list, and the integer verts
     # are what the viewer multiplies by vertScale.
-    assert scene["vertScale"] == 0.001
+    assert scene["vertScale"] == mars.VERT_SCALE_M
     for g in scene["geoms"]:
         assert scene["bodies"][g["body"]] in ("base_link", "head") or \
             scene["bodies"][g["body"]].startswith("link")
     assert all(isinstance(v, int) for v in scene["meshes"][0]["v"][:10])
+
+
+@needs_mars
+def test_the_wheel_split_cuts_out_the_tyres_and_loses_no_triangle():
+    """`base.STL` in, a shell and two tyres out, with nothing dropped.
+
+    The cut is what makes "black wheels" sayable at all: the description has
+    the box, the turret, the neck and both tyres as ONE mesh, so before it
+    there was no geom a rubber colour could go on.
+    """
+    spec = mars.load_robot_spec()
+    _n, base = mars._read_binary_stl(mars.asset_dir() / "meshes" / "base.STL")
+    # From `base.STL`, not from the files on disk: those are CACHED on
+    # `base.STL`'s mtime, so a test that read them back would pass over any
+    # change to the cut itself. Reading both and comparing is what says the
+    # cache is current — and is the one thing that fails if it is stale.
+    tyre = mars._tyre_triangles(base, mars._wheel_cylinders(spec))
+    shell_path, wheel_path = mars.split_base_mesh(spec)
+    _n, shell = mars._read_binary_stl(shell_path)
+    _n, tyres = mars._read_binary_stl(wheel_path)
+    assert len(shell) + len(tyres) == len(base), "the cut lost or duplicated"
+    assert len(tyres) == 7360 == int(tyre.sum()), "two 3 680-triangle tyres"
+    assert np.array_equal(tyres, base[tyre]), "the cached tyres are stale"
+    assert np.array_equal(shell, base[~tyre]), "the cached shell is stale"
+    # Every tyre triangle is ON one of the two drive wheels: inside its disc
+    # and within a tyre's width of its plane.
+    cylinders = mars._wheel_cylinders(spec)
+    mid = tyres.mean(axis=1)
+    on_a_wheel = np.zeros(len(mid), dtype=bool)
+    for centre, radius, half_width in cylinders:
+        on_a_wheel |= (
+            (np.abs(mid[:, 1] - centre[1]) <= 3.0 * half_width)
+            & (np.hypot(mid[:, 0] - centre[0], mid[:, 2] - centre[2])
+               <= radius * mars.WHEEL_RADIUS_TOL))
+    assert on_a_wheel.all(), f"{(~on_a_wheel).sum()} tyre triangles are not"
+
+
+@needs_mars
+def test_the_split_follows_the_MESH_and_not_a_cylinder_around_it():
+    """The planted regression for cutting by geometry instead of by shell.
+
+    A cylinder test on triangles is the obvious implementation and it is
+    wrong. MEASURED on `base.STL`: a cylinder sized to the tyre's own extent
+    — |y| >= 73.7 mm and radius <= 37.3 mm, which is what anyone would take
+    off the mesh — selects 7 503 triangles where the two tyre shells are
+    7 360. The 143 extras are the WHEEL ARCH: chassis wrapped around the
+    tyre, which would have come out painted rubber.
+
+    So those 143 must still be ON THE SHELL, and this test fails the day the
+    component walk is simplified into a bounding test.
+    """
+    spec = mars.load_robot_spec()
+    _n, base = mars._read_binary_stl(mars.asset_dir() / "meshes" / "base.STL")
+    tyre = mars._tyre_triangles(base, mars._wheel_cylinders(spec))
+    shell, tyres = base[~tyre], base[tyre]
+    axis_z = float(mars._wheel_cylinders(spec)[0][0][2])
+
+    def inside(v):
+        """Every vertex inside the bounding cylinder OF THE TYRES."""
+        return ((np.abs(v[:, :, 1]) >= np.abs(tyres[:, :, 1]).min() - 1e-6)
+                & (np.hypot(v[:, :, 0], v[:, :, 2] - axis_z)
+                   <= np.hypot(tyres[:, :, 0], tyres[:, :, 2] - axis_z).max()
+                   + 1e-6)).all(axis=1)
+
+    assert int(inside(shell).sum()) == 143, (
+        f"{int(inside(shell).sum())} shell triangles sit inside the tyres' "
+        "own cylinder, not the 143 of the wheel arch")
+
+
+@needs_mars
+@pytest.mark.parametrize("link", sorted(mars.HOUSING_CUTS))
+def test_a_housing_cut_takes_the_case_and_leaves_the_arm(link):
+    """`<link>.STL` in, an arm and a servo case out, nothing dropped.
+
+    Each joint's housing is fused into the arm it drives — Innate prints
+    them as one part — so these cuts are PLANES where the tyres' is a seam,
+    and the plane is the URDF's own collision box for the housing rather
+    than a number.
+
+    What the test pins is that the plane still separates the two: the case
+    must sit entirely behind the face, the arm entirely in front of it, and
+    the arm must still reach its far end. A plane that drifted onto the
+    shaft would black out a whole arm, which is the failure these cuts
+    exist to avoid.
+
+    The axis is read off the MESH here as well as in the code, on purpose:
+    MEASURED, `link2` runs along its z and `link3` along its x, and pinning
+    either one would make this test agree with a hard-coded axis instead of
+    checking for one.
+    """
+    box_geom, _mesh = mars.HOUSING_CUTS[link]
+    spec = mars.load_robot_spec()
+    _n, whole = mars._read_binary_stl(mars.asset_dir() / "meshes" / f"{link}.STL")
+    case_mask = mars._housing_triangles(whole, spec, box_geom)
+    shell_path, case_path = mars.split_housing_mesh(spec, link)
+    _n, shell = mars._read_binary_stl(shell_path)
+    _n, case = mars._read_binary_stl(case_path)
+    assert len(shell) + len(case) == len(whole), "the cut lost or duplicated"
+    assert np.array_equal(case, whole[case_mask]), "the cached case is stale"
+    assert np.array_equal(shell, whole[~case_mask]), "the cached arm is stale"
+
+    flat = whole.reshape(-1, 3)
+    axis = int(np.argmax(flat.max(axis=0) - flat.min(axis=0)))
+    box = spec.geom(box_geom)
+    face = float(np.asarray(box.pos)[axis] + np.asarray(box.size)[axis])
+    assert case.mean(axis=1)[:, axis].max() < face
+    assert shell.mean(axis=1)[:, axis].min() >= face
+    # A housing on the NEAR END, not the shaft. Measured by LENGTH, never by
+    # triangle count: MEASURED, the elbow case is 57 % of link3's triangles
+    # and 47 % of its length, because a moulded box is tessellated far more
+    # finely than a 15 cm shaft — counting faces called this cut a half-arm.
+    lo, hi = float(flat[:, axis].min()), float(flat[:, axis].max())
+    reach = (float(case[:, :, axis].max()) - lo) / (hi - lo)
+    assert 0.2 < reach < 0.55, f"the case reaches {reach:.0%} along {link}"
+    # …and the arm still reaches its far end.
+    assert float(shell[:, :, axis].max()) > lo + 0.9 * (hi - lo)
+
+
+@needs_mars
+@pytest.mark.parametrize("link", sorted(mars.HOUSING_CUTS))
+def test_a_housing_cut_refuses_a_plane_that_takes_everything(link):
+    """The guard for a description whose link and collision box disagree.
+
+    A plane is a blunter instrument than a seam: with the box moved, it
+    quietly takes all of an arm or none of it, and either answer would be
+    WRITTEN TO A FILE and cached. Off either end it raises — past the far
+    end because the housing is no longer at the joint, past the near end
+    because the plane then takes nothing.
+    """
+    box_geom, _mesh = mars.HOUSING_CUTS[link]
+    _n, whole = mars._read_binary_stl(mars.asset_dir() / "meshes" / f"{link}.STL")
+    for far, why in ((1.0, "not at the joint end"), (-1.0, "no longer describe")):
+        doctored = mars.load_robot_spec()
+        box = doctored.geom(box_geom)
+        box.pos = [far, far, far]
+        box.size = [0.001, 0.001, 0.001]
+        with pytest.raises(RuntimeError, match=why):
+            mars._housing_triangles(whole, doctored, box_geom)
+
+
+@needs_mars
+def test_the_head_cut_finds_the_lenses_by_shell_and_the_face_by_normal():
+    """`head.STL` in, a shell, a face panel and two lenses out.
+
+    One mesh, two methods, because that is what it offers: the barrels are a
+    printed part and come out as a SHELL; the black panel is not a part at
+    all — it is the flat front of the blue shell — and comes out by NORMAL.
+    """
+    spec = mars.load_robot_spec()
+    source = mars.asset_dir() / "meshes" / "head.STL"
+    normals, verts = mars._read_binary_stl(source)
+    eyes_mask = mars._eye_shell(verts, spec)
+    face_mask = mars._face_triangles(normals, verts, spec, eyes_mask)
+    assert not (eyes_mask & face_mask).any(), "a triangle is both"
+    shell_p, face_p, eyes_p = mars.split_head_mesh(spec)
+    _n, shell = mars._read_binary_stl(shell_p)
+    _n, face = mars._read_binary_stl(face_p)
+    _n, eyes = mars._read_binary_stl(eyes_p)
+    assert len(shell) + len(face) + len(eyes) == len(verts), "lost or duplicated"
+    assert np.array_equal(eyes, verts[eyes_mask]), "the cached lenses are stale"
+    assert np.array_equal(face, verts[face_mask]), "the cached face is stale"
+
+    axis = mars._look_axis(spec)
+    assert axis == 0, "the MARS head looks along its own x"
+    # Both camera frames sit inside the lens shell — that is what picked it.
+    for frame in mars.EYE_FRAMES:
+        origin = np.asarray(spec.body(frame).pos, float)
+        near = np.linalg.norm(eyes.mean(axis=1) - origin, axis=1).min()
+        assert near < mars.EYE_SHELL_NEAR_M, f"{frame} is {near:.4f} m away"
+    # The panel is at the FRONT and faces forward; the bevel around it does
+    # not, which is what leaves the real head's blue border.
+    front = float(verts[:, :, axis].max())
+    assert face.mean(axis=1)[:, axis].min() >= front - mars.FACE_DEPTH_M
+    # …and it is a panel, not the whole head: MEASURED, 124 of 7 770.
+    assert 50 < len(face) < 400, f"the face took {len(face)} triangles"
+
+
+@needs_mars
+def test_the_head_cut_refuses_a_camera_that_left_its_barrel():
+    """Both guards, because a wrong answer here would be CACHED.
+
+    A camera frame far from any head triangle means the barrels are not in
+    `head.STL` any more; two frames in two different shells means they are
+    no longer one printed part. Either way the cut stops rather than
+    painting some other shell grey.
+    """
+    _n, verts = mars._read_binary_stl(mars.asset_dir() / "meshes" / "head.STL")
+    doctored = mars.load_robot_spec()
+    doctored.body(mars.EYE_FRAMES[0]).pos = [3.0, 0.0, 0.0]
+    with pytest.raises(RuntimeError, match="no longer holds the camera barrels"):
+        mars._eye_shell(verts, doctored)
+    # And a frame moved onto ANOTHER shell of the same mesh — 2 mm off the
+    # blue shell's own side wall, so the distance guard passes and only the
+    # "one part" guard can catch it.
+    other = mars.load_robot_spec()
+    other.body(mars.EYE_FRAMES[0]).pos = [0.0, 0.058, 0.0]
+    with pytest.raises(RuntimeError, match="no longer one part"):
+        mars._eye_shell(verts, other)
+
+
+@needs_mars
+def test_the_split_refuses_a_wheel_it_cannot_find(monkeypatch):
+    """A cut that guessed would be CACHED, so every guard raises instead.
+
+    `split_base_mesh` writes a file; a wrong answer survives every later run
+    until someone deletes it by hand. So a cylinder with no mesh shell in it
+    (a URDF revision that moved a wheel), one that holds two, and a shell too
+    big to be a tyre are errors rather than quiet fallbacks.
+    """
+    spec = mars.load_robot_spec()
+    _n, base = mars._read_binary_stl(mars.asset_dir() / "meshes" / "base.STL")
+    wheel = mars._wheel_cylinders(spec)[0]
+    centre, radius, half_width = wheel
+    nowhere = (np.array([centre[0], centre[1] + 0.5, centre[2]]), radius, half_width)
+    with pytest.raises(RuntimeError, match="no mesh shell inside the wheel"):
+        mars._tyre_triangles(base, (nowhere,))
+    # A cylinder wide enough to hold most of the robot holds many shells.
+    with pytest.raises(RuntimeError, match="two mesh shells"):
+        mars._tyre_triangles(base, ((np.array([-0.06, 0.0, 0.15]), 0.4, 0.4),))
+    # And the real wheel, with the size contract tightened past what a tyre
+    # measures: the shell is found and then REJECTED for being the wrong size.
+    monkeypatch.setattr(mars, "WHEEL_RADIUS_TOL", 0.5)
+    with pytest.raises(RuntimeError, match="that is not a tyre"):
+        mars._tyre_triangles(base, (wheel,))
+
+
+@needs_mars
+def test_the_dump_quantises_fine_enough_not_to_melt_the_head():
+    """The viewer's lattice is a RESOLUTION, and MARS is a small robot.
+
+    The dump ships integer multiples of `vertScale` so the JSON stays small.
+    On the G1 a millimetre is free; MEASURED on MARS, whose head is 121 mm
+    across with 1-2 mm bevels, a millimetre lattice moves a vertex 0.50 mm on
+    average and 0.85 mm at worst, and the head arrived in the browser with
+    streaky normals on faces that are flat in MuJoCo.
+
+    So this pins the error the CURRENT lattice leaves, against the model the
+    dump was built from — not the lattice itself, which is the fix and not
+    the requirement.
+    """
+    model = mars.robot_spec().compile()
+    scene = mars.MARS.visual_scene()
+    scale = scene["vertScale"]
+    # The dump numbers its meshes in the order the VISUAL geoms first use
+    # them, which is not the model's mesh ids; a test that assumed otherwise
+    # compared one part against another and still "passed" on a lucky robot.
+    order: list[int] = []
+    for g in range(model.ngeom):
+        if int(model.geom_group[g]) != mars.VISUAL_GROUP:
+            continue
+        if model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH:
+            continue
+        mid = int(model.geom_dataid[g])
+        if mid not in order:
+            order.append(mid)
+    assert len(order) == len(scene["meshes"])
+    worst = 0.0
+    for mesh, mid in zip(scene["meshes"], order, strict=True):
+        sent = np.asarray(mesh["v"], dtype=np.float64).reshape(-1, 3) * scale
+        adr, num = int(model.mesh_vertadr[mid]), int(model.mesh_vertnum[mid])
+        true = model.mesh_vert[adr:adr + num]
+        assert len(sent) == len(true), f"mesh {mid} lost vertices"
+        worst = max(worst, float(np.linalg.norm(sent - true, axis=1).max()))
+    # A tenth of the 0.85 mm a millimetre lattice cost, with room to spare.
+    assert worst < 0.0002, f"the dump moves a vertex {worst * 1000:.3f} mm"
 
 
 @needs_mars

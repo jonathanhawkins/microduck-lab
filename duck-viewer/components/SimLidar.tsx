@@ -46,13 +46,14 @@ import {
 import {
   armBar,
   gripperBar,
+  lidarFootprintM,
   lidarMaxRange,
+  lidarMinRange,
   lidarNearest,
   lidarPlotPoints,
   lidarPolar,
   LIDAR_FRESH_MS,
-  LIDAR_MIN_RANGE_M,
-  robotFootprintM,
+  scanOutline,
   tofFromLidar,
 } from "@/lib/lidar";
 
@@ -74,12 +75,19 @@ const PLOT = 210;
 const LIDAR_MOUNT_BODY = "base_laser";
 
 /** How long a hit's tick is drawn in the room, m. Short on purpose: a tick at
- *  the surface reads as a contact, a full-length ray per return reads as fog. */
+ *  the surface reads as a contact, a full-length ray per return reads as fog.
+ *
+ *  The tick is no longer the only thing the other ~315° gets — see
+ *  `scanOutline`. It was, and the scan was RIGHT and looked broken: MEASURED
+ *  off the live wire in the follow-me room, 357 of 360 rays return and they
+ *  are spread 44-45 per octant, a complete turn — but 5 cm of tick on a wall
+ *  3 m away is two pixels, so all anybody could see was the front sector's
+ *  long rays and the scanner looked like a 45° one. */
 const HIT_TICK_M = 0.05;
 
-/** Per body: 360 hit ticks + the ~65 rays of the front sector, and four
- *  bodies' worth of room. A cap, not an expectation. */
-const MAX_LIDAR_SEG = 4 * 430;
+/** Per body: 360 hit ticks, up to 360 outline edges, the ~65 rays of the
+ *  front sector, and four bodies' worth of room. A cap, not an expectation. */
+const MAX_LIDAR_SEG = 4 * 800;
 
 /** A sensor's age as a reading — the ToF block's own wording (SimViewer's
  *  `freshness`), against the scanner's 6 Hz window. Duplicated rather than
@@ -195,9 +203,10 @@ export function LidarPlot({ client, duckId }: { client: SimClient; duckId: strin
           ctx.fillText(m === Math.ceil(max) ? `${m} m` : `${m}`, c + 2, c - r + 5);
         }
         // The blind disc: nearer than this the device cannot resolve, and a
-        // return inside it arrives as a 0 (clipped and marked invalid).
+        // return inside it arrives as a 0 (clipped and marked invalid). Off
+        // THIS scan, so a scanner with another floor draws its own.
         ctx.beginPath();
-        ctx.arc(c, c, LIDAR_MIN_RANGE_M * pxPerM, 0, Math.PI * 2);
+        ctx.arc(c, c, lidarMinRange(scan) * pxPerM, 0, Math.PI * 2);
         ctx.strokeStyle = "rgba(242,182,50,0.45)";
         ctx.setLineDash([2, 2]);
         ctx.stroke();
@@ -208,7 +217,7 @@ export function LidarPlot({ client, duckId }: { client: SimClient; duckId: strin
         const mx = scan?.mount ? scan.mount[0] : 0;
         const my = scan?.mount ? scan.mount[1] : 0;
         const base = lidarPolar(Math.atan2(-my, -mx), Math.hypot(mx, my), max, PLOT);
-        const foot = robotFootprintM(d?.robot);
+        const foot = lidarFootprintM(scan, d?.robot);
         if (foot > 0) {
           // What the adapter throws away as the robot looking at itself.
           ctx.beginPath();
@@ -480,6 +489,18 @@ export function LidarOverlay({
       col.toArray(colors, k + 3);
       n++;
     };
+    /** One segment between two POINTS — `seg` takes a ray and a range, which
+     *  the outline's chords are not. */
+    const edge = (a: [number, number, number], b: [number, number, number], color: string) => {
+      if (n >= MAX_LIDAR_SEG) return;
+      const k = n * 6;
+      pos[k] = a[0]; pos[k + 1] = a[1]; pos[k + 2] = a[2];
+      pos[k + 3] = b[0]; pos[k + 4] = b[1]; pos[k + 5] = b[2];
+      col.set(color);
+      col.toArray(colors, k);
+      col.toArray(colors, k + 3);
+      n++;
+    };
     if (f && enabled) {
       const sel = getSelectedDuck();
       for (const d of f.ducks) {
@@ -494,7 +515,7 @@ export function LidarOverlay({
         // The sector, computed exactly as the brain's frame is, so the fan in
         // the room is the fan in the panel's strip — including the footprint
         // returns both of them drop.
-        const tof = tofFromLidar(scan, { footprintM: robotFootprintM(d.robot) });
+        const tof = tofFromLidar(scan, { footprintM: lidarFootprintM(scan, d.robot) });
         const picks = new Set(tof.cols.map((x) => x.ray).filter((r) => r >= 0));
         for (let i = 0; i < scan.mm.length; i++) {
           const mm = scan.mm[i];
@@ -512,6 +533,25 @@ export function LidarOverlay({
           if (picks.has(i)) seg(origin, dir, 0, r, "#43c2b8");
           else if (tof.rayCol[i] >= 0) seg(origin, dir, 0, r, "#1f4d4a");
           seg(origin, dir, Math.max(0, r - HIT_TICK_M), r, depthColor(mm, max * 1000));
+        }
+        // …and the OUTLINE: consecutive returns joined into the silhouette
+        // the beam traced, which is what a planar scanner looks like in every
+        // viewer that has one. It breaks where the range jumps, so a doorway
+        // stays a doorway (lib/lidar.scanOutline). Drawn after the ticks so
+        // it sits over them, and in the ticks' own depth colour so one scan
+        // reads as one object.
+        const edges = scanOutline(scan.mm, max);
+        for (let e = 0; e < edges.length; e += 2) {
+          const i = edges[e], j = edges[e + 1];
+          const ai = scan.a0 + i * scan.da, aj = scan.a0 + j * scan.da;
+          const di = quatRotate(q, [Math.cos(ai), Math.sin(ai), 0]);
+          const dj = quatRotate(q, [Math.cos(aj), Math.sin(aj), 0]);
+          const ri = scan.mm[i] / 1000, rj = scan.mm[j] / 1000;
+          edge(
+            [origin[0] + di[0] * ri, origin[1] + di[1] * ri, origin[2] + di[2] * ri],
+            [origin[0] + dj[0] * rj, origin[1] + dj[1] * rj, origin[2] + dj[2] * rj],
+            depthColor(scan.mm[i], max * 1000),
+          );
         }
       }
     }

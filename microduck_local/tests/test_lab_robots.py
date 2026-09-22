@@ -951,13 +951,28 @@ def test_a_file_with_nothing_to_say_is_still_refused_by_its_width(tmp_path):
 def test_scene_endpoint_serves_the_mars_meshes(tmp_path, monkeypatch):
     monkeypatch.setattr(V, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setenv("LAB_STATE_PATH", str(tmp_path / "lab-state.json"))
+    from microduck_local.robots import mars
     get_scene = _endpoint(V.make_app([]), "/scene", "GET")
     sc = get_scene(robot="mars")
-    assert len(sc["meshes"]) == 9, "mars.urdf ships nine visual STLs"
+    assert len(sc["meshes"]) == 14, (
+        "mars.urdf ships nine visual STLs; the tyres come out of base.STL, a "
+        "servo case out of each of link2/link3.STL, and the face panel and "
+        "camera lenses out of head.STL")
     assert sc["bodies"][1] == "base_link"
-    # the colours the SERVER painted (robots/mars.style_visual_geoms), so the
-    # viewer needs no table of its own: Innate orange somewhere on the arm.
-    assert any(g["rgba"][0] > 0.8 and g["rgba"][1] < 0.6 for g in sc["geoms"])
+    # The colours the SERVER painted (robots/mars.paint_shell): the viewer
+    # adds gloss and rubber on top, but the shell itself arrives in the dump.
+    # Innate's Blue / White — a blue head bar, and tyres darker than anything
+    # else on the robot.
+    head = next(g for g in sc["geoms"] if g["name"] == "head")
+    assert head["rgba"][2] > head["rgba"][0] + 0.3, "the head is not blue"
+    # The tyres are darker than every PAINTED part. Not darker than
+    # everything: the servo cases are the same moulded black, and the head's
+    # face panel is darker still, so this compares against the shell and the
+    # blue rather than against every other geom.
+    tyres = next(g for g in sc["geoms"] if g["name"] == mars.WHEEL_MESH)
+    painted = [g for g in sc["geoms"]
+               if g["name"] not in (*mars.MESH_PAINT, *mars.BLACK_LINKS)]
+    assert max(tyres["rgba"][:3]) < min(max(g["rgba"][:3]) for g in painted)
 
 
 @needs_go2

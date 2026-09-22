@@ -41,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .render_rollout import CAMERAS, LOOKAT_Z, build_sheet, sheet_indices
+from .render_rollout import CAMERAS, LOOKAT_Z, build_sheet, offscreen_renderer, sheet_indices
 from .world.scenario import Scenario, load_scenario
 
 TOP_ELEVATION = -70.0     # near-plan, a little depth left (scripts/render_pitch.py's angle)
@@ -144,6 +144,11 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="/tmp/rw")
     ap.add_argument("--camera", default="top", help="top | follow:<duck> | side | front | three-quarter")
+    ap.add_argument("--distance", type=float, default=None,
+                    help="camera distance in m (default: framed per camera; a follow shot with a 1.3 m G1 person in it wants ~3)")
+    ap.add_argument("--elevation", type=float, default=None, help="camera elevation in degrees (default: the camera's own)")
+    ap.add_argument("--azimuth", type=float, default=None,
+                    help="camera azimuth in degrees (default: the camera's own; 90 lays a pitch's length across a landscape frame)")
     ap.add_argument("--brain", action="append", default=[], metavar="DUCK=KIND",
                     help="override a duck's brain (repeatable), e.g. d0=tidy, d1=wander")
     ap.add_argument("--tether-ms", type=float, default=0.0, help="brain round-trip latency, as the lab and eval-tidy apply it")
@@ -177,7 +182,7 @@ def main() -> None:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    renderer = mujoco.Renderer(w.model, height=args.height, width=args.width)
+    renderer = offscreen_renderer(w.model, args.width, args.height)
     # What to DRAW. MuJoCo's default geomgroup is [1,1,1,0,0,0], and the toys
     # are group 4 (`world.compose.PICKABLE_GROUP`, so the detector's
     # line-of-sight looks THROUGH them) - so every playroom clip ever recorded
@@ -189,6 +194,12 @@ def main() -> None:
     for g, on in enumerate((1, 1, 1, 0, 1, 0)):
         opt.geomgroup[g] = on
     cam, follow = make_camera(args.camera, sc)
+    if args.distance is not None:
+        cam.distance = args.distance
+    if args.elevation is not None:
+        cam.elevation = args.elevation
+    if args.azimuth is not None:
+        cam.azimuth = args.azimuth
     cmd = np.zeros(3, np.float32)
 
     frames: list[np.ndarray] = []

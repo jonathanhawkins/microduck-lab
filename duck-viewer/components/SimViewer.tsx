@@ -51,6 +51,7 @@ import {
   tofZonePoints,
   CAM_FOV_DEG,
   OVERLAY_LAYER,
+  SELF_LAYER,
   TOF_PRESETS,
   SIM_SPEEDS,
   SIM_SPEED_DEFAULT,
@@ -71,7 +72,7 @@ import { camAspect, renderInset } from "@/lib/inset";
 import { buildBodyGeometries, Duck, type BodyGeometry } from "./Duck";
 import { RobotBody } from "./SimStage";
 import { ArmBlock, GripperBlock, LidarOverlay, LidarPlot } from "./SimLidar";
-import { robotLook } from "@/lib/robots";
+import { isDuck, robotCount, robotLook } from "@/lib/robots";
 import CameraKeys from "./CameraKeys";
 import { useTruckSwipe } from "./useTruckSwipe";
 import { CaptureCanvas, Snapshotter } from "./Capture";
@@ -292,7 +293,13 @@ function InsetRender({ scene, client, enabled }: { scene: Scene; client: SimClie
   const cam = useMemo(() => new THREE.PerspectiveCamera(CAM_FOV_DEG[1], 1.35, 0.03, 20), []);
   useEffect(() => {
     camera.layers.enable(OVERLAY_LAYER);
+    // The orbit view keeps the housing the inset hides — you are looking AT
+    // the robot there, not out of it.
+    camera.layers.enable(SELF_LAYER);
   }, [camera]);
+  // The housing parked on SELF_LAYER for the inset pass, so it can be put
+  // back the moment the pass is over: every other camera still sees it.
+  const parked = useRef<THREE.Object3D[]>([]);
   useFrame(() => {
     gl.setScissorTest(false);
     gl.render(three, camera);
@@ -317,7 +324,25 @@ function InsetRender({ scene, client, enabled }: { scene: Scene; client: SimClie
     // renderInset measures the box and shapes the camera to it: it takes the
     // two DOMRects, not a rectangle, because the measuring is what went wrong
     // once (a pixel ratio applied twice - lib/inset.ts, lib/inset.test.ts).
+    // A camera cannot see the shell it is bolted inside (lib/sim.SELF_LAYER).
+    // The lab names the body — `det.selfBody`, the one its own detector
+    // already refuses to detect — so the viewer needs no table of its own,
+    // and an older lab that sends none simply draws everything.
+    const self = det?.selfBody ?? -1;
+    parked.current.length = 0;
+    if (self >= 0) {
+      three.traverse((o) => {
+        if (o.userData?.simRobotId === d.id && o.userData?.simBodyIndex === self) {
+          o.traverse((c) => {
+            parked.current.push(c);
+            c.layers.set(SELF_LAYER);
+          });
+        }
+      });
+    }
     renderInset(gl, three, cam, el.getBoundingClientRect(), gl.domElement.getBoundingClientRect(), size);
+    for (const o of parked.current) o.layers.set(0);
+    parked.current.length = 0;
   }, 1);
   return null;
 }
@@ -1088,7 +1113,15 @@ function ScenePicker({
   }, [open]);
 
   const current = scenarios.find((s) => s.name === pick);
-  const label = (s: ScenarioListing) => `${s.name} (${s.ducks} ducks, ${s.objects} obj)`;
+  // "mars-follow (1 MARS, 4 obj)". The body breakdown when the lab sends one
+  // (`ScenarioListing.robots`), else the old all-ducks count — which is what
+  // called a room holding one MARS and no duck "1 ducks".
+  const label = (s: ScenarioListing) => {
+    const who = s.robots?.length
+      ? s.robots.map((r) => robotCount(r.n, r.noun)).join(" + ")
+      : robotCount(s.ducks, "duck");
+    return `${s.name} (${who}, ${s.objects} obj)`;
+  };
   const groups: [string, ScenarioListing[]][] = [
     ["built in", scenarios.filter((s) => s.builtin)],
     ["saved by you", scenarios.filter((s) => !s.builtin)],
@@ -1230,7 +1263,9 @@ function DuckVoices({ client, sound }: { client: SimClient; sound: boolean }) {
       raf = requestAnimationFrame(tick);
       const f = client.frame;
       if (!f) return;
-      const ducks = f.ducks.map((d) => ({ id: d.id, graph: d.brain?.graph, state: d.brain?.state }));
+      const ducks = f.ducks.map((d) => ({
+        id: d.id, robot: d.robot, graph: d.brain?.graph, state: d.brain?.state,
+      }));
       // Wall time schedules the voices; the world's own clock only says
       // whether it is running (a scrubbed or paused world is silent).
       const now = performance.now() / 1000;
@@ -1870,7 +1905,7 @@ export default function SimViewer() {
         <button
           style={{ ...BTN, borderColor: sound ? "#43c2b8" : BTN_BORDER, color: sound ? undefined : "#7c8796" }}
           onClick={() => setSound((v) => !v)}
-          title="Shift+M: the ducks' voices — chirps while a follower has its person in sight, a questioning quack when it loses them. Only followers talk; a pitch or a tidy room is silent. Mute is the sound only: the bills keep moving."
+          title="Shift+M: the ducks' voices — chirps while a follower has its person in sight, a questioning quack when it loses them. Only DUCKS talk, and only following ones: a MARS, a pitch or a tidy room is silent. Mute is the sound only: the bills keep moving."
         >
           {sound ? "🔊 quacks" : "🔇 quacks"}
         </button>
@@ -2210,9 +2245,9 @@ export default function SimViewer() {
             </div>
             <PanelToggle open onToggle={() => setLessonOpen(false)} what="the controls" />
           </div>
-          WASD/QE fly the camera (A/D slide, W/S zoom, Q/E rise) · arrows orbit · Shift+R view home
+          WASD/EQ fly the camera (A/D slide, W/S zoom, E up, Q down) · arrows orbit · Shift+R view home
           <div style={{ marginTop: 6 }}>
-            R restart · P drive (the same WASD/arrows, Q/E steer the ducks instead) · T sensors · V cam ·
+            R restart · P drive (the same WASD/arrows steer the ducks instead; Q/E strafe them sideways) · T sensors · V cam ·
             L labels · M map · Shift+M mute the ducks · I inspector · B scoreboard · G states · Shift+E edit ·
             1–9 select · Esc · space scrub
           </div>

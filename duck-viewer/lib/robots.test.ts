@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { robotEmoji, robotLook, trickNoun } from "./robots";
+import { isDuck, robotCount, robotEmoji, robotLook, trickNoun } from "./robots";
 import { robotChipLabel } from "./activeRobot";
 import { OUR_GROUPS, robotTag, shippedGroups, type Policy } from "./lab";
 
@@ -98,5 +98,44 @@ describe("robotTag", () => {
     // "mars · " on every chip of a MARS drop.
     expect(robotTag("g1", "g1")).toBe("");
     expect(robotTag("mars", "mars")).toBe("");
+  });
+});
+
+describe("robotCount", () => {
+  it("pluralises a common noun and leaves a name alone", () => {
+    // The nouns come from the lab (`robot_noun`), so this is a rule and not
+    // a table: a plugin body brings its own noun with it. Case is the rule
+    // — nobody writes "MARSs".
+    expect(robotCount(1, "duck")).toBe("1 duck");
+    expect(robotCount(3, "duck")).toBe("3 ducks");
+    expect(robotCount(1, "MARS")).toBe("1 MARS");
+    expect(robotCount(2, "MARS")).toBe("2 MARS");
+    expect(robotCount(1, "G1")).toBe("1 G1");
+    expect(robotCount(2, "G1")).toBe("2 G1");
+    expect(robotCount(2, "so_arm100")).toBe("2 so_arm100s");
+  });
+
+  it("is what a scenario row reads as", () => {
+    // The bug: `mars-follow` holds one MARS and no duck, and the picker
+    // called it "1 ducks" — wrong number AND wrong animal.
+    const mars = [{ id: "mars", n: 1, noun: "MARS" }];
+    expect(mars.map((r) => robotCount(r.n, r.noun)).join(" + ")).toBe("1 MARS");
+    const mixed = [{ id: "microduck", n: 2, noun: "duck" }, { id: "mars", n: 1, noun: "MARS" }];
+    expect(mixed.map((r) => robotCount(r.n, r.noun)).join(" + ")).toBe("2 ducks + 1 MARS");
+  });
+});
+
+describe("isDuck", () => {
+  it("reads a missing robot as the duck, and nothing else as one", () => {
+    // A scenario entry leaves `robot` off when it means the duck
+    // (world/scenario.Duck defaults it), and an older lab sends no field at
+    // all — so absent has to mean duck or every duck goes silent.
+    expect(isDuck(undefined)).toBe(true);
+    expect(isDuck(null)).toBe(true);
+    expect(isDuck("")).toBe(true);
+    expect(isDuck("microduck")).toBe(true);
+    for (const r of ["mars", "g1", "unitree_go2", "trs_so_arm100"]) {
+      expect(isDuck(r), r).toBe(false);
+    }
   });
 });

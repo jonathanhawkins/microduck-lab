@@ -15,6 +15,8 @@
 // it is running at all (`update` goes quiet when the sim stalls: paused,
 // scrubbing, a dropped socket), so a frozen picture is a silent one.
 
+import { isDuck } from "./robots";
+
 /** What a duck can say. */
 export type Voice = "chirp" | "coo" | "question" | "grumble" | "reunion";
 
@@ -55,9 +57,19 @@ const LINES: Record<string, Record<string, VoiceLine>> = {
   },
 };
 
-/** The line a duck on this graph and state says, or null for silence. */
-export function voiceFor(graph: string | null | undefined, state: string | null | undefined): VoiceLine | null {
-  if (!graph || !state) return null;
+/** The line a duck on this graph and state says, or null for silence.
+ *
+ *  `robot` is the third thing it depends on, and it is not an optimisation:
+ *  the table is keyed by the brain GRAPH, and a graph is a brain rather than
+ *  a body — point the `follow` brain at a MARS and it quacked, in a room
+ *  (`mars-follow`) that holds no duck at all. A body is not a duck because
+ *  it can follow someone. Absent means the duck, as it does in a scenario
+ *  entry (`world/scenario.Duck.robot` defaults to "microduck"), so an older
+ *  lab that sends no robot field is unchanged. */
+export function voiceFor(graph: string | null | undefined,
+                         state: string | null | undefined,
+                         robot?: string | null): VoiceLine | null {
+  if (!graph || !state || !isDuck(robot)) return null;
   return LINES[graph]?.[state] ?? null;
 }
 
@@ -92,6 +104,9 @@ function rng(seed: number): () => number {
 
 export interface VoiceDuck {
   id: string;
+  /** Which BODY this is (`SimDuck.robot`). Only a duck quacks — see
+   *  `voiceFor`. Absent means the duck, as it does in a scenario. */
+  robot?: string | null;
   /** SimDuck.brain.graph and .state. */
   graph?: string | null;
   state?: string | null;
@@ -168,7 +183,7 @@ export class Voices {
     const out: VoiceEvent[] = [];
     const live = new Set<string>();
     for (const d of ducks) {
-      const line = voiceFor(d.graph, d.state);
+      const line = voiceFor(d.graph, d.state, d.robot);
       if (!line) {
         // Not a follower (or a brain between decisions): forget it, so it
         // re-staggers rather than firing the moment it becomes one.

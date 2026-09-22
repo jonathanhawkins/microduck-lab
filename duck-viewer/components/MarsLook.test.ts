@@ -14,6 +14,9 @@ import {
   MARS_DEFAULT_COLORWAY,
   MARS_KINDS,
   MIN_BODY_LUMA,
+  EYE_GREY,
+  FACE_BLACK,
+  INNATE_BLACK,
   makeMarsMaterial,
   marsColorway,
   marsHeadColor,
@@ -48,20 +51,32 @@ const MARS_BODIES = [
   "right_camera_optical_frame",
 ] as const;
 
-// The nine MESH geoms that actually arrive (the collision boxes and the
+// The fourteen MESH geoms that actually arrive (the collision boxes and the
 // marker spheres are filtered out server-side): body name → geom name, as
 // `GET /scene?robot=mars` sends them. The geom names drop the `_link`
 // suffix, which is exactly the mismatch the classifier has to absorb.
+//
+// `base_wheels`, `link2_servo`, `link3_servo`, `head_face` and `head_eyes`
+// are the odd ones: they are the meshes in a MARS that Innate did not ship. The description has the tyres as triangles
+// inside `base.STL`, and the server cuts them out (microduck_local
+// robots/mars.split_base_mesh) so that "black wheels" is a colour some geom
+// can be given. Both of its names say `base_link`/`base_wheels`, so the rule
+// that catches it has to beat the `base` one.
 const MARS_GEOMS: readonly (readonly [string, string])[] = [
   ["base_link", "base"],
+  ["base_link", "base_wheels"],
   ["link1", "link1"],
   ["link2", "link2"],
+  ["link2", "link2_servo"],
   ["link3", "link3"],
+  ["link3", "link3_servo"],
   ["link4", "link4"],
   ["link5", "link5"],
   ["link61", "link61"],
   ["link62", "link62"],
   ["head", "head"],
+  ["head", "head_face"],
+  ["head", "head_eyes"],
 ];
 
 describe("marsPartKind", () => {
@@ -74,10 +89,20 @@ describe("marsPartKind", () => {
   it("puts each streamed geom on the part it belongs to", () => {
     const got = MARS_GEOMS.map(([body, mesh]) => marsPartKind(body, mesh));
     expect(got).toEqual([
-      "chassis", // base.STL — the box, the turret and BOTH wheels in one mesh
-      "arm", "arm", "arm", "arm", "arm", // link1..link5
-      "gripper", "gripper", // link61 / link62, the two fingers
-      "head",
+      "chassis",   // base — base.STL minus the tyres — the box, the turret, the neck
+      "wheel",     // base_wheels — the two tyres, cut out of base.STL
+      "servo",     // link1 — the arm's first joint, a bare black servo case
+      "arm",       // link2 — the lower arm itself
+      "servo",     // link2_servo — the shoulder's housing, cut off link2
+      "arm",       // link3 — the forearm itself
+      "servo",     // link3_servo — the elbow's housing, cut off link3
+      "servo",     // link4 — the wrist, a whole mesh of its own
+      "arm",       // link5 — the gripper body
+      "gripper",   // link61 — a finger
+      "gripper",   // link62 — the other finger
+      "head",      // head — the blue head bar
+      "face",      // head_face — the flat black panel, cut off the head shell
+      "lens",      // head_eyes — the two camera domes, their own shell
     ]);
   });
 
@@ -102,6 +127,91 @@ describe("marsPartKind", () => {
   it("reads link61/link62 as fingers, not as link 6 of the arm", () => {
     expect(marsPartKind("link61")).toBe("gripper");
     expect(marsPartKind("link62")).toBe("gripper");
+  });
+
+  it("reads the tyres as wheels although both names say `base`", () => {
+    // The planted regression for the rule ORDER: `base_wheels` matches the
+    // chassis rule too, and before the wheel rule was put in front of it the
+    // tyres were painted with the body. A lab too old to send a `base_wheels`
+    // mesh has no geom here at all, which is the fallback that matters: it
+    // draws a white chassis with white wheels, not a robot with a hole in it.
+    expect(marsPartKind("base_link", "base_wheels")).toBe("wheel");
+    expect(marsPartKind("base_link", "base")).toBe("chassis");
+    expect(marsPartKind("base_link")).toBe("chassis");
+  });
+
+  it("wears rubber on the wheels, not the shell's paint", () => {
+    const cw = marsColorway();
+    const tyre = makeMarsMaterial("wheel", cw, { envScale: 1 }) as THREE.MeshPhysicalMaterial;
+    const shell = makeMarsMaterial("chassis", cw, { envScale: 1 }) as THREE.MeshPhysicalMaterial;
+    expect(tyre.color.getHexString(THREE.SRGBColorSpace)).toBe(INNATE_BLACK.slice(1));
+    expect(tyre.clearcoat).toBe(0);              // paint has a clearcoat
+    expect(tyre.metalness).toBe(0);
+    expect(tyre.roughness).toBeGreaterThan(shell.roughness);
+    // And it is EXEMPT from the light-shell reflection cut: `reflect` is a
+    // correction for a near-white body, and scaling a black tyre by it again
+    // flattened the tread into one blob.
+    const dark = makeMarsMaterial("wheel", MARS_COLORWAYS["orange-black"], { envScale: 1 }) as THREE.MeshPhysicalMaterial;
+    expect(cw.reflect).toBeLessThan(1);          // the shell IS cutting it
+    expect(tyre.envMapIntensity).toBeCloseTo(dark.envMapIntensity, 6);
+  });
+
+  it("reads the arm's first joint as a bare servo, not as arm shell", () => {
+    // The planted regression for the rule ORDER again: `link1` matches the
+    // arm rule too. On the real robot that joint is the moulded black case
+    // in its bracket by the right wheel — the one part of the arm the shell
+    // colour does not reach — and it was drawn in the arm's paint until the
+    // servo rule went in front.
+    expect(marsPartKind("link1")).toBe("servo");
+    expect(marsPartKind("link4")).toBe("servo");
+    // …and the two CUT housings, which arrive on the arm's own body with a
+    // `_servo` mesh name: the arm rule matches "link2"/"link3" too, so this
+    // is the same order test as the tyres'.
+    expect(marsPartKind("link2", "link2_servo")).toBe("servo");
+    expect(marsPartKind("link3", "link3_servo")).toBe("servo");
+    expect(marsPartKind("link2", "link2")).toBe("arm");
+    expect(marsPartKind("link3", "link3")).toBe("arm");
+    for (const l of ["link2", "link3", "link5"]) {
+      expect(marsPartKind(l), l).toBe("arm");
+    }
+    const cw = marsColorway();
+    const servo = makeMarsMaterial("servo", cw, { envScale: 1 }) as THREE.MeshPhysicalMaterial;
+    expect(servo.color.getHexString(THREE.SRGBColorSpace)).toBe(INNATE_BLACK.slice(1));
+    // It does NOT follow the colorway: the case is moulded, not painted, so
+    // every shell shows the same black there.
+    for (const id of Object.keys(MARS_COLORWAYS)) {
+      const m = makeMarsMaterial("servo", MARS_COLORWAYS[id]) as THREE.MeshPhysicalMaterial;
+      expect(m.color.getHexString(THREE.SRGBColorSpace), id).toBe(INNATE_BLACK.slice(1));
+    }
+  });
+
+  it("reads the head's panel and lenses before the head itself", () => {
+    // Both names start with "head", so the rule ORDER is the test again:
+    // before this went in front, Innate's black face and grey eyes were
+    // drawn in the head bar's blue.
+    expect(marsPartKind("head", "head_face")).toBe("face");
+    expect(marsPartKind("head", "head_eyes")).toBe("lens");
+    expect(marsPartKind("head", "head")).toBe("head");
+    // …and a camera FRAME is still a marker, not a lens: the rule that
+    // catches `head_camera_left` runs earlier and stays there.
+    expect(marsPartKind("head_camera_left")).toBe("marker");
+    const face = makeMarsMaterial("face", marsColorway(), { envScale: 1 }) as THREE.MeshPhysicalMaterial;
+    const lens = makeMarsMaterial("lens", marsColorway(), { envScale: 1 }) as THREE.MeshPhysicalMaterial;
+    expect(face.color.getHexString(THREE.SRGBColorSpace)).toBe(FACE_BLACK.slice(1));
+    expect(lens.color.getHexString(THREE.SRGBColorSpace)).toBe(EYE_GREY.slice(1));
+    // The lens has to read LIGHTER than the panel it sits in — that is the
+    // whole reason it is a kind of its own — and glossier, so it catches a
+    // highlight instead of going flat.
+    expect(srgbLuma(EYE_GREY)).toBeGreaterThan(srgbLuma(FACE_BLACK) * 1.5);
+    expect(lens.roughness).toBeLessThan(face.roughness);
+    expect(lens.envMapIntensity).toBeGreaterThan(face.envMapIntensity);
+    // Neither follows the colorway: they are moulded parts, not paint.
+    for (const id of Object.keys(MARS_COLORWAYS)) {
+      const f = makeMarsMaterial("face", MARS_COLORWAYS[id]) as THREE.MeshPhysicalMaterial;
+      const l = makeMarsMaterial("lens", MARS_COLORWAYS[id]) as THREE.MeshPhysicalMaterial;
+      expect(f.color.getHexString(THREE.SRGBColorSpace), id).toBe(FACE_BLACK.slice(1));
+      expect(l.color.getHexString(THREE.SRGBColorSpace), id).toBe(EYE_GREY.slice(1));
+    }
   });
 
   it("shows an unknown part in the shell colour rather than hiding it", () => {
@@ -134,16 +244,23 @@ describe("MARS_COLORWAYS", () => {
     }
   });
 
-  it("defaults to Innate's White shell, the one you can FIND on the stage", () => {
-    // Not the orange/black press photo any more: on the lab's #101216 floor
-    // the white shell is the one that reads at a glance from across the grid
+  it("defaults to the Blue / White shell Innate's own photos show", () => {
+    // Two things at once, and both are the point. A light body is the one
+    // that READS on the lab's #101216 floor at a glance from across the grid
     // (measured on the live page — the far slot's chassis crop went 0.241 ->
-    // 0.697, 3.1x the background to 8.6x). The hero is still in the table.
-    expect(MARS_DEFAULT_COLORWAY).toBe("white");
-    expect(marsColorway().id).toBe("white");
-    expect(marsColorway(null).id).toBe("white");
-    expect(marsColorway("no-such-shell").id).toBe("white");
+    // 0.697, 3.1x the background to 8.6x). And blue-white rather than white
+    // is the machine itself: a blue head bar and blue gripper fingers on
+    // black tyres. Both other shells are still in the table.
+    expect(MARS_DEFAULT_COLORWAY).toBe("blue-white");
+    expect(marsColorway().id).toBe("blue-white");
+    expect(marsColorway(null).id).toBe("blue-white");
+    expect(marsColorway("no-such-shell").id).toBe("blue-white");
     expect(marsColorway("orange-black").id).toBe("orange-black");
+    // The default's head is BLUE, not a wash of it: this is the assertion
+    // that fails if the head ever goes back through MARS_HEAD_MIX, which
+    // would pull it 45 % of the way to a white chassis.
+    const cw = marsColorway();
+    expect(marsHeadColor(cw)).toBe(cw.accent);
   });
 
   it("keeps the default body an OFF-white, cool, and never #fff", () => {
@@ -176,12 +293,15 @@ describe("MARS_COLORWAYS", () => {
     // The inversion of this file's founding finding: a DARK shell reads by its
     // specular top, a near-white one is flattened by it (the wash lands on the
     // shadowed faces, where there is no diffuse signal to compete with it).
-    expect(MARS_COLORWAYS.white.reflect).toBeLessThan(0.5);
-    for (const id of ["orange-black", "blue-white", "black"]) {
+    for (const id of ["white", "blue-white"]) {
+      expect(MARS_COLORWAYS[id].reflect, id).toBeLessThan(0.5);
+    }
+    for (const id of ["orange-black", "black"]) {
       expect(MARS_COLORWAYS[id].reflect, id).toBeUndefined();
     }
-    // …and it has to REACH the material, on every part kind: one part of a
-    // shell lit differently from the next is worse than either setting.
+    // …and it has to REACH the material, on every PAINTED part kind: one part
+    // of a shell lit differently from the next is worse than either setting.
+    // `wheel` is not in this list on purpose — see the test below.
     const refl = MARS_COLORWAYS.white.reflect as number;
     for (const k of ["chassis", "head", "arm", "gripper"] as const) {
       const dark = makeMarsMaterial(k, MARS_COLORWAYS["orange-black"], { envScale: 1 }) as THREE.MeshPhysicalMaterial;
@@ -191,15 +311,21 @@ describe("MARS_COLORWAYS", () => {
     }
   });
 
-  it("leaves the other three shells exactly as they shipped", () => {
-    // The white shell is the only thing the default change was allowed to
-    // touch; `toEqual` also fails if one of them grows a `reflect`.
+  it("leaves the two dark shells exactly as they shipped", () => {
+    // `toEqual` also fails if one of them grows a `reflect`, a `wheel`, a
+    // `head` or an `arm`: a dark shell wants the full specular top and the
+    // accent on its arm, and every field added for the light default is a
+    // field that must NOT have leaked onto these two.
     expect(MARS_COLORWAYS["orange-black"]).toEqual(
       { id: "orange-black", label: "Orange / Black", accent: "#ff8a1f", body: "#3b3f47" });
-    expect(MARS_COLORWAYS["blue-white"]).toEqual(
-      { id: "blue-white", label: "Blue / White", accent: "#2f34e6", body: "#e7e9ee" });
     expect(MARS_COLORWAYS["black"]).toEqual(
       { id: "black", label: "Black", accent: "#5b616b", body: "#3b3f47" });
+    // And the arm of a shell that names no `arm` is still its accent.
+    for (const id of ["orange-black", "black"]) {
+      const m = makeMarsMaterial("arm", MARS_COLORWAYS[id]) as THREE.MeshPhysicalMaterial;
+      expect(m.color.getHexString(THREE.SRGBColorSpace), id)
+        .toBe(MARS_COLORWAYS[id].accent.slice(1));
+    }
   });
 
   it("keeps every chassis above the dark-stage luminance floor", () => {
@@ -213,16 +339,25 @@ describe("MARS_COLORWAYS", () => {
     }
   });
 
-  it("puts the head between the accent and the chassis", () => {
-    // Not the full accent (a whole orange head reads as a traffic cone) and
-    // not the chassis (the two-tone shells carry the accent onto the head).
+  it("mixes the head toward the chassis unless the shell names one", () => {
+    // The MIX is for a shell whose accent is its ARM: a whole orange head
+    // reads as a traffic cone, and a head in the chassis colour loses the
+    // two-tone the real shells carry, so it lands between the two. A shell
+    // that names `head` is saying its head is not a function of its arm —
+    // Innate's Blue / White is a white arm with a blue head — and then the
+    // only thing to check is that it is not just the chassis again.
     for (const [, cw] of entries) {
-      const head = srgbLuma(marsHeadColor(cw));
+      const head = marsHeadColor(cw);
+      if (cw.head) {
+        expect(head, `${cw.id}`).toBe(cw.head);
+        expect(head, `${cw.id}`).not.toBe(cw.body);
+        continue;
+      }
       const lo = Math.min(srgbLuma(cw.accent), srgbLuma(cw.body));
       const hi = Math.max(srgbLuma(cw.accent), srgbLuma(cw.body));
-      expect(head, `${cw.id}`).toBeGreaterThan(lo - 1e-6);
-      expect(head, `${cw.id}`).toBeLessThan(hi + 1e-6);
-      expect(marsHeadColor(cw), `${cw.id}`).not.toBe(cw.accent);
+      expect(srgbLuma(head), `${cw.id}`).toBeGreaterThan(lo - 1e-6);
+      expect(srgbLuma(head), `${cw.id}`).toBeLessThan(hi + 1e-6);
+      expect(head, `${cw.id}`).not.toBe(cw.accent);
     }
   });
 

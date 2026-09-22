@@ -28,14 +28,10 @@ import {
   type SimDuck,
 } from "./sim";
 
-/** The device's own floor (`sensors/lidar.DEFAULT_MIN_RANGE_M`): a return
- *  nearer than this is CLIPPED and marked invalid, so it arrives as a 0 and
- *  the plot draws the disc it cannot see inside of.
- *
- *  The frame does not carry it — `LidarFrame.as_payload` ships `t`, `a0`,
- *  `da` and `mm`, and `world_server.tof_payload` adds `age`, `maxRange` and
- *  `mount`. A scanner with a different floor would draw the wrong disc here;
- *  `minRange` on the payload is the fix, and it is in the report. */
+/** FALLBACK floor (`sensors/lidar.DEFAULT_MIN_RANGE_M`), for a lab that
+ *  predates `LidarPayload.minRange`. Prefer `lidarMinRange(scan)`: the frame
+ *  now carries the device's own, and a scanner with a different floor drew
+ *  the wrong blind disc for as long as this constant was the only answer. */
 export const LIDAR_MIN_RANGE_M = 0.15;
 /** Fallback scale when a lab sends no `maxRange` (`DEFAULT_MAX_RANGE_M`). */
 export const LIDAR_MAX_RANGE_M = 6.0;
@@ -59,13 +55,35 @@ export const GRIPPER_LIMIT_NM = 2.0;
  *  MEASURED there: at `ARM_HOME` the folded arm blocks 4 of 360 rays at 7-10
  *  degrees from 0.156 m off `link5`, which in the base frame is ~0.08 m — so
  *  a brain reading those as an obstacle steers away from its own elbow for
- *  the whole run. Keyed by robot id because the FRAME does not carry it, and
- *  a body whose footprint this build has never heard of keeps every return,
- *  which is `tof_from_lidar`'s own default. `footprint` on the payload is the
- *  fix (report). */
+ *  the whole run.
+ *
+ *  **A FALLBACK, keyed by robot id, and the reason `lidarFootprintM` exists.**
+ *  A table here can only answer for a body this build has heard of: add a
+ *  second wheeled robot and it keeps every return off ITS folded arm and
+ *  draws them as obstacles, which is exactly the bug the number was measured
+ *  to kill. The frame carries the body's own since c858568 — prefer it. */
 const FOOTPRINT_M: Record<string, number> = { mars: 0.12 };
 export function robotFootprintM(robot: string | undefined | null): number {
   return (robot && FOOTPRINT_M[robot]) || 0;
+}
+
+/** The blind disc to draw: what THIS device said, else the fallback above. */
+export function lidarMinRange(f: Pick<LidarPayload, "minRange"> | null | undefined): number {
+  return f?.minRange && f.minRange > 0 ? f.minRange : LIDAR_MIN_RANGE_M;
+}
+
+/** How much of the scan is the robot's own arm: what the BODY declared on
+ *  the frame, else this build's table for a lab that predates the field.
+ *
+ *  `??` and not `||`, because **0.0 is an answer**: the lab sends it for a
+ *  body that declared no footprint, meaning "keep every return"
+ *  (`tof_from_lidar`'s own default). Falling through to the robot-id table
+ *  there would drop returns the lab deliberately kept. */
+export function lidarFootprintM(
+  f: Pick<LidarPayload, "footprint"> | null | undefined,
+  robot?: string | null,
+): number {
+  return f?.footprint ?? robotFootprintM(robot);
 }
 
 /** Which range sensor a body HAS — the question the inspector must answer
@@ -245,7 +263,8 @@ export interface LidarTof {
  *    [0.02, 4.0] m is "no target", which is why a 6 m miss fills nothing and
  *    a 4.5 m wall inside the scan is invisible to these brains.
  * 3. **The nearest valid return in each column wins**, and `footprintM`
- *    drops what is inside the robot first (the folded arm — see FOOTPRINT_M).
+ *    drops what is inside the robot first (the folded arm — the caller
+ *    reads it off the frame with `lidarFootprintM`).
  *
  * Columns are half-open `(lo, hi]` so a ray exactly on an internal edge lands
  * in exactly one of them; column 0's upper edge is nudged instead, because a
@@ -335,4 +354,52 @@ export function gripperBar(
 export function armBar(q: number, limits?: [number, number]): number {
   const [lo, hi] = limits && limits[1] > limits[0] ? limits : [-Math.PI, Math.PI];
   return Math.max(0, Math.min(1, (q - lo) / (hi - lo)));
+}
+
+/** How far two neighbouring returns may differ in range and still be the same
+ *  SURFACE, m. Under it the scan is drawn as a continuous edge; over it the
+ *  two are separate things and the outline breaks.
+ *
+ *  MEASURED in the follow-me room: the neighbour-to-neighbour range step is
+ *  under 4 cm along a wall (a 1° step at 3 m across a flat surface is 5 cm at
+ *  60° of incidence) and jumps by 0.4 m or more at a doorway, a chair leg or
+ *  the far side of the person. 0.25 m sits in that gap with room either side,
+ *  so a wall reads as one line and a person does not get joined to the wall
+ *  behind them. */
+export const SCAN_GAP_M = 0.25;
+
+/** The room OUTLINE a scan draws: index pairs to join, wrapping the turn.
+ *
+ *  This is what a planar scanner looks like in every viewer that has one
+ *  (RViz's LaserScan, a robot vacuum's map): not a fan of rays, which reads
+ *  as fog and hides the shape, but the SILHOUETTE the beam traced — the walls
+ *  and the legs of things, closing around the robot.
+ *
+ *  A pair is joined only when both ends are real returns AND their ranges
+ *  agree within `gapM`. That is the whole cleverness and it is load-bearing:
+ *  joining every neighbour draws a chord straight across a doorway and makes
+ *  a room look sealed, which is a lie about the one thing this instrument is
+ *  for. Misses (`maxRange`) and no-readings (0) are not ends of anything.
+ *
+ *  Returns flat pairs `[i0, i1, i0, i1, …]` so the caller can walk them into
+ *  a segment buffer without allocating per edge. */
+export function scanOutline(
+  mm: readonly number[],
+  maxRange: number,
+  gapM: number = SCAN_GAP_M,
+): number[] {
+  const n = mm.length;
+  const out: number[] = [];
+  if (n < 2) return out;
+  const real = (i: number) => {
+    const v = mm[i];
+    return v > 0 && v / 1000 < maxRange - 1e-9;
+  };
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    if (!real(i) || !real(j)) continue;
+    if (Math.abs(mm[i] - mm[j]) / 1000 > gapM) continue;
+    out.push(i, j);
+  }
+  return out;
 }

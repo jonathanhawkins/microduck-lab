@@ -18,7 +18,7 @@ import { assignDrag } from "@/lib/assign";
 import { captureWantsCleanFrame } from "@/lib/record";
 import { getSelectedDuck } from "@/lib/select";
 import { getDuckLabels } from "@/lib/ui";
-import { G1_KINDS, g1PartKind, useG1Materials, weldAndSmooth } from "./G1Look";
+import { CREASE_ANGLE_DEG, G1_KINDS, g1PartKind, useG1Materials, weldAndSmooth, weldTolerance } from "./G1Look";
 import { MARS_KINDS, marsPartKind, useMarsMaterials } from "./MarsLook";
 import { duckMouths, MOUTH_TRAVEL_RAD } from "@/lib/mouth";
 import { SHELL_MATERIALS, TEAM_COLORWAYS, TRIM_MATERIALS, teamColor, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
@@ -118,6 +118,14 @@ export function buildBodyGeometries(
   // here rather than at the call site is what keeps a second robot from
   // arriving 1000x too big, off camera, with nothing in the console.
   const vs = scene.vertScale ?? 1;
+  // The weld has to know the lattice the dump was quantised to — see
+  // G1Look.weldTolerance. A flat tolerance that is fine on a millimetre dump
+  // merges real vertices on a finer one.
+  const tol = weldTolerance(vs);
+  // MARS is the boxy one: its shells are bevelled panels, and smoothing
+  // across those bevels is what made its head arrive fluted. See
+  // G1Look.weldAndSmooth for why this is opt-in rather than the default.
+  const crease = opts.look === "mars" ? CREASE_ANGLE_DEG : undefined;
   const meshGeos = scene.meshes.map((m) => {
     const g = new THREE.BufferGeometry();
     const v = vs === 1 ? m.v : m.v.map((x) => x * vs);
@@ -132,7 +140,9 @@ export function buildBodyGeometries(
     const parts = scene.geoms
       .filter((g) => g.body === b)
       .map((g) => {
-        const geo = cad ? weldAndSmooth(meshGeos[g.mesh]) : meshGeos[g.mesh].clone();
+        const geo = cad
+          ? weldAndSmooth(meshGeos[g.mesh], tol, crease)
+          : meshGeos[g.mesh].clone();
         quat.set(g.quat[1], g.quat[2], g.quat[3], g.quat[0]); // wxyz → xyzw
         mat.compose(new THREE.Vector3(...g.pos), quat, new THREE.Vector3(1, 1, 1));
         geo.applyMatrix4(mat);
@@ -206,7 +216,7 @@ export function Duck({
   const billRef = useRef<THREE.Mesh>(null);
   const g1Materials = useG1Materials(bodies.some((b) => b.look === "g1"));
   // MARS's material table. The colorway is a VIEWER default today
-  // (MARS_DEFAULT_COLORWAY, Innate's orange/black hero): a duck's colorway
+  // (MARS_DEFAULT_COLORWAY, Innate's Blue / White hero): a duck's colorway
   // rides in on the frame's `team`, and that channel carries the four Pollen
   // DUCK colorways — the lab validates it against them and rejects anything
   // else (world/scenario.py), so a MARS cannot borrow it. A per-slot choice

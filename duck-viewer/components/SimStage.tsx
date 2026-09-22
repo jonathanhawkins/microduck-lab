@@ -29,7 +29,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { goalDefenders, PICKABLE_COLORS, PICKABLE_SIZES, rugSize, TEAM_COLORWAYS,
   type Scenario, type SimClient, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
 import type { Scene } from "@/lib/lab";
-import { g1PartKind, weldAndSmooth, type G1PartKind } from "./G1Look";
+import { CREASE_ANGLE_DEG, g1PartKind, weldAndSmooth, weldTolerance, type G1PartKind } from "./G1Look";
 import { MARS_KINDS, marsPartKind, useMarsMaterials, type MarsPartKind } from "./MarsLook";
 
 // -- palette -----------------------------------------------------------------
@@ -800,15 +800,19 @@ export function RobotBody({
   // /sim has no stage lights of its own, so it takes the full reflection —
   // the 0.35 the lab uses would leave the chassis flat here (the same split
   // `useG1Materials` documents).
-  // The room keeps the ORANGE / BLACK (graphite) shell even though the lab
-  // stage defaults to Innate's White: MEASURED on the live pages (2026-09-18),
-  // white on the playroom's pale wood floor sits at 0.95x the background —
-  // 3.7 luma points from the floor, 3 from the wall — where graphite sat at
-  // 0.47x, a 41-point step. On the dark lab stage the same white is 8.6x the
-  // background, which is why it is the default there. A per-slot colorway
-  // field would replace both defaults; until then each page picks the shell
-  // its floor can show.
-  const marsMaterials = useMarsMaterials(look === "mars", { envScale: 1, colorway: "orange-black" });
+  // The room takes the SAME shell the lab stage does — Innate's Blue / White
+  // (MARS_DEFAULT_COLORWAY) — and this line used to pin it to orange/black
+  // instead. The reason it did is still true and still measured: on the
+  // playroom's pale wood floor a white chassis sits at 0.95x the background
+  // (3.7 luma points from the floor, 3 from the wall) where graphite sat at
+  // 0.47x, a 41-point step, while on the dark lab stage that same white is
+  // 8.6x the background. What changed is what the trade is BETWEEN. Picking a
+  // shell per floor meant the same robot was orange in one tab and white in
+  // the next, and neither was the machine the owner has on their desk; the
+  // blue head bar and the black tyres that shell carries are the contrast the
+  // graphite body used to supply, and they do not wash out on pale wood. A
+  // per-slot colorway field would let a scenario override it.
+  const marsMaterials = useMarsMaterials(look === "mars", { envScale: 1 });
   const tree = useMemo(() => {
     // Vertices arrive in metres, or in millimetre ints with a `vertScale`
     // (the G1's dump is 21 MB that way instead of 78 MB of floats). Scaling
@@ -820,7 +824,8 @@ export function RobotBody({
       const v = vs === 1 ? m.v : m.v.map((x) => x * vs);
       raw.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
       raw.setIndex(m.f);
-      const g = weldAndSmooth(raw);
+      const g = weldAndSmooth(raw, weldTolerance(vs),
+                              look === "mars" ? CREASE_ANGLE_DEG : undefined);
       raw.dispose();
       return g;
     });
@@ -873,7 +878,14 @@ export function RobotBody({
     <group>
       {tree.map((parts, i) =>
         parts.length ? (
-          <group key={scene.bodies[i]} ref={(el) => { refs.current[i] = el; }}>
+          <group
+            key={scene.bodies[i]}
+            // Named so InsetRender can find ONE body of ONE robot without a
+            // ref registry: the camera's own housing is parked on SELF_LAYER
+            // for the inset pass and put back straight after.
+            userData={{ simRobotId: id, simBodyIndex: i }}
+            ref={(el) => { refs.current[i] = el; }}
+          >
             {parts.map((p, k) =>
               // MARS's materials come from the shared table (one material per
               // kind for the whole robot), not from per-mesh JSX: the

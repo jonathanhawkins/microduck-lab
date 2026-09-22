@@ -24,7 +24,7 @@ import numpy as np
 
 from . import motion
 from .pose import pose_scratch
-from .render_rollout import CAMERAS, build_sheet, sheet_indices
+from .render_rollout import CAMERAS, build_sheet, offscreen_renderer, sheet_indices
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -62,7 +62,7 @@ def main(argv=None) -> None:
     cam.azimuth, cam.elevation = CAMERAS[args.camera]
     cam.distance = max(0.7, 2.6 * scratch.stand_height)
     cam.lookat[:] = (0.0, 0.0, scratch.stand_height * 0.55)
-    renderer = mujoco.Renderer(scratch.model, height=height, width=width)
+    renderer = offscreen_renderer(scratch.model, width, height)
 
     stride = max(1, round(motion.CONTROL_HZ / max(args.fps, 1.0)))
     real_fps = motion.CONTROL_HZ / stride

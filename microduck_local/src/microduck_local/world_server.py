@@ -7,7 +7,7 @@ mjData — and streams it on a second socket so the two pages never fight
 over a frame format.
 
 HTTP:
-  GET  /scenarios              [{name, builtin, ducks, objects, modified}]
+  GET  /scenarios              [{name, builtin, ducks, robots, objects, modified}]
   GET  /scenarios/{name}       the scenario JSON (built-ins are generated)
   PUT  /scenarios/{name}       save a user scenario (validated; built-ins are read-only)
   DELETE /scenarios/{name}     remove a user scenario
@@ -304,10 +304,50 @@ def builtin_scenarios() -> dict[str, Scenario]:
 BUILTIN_NAMES = frozenset(builtin_scenarios().keys())
 
 
+def _robot_counts(sc: Scenario) -> list[dict]:
+    """What BODIES a scenario holds: `[{id, n, noun}]`, commonest first.
+
+    Beside `ducks`, which stays the total and stays named that for every
+    caller that already reads it. The count is what a menu can honestly show:
+    `mars-follow` holds one MARS and no duck at all, and the /sim scenario
+    picker called it "1 ducks" until this existed.
+
+    `robot_noun` is imported inside the function for `world/scenario.py`'s
+    reason — listing rooms must not drag a robot package (and its MJCF) in
+    on import.
+    """
+    from .lab.robots import robot_noun
+    counts: dict[str, int] = {}
+    for duck in sc.ducks:
+        rid = getattr(duck, "robot", "") or "microduck"
+        counts[rid] = counts.get(rid, 0) + 1
+    return [{"id": rid, "n": n, "noun": robot_noun(rid)}
+            for rid, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def _no_housing() -> int:
+    """`camera_housing_body` for an entry that does not answer one.
+
+    Only `WorldRobot` does today. A `WorldDuck` has a housing too — its
+    detector is site-mounted, so the housing is `jaw_soft`, the bill, and
+    MEASURED it IS inside the duck's own 116x60 frame. It is 0.94 cm from
+    the lens, which is a third of the /sim inset's 3 cm near plane, so it is
+    clipped with room to spare where MARS's shell at 1.5-2.8 cm is not. The
+    duck's body list does not run through `scene_bodies` (it is the fixed
+    17-body duck scene), so wiring an index for it is work with nothing to
+    show; it is deferred, not overlooked.
+
+    The viewer reads -1 as "draw everything", which is what it did before
+    this field existed and what an older lab still sends.
+    """
+    return -1
+
+
 def list_scenarios() -> list[dict]:
     out = []
     for name, sc in builtin_scenarios().items():
         out.append({"name": name, "builtin": True, "ducks": len(sc.ducks),
+                    "robots": _robot_counts(sc),
                     "objects": len(sc.walls) + len(sc.boxes) + len(sc.balls),
                     "modified": None})
     d = scenarios_dir()
@@ -319,6 +359,7 @@ def list_scenarios() -> list[dict]:
                 continue
             out.append({"name": p.stem, "builtin": p.stem in BUILTIN_NAMES,
                         "ducks": len(sc.ducks),
+                        "robots": _robot_counts(sc),
                         "objects": len(sc.walls) + len(sc.boxes) + len(sc.balls),
                         "modified": p.stat().st_mtime})
     return out
@@ -1006,6 +1047,10 @@ def tof_payload(w: World, d) -> dict | None:
         out["det"] = {"t": round(f.t, 4), "age": round(w.t - f.t, 4),
                       "fov": [d.detector.spec.fov_h_deg, d.detector.spec.fov_v_deg],
                       "cam": [round(v, 4) for v in f.cam_pose],
+                      # Which of this robot's own bodies wraps the lens, so the
+                      # /sim inset can leave it out of the picture the camera
+                      # draws — the same body the detector refuses to detect.
+                      "selfBody": getattr(d, "camera_housing_body", _no_housing)(),
                       "items": [x.as_payload() for x in f.detections]}
     return out or None
 

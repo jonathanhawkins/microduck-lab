@@ -64,3 +64,24 @@ export function robotLook(id: string): "duck" | "g1" | "generic" | "mars" {
 export function trickNoun(kind?: string): "trick" | "task" {
   return !kind || kind === "legged" ? "trick" : "task";
 }
+
+/** "2 ducks", "1 MARS", "2 G1" — a count of one body kind, for a menu.
+ *
+ *  The plural rule is the noun's own CASE, and it is a rule rather than a
+ *  table because the nouns come from the lab (`robot_noun`, which a plugin
+ *  body also answers). A lowercase noun is a common one and takes an s; a
+ *  noun with a capital in it is a name or an acronym and does not — nobody
+ *  writes "MARSs" or "G1s". A body whose noun is empty falls back to its id,
+ *  which the server already does before it gets here. */
+export function robotCount(n: number, noun: string): string {
+  const common = noun === noun.toLowerCase();
+  return `${n} ${noun}${n === 1 || !common ? "" : "s"}`;
+}
+
+/** Is this body the DUCK? The one question the viewer asks often enough to
+ *  be worth a name: only a duck quacks (lib/quack.ts), and a scenario's own
+ *  entries leave `robot` off when they mean the duck (world/scenario.Duck
+ *  defaults it to "microduck"). */
+export function isDuck(robot?: string | null): boolean {
+  return !robot || robot === "microduck";
+}

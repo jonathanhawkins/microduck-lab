@@ -406,3 +406,41 @@ def test_the_body_declares_its_frames_and_a_body_that_does_not_says_so():
     assert not hasattr(arena, "ROBOT_FRAMES"), "the per-robot table is gone"
     with pytest.raises(NotImplementedError, match="frames"):
         arena.WorldRobot("m0", bare_room().ducks[0], body, World(bare_room()).model)
+
+
+def test_the_camera_housing_is_the_body_the_detector_already_ignores():
+    """Which body a viewer must not draw from this robot's own camera.
+
+    MEASURED across the whole head-pitch range: MARS's `head` is 1.5-2.8 cm
+    from its lens while inside the frame, and the /sim inset's near plane is
+    3 cm — so the shell is clipped while everything is still and swings into
+    view the moment the drawn pose lags the captured one. What must NOT be
+    hidden is the arm: `link5` is in the same frame at 15-26 cm, and a real
+    MARS does see its own claw.
+
+    The index is the detector's OWN `exclude_body`, which is the point of
+    the method: the sensor already refuses to detect its housing, and a
+    viewer hiding a different body would be a second answer to one question.
+    """
+    from microduck_local.world_server import resolve_scenario
+    w = World(resolve_scenario("mars-follow"))
+    robot = next(iter(w._robots))
+    idx = robot.camera_housing_body()
+    names = robot.scene_bodies()
+    assert 0 <= idx < len(names)
+    assert names[idx] == "head"
+    # …and it IS the detector's own exclusion, not a name written twice.
+    excluded = robot.model.body(int(robot.detector.exclude_body)).name
+    assert excluded == robot.prefix + names[idx]
+    # The arm keeps its place in the list and is never the answer.
+    assert "link5" in names and names[idx] != "link5"
+
+
+def test_a_robot_with_no_detector_asks_the_viewer_to_hide_nothing():
+    """-1 is "draw everything" — what an older lab sends and what a blind
+    robot means. A viewer that read it as an index would hide body -1."""
+    from microduck_local.world_server import resolve_scenario
+    w = World(resolve_scenario("mars-follow"))
+    robot = next(iter(w._robots))
+    robot.detector = None
+    assert robot.camera_housing_body() == -1

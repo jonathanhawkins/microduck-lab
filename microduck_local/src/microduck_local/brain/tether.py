@@ -30,18 +30,30 @@ class Tether:
     def senses_in(self, s: Senses) -> Senses:
         """The senses the brain gets at time s.t: the snapshot taken half a
         round trip ago, its frames aged to now, its odometry as stale as
-        the link (0 delay: the snapshot itself)."""
+        the link (0 delay: the snapshot itself).
+
+        **Every sensor frame the Senses carries is handled here, or the link
+        leaks.** A channel left out of the two clauses below keeps the age it
+        was stamped with when the snapshot was taken, which is half a round
+        trip too fresh, and one left out of the cold-start clause is handed to
+        the brain LIVE while nothing has arrived yet. `lidar` was both until
+        2026-09-21: at 250 ms on a MARS the `/sim` inspector's range row read
+        0.00-0.16 s while the scan the brain held was 0.14-0.30 s old, and it
+        never went stale against a 0.25 s gate. Add the clause with the field.
+        """
         if self.delay <= 0:
             return s
         self._senses.append((s.t + self.half, s))
         while self._senses and self._senses[0][0] <= s.t + 1e-9:
             self._last_senses = self._senses.popleft()[1]
         old = self._last_senses
-        if old is None:
-            return replace(s, tof=None, tof_age=None, det=None, det_age=None)   # nothing has arrived yet
+        if old is None:                          # nothing has arrived yet
+            return replace(s, tof=None, tof_age=None, det=None, det_age=None,
+                           lidar=None, lidar_age=None)
         return replace(old, t=s.t,
                        tof_age=None if old.tof is None else s.t - old.tof.t,
-                       det_age=None if old.det is None else s.t - old.det.t)
+                       det_age=None if old.det is None else s.t - old.det.t,
+                       lidar_age=None if old.lidar is None else s.t - old.lidar.t)
 
     def intent_out(self, intent: Intent, t: float) -> Intent:
         """The intent landing on the robot at t: the one decided half a

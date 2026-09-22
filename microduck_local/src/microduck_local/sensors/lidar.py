@@ -63,6 +63,14 @@ from .ray import DEFAULT_GROUPS, RayFan, planar_fan
 from .tof import TofFrame, TofSpec
 
 #: The device, from `docs/mars-roadmap.md` §0 (Innate's published spec).
+#: RE-CHECKED against Innate's own hardware page (docs.innate.bot/robots/mars,
+#: September 2026), which states the LiDAR as "2D, 360°, 0.15-6 m range,
+#: 6 Hz (up to 10 Hz)" — every number below, confirmed. It is a FULL TURN and
+#: not a forward half: the whole 360 is scanned, sensed and drawn (the /sim
+#: overlay gives the ~45° the brains read long rays and the rest short ticks
+#: at the surfaces, which is a distinction and not a limit).
+#: The 6 Hz here is the device's NOMINAL rate; the page says it will run at up
+#: to 10, which nothing in this repo has asked it to do.
 DEFAULT_N_RAYS = 360
 DEFAULT_FOV_DEG = 360.0
 DEFAULT_MAX_RANGE_M = 6.0

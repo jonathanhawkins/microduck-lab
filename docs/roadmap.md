@@ -6991,9 +6991,10 @@ test, and the measurement that moved.**
 - Paired benchmarks, same seeds: eval-pitch 4 seeds — goals 1 → 1, own
   goals 1 → 0, kicks 14 → 15, back-kicks 6 → 7, **falls 4 → 1**;
   eval-tidy 16 seeds — **0.82 → 0.90 tidied, 0.44 → 0.31 falls a run**
-  (9 seeds better, 3 worse, 4 tied). Saved scenes that pin
-  `"collision": "walk"` (`scenarios/follow-me-edit*.json`,
-  `pitch-roles-2v2.json`) keep the old bodiless duck until re-saved.
+  (9 seeds better, 3 worse, 4 tied). A saved scene that pins
+  `"collision": "walk"` keeps the old bodiless duck until it is re-saved —
+  no shipped scenario does today (the ones that did were local editor saves,
+  removed 2026-09-22).
 
 Clean, measured: solver/integrator options equal `scene_walk.xml` (and
 upstream's implicitfast/10-iteration choice makes zero difference to the
@@ -7095,11 +7096,18 @@ tests):
 
 ## Later / parked
 
-- **A third body: the Innate MARS** (wheeled base + 6-DoF arm). Planned in
-  [`docs/mars-roadmap.md`](mars-roadmap.md): Phase 0 measured (the Apache-2.0
-  URDF loads under the lab's attach pattern at 11 DoF, 0.78x a duck per step);
-  the design is a `Body`/`RobotSpec` split so the walker seam stops being the
-  only door in. Nothing else built.
+- ~~**A third body: the Innate MARS**~~ (wheeled base + 6-DoF arm) — **BUILT
+  2026-09-18**, Phases 1-5 of [`docs/mars-roadmap.md`](mars-roadmap.md), where
+  every number and every miss is written back into its own phase. The
+  `Body`/`RobotSpec` split landed, so the walker seam is no longer the only
+  door in; `fetch-robot mars` is 7.2 MB in 8 s; MARS drives, scans and senses
+  in `/sim` on the duck's own `wander` / `follow` brains unedited (follow 0.988
+  in band); `tidy_arm` tidies **0.94** of the playroom in 5 min over 3 seeds
+  (0.90 over 8) against the duck's 0.83; and the same seam gave
+  `fetch-robot menagerie:<name>` for free. **Still open:** the two arm tasks
+  miss their bars (`reach` holds 5/8 against 8/8, `pick` lifts 11/20 against
+  80 %), `train-brain --robot mars` is untouched, and Phase 6's Innate
+  code-skill template does not exist.
 - **Port `find_ball` to an mjlab cfg** and retrain on GPU in upstream
   `microduck_rl`. That stack, not this one, is the sim2real recipe. Blocked on
   the items above: there is no point porting a recipe whose back-bucket

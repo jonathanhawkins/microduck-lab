@@ -56,6 +56,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import struct
 import urllib.request
 from collections.abc import Mapping
 from functools import lru_cache
@@ -446,14 +447,55 @@ BACKLASH_TANH_NM = 0.05
 
 # ------------------------------------------------------------ innate's look
 #
-# world.style_robot_geoms. Applied to the viewer's DUMP rather than to a
-# render: the lab ships colours per geom and the browser paints them.
-ORANGE_LINKS = frozenset({"link1", "link3", "link5"})
-BRIGHT_ORANGE = (1.0, 0.5, 0.0, 1.0)
-#: matt_black (0.05) lifted to charcoal, so the chassis reads as a shape
-#: rather than a silhouette.
-CHARCOAL = 0.16
-DARK_RGB_MEAN = 0.4            # below this mean, a geom is "matt black"
+# THE SHELL THE ROBOT SHIPS IN, not a render convention. Innate's own
+# `world.style_robot_geoms` paints the arm bright orange and lifts the rest
+# off matt black, which is their SIM's readability hack rather than a
+# photograph of the machine: a MARS on a desk is a near-white chassis and a
+# near-white arm on BLACK tyres, with Innate's deep blue on the head bar and
+# on the gripper's two fingers and its black servo cases left bare. That is
+# what this block paints, and the three colours are SAMPLED off Innate's own
+# product shots rather than guessed — body (229, 231, 233), blue (51, 97,
+# 177) in the gripper's mid-tone, black (42, 42, 43).
+#
+# Painted onto the SPEC (`paint_shell`, called from `robot_spec`) rather than
+# onto the viewer's dump the way it used to be, because the dump is not the
+# only place a MARS is looked at: `render-rollout` and `record-world` draw
+# the compiled model straight from MuJoCo, and with the paint living in the
+# dump alone every contact sheet of a MARS run came out the URDF's own
+# uniform grey. One spec, four consumers (training scene, world compose,
+# MuJoCo renders, the browser dump).
+#: The chassis, the turret, the neck and the five arm links.
+SHELL_WHITE = (0.898, 0.906, 0.914, 1.0)
+#: The head bar and the gripper's fingers. Deliberately NOT the G1's shell
+#: blue — both robots stand on the lab stage — and deliberately mid-value:
+#: a deeper blue goes to black under the lab's own lights.
+INNATE_BLUE = (0.200, 0.380, 0.694, 1.0)
+#: The tyres, and every other moulded-black part: on the real robot the tread
+#: and the servo cases are the same black, so they are one colour here. A
+#: touch above #000 so the tread reads as a shape instead of a hole — the
+#: same argument Innate's own charcoal (matt black 0.05 lifted to 0.16) made
+#: for the whole robot, which this block replaces: a silhouette is not a
+#: shape.
+INNATE_BLACK = (0.145, 0.149, 0.161, 1.0)
+#: Which links wear the blue. `head` is the camera bar; `link61`/`link62` are
+#: the gripper's two fingers (not links 6 and 1/2 — see MARS_RULES in the
+#: viewer's MarsLook.tsx, which classifies the same names).
+BLUE_LINKS = frozenset({"head", "link61", "link62"})
+#: Which links are BARE SERVO rather than shell, whole. On every shell Innate
+#: sells these cases are moulded black and not painted: `link1` is the arm's
+#: first joint (the box in its bracket beside the right wheel) and `link4` is
+#: the wrist. They can be named as links because each IS one mesh; the
+#: shoulder's and the elbow's cases are fused into the arms they drive, and
+#: naming those links would black out a whole arm — `HOUSING_CUTS` is how
+#: those two are said instead.
+BLACK_LINKS = frozenset({"link1", "link4"})
+#: The head's face panel and its two lenses. SAMPLED off Innate's own front
+#: shot: the panel's dark quartile is rgb(31, 35, 42) — a blue-black, not a
+#: neutral one — and the lens domes read up to rgb(72, 72, 77), neutral and
+#: clearly lighter than the panel they sit in, which is the whole point of
+#: giving them a colour of their own.
+FACE_BLACK = (0.122, 0.137, 0.165, 1.0)
+EYE_GREY = (0.320, 0.325, 0.345, 1.0)
 #: Frame markers the URDF draws as 5 mm spheres. Hidden, as in their viewer.
 HIDDEN_MARKER_LINKS = frozenset({"ee_link", "head_camera_left",
                                  "head_camera_right"})
@@ -463,6 +505,91 @@ HIDDEN_MARKER_LINKS = frozenset({"ee_link", "head_camera_left",
 #: hides the collision boxes and the marker spheres.
 VISUAL_GROUP = 1
 COLLISION_GROUP = 3            # where style sweeps collision geoms (hidden)
+#: The lattice the viewer's dump quantises MARS's vertices to. A TENTH of a
+#: millimetre, where the G1 and the dump's own default use one: MEASURED, a
+#: 1 mm lattice moves a MARS vertex 0.50 mm on average and 0.85 mm at worst
+#: on a head that is 121 mm across with 1-2 mm bevels, and the head arrived
+#: in the browser looking melted — streaky normals on faces that are flat in
+#: MuJoCo, and a stair-stepped silhouette. At 0.1 mm that error is 0.05 mm
+#: and the dump grows 6 % (3.80 → 4.02 MB). A 25 cm robot pays for its
+#: detail in bytes; a 1.3 m one does not have to.
+VERT_SCALE_M = 0.0001
+
+#: The two tyres are TRIANGLES INSIDE `base.STL`: the description ships the
+#: box, the turret, the neck and both wheels as one shell, so "black tyres"
+#: is not a colour any geom can be given until that mesh is cut in two.
+#: `split_base_mesh` does the cut and writes the halves beside the generated
+#: scene; `SHELL_MESH` keeps the URDF's own asset name (the viewer's dump
+#: names a geom after its MESH, so renaming it would move `base` out from
+#: under `marsPartKind`) and `WHEEL_MESH` is the one this module adds.
+SHELL_MESH = "base"
+WHEEL_MESH = "base_wheels"
+SHELL_STL = "base_shell.STL"
+WHEEL_STL = "base_wheels.STL"
+#: The arm's SERVO HOUSINGS that are fused into a link's own shell — Innate
+#: prints each case and the arm it drives as one part — so they are cut by a
+#: PLANE rather than along a seam: everything at the near end of the link,
+#: behind the far face of the URDF's own collision box for that housing.
+#: Taking the box from the description means the cut moves with a revision
+#: instead of with a number typed here.
+#:
+#: `{link: (collision box, the mesh the case becomes)}`. `link1` and `link4`
+#: are NOT here and need no cut: each of those joints is a whole mesh of its
+#: own (`BLACK_LINKS`).
+#: The mesh a case becomes is `<link>_servo` and NOT the collision box's own
+#: name: MuJoCo keeps one namespace per element kind, and a geom called
+#: `link2_shoulder` beside the collision box of that name is refused at
+#: compile. `_servo` is also what the viewer's rule matches on
+#: (MarsLook.tsx), so one suffix names the part kind in both repos.
+HOUSING_CUTS: Mapping[str, tuple[str, str]] = {
+    "link2": ("link2_shoulder", "link2_servo"),   # the shoulder
+    "link3": ("link3_root", "link3_servo"),       # the elbow
+}
+#: THE HEAD'S FACE AND EYES. `head.STL` is three shells: the blue shell, the
+#: two camera barrels joined as one part, and a small backing plate behind
+#: them. So the two halves of Innate's face come out by different means:
+#:
+#: * the EYES are the barrels, and need no plane — they are a shell of their
+#:   own, found by asking which shell the head's camera FRAMES sit in;
+#: * the FACE is not a part at all. Innate's black panel is the flat front of
+#:   the blue shell, so it is selected by NORMAL: the triangles that face the
+#:   way the cameras look, within `FACE_DEPTH_M` of the head's frontmost
+#:   point. The bevel around it does not face that way, which is what leaves
+#:   the blue border the real head has.
+EYE_FRAMES: tuple[str, str] = ("head_camera_left", "head_camera_right")
+FACE_MESH = "head_face"
+EYES_MESH = "head_eyes"
+#: How deep the flat panel goes, back from the head's frontmost point.
+#: MEASURED on `head.STL`: its 124 front-facing triangles sit in a 7 mm band,
+#: and the next ones are 14 mm further back — nothing at all between 46.2 and
+#: 53.1 mm — so 10 mm lands in an empty gap rather than on a threshold.
+FACE_DEPTH_M = 0.010
+#: How square-on a triangle must face to be panel rather than bevel (cosine
+#: to the look direction).
+FACE_NORMAL_MIN = 0.9
+#: How near a camera frame its own barrel shell must come, before the cut
+#: decides it has not found one.
+EYE_SHELL_NEAR_M = 0.015
+
+#: Colour per CUT mesh — the parts that are not a whole link, so they cannot
+#: be named in `BLACK_LINKS` or `BLUE_LINKS`. Every one of these is the same
+#: on all four shells: tyres, servo cases, the face panel and the lenses are
+#: moulded, not painted.
+MESH_PAINT: Mapping[str, tuple[float, float, float, float]] = {
+    WHEEL_MESH: INNATE_BLACK,
+    **{mesh: INNATE_BLACK for _box, mesh in HOUSING_CUTS.values()},
+    FACE_MESH: FACE_BLACK,
+    EYES_MESH: EYE_GREY,
+}
+#: The subset of them that is black, for the tests that ask "is this the
+#: darkest thing on the robot".
+BLACK_MESHES = frozenset(m for m, c in MESH_PAINT.items() if c == INNATE_BLACK)
+#: How much wider than its collision cylinder a tyre's mesh may be before the
+#: split refuses. The visual tyre is the same 37.2 mm disc as the cylinder
+#: (MEASURED: 37.3 mm), so this is a contract on the description rather than
+#: a fudge factor — a URDF revision that moves a wheel fails here instead of
+#: painting half the chassis black.
+WHEEL_RADIUS_TOL = 1.1
 
 
 # --------------------------------------------------------------- the assets
@@ -680,16 +807,461 @@ def tune_contacts(spec: mujoco.MjSpec) -> None:
         joint.armature = FINGER_ARMATURE
 
 
+# ------------------------------------------------------------- the tyres
+#
+# Everything from here to `paint_shell` exists to make ONE colour sayable:
+# black wheels. The description has no wheel mesh to paint — `base.STL` is
+# the chassis, the turret, the neck and both tyres in a single shell — so the
+# mesh is cut along its own connected components, once per machine, into a
+# `base_shell` and a `base_wheels` the spec can give two rgbas.
+
+def _read_binary_stl(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """`(normals[n, 3], verts[n, 3, 3])` from a binary STL.
+
+    The triangle count in the 84-byte header is checked against the file
+    length, which is the only honest way to tell a binary STL from an ASCII
+    one (the magic word "solid" appears in both), and is also the corruption
+    check: a truncated mesh would otherwise reshape into a silent mess.
+    """
+    blob = path.read_bytes()
+    if len(blob) < 84:
+        raise ValueError(f"{path} is {len(blob)} bytes — not an STL")
+    count = int(struct.unpack("<I", blob[80:84])[0])
+    if len(blob) != 84 + count * 50:
+        raise ValueError(
+            f"{path} is not a binary STL of {count} triangles: {len(blob)} "
+            f"bytes, expected {84 + count * 50}")
+    rec = np.frombuffer(blob, dtype=np.uint8, offset=84).reshape(count, 50)
+    normals = rec[:, 0:12].copy().view("<f4").reshape(count, 3)
+    verts = rec[:, 12:48].copy().view("<f4").reshape(count, 3, 3)
+    return normals, verts
+
+
+def _write_binary_stl(path: Path, normals: np.ndarray, verts: np.ndarray,
+                      header: str) -> Path:
+    """Write one binary STL, atomically (temp + `os.replace`).
+
+    Atomic for `write_scene_xml`'s reason, which is this repo's most expensive
+    lesson (`AGENTS.md`, "Atomic writes and live imports"): a vec-env worker
+    spawned while this file was half-written would load a truncated tyre.
+    """
+    count = len(verts)
+    rec = np.zeros((count, 50), dtype=np.uint8)
+    rec[:, 0:12] = np.ascontiguousarray(normals, "<f4").view(np.uint8)
+    rec[:, 12:48] = np.ascontiguousarray(verts, "<f4").view(np.uint8).reshape(count, 36)
+    blob = (header.encode()[:80].ljust(80, b" ")
+            + struct.pack("<I", count) + rec.tobytes())
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(blob)
+    os.replace(tmp, path)
+    return path
+
+
+def _triangle_shells(verts: np.ndarray) -> np.ndarray:
+    """One integer per triangle: which connected SHELL of the mesh it is in.
+
+    Vertices welded at 1e-5 m first — an STL is a triangle SOUP with every
+    vertex repeated per face, so without the weld every triangle is its own
+    component. MEASURED on `base.STL`: 107 494 triangles, 53 315 welded
+    vertices, 25 shells, of which the two tyres are 3 680 triangles each.
+
+    Connected components, and not a box or cylinder test on the triangles,
+    because the two disagree. MEASURED: a cylinder sized to the tyre's own
+    extent (|y| >= 73.7 mm, radius <= 37.3 mm — which is what anyone would
+    measure off the mesh) selects 7 503 triangles where the two shells are
+    7 360. The 143 extras are the WHEEL ARCH: chassis that happens to wrap
+    the tyre, and it would have come out painted rubber.
+    """
+    key = np.round(verts.reshape(-1, 3), 5)
+    _uniq, inverse = np.unique(key, axis=0, return_inverse=True)
+    faces = np.asarray(inverse).reshape(len(verts), 3)
+    parent = np.arange(int(faces.max()) + 1)
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]      # path halving
+            a = parent[a]
+        return a
+
+    for tri in faces:
+        for a, b in ((tri[0], tri[1]), (tri[1], tri[2])):
+            ra, rb = find(int(a)), find(int(b))
+            if ra != rb:
+                parent[ra] = rb
+    return np.array([find(int(v)) for v in faces[:, 0]])
+
+
+def _wheel_cylinders(spec: mujoco.MjSpec) -> tuple[tuple[np.ndarray, float, float], ...]:
+    """`(centre, radius, half_width)` for each drive wheel, off the SPEC.
+
+    Read from `WHEEL_GEOMS` rather than written down again so the cut and the
+    contact model cannot drift: the tyre this paints black is the cylinder
+    `tune_contacts` made frictionless. The axis is asserted to be the body's
+    y — every caller below treats y as the along-axis coordinate and (x, z)
+    as the disc — so a URDF that re-orients a wheel fails here rather than
+    splitting the mesh along the wrong plane.
+    """
+    out = []
+    for name in WHEEL_GEOMS:
+        geom = spec.geom(name)
+        if geom.type != mujoco.mjtGeom.mjGEOM_CYLINDER:
+            raise RuntimeError(f"{name} is {geom.type}, not a cylinder — "
+                               "check ASSETS' revision")
+        axis = np.zeros(3)
+        mujoco.mju_rotVecQuat(axis, np.array([0.0, 0.0, 1.0]),
+                              np.asarray(geom.quat, dtype=float))
+        if abs(float(axis[1])) < 0.99:
+            raise RuntimeError(
+                f"{name}'s axis is {np.round(axis, 3)}, not the body's y — "
+                "split_base_mesh assumes a y-aligned wheel")
+        out.append((np.asarray(geom.pos, dtype=float),
+                    float(geom.size[0]), float(geom.size[1])))
+    return tuple(out)
+
+
+def _tyre_triangles(verts: np.ndarray, cylinders) -> np.ndarray:
+    """A boolean per triangle: is it part of a tyre?
+
+    One SHELL per cylinder, selected by its centroid lying inside that
+    cylinder's disc, and then taken whole — the shell is the answer, the
+    cylinder only says which shell. Two shells matching one wheel, or none,
+    raises: this runs once and writes a file, so a wrong cut would be cached.
+    """
+    shells = _triangle_shells(verts)
+    centroids = verts.mean(axis=1)
+    picked = np.zeros(len(verts), dtype=bool)
+    for centre, radius, half_width in cylinders:
+        found = None
+        for label in np.unique(shells):
+            mask = shells == label
+            mid = centroids[mask].mean(axis=0)
+            if abs(mid[1] - centre[1]) > 3.0 * half_width:
+                continue
+            if math.hypot(mid[0] - centre[0], mid[2] - centre[2]) > radius:
+                continue
+            if found is not None:
+                raise RuntimeError(
+                    f"two mesh shells sit inside the wheel at y={centre[1]:.4f}"
+                    " — base.STL is not the mesh split_base_mesh was measured on")
+            found = mask
+        if found is None:
+            raise RuntimeError(
+                f"no mesh shell inside the wheel at y={centre[1]:.4f} — "
+                "base.STL is not the mesh split_base_mesh was measured on")
+        spread = float(np.hypot(centroids[found][:, 0] - centre[0],
+                                centroids[found][:, 2] - centre[2]).max())
+        if spread > radius * WHEEL_RADIUS_TOL:
+            raise RuntimeError(
+                f"the shell at y={centre[1]:.4f} reaches {spread:.4f} m from "
+                f"the wheel axis against a {radius:.4f} m tyre — that is not "
+                "a tyre")
+        picked |= found
+    return picked
+
+
+def _housing_triangles(verts: np.ndarray, spec: mujoco.MjSpec,
+                       box_geom: str) -> np.ndarray:
+    """A boolean per triangle of a link: is it that link's servo housing?
+
+    Everything behind the far face of `box_geom`, along the link's own LONG
+    AXIS. Two things are derived rather than typed, and both have to be:
+
+    * **the axis, off the MESH** — the arm links do not share one. MEASURED,
+      `link2` runs 156 mm along its z and `link3` runs 164 mm along its x, so
+      a hard-coded axis would cut one of them across the middle.
+    * **the plane, off the URDF's own collision box** for that housing, so a
+      description revision moves the cut with it.
+
+    A connected-component cut is not available here, which is the whole
+    reason this differs from `_tyre_triangles`: MEASURED, `link3` has three
+    shells and two of them are 396-triangle bearing discs — the housing and
+    the arm are one printed part in Innate's CAD.
+
+    A plane assigns whole triangles by centroid, so the seam is ragged by at
+    most one triangle. At this mesh's density that is well under a
+    millimetre, and splitting triangles on the plane buys a straighter edge
+    on a part the size of a thumbnail.
+    """
+    flat = verts.reshape(-1, 3)
+    axis = int(np.argmax(flat.max(axis=0) - flat.min(axis=0)))
+    box = spec.geom(box_geom)
+    pos, size = np.asarray(box.pos, float), np.asarray(box.size, float)
+    far_face = float(pos[axis] + size[axis])
+    # The housing sits at the joint, which is the link's ORIGIN end. A box
+    # that has drifted off that end would cut the arm in half silently.
+    if float(pos[axis] - size[axis]) > float(flat[:, axis].min()) + 1e-3:
+        raise RuntimeError(
+            f"{box_geom} starts at {pos[axis] - size[axis]:.4f} on axis "
+            f"{axis}, past the mesh's own {flat[:, axis].min():.4f} — the "
+            "housing is not at the joint end any more")
+    mask = verts.mean(axis=1)[:, axis] < far_face
+    if not mask.any() or mask.all():
+        raise RuntimeError(
+            f"the plane at {far_face:.4f} on axis {axis} takes "
+            f"{int(mask.sum())} of {len(mask)} triangles — the mesh and "
+            f"{box_geom} no longer describe the same arm; check ASSETS' "
+            "revision")
+    return mask
+
+
+def _split_stl(source: Path, mask: np.ndarray, a: Path, b: Path,
+               what: tuple[str, str]) -> tuple[Path, Path]:
+    """Write `source`'s `mask` triangles to `a` and the rest to `b`.
+
+    Cached on mtime: a cut costs up to ~2 s of union-find on 107 k triangles
+    and `robot_spec()` is called per lab slot, per world compose and per
+    vec-env worker. Re-cut when either half is missing or older than the
+    source, so a re-`fetch` of the description invalidates it on its own.
+
+    **The mtime is the description's, not this code's** — editing a cut and
+    re-running gives you the OLD halves until you delete them. That is the
+    right trade for a file every worker reads and nobody edits, and it is
+    covered rather than left to memory: `tests/test_mars.py` re-cuts from the
+    source and compares, so a stale pair fails the suite.
+    """
+    normals, verts = _read_binary_stl(source)
+    _write_binary_stl(a, normals[mask], verts[mask],
+                      f"MARS {what[0]}, cut out of {source.name} (microduck_local)")
+    _write_binary_stl(b, normals[~mask], verts[~mask],
+                      f"MARS {what[1]} (microduck_local)")
+    return a, b
+
+
+def _cut_is_fresh(source: Path, *halves: Path) -> bool:
+    return (all(h.is_file() for h in halves)
+            and min(h.stat().st_mtime for h in halves) >= source.stat().st_mtime)
+
+
+def _look_axis(spec: mujoco.MjSpec) -> int:
+    """Which axis of the HEAD frame the cameras look along.
+
+    Derived from where the camera frames sit rather than assumed to be x:
+    the arm links already proved that this description does not use one axis
+    for everything (`_housing_triangles`), and a head panel selected on the
+    wrong axis would be the robot's side, not its face.
+    """
+    mid = np.mean([np.asarray(spec.body(b).pos, float) for b in EYE_FRAMES], axis=0)
+    return int(np.argmax(np.abs(mid)))
+
+
+def _eye_shell(verts: np.ndarray, spec: mujoco.MjSpec) -> np.ndarray:
+    """A boolean per triangle of `head`: is it one of the camera barrels?
+
+    A SHELL, not a plane and not a radius: the two barrels are joined into a
+    single printed part in `head.STL` and come out whole. Which shell they
+    are is asked of the robot rather than hard-coded — it is the one both
+    camera frames sit inside — so a head revision that reorders the shells
+    still finds them, and one that moves a camera out of its own barrel
+    raises instead of painting a bridge piece grey.
+    """
+    shells = _triangle_shells(verts)
+    centroids = verts.mean(axis=1)
+    chosen = set()
+    for frame in EYE_FRAMES:
+        origin = np.asarray(spec.body(frame).pos, float)
+        near = np.linalg.norm(centroids - origin, axis=1)
+        label = shells[int(np.argmin(near))]
+        if float(near.min()) > EYE_SHELL_NEAR_M:
+            raise RuntimeError(
+                f"{frame} is {near.min():.4f} m from the nearest head "
+                "triangle — head.STL no longer holds the camera barrels")
+        chosen.add(int(label))
+    if len(chosen) != 1:
+        raise RuntimeError(
+            f"the two camera frames sit in {len(chosen)} different shells of "
+            "head.STL — the barrels are no longer one part")
+    return shells == chosen.pop()
+
+
+def _face_triangles(normals: np.ndarray, verts: np.ndarray,
+                    spec: mujoco.MjSpec, taken: np.ndarray) -> np.ndarray:
+    """A boolean per triangle of `head`: is it the flat black face panel?
+
+    By NORMAL and depth, because the panel is not a part: it is the front of
+    the blue shell. `taken` is the eye shell, excluded so the barrels keep
+    their own colour.
+    """
+    axis = _look_axis(spec)
+    unit = normals / (np.linalg.norm(normals, axis=1, keepdims=True) + 1e-12)
+    facing = unit[:, axis] > FACE_NORMAL_MIN
+    front = float(verts[:, :, axis].max())
+    deep = verts.mean(axis=1)[:, axis] >= front - FACE_DEPTH_M
+    mask = facing & deep & ~taken
+    if not mask.any():
+        raise RuntimeError(
+            f"no triangle of head.STL faces axis {axis} within "
+            f"{FACE_DEPTH_M} m of its front — the face panel is not where "
+            "the cameras look any more")
+    return mask
+
+
+def split_head_mesh(spec: mujoco.MjSpec,
+                    dest: Path | None = None) -> tuple[Path, Path, Path]:
+    """Cut `head.STL` into `(head_shell, head_face, head_eyes)`.
+
+    Three ways of finding a part, in one mesh, because that is what the mesh
+    offers: the eyes are a SHELL, the face is a set of NORMALS, and the rest
+    is whatever is left.
+    """
+    source = asset_dir(dest) / "meshes" / "head.STL"
+    root = dest or CACHE_DIR
+    shell = root / "head_shell.STL"
+    face, eyes = root / f"{FACE_MESH}.STL", root / f"{EYES_MESH}.STL"
+    if _cut_is_fresh(source, shell, face, eyes):
+        return shell, face, eyes
+    normals, verts = _read_binary_stl(source)
+    eye_mask = _eye_shell(verts, spec)
+    face_mask = _face_triangles(normals, verts, spec, eye_mask)
+    for path, mask, what in ((eyes, eye_mask, "camera lenses"),
+                             (face, face_mask, "face panel")):
+        _write_binary_stl(path, normals[mask], verts[mask],
+                          f"MARS {what}, cut out of head.STL (microduck_local)")
+    rest = ~(eye_mask | face_mask)
+    _write_binary_stl(shell, normals[rest], verts[rest],
+                      "MARS head shell, minus its face and lenses (microduck_local)")
+    return shell, face, eyes
+
+
+def split_housing_mesh(spec: mujoco.MjSpec, link: str,
+                       dest: Path | None = None) -> tuple[Path, Path]:
+    """Cut `<link>.STL` into `(<link>_shell.STL, <case>.STL)`.
+
+    The arm and its black servo case, so `paint_shell` can give them two
+    colours — the same problem the tyres had, solved by a plane instead of a
+    seam (`_housing_triangles`).
+    """
+    box_geom, mesh_name = HOUSING_CUTS[link]
+    source = asset_dir(dest) / "meshes" / f"{link}.STL"
+    root = dest or CACHE_DIR
+    shell, case = root / f"{link}_shell.STL", root / f"{mesh_name}.STL"
+    if _cut_is_fresh(source, shell, case):
+        return shell, case
+    _n, verts = _read_binary_stl(source)
+    case, shell = _split_stl(source, _housing_triangles(verts, spec, box_geom),
+                             case, shell,
+                             (f"{mesh_name} servo case",
+                              f"{link} minus its servo case"))
+    return shell, case
+
+
+def split_base_mesh(spec: mujoco.MjSpec, dest: Path | None = None) -> tuple[Path, Path]:
+    """Cut `base.STL` into `(base_shell.STL, base_wheels.STL)`.
+
+    Written beside the generated scene rather than into `mars_description/`,
+    which holds downloaded files whose sha256 `fetch` verifies — a derived
+    file in there would be a file the manifest cannot explain. Cached on
+    mtime, like every cut here (`_split_stl`).
+    """
+    source = asset_dir(dest) / "meshes" / "base.STL"
+    root = dest or CACHE_DIR
+    shell, wheels = root / SHELL_STL, root / WHEEL_STL
+    if _cut_is_fresh(source, shell, wheels):
+        return shell, wheels
+    _n, verts = _read_binary_stl(source)
+    wheels, shell = _split_stl(source, _tyre_triangles(verts, _wheel_cylinders(spec)),
+                               wheels, shell,
+                               ("drive wheels", "base.STL minus the drive wheels"))
+    return shell, wheels
+
+
+def _add_cut_geom(spec: mujoco.MjSpec, body: str, name: str, path: Path) -> None:
+    """Add one VISUAL geom for a cut-out half.
+
+    `contype`/`conaffinity` 0, `density` 0, the URDF importer's own
+    `VISUAL_GROUP`: the physics of everything cut here already exists — the
+    wheels are the frictionless cylinders `tune_contacts` tuned, the elbow is
+    `link3_root` — and nothing here touches it. These geoms add mass, contact
+    and inertia of exactly zero, and exist only so `paint_shell` has
+    somewhere to put a second colour.
+    """
+    mesh = spec.add_mesh()
+    mesh.name = name
+    mesh.file = str(path)
+    geom = spec.body(body).add_geom()
+    geom.name = name
+    geom.type = mujoco.mjtGeom.mjGEOM_MESH
+    geom.meshname = name
+    geom.group = VISUAL_GROUP
+    geom.contype = 0
+    geom.conaffinity = 0
+    geom.density = 0.0
+
+
+def add_cut_meshes(spec: mujoco.MjSpec, dest: Path | None = None) -> None:
+    """Point `base`, each cut arm link and the head at their shell halves, and
+    add the parts cut out of them: the drive wheels, one servo case per joint
+    in `HOUSING_CUTS`, and the head's face panel and lenses."""
+    shell, wheels = split_base_mesh(spec, dest)
+    spec.mesh(SHELL_MESH).file = str(shell)
+    _add_cut_geom(spec, BASE_BODY, WHEEL_MESH, wheels)
+    for link, (_box, mesh_name) in HOUSING_CUTS.items():
+        shell, case = split_housing_mesh(spec, link, dest)
+        spec.mesh(link).file = str(shell)
+        _add_cut_geom(spec, link, mesh_name, case)
+    head_shell, face, eyes = split_head_mesh(spec, dest)
+    spec.mesh("head").file = str(head_shell)
+    _add_cut_geom(spec, "head", FACE_MESH, face)
+    _add_cut_geom(spec, "head", EYES_MESH, eyes)
+
+
+def paint_shell(spec: mujoco.MjSpec) -> None:
+    """Innate's White shell, and what may be DRAWN at all — on the spec.
+
+    Innate's `world.style_robot_geoms`, moved off the viewer's dump and onto
+    the thing every consumer compiles: the training scene, a composed `/sim`
+    room, a `render-rollout` contact sheet and the browser's mesh dump all
+    come from this spec, and a look that only the dump could see is exactly
+    why every MuJoCo sheet of a MARS run came out the URDF's uniform grey
+    while the lab stage showed a painted robot.
+
+    Three rules, in the order they are read:
+
+    * **collision geoms are swept into `COLLISION_GROUP`.** MuJoCo's URDF
+      importer leaves them in group 0, which every renderer here draws — and
+      MEASURED, a MARS rendered straight from this scene was 46 black boxes
+      with the robot somewhere inside them. Group 3 is off in MuJoCo's own
+      default mask and off in `record_world`'s. They keep the URDF's colour:
+      a colour on a geom nobody draws is a colour on nothing.
+    * **frame markers go to alpha 0**, as in Innate's viewer, rather than to
+      a colour — `ee_link` and the two head cameras are 5 mm spheres that
+      would otherwise float beside the robot.
+    * a geom cut out of a link takes `MESH_PAINT`'s colour for it — black
+      tyres and servo cases, the head's black face panel, its grey lenses.
+    * everything else is painted by LINK: black on `BLACK_LINKS`, blue on
+      the head bar and the two fingers, white on the rest.
+    """
+    for body in spec.bodies:
+        for geom in body.geoms:
+            if geom.contype:                       # a <collision> geom
+                geom.group = COLLISION_GROUP
+            elif body.name in HIDDEN_MARKER_LINKS:
+                geom.rgba = [*list(geom.rgba)[:3], 0.0]
+            elif geom.meshname in MESH_PAINT:
+                geom.rgba = list(MESH_PAINT[geom.meshname])
+            elif body.name in BLACK_LINKS:
+                geom.rgba = list(INNATE_BLACK)
+            elif body.name in BLUE_LINKS:
+                geom.rgba = list(INNATE_BLUE)
+            else:
+                geom.rgba = list(SHELL_WHITE)
+
+
 def robot_spec() -> mujoco.MjSpec:
     """One MARS as an `MjSpec`, ready to `attach` — innate's recipe, applied.
 
     The single definition of "a MARS" for the lab slot, the `/sim` world and
     (Phase 4) the training env, the way `g1.g1_spec()` is for the G1.
+
+    The last two steps are the LOOK, and they are here rather than on the
+    viewer's dump because a spec is what every consumer compiles: see
+    `paint_shell`.
     """
     spec = load_robot_spec()
     spec.option.timestep = C.PHYSICS_DT
     add_planar_base(spec)
     tune_contacts(spec)
+    add_cut_meshes(spec)
+    paint_shell(spec)
     return spec
 
 
@@ -913,43 +1485,14 @@ def arm_servo(model: mujoco.MjModel, data: mujoco.MjData,
 
 # --------------------------------------------------------------- the viewer
 
-def style_visual_geoms(model: mujoco.MjModel, prefix: str = "") -> None:
-    """innate's world.style_robot_geoms, applied to a model about to be
-    DUMPED rather than rendered: orange arm links, charcoal instead of matt
-    black, hidden frame markers, collision boxes swept into a hidden group.
-
-    The lab ships a colour per geom and the browser paints it, so this is how
-    a MARS arrives orange in the viewer without the viewer knowing anything
-    about MARS (`docs/mars-roadmap.md` §6.4: a material `kind` per geom, not
-    a component per robot).
-
-    Robot geoms only, by `prefix`: everything else in a composed world owns
-    the group it was built with, and sweeping those into the hidden group
-    would erase them from every render.
-    """
-    for i in range(model.ngeom):
-        body = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY,
-                                 model.geom_bodyid[i]) or ""
-        if prefix and not body.startswith(prefix):
-            continue
-        link = body[len(prefix):] if prefix else body
-        if model.geom_contype[i] == 1:                 # a <collision> geom
-            model.geom_group[i] = COLLISION_GROUP
-        elif link in ORANGE_LINKS:
-            model.geom_rgba[i] = BRIGHT_ORANGE
-        elif link in HIDDEN_MARKER_LINKS:
-            model.geom_rgba[i, 3] = 0.0
-        elif float(model.geom_rgba[i, :3].mean()) < DARK_RGB_MEAN:
-            model.geom_rgba[i, :3] = CHARCOAL
-
-
 @lru_cache(maxsize=1)
 def visual_scene() -> dict:
-    """The viewer's mesh dump for one MARS. Cached: 9 meshes, ~7 MB of STL.
+    """The viewer's mesh dump for one MARS. Cached: 10 meshes, ~7 MB of STL.
 
     Built from the robot alone (no floor, no light) so the body list is
-    exactly what an `attach` into a room produces, and styled first so the
-    colours travel with the geometry.
+    exactly what an `attach` into a room produces. The colours travel with
+    the geometry because `robot_spec` painted the spec they were compiled
+    from — there is no styling step here any more.
 
     The dump itself is `g1.extract_visual_scene` — generic apart from which
     geom group it reads, which is now an argument. It keeps the collision
@@ -957,9 +1500,8 @@ def visual_scene() -> dict:
     only, and every one of those in this URDF is a `<visual>`.
     """
     from .g1 import extract_visual_scene
-    m = robot_spec().compile()
-    style_visual_geoms(m)
-    return extract_visual_scene(m, group=VISUAL_GROUP)
+    return extract_visual_scene(robot_spec().compile(), group=VISUAL_GROUP,
+                                vert_scale=VERT_SCALE_M)
 
 
 # ------------------------------------------------------------------ the body
@@ -1071,7 +1613,7 @@ class MarsBody(BodyBase):
 
     def look(self) -> str:
         """The viewer's material set. The colours are already in the dump
-        (`style_visual_geoms`); this names the table the browser adds gloss,
+        (`paint_shell`); this names the table the browser adds gloss,
         metalness and the wheels' rubber with — Phase 1b/viewer work."""
         return "mars"
 

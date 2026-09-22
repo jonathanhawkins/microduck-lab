@@ -14,14 +14,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  LIDAR_MIN_RANGE_M,
   armBar,
   gripperBar,
+  lidarFootprintM,
+  lidarMinRange,
   lidarNearest,
   lidarPlotPoints,
   lidarPolar,
-  LIDAR_MIN_RANGE_M,
   rangeChannel,
   robotFootprintM,
+  scanOutline,
   sensorOverlayLabel,
   tofColumnEdges,
   tofFromLidar,
@@ -29,6 +32,40 @@ import {
 import type { SimDuck } from "./sim";
 
 const scan = (mm: number[], a0 = 0, da = Math.PI / 2, maxRange = 6) => ({ a0, da, mm, maxRange });
+
+describe("the scan's own two numbers come off the FRAME, not a robot-id table", () => {
+  // `world_server.tof_payload` ships `minRange` and `footprint` (c858568) so
+  // the viewer stops answering them from a table keyed by robot id. A table
+  // can only answer for a body this build has heard of, and both numbers
+  // decide what is DRAWN: the blind disc, and which returns are the robot
+  // looking at its own arm.
+
+  it("draws the blind disc at the device's own floor, falling back when a lab sends none", () => {
+    expect(lidarMinRange({ minRange: 0.15 })).toBe(0.15);
+    // A different scanner: the picture must follow the device, not the build.
+    expect(lidarMinRange({ minRange: 0.05 })).toBe(0.05);
+    expect(lidarMinRange({})).toBe(LIDAR_MIN_RANGE_M); // a lab that predates the field
+    expect(lidarMinRange(null)).toBe(LIDAR_MIN_RANGE_M); // …and no scan at all
+  });
+
+  it("takes the footprint off the frame, and 0.0 is an ANSWER and not a gap", () => {
+    // The `??` vs `||` trap, which is the whole reason this helper exists:
+    // the lab sends 0.0 for a body that declared no footprint, meaning "keep
+    // every return" (`tof_from_lidar`'s own default). A `||` here would fall
+    // through to the robot-id table and drop returns the lab kept.
+    expect(lidarFootprintM({ footprint: 0 }, "mars")).toBe(0);
+    expect(lidarFootprintM({ footprint: 0.12 }, "mars")).toBe(0.12);
+    // THE FINDING: a second wheeled body this build has never heard of. The
+    // table answers 0 for it and the adapter then reads its folded arm as an
+    // obstacle — the frame is what makes that right.
+    expect(lidarFootprintM({ footprint: 0.2 }, "rover-2")).toBe(0.2);
+    expect(robotFootprintM("rover-2")).toBe(0); // …what the table alone would have said
+    // A lab that predates the field still lands on this build's number.
+    expect(lidarFootprintM({}, "mars")).toBe(0.12);
+    expect(lidarFootprintM(null, "mars")).toBe(0.12);
+    expect(lidarFootprintM({}, "microduck")).toBe(0);
+  });
+});
 
 describe("lidarPolar / lidarPlotPoints: the plot is in the ROBOT's frame", () => {
   it("puts the robot's FORWARD at the top of the drawing", () => {
@@ -363,5 +400,62 @@ describe("armBar: an angle inside its own travel", () => {
     // sends lo == hi would otherwise paint every joint NaN% wide. It falls
     // back to ±π, so 0.5 rad sits at (0.5 + π) / 2π.
     expect(armBar(0.5, [1, 1])).toBeCloseTo((0.5 + Math.PI) / (2 * Math.PI), 6);
+  });
+});
+
+describe("scanOutline", () => {
+  const MAX = 6;
+  const mm = (...m: number[]) => m;
+
+  it("joins neighbours on one surface and closes the turn", () => {
+    // Four returns all at 2 m: a square of edges right round, including the
+    // wrap from the last ray back to the first. A scan is a CIRCLE of
+    // bearings, so an outline that stopped at index n-1 would leave one
+    // wedge of the room permanently open.
+    const out = scanOutline(mm(2000, 2000, 2000, 2000), MAX);
+    expect(out).toEqual([0, 1, 1, 2, 2, 3, 3, 0]);
+  });
+
+  it("breaks where the range jumps — a doorway stays a doorway", () => {
+    // The whole reason for the gap test: joining every neighbour draws a
+    // chord across the opening and reports a sealed room, which is a lie
+    // about the one thing this instrument is for.
+    const out = scanOutline(mm(2000, 2000, 5000, 5000), MAX, 0.25);
+    expect(out).toEqual([0, 1, 2, 3]);       // …and no 1-2, no 3-0
+  });
+
+  it("ends nothing on a miss or a no-reading", () => {
+    // maxRange is "nothing within range" and 0 is "no reading at all".
+    // Neither is a surface, so neither can be the end of an edge.
+    // A miss at 1 breaks 0-1 and 1-2 — and 2-0 survives, because on a turn
+    // of three bearings those two ARE neighbours. The break is local to the
+    // dead ray, which is the point: one bad return must not open the room.
+    expect(scanOutline(mm(2000, 6000, 2000), MAX)).toEqual([2, 0]);
+    expect(scanOutline(mm(2000, 0, 2000), MAX)).toEqual([2, 0]);
+    // …and a run of real returns either side of one still joins its own:
+    // 0-1 along the wall, 3-0 round the wrap, with only the dead ray's two
+    // edges missing.
+    expect(scanOutline(mm(2000, 2000, 0, 2000), MAX)).toEqual([0, 1, 3, 0]);
+  });
+
+  it("survives a degenerate scan", () => {
+    expect(scanOutline([], MAX)).toEqual([]);
+    expect(scanOutline(mm(2000), MAX)).toEqual([]);
+  });
+
+  it("draws a real room as ONE closed loop, not a fan", () => {
+    // The shape of the fix, on a 360-ray turn of a 3 m box: every neighbour
+    // is on the same wall except at the four corners, where the range steps
+    // by less than the gap — so the outline is 360 edges and closes.
+    const n = 360, box = 1.5;
+    const scan = Array.from({ length: n }, (_, i) => {
+      const a = (i * 2 * Math.PI) / n;
+      const r = Math.min(box / Math.abs(Math.cos(a)), box / Math.abs(Math.sin(a)));
+      return Math.round(r * 1000);
+    });
+    const out = scanOutline(scan, MAX);
+    expect(out.length / 2).toBe(n);          // closed: one edge per bearing
+    const used = new Set(out);
+    expect(used.size).toBe(n);               // …and every ray is in it
   });
 });

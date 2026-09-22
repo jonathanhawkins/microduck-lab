@@ -13,6 +13,24 @@ export const SIM_WS = LAB_HTTP.replace(/^http/, "ws") + "/ws/sim";
  *  put the new LiDAR overlay into the robot's own camera view. */
 export const OVERLAY_LAYER = 1;
 
+/** The layer a robot's own camera HOUSING is parked on while the inset
+ *  renders: the orbit camera has it enabled, the inset camera does not.
+ *
+ *  A camera cannot see the shell it is bolted inside, and MARS's proves it:
+ *  MEASURED across its whole head-pitch range, its `head` is 1.5-2.8 cm from
+ *  the lens while inside the frame, against the inset's 3 cm near plane — so
+ *  the shell is clipped while everything is still, and swings into the
+ *  picture the moment the drawn pose (lerped toward each frame) lags the
+ *  pose the capture came from. Moving the camera would have fixed the
+ *  picture by moving a SENSOR, which is where every bearing the detector
+ *  reports is measured from.
+ *
+ *  Only the housing, and only the robot whose camera it is: the arm stays
+ *  (`link5` is in the same frame at 15-26 cm, and a real MARS sees its own
+ *  claw), and another robot in the room keeps its head. The lab names the
+ *  body — `det.selfBody`, the one its detector already refuses to detect. */
+export const SELF_LAYER = 2;
+
 /** Scale a scene dump's vertices into metres IN PLACE, and say so.
  *
  *  A dump may carry millimetre ints with a `vertScale` (the G1's is 21 MB
@@ -170,7 +188,21 @@ export interface Scenario {
   attacks?: Partial<Record<TeamName, "left" | "right">>;
   collision: "walk" | "all";
 }
-export interface ScenarioListing { name: string; builtin: boolean; ducks: number; objects: number; modified: number | null }
+/** One row of `GET /scenarios`.
+ *
+ *  `ducks` is the TOTAL number of robot entries and is named that for its
+ *  history; `robots` breaks it down by body, commonest first, and is what a
+ *  menu should show. A lab too old to send `robots` leaves it undefined, and
+ *  the picker falls back to counting everything as ducks — which is what it
+ *  used to do, and why `mars-follow` announced "1 ducks". */
+export interface ScenarioListing {
+  name: string;
+  builtin: boolean;
+  ducks: number;
+  robots?: { id: string; n: number; noun: string }[];
+  objects: number;
+  modified: number | null;
+}
 
 /** THE RUG (SimStage draws it on every walled room that is not a pitch).
  *  A /sim room is drawn at HUMAN scale — 0.8 m plank tiles, eight boards to a
@@ -361,13 +393,26 @@ export interface DetectionItem { cls: string; name: string; bearing: number; ele
 /** A detector frame: captured at `t`, `age` old now, the frustum it saw
  *  through, the camera's world pose at capture (x y z, w x y z quaternion of
  *  the site frame, x forward) and what it found. */
-export interface DetPayload { t: number; age: number; fov?: [number, number]; cam?: number[]; items: DetectionItem[] }
+export interface DetPayload {
+  t: number;
+  age: number;
+  fov?: [number, number];
+  cam?: number[];
+  /** Which of THIS robot's own bodies wraps the lens, as an index into its
+   *  `bodies` list — the body the /sim inset must not draw when it renders
+   *  from this camera (SELF_LAYER). -1, or absent on an older lab, means
+   *  draw everything. */
+  selfBody?: number;
+  items: DetectionItem[];
+}
 export interface BrainInputs {
   tof?: { age: number | null; stale: boolean; max: number };
   /** The planar scan's own freshness, for a body that reads one.
    *
-   *  Not sent today: `brain/runtime.age_inputs` reports `tof` and `det` only,
-   *  and for a wheeled body the `tof` entry's age IS the scan's age
+   *  Sent since c858568: `age_inputs` keys on `Senses.lidar` and names the
+   *  row after the DEVICE the body has, so a wheeled body reports `lidar`
+   *  and no `tof` at all. On a lab that predates it the `tof` entry's age IS
+   *  the scan's age
    *  (`World.senses_tof` hands the brain an adapted 8x8 and deliberately
    *  keeps the SCAN's timestamp — a 6 Hz scanner's frame is up to 167 ms old
    *  and a brain gating on freshness must see that). The inspector therefore
@@ -493,10 +538,9 @@ export interface SimDuck {
  *  part of the robot; closing on AIR reads 0.0 N·m, identical to an open
  *  claw, which is why the contact conjunct exists).
  *
- *  **NOT SENT YET.** The lab streams the grasp as `SimDuck.holding` (the
- *  pickable's id) and nothing else; the load is measured on the Python side
- *  (`MarsDriver.gripper_load`) and never leaves it. The inspector draws this
- *  block when a lab starts sending it and nothing when it does not. */
+ *  Sent since c858568 (`world_server.gripper_payload`), beside the
+ *  pickable's id on `SimDuck.holding`. The inspector draws this block when a
+ *  lab sends it and nothing when it does not, so an older lab still works. */
 export interface GripperPayload {
   /** N·m at joint6. Signed: closing is one direction, opening the other. */
   load: number;
@@ -515,10 +559,9 @@ export interface GripperPayload {
  *  a few hundredths of a radian low (`brain/runtime.Senses.arm` measures 28.5
  *  mm of claw height at the pick pose).
  *
- *  **NOT SENT YET** either — `WorldRobot.arm_qpos` exists and feeds
- *  `Senses.arm`, but no frame carries it. With `cmd` the inspector marks the
- *  command beside the achieved angle, which is the sag the brain
- *  pre-compensates. */
+ *  Sent since c858568 (`world_server.arm_payload`). With `cmd` the inspector
+ *  marks the command beside the achieved angle, and the GAP between them is
+ *  the sag the brain pre-compensates — which is why both are on the wire. */
 export interface ArmPayload {
   q: Record<string, number>;
   cmd?: Record<string, number>;
@@ -541,6 +584,19 @@ export interface LidarPayload {
   mm: number[];
   age?: number;
   maxRange?: number;
+  /** The device's own floor (`LidarSensor.min_range`): a return nearer than
+   *  this is CLIPPED and marked invalid, so it arrives as a 0 and a plot must
+   *  draw the disc it cannot see inside of. Read it with `lidarMinRange`,
+   *  which falls back to the 0.15 m default for a lab that predates it. */
+  minRange?: number;
+  /** How far out a return is the robot looking at its own arm
+   *  (`WorldRobot.footprint_m` -> `MarsBody.footprint_m`), dropped by the
+   *  adapter every brain here reads.
+   *
+   *  **0 is a value, not a gap**: it means "declared none, every return
+   *  kept", which is `tof_from_lidar`'s own default. Read it with `??` and
+   *  never `||` — `lidarFootprintM` does. */
+  footprint?: number;
   mount?: [number, number, number] | null;
 }
 export interface SimObject {

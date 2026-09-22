@@ -676,6 +676,33 @@ class WorldRobot:
                 self.model.body(b).name[len(self.prefix):] for b in sub]
         return self._scene_bodies
 
+    def camera_housing_body(self) -> int:
+        """Which of `scene_bodies()` WRAPS this robot's camera, or -1.
+
+        The body a viewer must not draw when it renders from this robot's own
+        camera: on MARS that is the `head` its `head_camera_left` link sits
+        inside, whose shell is 1.5-2.8 cm from the lens and so sits right on
+        the /sim inset's 3 cm near plane — close enough to be clipped while
+        everything is still, and to swing into frame the moment the drawn
+        pose lags the captured one.
+
+        It is `Detector.exclude_body` and not a name written here, which is
+        the point: the detector ALREADY resolves its own housing (a body
+        mount takes its parent) and already refuses to detect it. A viewer
+        hiding a different body from the one the sensor ignores would be two
+        answers to one question.
+        """
+        det = getattr(self, "detector", None)
+        if det is None or getattr(det, "exclude_body", -1) < 0:
+            return -1
+        name = self.model.body(int(det.exclude_body)).name
+        if not name.startswith(self.prefix):
+            return -1
+        try:
+            return self.scene_bodies().index(name[len(self.prefix):])
+        except ValueError:
+            return -1
+
     def bodies_payload(self, data: mujoco.MjData) -> list[list[float]]:
         """Poses for `scene_bodies()`, world first as an identity pose — the
         shape `world_server`'s frame puts under a duck's `bodies`."""

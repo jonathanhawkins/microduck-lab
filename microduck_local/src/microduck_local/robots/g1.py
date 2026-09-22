@@ -407,13 +407,24 @@ def _quat_apply_inverse(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
 
 
 def extract_visual_scene(model: mujoco.MjModel, prefix: str = "",
-                         group: int = 2) -> dict:
+                         group: int = 2, vert_scale: float = 0.001) -> dict:
     """The real G1 visual meshes.
 
-    Verts are millimetres (ints) so the JSON is ~21 MB instead of ~78 MB of
-    floats; the viewer multiplies by `vertScale`. No voxel weld — that turned
-    every thin CAD shell (chest, thighs, shins) into craters.
-    Same `{bodies, meshes, geoms}` shape as viz_server.extract_scene.
+    Verts are INTEGER multiples of `vert_scale` metres so the JSON is ~21 MB
+    instead of ~78 MB of floats; the viewer multiplies by `vertScale`. No
+    voxel weld — that turned every thin CAD shell (chest, thighs, shins) into
+    craters. Same `{bodies, meshes, geoms}` shape as viz_server.extract_scene.
+
+    **`vert_scale` is a resolution, and a metre-tall robot and a 25 cm one do
+    not want the same one.** A millimetre lattice moves a G1 vertex by at
+    most half its shell's thickness and nobody can see it. MEASURED on MARS,
+    whose head is 121 mm across with 1-2 mm bevels, the same lattice moves a
+    vertex 0.50 mm on average and 0.85 mm at worst — which is what made its
+    head arrive in the browser looking melted, with streaky normals on faces
+    that are flat in MuJoCo. At 0.1 mm the error is 0.05 mm and the dump
+    grows 6 % (3.80 → 4.02 MB), so a small robot pays a rounding error in
+    bytes instead of in shape. The default stays 1 mm: the G1 does not need
+    the digits, and this is a per-body choice (`robots/mars.visual_scene`).
 
     `group` is which geom group holds the VISUALS. 2 is the Lucky Robots
     MJCF's convention and the default, so nothing about the G1 changes;
@@ -447,7 +458,7 @@ def extract_visual_scene(model: mujoco.MjModel, prefix: str = "",
             fa, fn = int(model.mesh_faceadr[mid]), int(model.mesh_facenum[mid])
             if vn == 0 or fn == 0:
                 continue
-            v = np.round(model.mesh_vert[va:va + vn] * 1000.0).astype(np.int32)
+            v = np.round(model.mesh_vert[va:va + vn] / vert_scale).astype(np.int32)
             f = model.mesh_face[fa:fa + fn]
             mesh_ids[mid] = len(meshes)
             meshes.append({
@@ -465,7 +476,8 @@ def extract_visual_scene(model: mujoco.MjModel, prefix: str = "",
             "name": model.mesh(mid).name,
             "rgba": [round(float(x), 4) for x in rgba],
         })
-    return {"bodies": bodies, "meshes": meshes, "geoms": geoms, "vertScale": 0.001}
+    return {"bodies": bodies, "meshes": meshes, "geoms": geoms,
+            "vertScale": vert_scale}
 
 
 @lru_cache(maxsize=1)
