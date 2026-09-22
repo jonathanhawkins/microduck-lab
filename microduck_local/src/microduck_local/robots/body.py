@@ -1,0 +1,541 @@
+"""What the LAB needs to know about a robot — walker or not.
+
+`robots/spec.py`'s `RobotSpec` is honestly named in its own docstring: "what
+the **walking env** needs to know about a robot". Its fields are foot geoms,
+fall thresholds, air-time windows, twist-command ranges, a gyro sensor. Every
+body so far entered through it because every body so far walked.
+
+The third body planned (Innate's MARS, `docs/mars-roadmap.md` §1) is a wheeled
+base with an arm. It has no feet, cannot fall, and the thing this harness calls
+"the policy" — a velocity-command walker — does not exist for it. Threading it
+through `RobotSpec` would be the architecture-scale version of the mistake
+`AGENTS.md` warns about most: keeping an inherited term whose default target is
+wrong for the new body, and letting the robot sag into the proxy.
+
+So the lab's contract is split from the walker's:
+
+    Body       what the LAB, the VIEWER and /sim need — this file
+    RobotSpec  Body + the walking env's names and windows — spec.py
+
+`RobotSpec` inherits `BodyBase`, so the duck and the G1 keep every field and
+every byte of behaviour (the golden-bit tests are the proof, as they were when
+the G1 arrived). A non-walker implements `Body` directly and never sees
+`foot_geoms`, `fall_gravity_z` or an air-time window.
+
+`Body` is a Protocol, not a base class to inherit: a body that arrives from a
+pip-installed plugin through the `microduck_local.bodies` entry point
+(`robots/registry.py`) conforms by shape, not by importing this package's
+class.
+
+**`conforms()`, not `isinstance()`, is the check** — measured, because the
+obvious one is wrong here. Python 3.12 resolves a runtime-checkable Protocol's
+members with `inspect.getattr_static`, which deliberately does not run
+`__getattr__`; the G1's spec is a lazy proxy built on `__getattr__`
+(`robots/g1._LazyG1Spec`, so that importing the module does not read the
+fetched config), so `isinstance(G1_SPEC, Body)` is **False** while the G1 is a
+perfectly good body. `conforms()` asks `hasattr`, which the proxy answers.
+Keep the Protocol for the type checker and the documentation; use `conforms()`
+when the answer decides anything.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Protocol, runtime_checkable
+
+
+def _no_scene_fn() -> Path:
+    """The `scene_fn` placeholder: a body that never declared one.
+
+    A default that RAISES rather than a `None` to be checked at every call
+    site, and rather than one robot's scene — which is the whole reason the
+    duck's assets moved off `RobotSpec` (`robots/microduck.py`'s docstring).
+    `RobotSpec.__post_init__` refuses it outright, so a walker still fails at
+    CONSTRUCTION as it did when the field was declared there.
+    """
+    raise NotImplementedError(
+        "this body declares no scene_fn — a Body must be able to hand out a "
+        "compiled-scene path (robots/g1.g1_scene_xml and "
+        "robots/mars.scene_xml both generate theirs under .cache)")
+
+
+@dataclass(frozen=True)
+class RobotFrames:
+    """The frames and joints `/sim` world mode has to know by NAME about a
+    body it DRIVES rather than runs a policy on.
+
+    Declared by the body (`Body.frames`), not tabled by the world. The first
+    cut of Phase 3b held these two names in a `ROBOT_FRAMES` dict inside
+    `world/arena.py`, which is precisely the pattern this whole split exists
+    to delete: `docs/mars-roadmap.md` §1 counts 45 hand-written `if robot ==
+    "g1"` sites, and §6.5's fix is that a body DECLARES its channels and the
+    world asks. Both names are the body's own knowledge and `robots/mars.py`
+    already carries them (`BASE_BODY`, `HEAD_JOINT`); a fourth robot is an
+    entry in its own module, and a body from a pip-installed plugin can
+    import this class rather than patch a dict in the arena.
+    """
+
+    #: The link the rest of the robot's bodies hang off — the subtree root, so
+    #: that `World.duck_bodies`, `_geom_owner` and the pose payload can slice
+    #: it out of a composed model the way they slice a duck off `trunk_base`.
+    base: str
+    #: The one joint a duck's `head_pitch` gaze intent maps onto, and the sign
+    #: that makes "down" mean down on this robot. None for a body with no
+    #: pitching head, and then a gaze intent reaches nothing.
+    head_pitch_joint: str | None = None
+    head_pitch_sign: float = 1.0
+
+
+@runtime_checkable
+class Body(Protocol):
+    """One robot the lab can list, draw, teach and put in a room.
+
+    Everything here is something a NON-walker can answer. The walking env's
+    questions live on `RobotSpec`, which is a `Body` plus those.
+    """
+
+    # --- identity ---------------------------------------------------------
+    id: str                      # "microduck" | "g1" | "mars" — the wire name
+    title: str                   # "Unitree G1" — what a chip or menu shows
+    noun: str                    # "duck" | "G1" — what a SENTENCE calls one
+    kind: str                    # "legged" | "wheeled"; "arm" reserved
+    # --- the policy contract this body speaks -----------------------------
+    joint_names: tuple[str, ...]
+    joint_groups: tuple[str, ...] | None
+    default_pose: Any            # np.ndarray, rad, len == num_joints. `Any`
+    #                              so conforming does not drag numpy in.
+    obs_dim: int
+    lab_spacing_m: float         # floor one slot on the lab stage gets, m
+    # --- the model, and the pose it starts in -----------------------------
+    # Both were `RobotSpec` fields until a non-walker needed them: EVERY body
+    # has a compiled scene and a keyframe to spawn at, walker or not, and
+    # `tests/test_body_conformance.py`'s generic cases read exactly these two
+    # to compile a body and measure it. A body that cannot answer them is one
+    # the suite cannot check, so the contract says so here.
+    scene_fn: Callable[[], Path]
+    stand_keyframe: str
+    # Which `env_class` task a slot that was given no task runs. See the
+    # field on `BodyBase` for why it is data and not a guess.
+    default_task: str | None
+
+    @property
+    def num_actions(self) -> int: ...
+
+    def contract(self) -> Any: ...   # robots/policy_contract.PolicyContract
+    def ready(self) -> bool: ...
+    def fetch(self) -> Path: ...
+    def setup_hint(self) -> str: ...
+    def visual_scene(self) -> dict: ...
+    def look(self) -> str: ...
+    def env_class(self, task: str = "walk") -> type: ...
+    def tasks(self) -> tuple[Any, ...]: ...
+    def shipped_policies(self) -> tuple[dict, ...]: ...
+    def train_env_kwargs(self, args: Any) -> dict: ...
+    def attach(self, spec: Any, prefix: str, frame: Any) -> None: ...
+    def driver(self, model: Any, prefix: str) -> Any: ...
+    def frames(self) -> RobotFrames: ...
+    def make_sensors(self, model: Any, prefix: str, *, presets: Any,
+                     targets: Any, seed: Any) -> dict: ...
+
+
+@dataclass(frozen=True, eq=False, kw_only=True)   # eq=False: ndarray fields
+class BodyBase:
+    """The `Body` fields, as data, plus the answers that are body-agnostic.
+
+    Keyword-only because `RobotSpec` adds REQUIRED fields after these
+    defaulted ones; a dataclass cannot order that positionally, and every
+    construction in the tree was already by keyword.
+
+    A method here either has one true generic answer (`num_actions`,
+    `tasks`, `look`, `setup_hint`) or raises with the name of the thing to
+    override. It never guesses: a body that inherited another robot's meshes
+    or another robot's env would fail as a wrong picture and a wrong policy
+    rather than as an error, and this harness has paid for that class of
+    silence more than once (`AGENTS.md`, "Verification discipline").
+    """
+
+    id: str
+    joint_names: tuple[str, ...]
+    default_pose: Any                          # np.ndarray, rad
+    obs_dim: int
+    title: str = ""
+    # What the UI calls one of these in a sentence: "teach the {noun} a
+    # trick". Empty falls back to the title.
+    noun: str = ""
+    # What SHAPE of robot this is, so a feature can ask instead of listing
+    # ids: "legged" (duck, G1), and "wheeled" / "arm" reserved for MARS.
+    # The walking env's questions are on RobotSpec, not behind this string —
+    # `kind` is for the UI and for picking a base env, never for physics.
+    kind: str = "legged"
+    # Panel section label per joint, in joint_names order (None: one group).
+    joint_groups: tuple[str, ...] | None = None
+    # How much floor ONE SLOT on the lab stage gets, centre to centre (m).
+    # The lab lays its roster out in a square grid and each slot is pitched by
+    # its own robot (viz_server.lab_slot_offsets), because one duck-sized
+    # constant put six 1.3 m G1 helpers inside each other.
+    # Measured at each robot's own STAND keyframe — the widest HORIZONTAL
+    # extent of the whole body's geom AABBs, which is what must not overlap:
+    #     microduck  0.1845 m wide  ->  0.65 m   (3.52x, the pitch the viewer
+    #                                             has always drawn: this default)
+    #     g1         0.5338 m wide  ->  1.88 m   (the same 3.52x; robots/g1.py)
+    # tests/test_lab_robots.py re-measures both widths from the models, so a
+    # model revision that changes a body's size fails here rather than quietly
+    # crowding the stage. (Scaling on standing height instead — 0.277 m vs
+    # 1.307 m — would give the G1 3.07 m: also defensible, simply further apart
+    # than the stage camera can frame.)
+    lab_spacing_m: float = 0.65
+    # The compiled scene ONE of these stands in, as a callable so a body
+    # whose scene is GENERATED (the G1's, MARS's) writes it on demand rather
+    # than at import. See `_no_scene_fn` for why the default raises instead
+    # of being None or one robot's scene.
+    scene_fn: Callable[[], Path] = _no_scene_fn
+    # The keyframe in that scene a body spawns from. Named for the walkers
+    # that came first — MARS's is "HOME", an arm pose with nothing to stand
+    # on — and kept under that name because the walking env, the 🎬 pose
+    # editor, `render-rollout` and the conformance suite all read it already.
+    stand_keyframe: str = "STAND"
+    # Which task `env_class()` is asked for when nobody said. DATA, because
+    # the three answers are three different statements about a body and none
+    # of them is derivable from the others: a walker's default is `"walk"`
+    # (the lab has always built a walk env for a roster slot with no task);
+    # MARS's is `"reach"`, because "walk" is not a thing it can be asked and
+    # `env_class("walk")` rightly raises; a level-0 body's is `None`, which
+    # says it has NO env at all — `robots/mjcf_body.py` reads an MJCF and
+    # never chooses a policy convention, so a slot for one idles
+    # kinematically at its keyframe rather than being handed somebody else's
+    # env (`lab/robots.KinematicIdle`). Guessing it from `kind` would put the
+    # duck's env behind a string the viewer also renders with.
+    default_task: str | None = "walk"
+    # The world TIMESTEP a room holding one of these has to be compiled at
+    # (s), or None for "whatever the world runs at"
+    # (`world/scenario.DEFAULT_PHYSICS_DT`, 5 ms).
+    #
+    # Declared by the body because it is a measurement about the body's own
+    # CONTACTS, and read by `world/scenario.robot_physics_dt` so a procedural
+    # room asks instead of branching on an id. MARS answers 2 ms: MEASURED, at
+    # 5 ms its claw does not slip on the playroom block, it EJECTS it (4 of 16
+    # spots held against 14 of 16 at 2 ms — `robots/mars.GRASP_PHYSICS_DT`).
+    # The walkers answer None and their rooms are bit-for-bit what they were.
+    #
+    # One number per body and not per body PART, because `MjSpec.attach` keeps
+    # the parent's `<option>`: a room has one clock and every robot in it runs
+    # on that clock. A room with two bodies that disagree is a real conflict
+    # and the builder that assembles it has to choose — it is not something a
+    # composer can paper over.
+    physics_dt: float | None = None
+
+    # ------------------------------------------------------------------ data
+
+    @property
+    def num_joints(self) -> int:
+        return len(self.joint_names)
+
+    @property
+    def num_actions(self) -> int:
+        """One action per joint. A body whose action vector is not its joint
+        vector overrides this — MARS's is 6 joints plus a base twist."""
+        return len(self.joint_names)
+
+    # -------------------------------------------------------- the contract
+
+    def contract(self) -> Any:
+        """What this body's policies SAY THEY ARE: a `PolicyContract`.
+
+        No generic answer, and deliberately not a synthesised one. An id and
+        a width could be spelled from `self.id` and `self.obs_dim`, but the
+        two things that make a contract worth carrying cannot be guessed: the
+        control RATE (the walkers tick at 50 Hz, MARS's skills at 25, and a
+        policy run at the wrong one is a different controller) and the
+        DEPLOY sentence (whether putting this on hardware is the robot's own
+        contract, a lab convenience, or an untested code skill). A guessed id
+        over a wrong rate is precisely the silent cross that
+        `robots/policy_contract.py` exists to stop, so a body that has not
+        declared its contract says so.
+
+        The slot table is the other half: it must be read off the env that
+        FILLS the observation, which only the body's own module knows.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} does not declare its policy contract — implement "
+            "contract() returning a robots/policy_contract.PolicyContract "
+            "(robots/microduck.py, robots/g1.py and robots/mars.py are the "
+            "three shapes: a deployment contract, a lab contract and a code "
+            "skill)")
+
+    # ---------------------------------------------------------------- assets
+
+    def ready(self) -> bool:
+        """Are this body's assets on disk?
+
+        The lab asks before offering a chip, so the palette can show "not set
+        up yet — ⤓" instead of a chip that throws when clicked.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} does not say whether its assets are present — "
+            "implement ready() (robots/g1.py checks for the MJCF, the meshes "
+            "and the walker ONNX)")
+
+    def fetch(self) -> Path:
+        """Download the assets and return the directory holding them.
+
+        One click in the palette and `uv run fetch-robot <id>` both land here,
+        so there is one download path per body instead of a script per body.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} has no fetch() — a body whose assets ship with the "
+            "checkout returns its asset directory unchanged")
+
+    def setup_hint(self) -> str:
+        """The command that makes `ready()` true, for an error message."""
+        return f"uv run fetch-robot {self.id}"
+
+    # ---------------------------------------------------------------- viewer
+
+    def visual_scene(self) -> dict:
+        """The viewer's mesh dump: {bodies, meshes, geoms, vertScale}."""
+        raise NotImplementedError(
+            f"{self.id!r} has no visual_scene() — robots/g1.extract_visual_scene "
+            "is the mm-int dump every body's should produce")
+
+    def look(self) -> str:
+        """Which material set the viewer paints this body with.
+
+        An id by default, so a new body draws with its own look the moment it
+        has one and never silently borrows another robot's colours.
+        """
+        return self.id
+
+    # --------------------------------------------------------------- training
+
+    def env_class(self, task: str = "walk") -> type:
+        """The gymnasium env that trains `task` on this body.
+
+        This was `train.env_class`'s if-chain. It moved here so a third body
+        is a registry entry rather than a third branch in the trainer.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} has no env for task {task!r} — implement env_class()")
+
+    def tasks(self) -> tuple[Any, ...]:
+        """The `Behavior` recipes the 🎓 panel offers for this body.
+
+        Delegated, not duplicated: `behaviors/` is the one place a recipe is
+        declared, and it already tags each one with the robot it belongs to.
+        """
+        from ..behaviors.core import for_robot
+        return tuple(for_robot(self.id))
+
+    def train_env_kwargs(self, args: Any) -> dict:
+        """The env kwargs a `train-walk` invocation applies for this body.
+
+        `train.env_kwargs_from_args` carried these as an `if robot == "g1"`
+        block — the actuator model it refuses, the episode length its held
+        poses need. Same reason as `env_class`: a body's trainer knobs belong
+        to the body.
+        """
+        return {}
+
+    def shipped_policies(self) -> tuple[dict, ...]:
+        """Policies that came WITH this body, as palette entries.
+
+        The shape is the one `viz_server.discover_policies` appends:
+        `{id, label, group, path, robot}` plus an optional measured `note`.
+        Empty is the normal answer — most bodies ship nothing.
+        """
+        return ()
+
+    # ------------------------------------------------------------- /sim world
+
+    def attach(self, spec: Any, prefix: str, frame: Any) -> None:
+        """Attach one of these into a `/sim` world model under `prefix`.
+
+        `world/compose.py` puts N bodies in one `MjSpec` this way. Phase 3
+        makes `compose()` call this; until then it is the declared seam and
+        `compose()` still holds its own copy of both paths.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} has no attach() — world/compose.py shows the pattern "
+            "(MjSpec.attach under a per-robot prefix and frame)")
+
+    def driver(self, model: Any, prefix: str) -> Any:
+        """A controller that STEPS one of these in a `/sim` world.
+
+        Deliberately not built in this phase. The two that exist are
+        `robots/g1.G1Walker` (a 99-obs ONNX at 50 Hz) and the duck's walker +
+        command block inside `world/arena.WorldDuck`, which is still sized by
+        the 61-obs contract (`docs/mars-roadmap.md` §6.5). Generalising them
+        is Phase 3's job, and doing it here would mean designing the sense and
+        intent channels against one body — the way `WorldDuck` already was.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} has no driver() — see robots/g1.G1Walker and "
+            "world/arena.WorldDuck (docs/mars-roadmap.md Phase 3)")
+
+    def frames(self) -> RobotFrames:
+        """This body's `RobotFrames` — the names `/sim` needs to drive it.
+
+        No generic answer, and a guessed one would be the bad kind of silence:
+        `mj_name2id` answers -1 for a base link a body does not have, and a
+        `WorldRobot` built on -1 would slice the wrong subtree out of a
+        composed model and stream a robot drawn with its parts on another
+        robot's joints. So a body that world mode is asked to DRIVE says what
+        its root link is called, and one that is never driven never needs to.
+
+        Only a `Body.driver()`-stepped body is asked
+        (`world/arena.WorldRobot.__init__`). The duck is stepped as a
+        `WorldDuck` and the G1 in a room is still a `WorldPerson`, so neither
+        overrides this — which is the honest state of the tree and not an
+        omission: the day a G1 enters a room as a roster entry rather than as
+        a person is the day it declares one.
+        """
+        raise NotImplementedError(
+            f"{self.id!r} does not declare its /sim frames — implement "
+            "frames() returning a robots/body.RobotFrames (robots/mars.py is "
+            "the one shape: a base link, a head pitch joint and its sign)")
+
+    def make_sensors(self, model: Any, prefix: str, *, presets: Any,
+                     targets: Any, seed: Any) -> dict:
+        """This body's SENSE CHANNELS on an attached model: {name: sensor}.
+
+        `world/arena.World` mounted a duck's two sensors by the duck's own
+        SITE NAMES — `prefix + "tof"`, `prefix + "head_camera"` — hard-coded
+        in the arena (`docs/mars-roadmap.md` §6.5 counts that as one of world
+        mode's two hacks). A body knows where its own apertures are and what
+        device is behind them, so it answers that here and the arena asks.
+
+        Channel names are the contract, because `brain/runtime.Senses` has a
+        field per channel: `"tof"` (an 8x8 `sensors.tof.TofSensor`),
+        `"detector"` (`sensors.detector.Detector`) and `"lidar"`
+        (`sensors.lidar.LidarSensor`). A channel a body does not have is
+        simply absent from the dict; the arena never invents one.
+
+        Arguments, all keyword:
+
+        * `presets` — the scenario entry's preset names, `{"tof": ...,
+          "detector": ...}` off `world/scenario.Duck` (a value of None means
+          "no such sensor on this robot"). `"tof"` is the entry's RANGE
+          SENSOR, which on MARS is the lidar — see `Duck`'s docstring.
+        * `targets` — the detector's `sensors.detector.Target` list, which
+          only the World can build (it spans every body in the room).
+        * `seed` — a zero-argument callable returning the next seed. A
+          callable and not an int because the ORDER of draws off the World's
+          RNG is part of the duck's measured behaviour: the duck's ToF seed is
+          drawn before its detector's, and every golden bit and every seeded
+          soccer number was recorded that way.
+
+        The generic answer is NO SENSORS, and it is a true one rather than a
+        placeholder: a body at level 0 of §7.1's ladder (an MJCF and an id)
+        has declared no apertures, and a room is still a place it can stand
+        in. A body that wants senses says so by overriding this.
+        """
+        return {}
+
+
+#: How much floor a body gets per unit of its own width, centre to centre.
+#: NOT a design choice — a MEASUREMENT, back-derived from the one number the
+#: viewer has always drawn: 0.65 m of stage for a duck that is 0.1845 m across.
+#: Every other body's pitch is that ratio on ITS width, because one
+#: duck-sized constant put six 1.3 m G1 helpers inside each other.
+#: `tests/test_body_conformance.py` re-derives every registered body's
+#: `lab_spacing_m` from this, and `tests/test_lab_robots.py` pins the ratio
+#: itself against the duck's model.
+LAB_PITCH_RATIO = 3.52
+
+
+def widest_horizontal_extent_m(model: Any, data: Any) -> float:
+    """The widest HORIZONTAL extent of the whole robot, in metres.
+
+    The geom AABBs in WORLD axes — which is what must not overlap when two of
+    these stand side by side on the stage — over a `data` that has already
+    been posed and `mj_forward`ed. World geoms (`geom_bodyid == 0`: the floor
+    plane, a skybox) are skipped, or an infinite plane would answer for every
+    body.
+
+    The larger of the x and y extents, not the y one: MEASURED, MARS at HOME
+    folds its arm over a chassis whose rear tray overhangs 76 mm, so it is
+    longer (0.4135 m) than it is wide (0.3665 m), and taking y alone would
+    have parked two of them 0.7 m closer than their own bodies allow.
+
+    Lives here, beside the `lab_spacing_m` field it measures, because three
+    callers needed it and a duplicated ten-line AABB loop is a measurement
+    that can drift from itself: `MjcfBody` uses it to MEASURE a stranger's
+    robot at construction, and the two test modules use it to re-derive what
+    a declared body wrote down. `numpy` and `mujoco` are imported inside so
+    that importing this module still costs nothing — the module docstring's
+    `Any` annotations exist for the same reason.
+    """
+    import numpy as np
+
+    lo = np.full(3, np.inf)
+    hi = np.full(3, -np.inf)
+    for g in range(model.ngeom):
+        if model.geom_bodyid[g] == 0:            # world geoms (the floor plane)
+            continue
+        rot = data.geom_xmat[g].reshape(3, 3)
+        centre = data.geom_xpos[g] + rot @ model.geom_aabb[g, :3]
+        ext = np.abs(rot) @ model.geom_aabb[g, 3:]
+        lo = np.minimum(lo, centre - ext)
+        hi = np.maximum(hi, centre + ext)
+    return float(max(hi[0] - lo[0], hi[1] - lo[1]))
+
+
+def measure_lab_spacing_m(model: Any, keyframe: str | None = None
+                          ) -> tuple[float, float]:
+    """`(lab_spacing_m, measured_width_m)` for `model` at `keyframe`.
+
+    The pitch a body should declare, computed rather than typed. A per-body
+    number written by hand drifts from the model it describes the moment the
+    MJCF changes shape, and `MjcfBody` has no author to type one — so it
+    measures its own at construction and the conformance suite then re-derives
+    the same arithmetic and agrees to within 5 %.
+
+    `keyframe=None` measures at `qpos0`, for a model that has none.
+    """
+    import mujoco
+
+    data = mujoco.MjData(model)
+    if keyframe:
+        mujoco.mj_resetDataKeyframe(model, data, model.key(keyframe).id)
+    mujoco.mj_forward(model, data)
+    width = widest_horizontal_extent_m(model, data)
+    if not width > 0:
+        raise ValueError(
+            "the body measures 0 m across at "
+            f"{keyframe or 'qpos0'} — it has no geoms on any body, so there "
+            "is nothing to put on a stage or to draw")
+    return LAB_PITCH_RATIO * width, width
+
+
+def conforms(body: object) -> tuple[str, ...]:
+    """Which `Body` names `body` is missing — empty when it conforms.
+
+    The registry's gate, for two reasons. It SAYS what is wrong, because a
+    plugin author reading "not a Body" learns nothing. And it sees through a
+    lazy proxy, which `isinstance(x, Body)` does not — see the module
+    docstring; `G1_SPEC` is exactly such a proxy.
+
+    The names are spelled out rather than read from `Body.__protocol_attrs__`
+    so the ORDER of the message is the order the contract is documented in,
+    and so this keeps working if that private attribute moves. Two lists that
+    must agree is exactly the kind of duplication that drifts, so
+    `tests/test_registry.py` pins them against each other.
+    """
+    return tuple(n for n in WANTED if not hasattr(body, n))
+
+
+#: Every name a `Body` must have, in the order `Body` declares them.
+WANTED: Sequence[str] = (
+    "id", "title", "noun", "kind", "joint_names", "joint_groups",
+    "default_pose", "obs_dim", "num_actions", "lab_spacing_m",
+    "scene_fn", "stand_keyframe", "default_task",
+    "contract",
+    "ready", "fetch", "setup_hint", "visual_scene", "look",
+    "env_class", "tasks", "shipped_policies", "train_env_kwargs",
+    "attach", "driver", "frames", "make_sensors",
+)
+
+
+__all__ = ["LAB_PITCH_RATIO", "WANTED", "Body", "BodyBase", "RobotFrames",
+           "conforms", "measure_lab_spacing_m", "widest_horizontal_extent_m"]

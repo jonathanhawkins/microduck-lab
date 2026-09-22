@@ -251,11 +251,11 @@ def test_with_the_knob_off_the_plan_is_unchanged_and_on_it_stays_inside_the_aim_
         ball = b.tracker.best("ball", 0.1, min_hits=1)
         return b, b._plan(odom, ball)
     assert ChaseParams().kick_select is True                        # ships on since 2026-09-07 (confirmed on fresh seeds)
-    off = ChaseParams(kick_select=False)                             # the pre-2026-09-07 planner
+    off = ChaseParams(kick_select=False, board_push=0.0)              # the pre-2026-09-07 planner
     b0, plan_off = plan(off, (0.0, 0.0, 0.0), 0.2)
-    b1, plan_off2 = plan(ChaseParams(kick_select=False), (0.0, 0.0, 0.0), 0.2)
+    b1, plan_off2 = plan(ChaseParams(kick_select=False, board_push=0.0), (0.0, 0.0, 0.0), 0.2)
     assert plan_off == plan_off2 and b0.last_select is None and b1.last_select is None
-    on = ChaseParams()
+    on = ChaseParams(board_push=0.0)                                  # isolate the selector from the board push
     # Facing our OWN mouth from 0.4 m out (the ball 0.5 m ahead of a duck at
     # x = -0.6): straight ahead puts two thirds of kicks in our net, the
     # edge lines of the aim window 7-9% (measured, see the knob). The
@@ -277,7 +277,7 @@ def test_with_the_knob_off_the_plan_is_unchanged_and_on_it_stays_inside_the_aim_
     exit_a = on.kick_exit_left if v.foot == "kick_left" else on.kick_exit_right
     assert abs(_wrap(v.heading + exit_a - los)) > 1.2
     # Mellmann's zero tolerance would refuse every line there and keep the clamp's.
-    strict = ChaseParams(kick_select=True, kick_select_t_own=0.0)
+    strict = ChaseParams(kick_select=True, kick_select_t_own=0.0, board_push=0.0)
     b, _ = plan(strict, odom, 0.0, 0.5)
     assert b.last_select is None
 

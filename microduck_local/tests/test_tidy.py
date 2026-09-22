@@ -380,6 +380,62 @@ def test_a_tethered_brain_reads_its_latency_off_the_sensor_ages_and_stops_earlie
     assert out[0].twist[0] == 0.0 and abs(out[5].twist[0] - 0.2) < 1e-9        # at t=0.25 the one from t=0.10... within a tick
 
 
+def test_a_tether_ages_the_scan_too_and_hands_out_nothing_before_it_arrives():
+    """The complement of the case above, for the OTHER range channel.
+
+    `Tether.senses_in` has one clause per sensor frame, and a channel missing
+    from them does not fail loudly — it keeps the age it was stamped with when
+    the snapshot was taken, which is half a round trip too fresh. `lidar` was
+    missing from both until 2026-09-21, and the `/sim` inspector's range row
+    (`brain/runtime.age_inputs`, which labels itself after the device the body
+    carries) read 0.00-0.16 s on a tethered MARS while the scan the brain held
+    was 0.14-0.30 s old, and never went stale against its own 0.25 s gate.
+
+    Asserted against the age of the frame THE BRAIN IS HOLDING — `s.t -
+    s.lidar.t`, recomputed here — and not against a bound like `<= 1/6 + lag`,
+    which the broken sawtooth also satisfied. A/B'd against the break planted
+    three ways (each clause alone, then both): caught at t=0.00 for the
+    cold-start leak and t=0.14 for the un-aged hand-off. The first version of
+    this case was TOOTHLESS against the cold-start half — `if s.lidar is None`
+    simply never ran when the link leaked, and the leaked frame ages
+    consistently — hence the `t < half` complement below.
+    """
+    from microduck_local.brain.runtime import age_inputs
+    from microduck_local.brain.tether import Tether
+    from microduck_local.sensors.lidar import LidarFrame
+
+    def scan(t):
+        return LidarFrame(t=t, ranges=np.full(8, 2.0, np.float32),
+                          angles=np.zeros(8, np.float32), valid=np.ones(8, bool))
+
+    th, gate = Tether(0.25), 0.25                     # 250 ms RTT, the tidy brain's own gate
+    last, seen, stale, blind = scan(0.0), 0, 0, 0
+    for k in range(40):                               # 0.8 s on the 50 Hz control grid
+        t = 0.02 * k
+        if t - last.t >= 1 / 6.0 - 1e-9:              # the device's own 6 Hz
+            last = scan(t)
+        s = th.senses_in(Senses(t=t, lidar=last, lidar_age=t - last.t,
+                                speed=0.0, odom=(0.0, 0.0, 0.0)))
+        if t < th.half - 1e-9:
+            # NOT "if s.lidar is None" — that clause is vacuous when the link
+            # leaks, and the leaked frame's age is self-consistent, so the
+            # equality below passes on it. The complement is the assertion:
+            # before the one-way lag elapses the brain has NOTHING.
+            assert s.lidar is None and s.lidar_age is None, (t, s.lidar_age)
+            blind += 1
+            continue
+        seen += 1
+        true_age = s.t - s.lidar.t
+        row = age_inputs(s, gate, 0.4)["lidar"]
+        assert row["age"] == pytest.approx(true_age, abs=1e-3), (t, row, true_age)
+        assert row["stale"] is (true_age > gate), (t, row, true_age)
+        stale += row["stale"]
+    assert blind >= 6 and seen >= 25, (blind, seen)
+    # The link is 250 ms and a scan is 167 ms, so the frame in hand DOES go
+    # past the gate every period — the whole reason a brain reads this row.
+    assert stale > 0, "a 250 ms tether never showed the scan as stale"
+
+
 def test_tidy_can_back_straight_out_of_the_rim_instead():
     """`backoff_back_s`: the sidestep-turn-walk above exists because the
     walker "cannot walk backwards" — a dead-band reading. It reverses at

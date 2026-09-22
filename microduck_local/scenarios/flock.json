@@ -1,0 +1,155 @@
+{
+ "name": "flock",
+ "seed": 0,
+ "floor": {
+  "size": [
+   7.0,
+   6.0
+  ]
+ },
+ "walls": [
+  {
+   "from": [
+    -3.25,
+    -2.75
+   ],
+   "to": [
+    3.25,
+    -2.75
+   ],
+   "height": 0.3,
+   "thickness": 0.02
+  },
+  {
+   "from": [
+    3.25,
+    -2.75
+   ],
+   "to": [
+    3.25,
+    2.75
+   ],
+   "height": 0.3,
+   "thickness": 0.02
+  },
+  {
+   "from": [
+    3.25,
+    2.75
+   ],
+   "to": [
+    -3.25,
+    2.75
+   ],
+   "height": 0.3,
+   "thickness": 0.02
+  },
+  {
+   "from": [
+    -3.25,
+    2.75
+   ],
+   "to": [
+    -3.25,
+    -2.75
+   ],
+   "height": 0.3,
+   "thickness": 0.02
+  }
+ ],
+ "boxes": [],
+ "balls": [],
+ "ducks": [
+  {
+   "id": "d0",
+   "spawn": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "policy": "pollen:alpha_walking",
+   "tof": "datasheet",
+   "detector": "datasheet",
+   "brain": "learned:follow-v4"
+  },
+  {
+   "id": "d1",
+   "spawn": [
+    -0.6,
+    0.5,
+    0.0
+   ],
+   "policy": "pollen:alpha_walking",
+   "tof": "datasheet",
+   "detector": "datasheet",
+   "brain": "learned:follow-v4"
+  },
+  {
+   "id": "d2",
+   "spawn": [
+    -0.6,
+    -0.5,
+    0.0
+   ],
+   "policy": "pollen:alpha_walking",
+   "tof": "datasheet",
+   "detector": "datasheet",
+   "brain": "learned:follow-v4"
+  },
+  {
+   "id": "d3",
+   "spawn": [
+    -1.2,
+    0.9,
+    0.0
+   ],
+   "policy": "pollen:alpha_walking",
+   "tof": "datasheet",
+   "detector": "datasheet",
+   "brain": "learned:follow-v4"
+  },
+  {
+   "id": "d4",
+   "spawn": [
+    -1.2,
+    -0.9,
+    0.0
+   ],
+   "policy": "pollen:alpha_walking",
+   "tof": "datasheet",
+   "detector": "datasheet",
+   "brain": "learned:follow-v4"
+  }
+ ],
+ "persons": [
+  {
+   "id": "p0",
+   "pos": [
+    1.2,
+    0.0
+   ],
+   "yaw": 1.57,
+   "path": [
+    [
+     1.5,
+     1.5
+    ],
+    [
+     -1.5,
+     1.5
+    ],
+    [
+     -1.5,
+     -1.5
+    ],
+    [
+     1.5,
+     -1.5
+    ]
+   ],
+   "speed": 0.5,
+   "kind": "g1",
+   "yield_m": 0.45
+  }
+ ]
+}

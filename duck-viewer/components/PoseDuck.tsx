@@ -1,6 +1,6 @@
 "use client";
 
-// The 🎬 preview duck: a translucent ghost that shows the pose the animation
+// The 🎬 preview robot: a translucent ghost that shows the pose the animation
 // editor is currently authoring. It is NOT a lab duck — no env, no policy, no
 // WS stream. Its body transforms come from POST /pose (forward kinematics on
 // the server's scratch model), so previewing can never perturb a live episode.
@@ -10,13 +10,23 @@
 // SCREEN ANGLE around the joint's projected pivot back onto the hinge axis, so
 // circling the cursor around a knee bends the knee the way it looks like it
 // should — and it degrades gracefully when the axis points across the screen.
+//
+// In 🎯 ik mode the surface is the effectors instead: one grabbable sphere per
+// foot / hand / head, dragged in the view plane, and the server's solver
+// (POST /ik) finds the joints that put it there.
+//
+// It draws whichever body the editor is posing (animStore.robot): the duck
+// from the stage's own scene, any other robot from a /scene fetched here once.
+// Every metre-sized constant below is multiplied by the body's `sizeScale`,
+// so the G1's gizmos are G1-sized instead of duck-sized dots on a 1.3 m body.
 
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { Html } from "@react-three/drei";
 import * as THREE from "three";
-import type { Scene } from "@/lib/lab";
-import { RIG_CONTROLS } from "@/lib/rig";
+import { fetchScene, type RobotId, type Scene } from "@/lib/lab";
+import { rigControlsFor } from "@/lib/rig";
+import { dragPointOnViewPlane, ikDragStep, type V3 } from "@/lib/ikdrag";
 import { buildBodyGeometries, type BodyGeometry } from "./Duck";
 import {
   animStore,
@@ -25,21 +35,41 @@ import {
   BALANCE_OUT,
   BALANCE_STANCE,
   balanceState,
-  PREVIEW_OFFSET,
+  effectorForBody,
+  previewOffset,
   ROOT_SEL,
   setSelected,
+  setSelectedEffector,
   setSelectedRig,
   subscribeAnim,
 } from "@/lib/anim";
 
-// One extra merged-geometry set for the whole app, cached across mounts: the
-// panel toggles this component on and off, and rebuilding ~16 merged meshes
-// from the 20 MB scene payload each time would hitch the frame.
-let geomCache: { scene: Scene; bodies: BodyGeometry[] } | null = null;
+// One merged-geometry set per scene for the whole app, cached across mounts:
+// the panel toggles this component on and off (and switches robots), and
+// rebuilding ~16 merged meshes from the 20 MB scene payload each time would
+// hitch the frame. Keyed weakly so a scene the viewer drops is collectable.
+const geomCache = new WeakMap<Scene, BodyGeometry[]>();
 function previewGeometries(scene: Scene): BodyGeometry[] {
-  if (!geomCache || geomCache.scene !== scene)
-    geomCache = { scene, bodies: buildBodyGeometries(scene) };
-  return geomCache.bodies;
+  let bodies = geomCache.get(scene);
+  if (!bodies) {
+    bodies = buildBodyGeometries(scene);
+    geomCache.set(scene, bodies);
+  }
+  return bodies;
+}
+
+// The mesh set of a robot other than the stage's duck, fetched once per
+// robot for the life of the page (the G1's is ~21 MB; the panel is not the
+// place to pay that twice).
+const sceneCache = new Map<RobotId, Promise<Scene>>();
+function ghostScene(robot: RobotId): Promise<Scene> {
+  let p = sceneCache.get(robot);
+  if (!p) {
+    p = fetchScene(robot);
+    sceneCache.set(robot, p);
+    p.catch(() => sceneCache.delete(robot)); // a 404 (assets not fetched) may be fixed later
+  }
+  return p;
 }
 
 const GHOST = new THREE.Color("#5fd0bd");
@@ -54,9 +84,12 @@ const EMIT_SELECTED = new THREE.Color("#5a4108");
 const MIN_AXIS_Z = 0.22;
 /** Angle noise near the pivot is huge; ignore until the cursor is out here. */
 const MIN_RADIUS_PX = 18;
-/** Eye offset from the preview duck's trunk for the ◎ focus button (three.js
- *  world). ~1 m back reads the whole 25 cm robot without clipping. */
+/** Eye offset from the preview robot's trunk for the ◎ focus button (three.js
+ *  world), for a duck-sized body. ~1 m back reads the whole 25 cm robot
+ *  without clipping; a bigger body scales it out. */
 const EYE: [number, number, number] = [0.8, 0.39, 0.94];
+/** How far above the trunk the "🎬 pose" label floats (duck-sized). */
+const LABEL_RISE = 0.24;
 
 interface DragState {
   joint: number; // joint index, or ROOT_SEL — in rig mode, the GEAR joint
@@ -76,6 +109,35 @@ const HANDLE_GAIN = 0.005;
 const HANDLE_IDLE = new THREE.Color("#5fd0bd");
 const HANDLE_HOVER = new THREE.Color("#a9f0e4");
 const HANDLE_DRAG = new THREE.Color("#ffd166");
+/** The diamond's radius, its rail's half-length and thickness, and where its
+ *  name hangs below it — duck-sized metres. */
+const HANDLE_R = 0.016;
+const HANDLE_RAIL = 0.085;
+const HANDLE_RAIL_R = 0.0016;
+const HANDLE_LABEL_DROP = 0.062;
+
+// --- the 🎯 IK handles: one grabbable sphere per effector -----------------
+// Dragged in the VIEW PLANE (lib/ikdrag.ts): the pointer moves the point at
+// the depth it already sits at. The colour is the answer at a glance —
+// selected gold, hovered light, idle the ghost's teal, and amber once the
+// solver could not get the limb there (a residual past IK_AMBER_M).
+const IK_GIZMO_R = 0.013;
+/** Residual beyond which a handle is drawn amber, duck-sized metres: a
+ *  centimetre is where "not quite" becomes "that pose does not exist". */
+const IK_AMBER_M = 0.01;
+const IK_AMBER = new THREE.Color(BALANCE_OUT);
+
+interface IkDragState {
+  id: string;
+  /** Where the pointer ray last crossed the drag plane, three.js WORLD. */
+  lastHit: V3 | null;
+  /** Effector minus hit at the grab (world), so the handle keeps its
+   *  relationship to the pointer through the gesture. */
+  grabOffset: V3;
+  /** The camera's view direction at the grab — the plane normal. Orbit is
+   *  parked for the gesture, so it does not change. */
+  viewDir: V3;
+}
 
 // --- the ⊕ CoM marker: ball, plumb line, crosshair on the ground ----------
 // Inside `rootRef` the frame is MuJoCo world, Z UP (hence the locator ring at
@@ -88,6 +150,10 @@ const COM_BALL_R = 0.009;
 const CROSS_ARM = 0.024;
 /** Just off the floor, under the locator ring: co-planar would z-fight. */
 const FLOOR_Z = 0.0022;
+const PLUMB_R = 0.0012;
+const CROSS_RING: [number, number] = [0.0105, 0.0125];
+/** The locator ring under the whole ghost. */
+const LOCATOR_RING: [number, number] = [0.15, 0.175];
 const COM_IN = new THREE.Color(BALANCE_IN);
 const COM_STANCE = new THREE.Color(BALANCE_STANCE);
 const COM_OUT = new THREE.Color(BALANCE_OUT);
@@ -129,20 +195,45 @@ function fillLoop(loop: THREE.LineLoop, outline: number[][]) {
   loop.geometry.setDrawRange(0, n);
 }
 
+const v3 = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
+
+/** The ghost of whichever body the editor is posing. `scene` is the stage's
+ *  duck; another robot's meshes are fetched here (once) and nothing is drawn
+ *  until they arrive. Keyed by robot so a switch remounts the body cleanly —
+ *  the per-body ref arrays are the wrong length for the other one. */
 export function PoseDuck({ scene }: { scene: Scene }) {
-  const visible = useSyncExternalStore(
-    subscribeAnim,
-    () => animStore.visible,
-    () => false
-  );
+  useSyncExternalStore(subscribeAnim, animVersion, () => 0);
+  const visible = animStore.visible;
+  const robot = animStore.robot;
+  const [fetched, setFetched] = useState<{ robot: RobotId; scene: Scene } | null>(null);
+  useEffect(() => {
+    if (!visible || robot === "microduck") return;
+    let stale = false;
+    ghostScene(robot)
+      .then((s) => {
+        if (!stale) setFetched({ robot, scene: s });
+      })
+      .catch(() => {
+        // the panel already shows the /joints error for a body this lab lacks
+      });
+    return () => {
+      stale = true;
+    };
+  }, [visible, robot]);
   if (!visible) return null;
-  return <PoseDuckBody scene={scene} />;
+  const ghost = robot === "microduck" ? scene : fetched?.robot === robot ? fetched.scene : null;
+  if (!ghost) return null;
+  return <PoseDuckBody key={robot} scene={ghost} />;
 }
 
 function PoseDuckBody({ scene }: { scene: Scene }) {
   // Re-render on selection changes so materials/labels stay in step even when
   // no frame is being drawn (the per-frame path below does the fast work).
   useSyncExternalStore(subscribeAnim, animVersion, () => 0);
+  // Everything sized in metres is for a duck; this body's size against it
+  // scales the lot. Constant for the life of this mount (keyed by robot).
+  const S = animStore.sizeScale;
+  const offset = previewOffset(S);
 
   const bodies = useMemo(() => previewGeometries(scene), [scene]);
   const { camera, gl } = useThree();
@@ -154,6 +245,7 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
   const labelDivRef = useRef<HTMLDivElement>(null);
   const drag = useRef<DragState | null>(null);
   const rigDrag = useRef<{ lastY: number; id: string } | null>(null);
+  const ikDrag = useRef<IkDragState | null>(null);
   const handleHover = useRef(false);
   const handleRef = useRef<THREE.Group>(null);
   const handleMatRefs = useRef<(THREE.MeshBasicMaterial | null)[]>([]);
@@ -164,6 +256,17 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     over: (e: ThreeEvent<PointerEvent>) => void;
     out: () => void;
   } | null>(null);
+  // Same arrangement for the 🎯 handles: `begin` starts a drag of one
+  // effector from a pointer position (a gizmo grab or a body click in ik
+  // mode) and says whether it could.
+  const ikGestures = useRef<{
+    begin: (id: string, clientX: number, clientY: number) => boolean;
+    over: (id: string) => void;
+    out: (id: string) => void;
+  } | null>(null);
+  const gizmoRefs = useRef<Record<string, THREE.Mesh | null>>({});
+  const gizmoMatRefs = useRef<Record<string, THREE.MeshBasicMaterial | null>>({});
+  const hoverEffector = useRef<string | null>(null);
   const comRef = useRef<THREE.Group>(null);
   const comBallRef = useRef<THREE.Mesh>(null);
   const comPlumbRef = useRef<THREE.Mesh>(null);
@@ -194,10 +297,13 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
   const axisV = useMemo(() => new THREE.Vector3(), []);
   const comV = useMemo(() => new THREE.Vector3(), []);
   const viewerDir = useMemo(() => new THREE.Vector3(), []);
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+  const ndc = useMemo(() => new THREE.Vector2(), []);
 
   // --- per-frame: apply the previewed pose + selection tinting -------------
   useFrame((state, dt) => {
     const pose = animStore.bodies;
+    const meta = animStore.meta;
     // Until the first POST /pose lands, every body group still sits at the
     // group origin — a heap of parts on the floor. Stay hidden instead.
     if (rootRef.current) rootRef.current.visible = pose !== null;
@@ -214,22 +320,25 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
         grp.position.lerp(tmpP, alpha);
         grp.quaternion.slerp(tmpQ, alpha);
       });
-      const trunk = pose[1];
+      const trunk = pose[meta?.trunkBody ?? 1];
       if (labelRef.current && trunk)
-        labelRef.current.position.set(trunk[0], trunk[1], trunk[2] + 0.24);
+        labelRef.current.position.set(trunk[0], trunk[1], trunk[2] + LABEL_RISE * S);
       // The ⇕ handle parks at the ACTIVE control's anchor body (world-frame
       // offset, world-vertical rail) — it follows the part it moves and jumps
       // when the selection changes, which is how you see what it is armed with.
-      const meta = animStore.meta;
+      const controlsHere = rigControlsFor(meta);
       const active =
-        RIG_CONTROLS.find((c) => c.id === (animStore.selectedRig?.id ?? "squat")) ??
-        RIG_CONTROLS[0];
+        controlsHere.find((c) => c.id === (animStore.selectedRig?.id ?? "squat")) ?? controlsHere[0];
       const anchorBody =
-        active.handle.joint === "root"
-          ? meta?.trunkBody
-          : meta?.joints.find((j) => j.name === active.handle.joint)?.body;
+        !active
+          ? undefined
+          : active.handle.joint === "root"
+            ? meta?.trunkBody
+            : meta?.joints.find((j) => j.name === active.handle.joint)?.body;
       const anchorGrp = anchorBody != null ? groupRefs.current[anchorBody] : null;
-      if (handleRef.current && anchorGrp) {
+      if (handleRef.current) handleRef.current.visible = !!anchorGrp;
+      if (handleRef.current && anchorGrp && active) {
+        // The offsets are the server's, in THIS body's metres — not scaled.
         const [ox, oy, oz] = active.handle.offset;
         handleRef.current.position.set(
           anchorGrp.position.x + ox,
@@ -238,6 +347,33 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
         );
         const c = rigDrag.current ? HANDLE_DRAG : handleHover.current ? HANDLE_HOVER : HANDLE_IDLE;
         handleMatRefs.current.forEach((m) => m?.color.copy(c));
+      }
+    }
+    // --- the 🎯 IK handles -----------------------------------------------
+    // Positions come with every /pose answer, so like `bodies` they are read
+    // here per-frame and never cost a render.
+    const effs = animStore.mode === "ik" && pose ? animStore.effectors : null;
+    for (const [id, mesh] of Object.entries(gizmoRefs.current)) {
+      if (!mesh) continue;
+      const at = effs?.[id];
+      mesh.visible = !!at;
+      if (!at) continue;
+      tmpP.set(at[0], at[1], at[2]);
+      // Straight to the mark the first time: lerping out of the group
+      // origin would streak the ball across the floor.
+      if (mesh.position.lengthSq() === 0) mesh.position.copy(tmpP);
+      else mesh.position.lerp(tmpP, alpha);
+      const m = gizmoMatRefs.current[id];
+      if (m) {
+        const short = (animStore.ikResidual[id] ?? 0) > IK_AMBER_M * S;
+        const c = short
+          ? IK_AMBER
+          : animStore.selectedEffector === id
+            ? HANDLE_DRAG
+            : hoverEffector.current === id
+              ? HANDLE_HOVER
+              : HANDLE_IDLE;
+        m.color.copy(c);
       }
     }
     // --- the ⊕ CoM marker ---------------------------------------------
@@ -284,14 +420,18 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     }
     const sel = animStore.selected;
     const selBody =
-      sel == null ? -1 : animStore.meta?.joints.find((j) => j.index === sel)?.body ?? -1;
-    const rootBody = sel === ROOT_SEL ? animStore.meta?.trunkBody ?? -1 : -1;
+      sel == null ? -1 : meta?.joints.find((j) => j.index === sel)?.body ?? -1;
+    const rootBody = sel === ROOT_SEL ? meta?.trunkBody ?? -1 : -1;
     // A selected rig control lights up EVERY body it drives — the coupling is
     // the thing being edited, and the highlight is how you read its extent.
+    // A selected effector lights up its body: the part the solver moves.
     const rigBodies = animStore.selectedRig?.bodies;
+    const effBody = animStore.selectedEffector
+      ? meta?.effectors.find((e) => e.id === animStore.selectedEffector)?.body ?? -1
+      : -1;
     matRefs.current.forEach((m, b) => {
       if (!m) return;
-      const isSel = rigBodies ? rigBodies.includes(b) : b === selBody || b === rootBody;
+      const isSel = rigBodies ? rigBodies.includes(b) : b === selBody || b === rootBody || b === effBody;
       const isHover = !isSel && b === animStore.hoveredBody;
       m.color.copy(isSel ? SELECTED : isHover ? GHOST_HOVER : GHOST);
       m.emissive.copy(isSel ? EMIT_SELECTED : EMIT_IDLE);
@@ -304,20 +444,20 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
       const c = state.controls as unknown as
         | { target: THREE.Vector3; update?: () => void }
         | null;
-      const trunk = pose[1];
+      const trunk = pose[meta?.trunkBody ?? 1];
       if (c && trunk) {
         // MuJoCo (x, y, z) → three.js world (x, z, -y) through the scene's
-        // -90°-about-X group, plus this duck's grid offset.
-        const wx = trunk[0] + PREVIEW_OFFSET[0];
+        // -90°-about-X group, plus this robot's grid offset.
+        const wx = trunk[0] + offset[0];
         const wy = trunk[2];
-        const wz = -(trunk[1] + PREVIEW_OFFSET[1]);
-        camera.position.set(wx + EYE[0], wy + EYE[1], wz + EYE[2]);
+        const wz = -(trunk[1] + offset[1]);
+        camera.position.set(wx + EYE[0] * S, wy + EYE[1] * S, wz + EYE[2] * S);
         const anchor = new THREE.Vector3(wx, wy, wz);
         c.target.copy(anchor);
         camera.lookAt(c.target);
         camera.updateMatrixWorld();
-        // Frame the duck in the stage the editor panel is NOT covering. The
-        // target is aimed BELOW the duck (which lifts it on screen) by an
+        // Frame the robot in the stage the editor panel is NOT covering. The
+        // target is aimed BELOW the robot (which lifts it on screen) by an
         // amount measured through the actual projection — one finite-
         // difference probe beats any hand-tuned metre offset, and it stays
         // right at other FOVs, aspect ratios and panel heights.
@@ -359,6 +499,24 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     return { pivot, axis };
   };
 
+  /** An effector's CURRENT position (the server's last answer) in three.js
+   *  world — the anchor of its drag plane. */
+  const effectorWorld = (id: string): THREE.Vector3 | null => {
+    const p = animStore.effectors?.[id];
+    const root = rootRef.current;
+    if (!p || !root) return null;
+    root.updateWorldMatrix(true, false);
+    return root.localToWorld(new THREE.Vector3(p[0], p[1], p[2]));
+  };
+
+  /** The pointer's ray into the scene, from client pixels. */
+  const pointerRay = (clientX: number, clientY: number): THREE.Ray => {
+    const rect = gl.domElement.getBoundingClientRect();
+    ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    return raycaster.ray;
+  };
+
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       // The ⇕ handle: vertical pixels → radians of whichever control it was
@@ -368,6 +526,24 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
         const dy = e.clientY - rd.lastY;
         rd.lastY = e.clientY;
         animStore.applyRigDelta?.(rd.id, dy * HANDLE_GAIN * (e.shiftKey ? 0.25 : 1));
+        return;
+      }
+      // A 🎯 handle: the pointer ray meets the plane through the effector's
+      // current position, facing the camera; the solver is asked for that
+      // point (in the ghost group's own frame, the one /pose reports in).
+      const ik = ikDrag.current;
+      if (ik) {
+        const at = effectorWorld(ik.id);
+        const root = rootRef.current;
+        if (!at || !root) return;
+        const ray = pointerRay(e.clientX, e.clientY);
+        const hit = dragPointOnViewPlane(v3(ray.origin), v3(ray.direction), v3(at), ik.viewDir);
+        if (!hit) return;
+        const step = ikDragStep(v3(at), hit, ik.lastHit, ik.grabOffset, ik.viewDir, e.shiftKey ? 0.25 : 1);
+        ik.lastHit = hit;
+        ik.grabOffset = step.grabOffset;
+        const local = root.worldToLocal(new THREE.Vector3(step.target[0], step.target[1], step.target[2]));
+        animStore.applyIkDrag?.(ik.id, [local.x, local.y, local.z]);
         return;
       }
       const d = drag.current;
@@ -405,9 +581,10 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
       else animStore.applyJointDelta?.(d.joint, step);
     };
     const onUp = () => {
-      if (!drag.current && !rigDrag.current) return;
+      if (!drag.current && !rigDrag.current && !ikDrag.current) return;
       drag.current = null;
       rigDrag.current = null;
+      ikDrag.current = null;
       animStore.dragging = false;
       if (controls) controls.enabled = true;
       gl.domElement.style.cursor = "";
@@ -436,11 +613,43 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
         if (!animStore.dragging) gl.domElement.style.cursor = "";
       },
     };
+    // The 🎯 handles, same lifecycle. `begin` is shared by a gizmo grab and
+    // an ik-mode body click: both anchor the drag plane at the effector, so
+    // the pointer's offset from it at the grab is kept through the gesture.
+    ikGestures.current = {
+      begin: (id, clientX, clientY) => {
+        const at = effectorWorld(id);
+        if (!at) return false;
+        const viewDir = v3(camera.getWorldDirection(tmpV));
+        const ray = pointerRay(clientX, clientY);
+        const hit = dragPointOnViewPlane(v3(ray.origin), v3(ray.direction), v3(at), viewDir);
+        ikDrag.current = {
+          id,
+          lastHit: hit,
+          grabOffset: hit ? [at.x - hit[0], at.y - hit[1], at.z - hit[2]] : [0, 0, 0],
+          viewDir,
+        };
+        setSelectedEffector(id);
+        animStore.dragging = true;
+        if (controls) controls.enabled = false;
+        gl.domElement.style.cursor = "grabbing";
+        return true;
+      },
+      over: (id) => {
+        hoverEffector.current = id;
+        if (!animStore.dragging) gl.domElement.style.cursor = "grab";
+      },
+      out: (id) => {
+        if (hoverEffector.current === id) hoverEffector.current = null;
+        if (!animStore.dragging) gl.domElement.style.cursor = "";
+      },
+    };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
     return () => {
       handleGestures.current = null;
+      ikGestures.current = null;
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
@@ -451,6 +660,16 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
 
   const onBodyDown = (b: number) => (e: ThreeEvent<PointerEvent>) => {
     const meta = animStore.meta;
+    // IK mode: the clicked part selects the effector whose limb it is on
+    // (a shin → that foot) and drags it. A part no effector moves falls
+    // through to plain joint editing.
+    if (animStore.mode === "ik" && meta) {
+      const eff = effectorForBody(meta, b);
+      if (eff && ikGestures.current?.begin(eff.id, e.nativeEvent.clientX, e.nativeEvent.clientY)) {
+        e.stopPropagation();
+        return;
+      }
+    }
     // Rig mode: the clicked part selects its mapped control, and the drag
     // circles the gear joint's hinge but drives the whole coupling.
     const pick = animStore.mode === "rig" ? animStore.rigForBody[b] : null;
@@ -479,16 +698,19 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
     gl.domElement.style.cursor = "grabbing";
   };
 
+  const effectors = animStore.meta?.effectors ?? [];
   const selectedName = animStore.selectedRig
     ? `🎮 ${animStore.selectedRig.label}`
-    : animStore.selected == null
-      ? null
-      : animStore.selected === ROOT_SEL
-        ? "root pitch"
-        : animStore.meta?.joints[animStore.selected]?.name ?? null;
+    : animStore.selectedEffector
+      ? `🎯 ${effectors.find((x) => x.id === animStore.selectedEffector)?.label ?? animStore.selectedEffector}`
+      : animStore.selected == null
+        ? null
+        : animStore.selected === ROOT_SEL
+          ? "root pitch"
+          : animStore.meta?.joints[animStore.selected]?.name ?? null;
 
   return (
-    <group ref={rootRef} visible={false} position={[PREVIEW_OFFSET[0], PREVIEW_OFFSET[1], 0]}>
+    <group ref={rootRef} visible={false} position={[offset[0], offset[1], 0]}>
       {bodies.map((body, b) =>
         body.geometry ? (
           <group key={b} ref={(el) => void (groupRefs.current[b] = el)}>
@@ -524,8 +746,8 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
 
       {/* The ⇕ rig handle — the way a game rig gives the animator one grabbable
           control per track: it drives the SELECTED rig control (squat when
-          nothing is selected), parks at that control's anchor on the duck, and
-          wears its name. Grab it, drag down = +. */}
+          nothing is selected), parks at that control's anchor on the robot,
+          and wears its name. Grab it, drag down = +. */}
       <group
         ref={handleRef}
         onPointerDown={(e) => handleGestures.current?.down(e)}
@@ -534,11 +756,11 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
       >
         {/* diamond, with a vertical travel rail through it (trunk +z) */}
         <mesh>
-          <octahedronGeometry args={[0.016, 0]} />
+          <octahedronGeometry args={[HANDLE_R * S, 0]} />
           <meshBasicMaterial ref={(el) => void (handleMatRefs.current[0] = el)} color={HANDLE_IDLE} />
         </mesh>
         <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <cylinderGeometry args={[0.0016, 0.0016, 0.085, 6]} />
+          <cylinderGeometry args={[HANDLE_RAIL_R * S, HANDLE_RAIL_R * S, HANDLE_RAIL * S, 6]} />
           <meshBasicMaterial
             ref={(el) => void (handleMatRefs.current[1] = el)}
             color={HANDLE_IDLE}
@@ -547,7 +769,7 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
           />
         </mesh>
         {/* the handle wears the name of the control it is armed with */}
-        <Html center zIndexRange={[10, 0]} position={[0, 0, -0.062]} style={{ pointerEvents: "none" }}>
+        <Html center zIndexRange={[10, 0]} position={[0, 0, -HANDLE_LABEL_DROP * S]} style={{ pointerEvents: "none" }}>
           <div
             style={{
               color: "#8ee6d6",
@@ -562,15 +784,49 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
         </Html>
       </group>
 
+      {/* The 🎯 IK handles: one sphere per effector, at the point the solver
+          moves, shown in ik mode only. Drawn through the shell (depthTest
+          off) — a sole's centre is inside the foot. Raycasting does not
+          honour `visible`, so outside ik mode the handlers let the event
+          through to the body part behind. */}
+      {effectors.map((e) => (
+        <mesh
+          key={e.id}
+          ref={(el) => void (gizmoRefs.current[e.id] = el)}
+          visible={false}
+          renderOrder={4}
+          onPointerDown={(ev) => {
+            if (animStore.mode !== "ik") return;
+            if (ikGestures.current?.begin(e.id, ev.nativeEvent.clientX, ev.nativeEvent.clientY))
+              ev.stopPropagation();
+          }}
+          onPointerOver={(ev) => {
+            if (animStore.mode !== "ik") return;
+            ev.stopPropagation();
+            ikGestures.current?.over(e.id);
+          }}
+          onPointerOut={() => ikGestures.current?.out(e.id)}
+        >
+          <sphereGeometry args={[IK_GIZMO_R * S, 16, 12]} />
+          <meshBasicMaterial
+            ref={(el) => void (gizmoMatRefs.current[e.id] = el)}
+            color={HANDLE_IDLE}
+            transparent
+            opacity={0.85}
+            depthTest={false}
+          />
+        </mesh>
+      ))}
+
       {/* The ⊕ CoM marker: a ball at the centre of mass, a plumb line to the
           floor, and a crosshair where it lands, green once that point is
           inside a sole. renderOrder + depthTest off, because the CoM is
-          INSIDE the shell and a marker you cannot see through the duck
+          INSIDE the shell and a marker you cannot see through the robot
           answers nothing. three.js takes groupOrder from EVERY Group it
           descends through, so the inner group carries it again. */}
       <group ref={comRef} visible={false} renderOrder={3}>
         <mesh ref={comBallRef}>
-          <sphereGeometry args={[COM_BALL_R, 16, 12]} />
+          <sphereGeometry args={[COM_BALL_R * S, 16, 12]} />
           <meshBasicMaterial
             ref={(el) => void (comMatRefs.current[0] = el)}
             color={BALANCE_OUT}
@@ -580,7 +836,7 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
           />
         </mesh>
         <mesh ref={comPlumbRef} rotation={[Math.PI / 2, 0, 0]}>
-          <cylinderGeometry args={[0.0012, 0.0012, 1, 6]} />
+          <cylinderGeometry args={[PLUMB_R * S, PLUMB_R * S, 1, 6]} />
           <meshBasicMaterial
             ref={(el) => void (comMatRefs.current[1] = el)}
             color={BALANCE_OUT}
@@ -592,7 +848,7 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
         </mesh>
         <group ref={comCrossRef} renderOrder={3}>
           <mesh>
-            <planeGeometry args={[CROSS_ARM * 2, 0.0018]} />
+            <planeGeometry args={[CROSS_ARM * 2 * S, 0.0018 * S]} />
             <meshBasicMaterial
               ref={(el) => void (comMatRefs.current[2] = el)}
               color={BALANCE_OUT}
@@ -604,7 +860,7 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
             />
           </mesh>
           <mesh>
-            <planeGeometry args={[0.0018, CROSS_ARM * 2]} />
+            <planeGeometry args={[0.0018 * S, CROSS_ARM * 2 * S]} />
             <meshBasicMaterial
               ref={(el) => void (comMatRefs.current[3] = el)}
               color={BALANCE_OUT}
@@ -616,7 +872,7 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
             />
           </mesh>
           <mesh>
-            <ringGeometry args={[0.0105, 0.0125, 28]} />
+            <ringGeometry args={[CROSS_RING[0] * S, CROSS_RING[1] * S, 28]} />
             <meshBasicMaterial
               ref={(el) => void (comMatRefs.current[4] = el)}
               color={BALANCE_OUT}
@@ -635,7 +891,7 @@ function PoseDuckBody({ scene }: { scene: Scene }) {
 
       {/* Locator ring — the ghost is translucent and easy to lose on a busy floor. */}
       <mesh position={[0, 0, 0.005]}>
-        <ringGeometry args={[0.15, 0.175, 48]} />
+        <ringGeometry args={[LOCATOR_RING[0] * S, LOCATOR_RING[1] * S, 48]} />
         <meshBasicMaterial
           color="#5fd0bd"
           transparent

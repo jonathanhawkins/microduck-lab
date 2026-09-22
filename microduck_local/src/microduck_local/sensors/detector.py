@@ -30,6 +30,8 @@ from dataclasses import dataclass, fields, replace
 import mujoco
 import numpy as np
 
+from .ray import UNSENSED_GROUP
+
 DETECT_CLASSES = ("duck", "person", "ball", "marker", "toy", "basket", "post")
 
 # THE CALIBRATION REFERENCE, NOT THE ROBOT'S CAMERA — the distinction matters
@@ -519,9 +521,51 @@ NOMINAL_RADIUS = {"duck": 0.10, "person": 0.20, "ball": 0.035, "marker": 0.05, "
 
 
 class Detector:
+    """The head camera + NPU detector on one mount frame of a compiled model.
+
+    The mount is a SITE by default (`spec.site`, prefixed per duck in a
+    world) because the duck's MJCF carries a `head_camera` site whose frame is
+    already x-forward / y-left / z-up. `body=` mounts on a BODY frame instead,
+    for a robot whose camera is a jointless URDF LINK and has no site to
+    name: MARS's `head_camera_left` is such a frame (`robots/mars.CAMERA_BODY`
+    — `load_robot_spec` keeps it as a body on purpose, with `fusestatic`
+    off, so that `mj_name2id` can find it at all). Same optional-override
+    shape `sensors/ray.RayFan` grew for `exclude_body`, and for the same
+    reason: one extra frame source, documented, rather than a second class.
+
+    The frame CONVENTION is the same either way and is the caller's to
+    satisfy: x forward, y left, z up. MEASURED on mars.urdf — `head_camera_left`
+    is a fixed joint off `head` with `rpy="0 0 0"`, and `head` is a fixed
+    offset off `base_link`, so the camera body's axes ARE the chassis's:
+    x forward. (The URDF also carries `camera_optical_frame`, which is
+    z-forward / x-right / y-down — the ROS optical convention — and is the
+    wrong frame to mount this on.)
+
+    **What the lens cannot see is its HOUSING, and a body mount's housing is
+    its parent.** The occlusion ray excludes one body. For a site that is
+    right: the duck's `head_camera` site sits on `jaw_soft`, whose own
+    geometry is the thing in front of the lens. For a jointless URDF LINK it
+    is not, and MEASURED on the composed MARS world it fails completely:
+    `head_camera_left` is a 5 mm marker sphere at (0.04327, 0.0297,
+    -0.000275) inside `head`, whose collision box is 113 x 121 x 36 mm
+    centred at (0.007, 0, 0) — so the camera is INSIDE the box, every ray to
+    every target hit `d0/head_body` at 0.0206 m, `_unoccluded` returned 0.0
+    for a person 1.22 m dead ahead, and a `follow` brain on a MARS sat in
+    `search` for a whole 60 s run having never seen anything. So a `body=`
+    mount defaults its exclusion to the mount's PARENT, which is what
+    `sensors/lidar.LidarSensor` does for exactly the same reason (its
+    `base_laser` is a bare frame inside the turret box) and what Innate's own
+    `lidar_scan` does. `exclude_body=` overrides it either way, and a SITE
+    mount's default is unchanged — the duck's every occlusion test is the test
+    it was.
+    """
+
     def __init__(self, model: mujoco.MjModel, site: str | None = None,
                  spec: DetectorSpec = DetectorSpec(), noise: DetectorNoise = DetectorNoise.ideal(),
-                 targets: list[Target] | None = None, seed: int | None = 0):
+                 targets: list[Target] | None = None, seed: int | None = 0,
+                 body: str | None = None, exclude_body: str | None = None):
+        if site is not None and body is not None:
+            raise ValueError("give site= or body=, not both")
         self.spec = spec if site is None else replace(spec, site=site)
         self.noise = noise
         self.model = model
@@ -531,10 +575,27 @@ class Detector:
         # detection - and so every soccer number ever measured - bit for bit
         # where it was. Seeded from the same seed, not drawn from `rng`.
         self.rng_land = np.random.default_rng(None if seed is None else seed + 10_007)
-        self.site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, self.spec.site)
-        if self.site_id < 0:
-            raise KeyError(f"site {self.spec.site!r} not in model")
-        self.mount_body = int(model.site_bodyid[self.site_id])
+        self.mount = body if body is not None else self.spec.site
+        if body is not None:
+            self.site_id = -1
+            self.mount_body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body)
+            if self.mount_body < 0:
+                raise KeyError(f"body {body!r} not in model")
+            # The housing is the parent — see the class docstring's
+            # measurement. Resolved from the model so a prefixed robot
+            # ("m0/head_camera_left" -> "m0/head") needs no id table.
+            self.exclude_body = int(model.body_parentid[self.mount_body])
+        else:
+            self.site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, self.spec.site)
+            if self.site_id < 0:
+                raise KeyError(f"site {self.spec.site!r} not in model")
+            self.mount_body = int(model.site_bodyid[self.site_id])
+            self.exclude_body = self.mount_body
+        if exclude_body is not None:
+            self.exclude_body = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_BODY, exclude_body)
+            if self.exclude_body < 0:
+                raise KeyError(f"exclude_body {exclude_body!r} not in model")
         self.own_root = int(model.body_rootid[self.mount_body])
         self.targets: list[Target] = list(targets or [])
         self.period = 1.0 / self.spec.rate_hz
@@ -542,9 +603,12 @@ class Detector:
         self._pending: deque[tuple[float, DetectionFrame]] = deque()
         self.last: DetectionFrame | None = None
         # Everything occludes except toys (group 4, see world/compose.py):
-        # a held toy sits right in front of the lens.
+        # a held toy sits right in front of the lens - and except the
+        # render-only group, which is where the hinged bill lives. The camera
+        # mounts on `jaw_soft` and cannot be blocked by its own beak.
         self._geomgroup = np.ones(6, dtype=np.uint8)
         self._geomgroup[4] = 0
+        self._geomgroup[UNSENSED_GROUP] = 0
 
     # -- geometry ----------------------------------------------------------
     @staticmethod
@@ -603,7 +667,7 @@ class Detector:
                 continue
             vec = np.ascontiguousarray(q / qn, dtype=np.float64)
             dist = mujoco.mj_ray(self.model, data, origin, vec, self._geomgroup, 1,
-                                 self.mount_body, geomid)
+                                 self.exclude_body, geomid)
             if dist >= 0 and geomid[0] >= 0:
                 hit_root = int(self.model.body_rootid[self.model.geom_bodyid[geomid[0]]])
                 if hit_root != tgt_root and dist < qn - tgt.radius:
@@ -774,11 +838,19 @@ class Detector:
         return str(self.rng.choice(others)) if others else None
 
     # -- measurement -------------------------------------------------------
+    def lens(self, data: mujoco.MjData) -> tuple[np.ndarray, np.ndarray]:
+        """(origin, rotation) of the mount frame — the site's, or the body's
+        when this detector was mounted with `body=`."""
+        if self.site_id >= 0:
+            return (np.ascontiguousarray(data.site_xpos[self.site_id], dtype=np.float64),
+                    data.site_xmat[self.site_id].reshape(3, 3))
+        return (np.ascontiguousarray(data.xpos[self.mount_body], dtype=np.float64),
+                data.xmat[self.mount_body].reshape(3, 3))
+
     def capture(self, data: mujoco.MjData, t: float) -> DetectionFrame:
         """Run the detector on the world as it is now (no latency applied)."""
         s, nz = self.spec, self.noise
-        origin = np.ascontiguousarray(data.site_xpos[self.site_id], dtype=np.float64)
-        R = data.site_xmat[self.site_id].reshape(3, 3)
+        origin, R = self.lens(data)
         R2 = None
         if s.bottom_pitch_deg > 0.0:
             # The second lens: the head frame pitched DOWN about its own left

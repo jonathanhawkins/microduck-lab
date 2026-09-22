@@ -10,6 +10,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { LAB_HTTP } from "@/lib/lab";
+import { liveDuckAudio } from "@/lib/quackaudio";
 import {
   captureDone,
   captureError,
@@ -59,14 +60,15 @@ export function stamp(): string {
   );
 }
 
-function pickMime(): string | null {
+function pickMime(audio: boolean): string | null {
   if (typeof MediaRecorder === "undefined") return null;
-  const prefs = [
-    "video/webm;codecs=vp9",
-    "video/webm;codecs=vp8",
-    "video/webm",
-    "video/mp4", // Safari
-  ];
+  // With the ducks talking the container carries a second stream, so the
+  // codec string has to name an audio codec too — a video-only mime with an
+  // audio track in the stream is up to the browser, and Chrome has shipped
+  // both "encode it as opus anyway" and "drop it".
+  const prefs = audio
+    ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]
+    : ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"];
   return prefs.find((m) => MediaRecorder.isTypeSupported(m)) ?? null;
 }
 
@@ -111,7 +113,10 @@ export function useTake({ framingMs = 0 }: { framingMs?: number } = {}): Take {
   const beginRecording = (subject: string) => {
     if (getCapture().phase !== "framing") return; // cancelled during the glide
     const canvas = getCaptureCanvas();
-    const mime = pickMime();
+    // The ducks' voices ride along in the take when they are actually
+    // audible — the point of the feature is a clip you can hear.
+    const voice = liveDuckAudio()?.captureTrack() ?? null;
+    const mime = pickMime(!!voice);
     if (!canvas) return fail("no canvas to record");
     if (!mime) return fail("this browser can't record video (no MediaRecorder)");
     // captureStream(0) + an explicit requestFrame() per rendered frame (the
@@ -133,6 +138,7 @@ export function useTake({ framingMs = 0 }: { framingMs?: number } = {}): Take {
     } catch (e) {
       return fail(`canvas capture failed: ${e}`);
     }
+    if (voice) stream.addTrack(voice);
     setCaptureTrack(pumpTrack);
     let rec: MediaRecorder;
     try {

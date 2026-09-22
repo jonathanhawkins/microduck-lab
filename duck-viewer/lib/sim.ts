@@ -1,10 +1,65 @@
 // Types + client for the lab's WORLD mode (microduck_local/world_server.py):
 // the /sim page's backend. Same lab host as lib/lab.ts, second socket.
 
+import type { BrainGraphInfo } from "./braingraph";
 import type { BrainView } from "./brainview";
 import { LAB_HTTP } from "@/lib/lab";
 
 export const SIM_WS = LAB_HTTP.replace(/^http/, "ws") + "/ws/sim";
+
+/** The three.js layer every /sim sensor overlay draws on: the orbit camera
+ *  sees it, the head-camera inset does not — a robot does not see its own
+ *  sensor drawings. One definition, because a second copy that said 2 would
+ *  put the new LiDAR overlay into the robot's own camera view. */
+export const OVERLAY_LAYER = 1;
+
+/** The layer a robot's own camera HOUSING is parked on while the inset
+ *  renders: the orbit camera has it enabled, the inset camera does not.
+ *
+ *  A camera cannot see the shell it is bolted inside, and MARS's proves it:
+ *  MEASURED across its whole head-pitch range, its `head` is 1.5-2.8 cm from
+ *  the lens while inside the frame, against the inset's 3 cm near plane — so
+ *  the shell is clipped while everything is still, and swings into the
+ *  picture the moment the drawn pose (lerped toward each frame) lags the
+ *  pose the capture came from. Moving the camera would have fixed the
+ *  picture by moving a SENSOR, which is where every bearing the detector
+ *  reports is measured from.
+ *
+ *  Only the housing, and only the robot whose camera it is: the arm stays
+ *  (`link5` is in the same frame at 15-26 cm, and a real MARS sees its own
+ *  claw), and another robot in the room keeps its head. The lab names the
+ *  body — `det.selfBody`, the one its detector already refuses to detect. */
+export const SELF_LAYER = 2;
+
+/** Scale a scene dump's vertices into metres IN PLACE, and say so.
+ *
+ *  A dump may carry millimetre ints with a `vertScale` (the G1's is 21 MB
+ *  that way instead of 78 MB of floats). Whoever scales it must also reset
+ *  `vertScale` to 1: `SimStage.RobotBody` scales by that field itself (the
+ *  lab stage's `Duck.tsx` always has), and a scene scaled here that still
+ *  said 0.001 was scaled AGAIN there — a G1 person drawn a thousand times
+ *  too small, i.e. not at all, with nothing in the console. That is how the
+ *  /sim G1 vanished on 2026-09-18 when the person renderer was generalised.
+ *  Idempotent: scaling a scene that already says 1 changes nothing. */
+export function scaleSceneToMetres<T extends { meshes: { v: number[] }[]; vertScale?: number }>(sc: T): T {
+  const scale = sc.vertScale ?? 1;
+  if (scale !== 1) {
+    for (const m of sc.meshes) {
+      const v = m.v;
+      for (let i = 0; i < v.length; i++) v[i] *= scale;
+    }
+    sc.vertScale = 1;
+  }
+  return sc;
+}
+
+/** Visual scene for a G1 person (same shape as GET /scene). null if unfetched. */
+export async function fetchG1Scene(): Promise<import("./lab").Scene | null> {
+  const r = await fetch(`${LAB_HTTP}/scene/g1`);
+  if (!r.ok) return null;
+  const sc = await r.json() as import("./lab").Scene & { vertScale?: number };
+  return scaleSceneToMetres(sc);
+}
 
 export type TofPreset = "ideal" | "datasheet" | "hostile";
 export const TOF_PRESETS: TofPreset[] = ["ideal", "datasheet", "hostile"];
@@ -15,7 +70,15 @@ export interface ScenarioBall { pos: [number, number]; radius: number; mass: num
 export interface ScenarioDuck {
   id: string;
   spawn: [number, number, number];
+  /** Which BODY this entry is — any registry id, "microduck" when absent
+   *  (`world/scenario.Duck.robot`). A room can hold a duck and a MARS, and
+   *  the stage draws each from `GET /scene?robot=<id>`. */
+  robot?: string;
   policy: string | null;
+  /** The entry's RANGE-SENSOR preset. On a duck it names the 8x8 ToF's
+   *  noise; on a wheeled body it names the LIDAR's — one field, because the
+   *  question it answers ("how noisy is this robot's range sense") is the
+   *  same one (`world/scenario.Duck`'s own docstring). */
   tof: TofPreset | null;
   detector?: TofPreset | null;
   brain?: string | null;
@@ -91,7 +154,10 @@ export function teamColor(team: string | null | undefined): string | null {
 export function teamSwatch(team: string | null | undefined, fallback = "#555"): string {
   return teamColor(team) ?? fallback;
 }
-export interface ScenarioPerson { id: string; pos: [number, number]; yaw: number; path: [number, number][]; speed: number; radius: number; height: number }
+export interface ScenarioPerson {
+  id: string; pos: [number, number]; yaw: number; path: [number, number][];
+  speed: number; radius: number; height: number; kind?: "capsule" | "g1";
+}
 export interface ScenarioPickable { id: string; kind: "brick" | "block" | "sock"; pos: [number, number]; yaw: number }
 export interface ScenarioBasket { pos: [number, number]; size: [number, number]; rim: number }
 export const PICKABLE_SIZES: Record<string, [number, number, number]> = {
@@ -122,7 +188,38 @@ export interface Scenario {
   attacks?: Partial<Record<TeamName, "left" | "right">>;
   collision: "walk" | "all";
 }
-export interface ScenarioListing { name: string; builtin: boolean; ducks: number; objects: number; modified: number | null }
+/** One row of `GET /scenarios`.
+ *
+ *  `ducks` is the TOTAL number of robot entries and is named that for its
+ *  history; `robots` breaks it down by body, commonest first, and is what a
+ *  menu should show. A lab too old to send `robots` leaves it undefined, and
+ *  the picker falls back to counting everything as ducks — which is what it
+ *  used to do, and why `mars-follow` announced "1 ducks". */
+export interface ScenarioListing {
+  name: string;
+  builtin: boolean;
+  ducks: number;
+  robots?: { id: string; n: number; noun: string }[];
+  objects: number;
+  modified: number | null;
+}
+
+/** THE RUG (SimStage draws it on every walled room that is not a pitch).
+ *  A /sim room is drawn at HUMAN scale — 0.8 m plank tiles, eight boards to a
+ *  tile, a 1.32 m G1 walking through it — so the rug is sized the way a real
+ *  area rug is, not the way a 25 cm duck would see it: a little over half the
+ *  room each way, capped at a 9 x 12 ft rug (2.74 x 3.66 m), the largest size
+ *  sold off the roll. The caps are what matter — the old ones (1.6 x 1.2) are
+ *  a 5 x 4 ft accent rug, which reads as a doormat in the middle of the 6 x 5 m
+ *  follow-me / flock rooms. Returned [x, y]: the long side lies along the
+ *  room's long axis, so a portrait room gets a portrait rug. */
+export const RUG_LONG_MAX = 3.66;
+export const RUG_SHORT_MAX = 2.74;
+export function rugSize(roomW: number, roomH: number): [number, number] {
+  const long = Math.min(Math.max(roomW, roomH) * 0.55, RUG_LONG_MAX);
+  const short = Math.min(Math.min(roomW, roomH) * 0.6, RUG_SHORT_MAX);
+  return roomW >= roomH ? [long, short] : [short, long];
+}
 
 /** Which goal MOUTH each team attacks, decided the way the World decides it
  *  (world/arena.py `World.goal_for`): the scenario's declaration when it
@@ -155,6 +252,67 @@ export function goalDefenders(scenario: Scenario | null): { left: string | null;
   return { left: defender("left"), right: defender("right") };
 }
 
+/** Wall-clock speed presets for the world, mirroring SPEED_CHOICES in
+ *  world_server.py. Slow motion is the same knob from the other end: at
+ *  0.25x the lab steps the sim once every fourth wall tick, which is how
+ *  you watch a fall or a kick land. */
+export const SIM_SPEEDS = [0.25, 0.5, 1, 2, 4, 8] as const;
+
+export const SIM_SPEED_DEFAULT = 1;
+
+/** The world's current wall-clock speed, republished on every frame.
+ *
+ *  A module store rather than a prop because its consumers are the per-frame
+ *  pose smoothers inside `useFrame` (Duck.tsx, SimStage.tsx), which would
+ *  otherwise need it threaded through every duck and every object. Read it
+ *  inside the frame callback, never during render.
+ *
+ *  Those renderers are shared with the LAB pages, which stream at 1x and have
+ *  no speed knob, so this has to be handed back: `SimClient.close()` restores
+ *  it, and a socket that drops without closing is covered by the reconnect
+ *  writing the live value again. */
+export const simRate = { speed: SIM_SPEED_DEFAULT };
+
+/** Base rate of the renderers' pose smoothing, in wall Hz (tau = 62 ms).
+ *
+ *  It is MULTIPLIED by `simRate.speed`, because the filter's lag is fixed in
+ *  WALL time while the sim time a frame carries is not. Left unscaled, 8x
+ *  put half a second of world behind the picture and attenuated the ~1.5 Hz
+ *  sim gait (arriving at ~12 Hz of wall) against a 2.5 Hz corner, so the
+ *  ducks glided with barely-moving legs; and 0.25x converged inside two
+ *  frames and then held, rendering slow motion as 12.5 Hz stepping — the
+ *  one case the speed knob exists to make watchable. */
+export const POSE_SMOOTH_HZ = 16;
+
+/** Label a speed the way a video player would: 1x, 0.25x, 2x. */
+export function speedLabel(x: number): string {
+  return `${Number(x.toFixed(2))}\u00d7`;
+}
+
+/** The [ and ] keys step through SIM_SPEEDS and stop at the ends — they do
+ *  not wrap, because a key-repeat off 8x landing back on 0.25x is a trap.
+ *  An off-preset speed (someone POSTed 3) steps to the neighbour it is
+ *  heading towards rather than snapping backwards. */
+export function stepSpeed(current: number, dir: -1 | 1): number {
+  const xs = SIM_SPEEDS;
+  if (dir > 0) return xs.find((x) => x > current + 1e-9) ?? xs[xs.length - 1];
+  return [...xs].reverse().find((x) => x < current - 1e-9) ?? xs[0];
+}
+
+/** Is the lab keeping the promise? True when the measured RTF has fallen
+ *  meaningfully short of what was asked — a 3v3 at 4x runs about 3. The
+ *  slack absorbs the RTF's own one-second window jitter.
+ *
+ *  The "no measurement yet" guard is `rtf > 0`, not an absolute floor: the
+ *  lab reports exactly 0 until a window closes, and it zeroes the window on
+ *  every speed change for that reason. An absolute floor would have to be
+ *  small enough not to swallow a genuine stall at 0.25x — at which a world
+ *  managing 0.04x is a 6x shortfall, and any floor above it reports a frozen
+ *  world as healthy. */
+export function speedShortfall(rtf: number, asked: number): boolean {
+  return rtf > 0 && rtf < asked * 0.85;
+}
+
 export interface TofPayload {
   t: number;
   mm: number[];                       // 64, row-major, 0 = no target
@@ -166,6 +324,13 @@ export interface TofPayload {
 export const TOF_ROWS = 8;
 export const TOF_COLS = 8;
 export const TOF_FOV_DEG = 45;
+/** The ToF's own range limits (`sensors/tof.TofSpec`): a return outside them
+ *  is "no target", 0 on the wire. They are the SENSOR's, not the duck's, so
+ *  the lidar→ToF adapter a wheeled body's brains read applies the same pair
+ *  (lib/lidar.ts ports it) — a 4.5 m wall is inside a 6 m scan and outside
+ *  the 8x8 those brains were tuned on. */
+export const TOF_MIN_RANGE_M = 0.02;
+export const TOF_MAX_RANGE_M = 4.0;
 export const TOF_SITE_POS: [number, number, number] = [0.0135, 0.0224086, -0.0733];
 export const TOF_SITE_QUAT_WXYZ: [number, number, number, number] = [0.707107, 0, 0.707107, 0];
 
@@ -192,7 +357,11 @@ function quatMul(a: number[], b: number[]): [number, number, number, number] {
     a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
   ];
 }
-function quatRotate(q: number[], v: [number, number, number]): [number, number, number] {
+/** A wxyz quaternion applied to a vector. Exported because the /sim overlays
+ *  need it too (the LiDAR overlay turns a mount-frame bearing into a world
+ *  ray off the `base_laser` pose the frame already carries) and two copies of
+ *  a rotation are two chances to get one of them wrong. */
+export function quatRotate(q: number[], v: [number, number, number]): [number, number, number] {
   // wxyz quaternion applied to v
   const [w, x, y, z] = q;
   const t0 = 2 * (y * v[2] - z * v[1]);
@@ -224,9 +393,32 @@ export interface DetectionItem { cls: string; name: string; bearing: number; ele
 /** A detector frame: captured at `t`, `age` old now, the frustum it saw
  *  through, the camera's world pose at capture (x y z, w x y z quaternion of
  *  the site frame, x forward) and what it found. */
-export interface DetPayload { t: number; age: number; fov?: [number, number]; cam?: number[]; items: DetectionItem[] }
+export interface DetPayload {
+  t: number;
+  age: number;
+  fov?: [number, number];
+  cam?: number[];
+  /** Which of THIS robot's own bodies wraps the lens, as an index into its
+   *  `bodies` list — the body the /sim inset must not draw when it renders
+   *  from this camera (SELF_LAYER). -1, or absent on an older lab, means
+   *  draw everything. */
+  selfBody?: number;
+  items: DetectionItem[];
+}
 export interface BrainInputs {
   tof?: { age: number | null; stale: boolean; max: number };
+  /** The planar scan's own freshness, for a body that reads one.
+   *
+   *  Sent since c858568: `age_inputs` keys on `Senses.lidar` and names the
+   *  row after the DEVICE the body has, so a wheeled body reports `lidar`
+   *  and no `tof` at all. On a lab that predates it the `tof` entry's age IS
+   *  the scan's age
+   *  (`World.senses_tof` hands the brain an adapted 8x8 and deliberately
+   *  keeps the SCAN's timestamp — a 6 Hz scanner's frame is up to 167 ms old
+   *  and a brain gating on freshness must see that). The inspector therefore
+   *  LABELS that row by the body's channel, and renders this one whenever a
+   *  lab starts sending it. */
+  lidar?: { age: number | null; stale: boolean; max: number };
   det?: { age: number | null; stale: boolean; max: number; n: number };
   target?: { bearing: number; range: number | null; since: number } | null;
   /** The brain's tracker, with each track's odometry-frame position and velocity once it has both. */
@@ -274,6 +466,10 @@ export interface BrainInputs {
 export interface SimDuck {
   id: string;
   name: string;
+  /** Which BODY to draw this entry as — any registry id, "microduck" when
+   *  absent. `bodies` below is then ITS scene's list, in
+   *  `GET /scene?robot=<id>` order (18 poses for a MARS, world first). */
+  robot?: string;
   /** Soccer: the team's colorway (what the duck is painted) and its job. */
   team?: TeamName | null;
   role?: RoleName | null;
@@ -284,7 +480,13 @@ export interface SimDuck {
   speed: number;
   cmdSpeed: number;
   steerable: boolean;
+  /** The RANGE-SENSOR noise preset, by device. A duck carries the 8x8 ToF and
+   *  `lidar` is null; a wheeled body carries the 360-degree scanner and `tof`
+   *  is null (`world_server.duck_info`). Which of the two is set is what the
+   *  inspector reads to know which instrument this body HAS — it is the
+   *  body's declaration, so it answers before the first frame arrives. */
   tof: TofPreset | "custom" | null;
+  lidar?: TofPreset | "custom" | null;
   detector: TofPreset | "custom" | null;
   holding: string | null;
   /** Odometry drift preset the brain's pose carries (roadmap 1.7), and the drifted estimate itself. */
@@ -292,19 +494,119 @@ export interface SimDuck {
   odomEst?: [number, number, number];
   skill: string | null;
   beak: "open" | "closed";
+  /** The 15th servo as an opening fraction, 0 shut to 1 wide. `beak` above is
+   *  the GRASP state; this is how far the bill actually is. Optional: a server
+   *  older than the hinged jaw does not send it. */
+  mouth?: number;
+  /** The duck's OWN brain, from the registry — unlike `brain.kind` below,
+   *  which reports who is steering this tick and so reads "manual" for every
+   *  duck while a drive command is held. Anything that must survive taking
+   *  the wheel (the state graph's trace identity) keys on this. */
+  brainKind?: string | null;
   /** Who is steering this duck this tick: a brain from the lab's registry
    *  (auto mode), the demo script (blind ducks), or you (manual). */
   brain: {
     kind: string; state: string; cmd: [number, number, number]; head?: number[]; note?: string; beak?: string | null; skill?: string | null;
+    /** Which declared state graph this duck's brain is drawn on
+     *  (brain/graph.py). A key into WorldInfo.graphs; null for a brain
+     *  nothing is declared for. */
+    graph?: string | null;
     inputs: BrainInputs & { tidy?: { picked: number; delivered: number; givenUp: string[] } };
     /** A learned brain's last decision — what the network saw and said (runtime.brain_view). */
     view?: BrainView;
   };
   headApplied: boolean;
   bodies: number[][];
-  sensors: { tof?: TofPayload; det?: DetPayload } | null;
+  /** What this body SENSES, one key per channel it has
+   *  (`world_server.tof_payload`, `robots/body.Body.make_sensors`): the duck's
+   *  8x8 `tof`, a wheeled body's 360-degree `lidar`, the head camera's `det`.
+   *  The inspector renders one block per key present, which is why a body with
+   *  no ToF never shows a ToF placeholder. `gripper` and `arm` are the arm
+   *  channels — see their own types for what the lab still owes. */
+  sensors: {
+    tof?: TofPayload;
+    det?: DetPayload;
+    lidar?: LidarPayload;
+    gripper?: GripperPayload;
+    arm?: ArmPayload;
+  } | null;
 }
-export interface SimObject { id: string; kind: "ball" | "box" | "person" | "toy"; pose: number[]; possessed?: boolean; toy?: string; held?: string | null; inBasket?: boolean }
+
+/** The claw, as a reading: the constraint torque at joint6 and whether that
+ *  counts as holding something (`robots/mars_drive.MarsDriver.held_body` —
+ *  `|load| >= mars.HOLD_LOAD_NM` AND a blade contact with a body that is not
+ *  part of the robot; closing on AIR reads 0.0 N·m, identical to an open
+ *  claw, which is why the contact conjunct exists).
+ *
+ *  Sent since c858568 (`world_server.gripper_payload`), beside the
+ *  pickable's id on `SimDuck.holding`. The inspector draws this block when a
+ *  lab sends it and nothing when it does not, so an older lab still works. */
+export interface GripperPayload {
+  /** N·m at joint6. Signed: closing is one direction, opening the other. */
+  load: number;
+  /** The driver's own predicate, not a threshold re-applied here. */
+  holding?: boolean;
+  /** Full scale for the bar, if the body has an opinion
+   *  (`mars.GRIPPER_EFFORT_LIMIT`, 2.0 N·m — the servo's own clamp). */
+  limit?: number;
+  /** The hold threshold to mark (`mars.HOLD_LOAD_NM`, 1.0 N·m). */
+  hold?: number;
+}
+
+/** The arm's ACHIEVED joint positions by name — what Innate's
+ *  `/mars/arm/state` publishes, and NOT the commanded targets: the servo
+ *  carries structural compliance and backlash, so a commanded pose is reached
+ *  a few hundredths of a radian low (`brain/runtime.Senses.arm` measures 28.5
+ *  mm of claw height at the pick pose).
+ *
+ *  Sent since c858568 (`world_server.arm_payload`). With `cmd` the inspector
+ *  marks the command beside the achieved angle, and the GAP between them is
+ *  the sag the brain pre-compensates — which is why both are on the wire. */
+export interface ArmPayload {
+  q: Record<string, number>;
+  cmd?: Record<string, number>;
+  /** Joint limits, for a bar that means something: [lo, hi] rad by name. */
+  limits?: Record<string, [number, number]>;
+}
+
+/** One 360-degree planar scan (`sensors/lidar.LidarFrame.as_payload`).
+ *
+ *  Millimetre integers in the ToF's own convention — **0 means no reading**,
+ *  an invalid ray and not a zero-range one — with the bearings rebuilt from
+ *  `a0 + i * da` rather than shipped as 360 floats the consumer already
+ *  knows. `mount` is where the scanner sits in the base's HEADING frame, so
+ *  a drawing starts at the aperture and not at the chassis origin: 76 mm
+ *  apart on MARS, which is a third of the robot's length. */
+export interface LidarPayload {
+  t: number;
+  a0: number;
+  da: number;
+  mm: number[];
+  age?: number;
+  maxRange?: number;
+  /** The device's own floor (`LidarSensor.min_range`): a return nearer than
+   *  this is CLIPPED and marked invalid, so it arrives as a 0 and a plot must
+   *  draw the disc it cannot see inside of. Read it with `lidarMinRange`,
+   *  which falls back to the 0.15 m default for a lab that predates it. */
+  minRange?: number;
+  /** How far out a return is the robot looking at its own arm
+   *  (`WorldRobot.footprint_m` -> `MarsBody.footprint_m`), dropped by the
+   *  adapter every brain here reads.
+   *
+   *  **0 is a value, not a gap**: it means "declared none, every return
+   *  kept", which is `tof_from_lidar`'s own default. Read it with `??` and
+   *  never `||` — `lidarFootprintM` does. */
+  footprint?: number;
+  mount?: [number, number, number] | null;
+}
+export interface SimObject {
+  id: string; kind: "ball" | "box" | "person" | "toy"; pose: number[];
+  possessed?: boolean; toy?: string; held?: string | null; inBasket?: boolean;
+  /** "g1" when this person is a Unitree G1, not the mocap capsule. */
+  robot?: string;
+  /** G1 body poses in GET /scene/g1 order, when robot is set. */
+  bodies?: number[][];
+}
 export interface TidyScore { total: number; inBasket: number; held: string[] }
 export interface SimFrame {
   t: number;
@@ -339,6 +641,10 @@ export interface SimFrame {
       Record<string, number | null>>>) | null;
   /** Brain round-trip latency applied to every intent (roadmap 12.10), ms; 0 = onboard. */
   tetherMs?: number;
+  /** Wall-clock speed the world was ASKED to run at. What it managed is
+   *  `rtf` — the two part company once the scene costs more than its 20 ms
+   *  tick (a 3v3 pitch stops climbing near 3x), and the HUD says so. */
+  simSpeed?: number;
   /** Occupancy maps per duck, in each duck's ODOMETRY frame (brain-layer output, ~2 Hz; null on the other frames). */
   maps: Record<string, OccupancyMap> | null;
 }
@@ -366,6 +672,9 @@ export interface WorldInfo {
   /** The learned brains again, with what people read: the inspector's menu
    *  files them by group and shows the title; `learned:<name>` stays the value. */
   learned?: LearnedInfo[];
+  /** The state graphs, keyed by the per-duck `brain.graph`. Static tables —
+   *  they ride this message once, never the frame. */
+  graphs?: Record<string, BrainGraphInfo>;
 }
 
 export interface LearnedInfo {
@@ -581,6 +890,7 @@ export class SimClient {
       if (this.ws !== ws) return;
       const frame: SimFrame = JSON.parse(ev.data);
       this.live = frame;
+      simRate.speed = frame.simSpeed ?? 1;
       this.bytes += ev.data.length;
       this.lastFrameAt = Date.now();
       if (frame.events?.length) {
@@ -615,10 +925,16 @@ export class SimClient {
   sendBrain(duck: string, kind: string) { this.send({ brain: { duck, kind } }); }
   sendPossess(person: string | null) { this.send({ possess: person }); }
   sendHead(duck: string, apply: boolean) { this.send({ head: { duck, apply } }); }
+  sendSpeed(x: number) { this.send({ speed: x }); }
   close() {
     this.closed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws?.close();
+    // Hand the speed back. `simRate` is a module store and `Duck`/`SimStage`
+    // are shared with the lab pages, which have no speed knob — leaving 8x
+    // behind meant a client-side nav from /sim to / rendered the lab with
+    // its pose smoothing effectively off until a full reload.
+    simRate.speed = SIM_SPEED_DEFAULT;
   }
 }
 

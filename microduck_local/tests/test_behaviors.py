@@ -9,6 +9,7 @@ from microduck_local.behaviors import (
     BEHAVIORS,
     BehaviorEnv,
     behavior_card,
+    for_robot,
     match_behavior,
 )
 
@@ -101,7 +102,9 @@ def test_matcher_takes_a_bare_behavior_id():
     titles are display text, and an imitation card's title is the clip's
     name dressed up (`Perform “backflip”`) — scored as prose, that used to
     land on the floor-roll recipe, so a retrain trained the wrong trick."""
-    for b in BEHAVIORS.values():
+    # Scoped to the duck: the registry also holds another body's tasks, and
+    # the matcher is robot-filtered so a duck roster can never be handed one.
+    for b in for_robot("microduck"):
         assert match_behavior(b.id) is b
         assert match_behavior(f"  {b.id.upper()} ") is b
     assert match_behavior("imitate").id == "imitate"
@@ -111,7 +114,7 @@ def test_matcher_takes_a_bare_behavior_id():
 
 def test_cards_are_json_friendly():
     import json
-    for b in BEHAVIORS.values():
+    for b in BEHAVIORS.values():        # every body's cards must serialize
         card = behavior_card(b)
         json.dumps(card)
         assert card["terms"] and card["howItLearns"] and card["emoji"]
@@ -1692,13 +1695,19 @@ def test_no_recipe_has_adopted_the_wide_upright():
 
     If a recipe ever adopts it, this test is the reminder that it re-prices a
     term four other behaviors read."""
+    from microduck_local import behaviors as live
     from microduck_local.behaviors import _upright, _upright_wide
 
-    wide = {bid for bid, b in BEHAVIORS.items()
+    # Read the registry THROUGH the module: `reload_library()` (every /teach
+    # calls it) rebinds core.BEHAVIORS to a fresh dict, so a module-level
+    # `from ... import BEHAVIORS` in this file goes stale the moment a lab
+    # test has run first — and then every `t.fn is _upright` here compares a
+    # new function against the old registry's objects and finds nothing.
+    wide = {bid for bid, b in live.BEHAVIORS.items()
             for t in b.terms if t.fn is _upright_wide}
     assert wide == set(), wide
     # ...and the recipes that name the term all still use the narrow one.
-    narrow = {bid for bid, b in BEHAVIORS.items()
+    narrow = {bid for bid, b in live.BEHAVIORS.items()
               for t in b.terms if t.fn is _upright}
     assert "find_ball" in narrow, narrow
 
@@ -1746,10 +1755,10 @@ def test_lean_spawn_is_a_quarter_of_training_and_none_of_the_battery():
     starts. A family firing inside the battery would change the test without
     saying so, which is the same trap as measuring `centred` in normalized
     bearing across two cameras."""
+    from microduck_local import behaviors as live  # see wide_upright above
     from microduck_local.behaviors import _ball_spawn_leaning
     from microduck_local.eval_find_ball import run_battery
-
-    fams = BEHAVIORS["find_ball"].spawn_families
+    fams = live.BEHAVIORS["find_ball"].spawn_families
     assert [fn for _, fn in fams] == [_ball_spawn_leaning]
     assert [p for p, _ in fams] == [0.25], fams
 

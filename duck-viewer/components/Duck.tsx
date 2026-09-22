@@ -18,7 +18,10 @@ import { assignDrag } from "@/lib/assign";
 import { captureWantsCleanFrame } from "@/lib/record";
 import { getSelectedDuck } from "@/lib/select";
 import { getDuckLabels } from "@/lib/ui";
-import { SHELL_MATERIALS, TEAM_COLORWAYS, TRIM_MATERIALS, teamColor, type TeamName } from "@/lib/sim";
+import { CREASE_ANGLE_DEG, G1_KINDS, g1PartKind, useG1Materials, weldAndSmooth, weldTolerance } from "./G1Look";
+import { MARS_KINDS, marsPartKind, useMarsMaterials } from "./MarsLook";
+import { duckMouths, MOUTH_TRAVEL_RAD } from "@/lib/mouth";
+import { SHELL_MATERIALS, TEAM_COLORWAYS, TRIM_MATERIALS, teamColor, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
 
 // FALLBACK body-name → color, used only against servers that predate rgba
 // streaming (whole body painted one guessed color).
@@ -70,6 +73,21 @@ function geomColor(g: SceneGeom, bodyName: string, out: THREE.Color, paint: Reco
 export interface BodyGeometry {
   name: string;
   geometry: THREE.BufferGeometry | null;
+  /** Which material set draws this body (lib/robots.robotLook):
+   *
+   *  - undefined / "duck" — the merged vertex-colour mesh the duck has
+   *    always been;
+   *  - "g1" — welded + smoothed, groups indexing G1_KINDS materials
+   *    (components/G1Look.tsx), the same look as the /sim page's G1;
+   *  - "mars" — the same shape of thing for MARS_KINDS
+   *    (components/MarsLook.tsx): a graphite chassis and head that survive
+   *    the dark stage, the colorway's accent on the arm and gripper, and the
+   *    frame markers drawn as nothing;
+   *  - "generic" — welded + smoothed like the G1 but painted per geom from
+   *    the scene dump's own `rgba`. That is how a Menagerie model arrives in
+   *    its MJCF's colours, with no component and no colour table per robot.
+   */
+  look?: "g1" | "generic" | "mars";
 }
 
 /** Merge every geom of every body into one geometry per body (body-local
@@ -80,11 +98,38 @@ export interface BodyGeometry {
  *  PER COLORWAY and shares it across that team's ducks — not one per duck.
  *  Eight ducks with a set each is what lost the WebGL context before the
  *  bodies were merged at all (duck-viewer/README.md). */
-export function buildBodyGeometries(scene: Scene, team?: string | null): BodyGeometry[] {
+export function buildBodyGeometries(
+  scene: Scene,
+  team?: string | null,
+  opts: { look?: "g1" | "generic" | "mars" } = {}
+): BodyGeometry[] {
   const paint = teamPaint(team);
+  // A non-duck body: welded + smoothed, one draw per material group. The G1
+  // and MARS group by PART KIND (a visor or a chassis, each with its own
+  // material); "generic" groups by nothing and is drawn from its own vertex
+  // colours, so a robot the viewer has never seen still arrives in its own
+  // paint. `kinds` is both the switch and the index table — a look with a
+  // material array is exactly a look with a kind list.
+  const kinds: readonly string[] | null =
+    opts.look === "g1" ? G1_KINDS : opts.look === "mars" ? MARS_KINDS : null;
+  const cad = kinds !== null || opts.look === "generic";
+  // Vertices arrive in metres (the duck) or in millimetre ints with a
+  // vertScale (the G1 — a 21 MB dump instead of 78 MB of floats). Scaling
+  // here rather than at the call site is what keeps a second robot from
+  // arriving 1000x too big, off camera, with nothing in the console.
+  const vs = scene.vertScale ?? 1;
+  // The weld has to know the lattice the dump was quantised to — see
+  // G1Look.weldTolerance. A flat tolerance that is fine on a millimetre dump
+  // merges real vertices on a finer one.
+  const tol = weldTolerance(vs);
+  // MARS is the boxy one: its shells are bevelled panels, and smoothing
+  // across those bevels is what made its head arrive fluted. See
+  // G1Look.weldAndSmooth for why this is opt-in rather than the default.
+  const crease = opts.look === "mars" ? CREASE_ANGLE_DEG : undefined;
   const meshGeos = scene.meshes.map((m) => {
     const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute(m.v, 3));
+    const v = vs === 1 ? m.v : m.v.map((x) => x * vs);
+    g.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
     g.setIndex(m.f);
     return g;
   });
@@ -95,7 +140,9 @@ export function buildBodyGeometries(scene: Scene, team?: string | null): BodyGeo
     const parts = scene.geoms
       .filter((g) => g.body === b)
       .map((g) => {
-        const geo = meshGeos[g.mesh].clone();
+        const geo = cad
+          ? weldAndSmooth(meshGeos[g.mesh], tol, crease)
+          : meshGeos[g.mesh].clone();
         quat.set(g.quat[1], g.quat[2], g.quat[3], g.quat[0]); // wxyz → xyzw
         mat.compose(new THREE.Vector3(...g.pos), quat, new THREE.Vector3(1, 1, 1));
         geo.applyMatrix4(mat);
@@ -104,13 +151,45 @@ export function buildBodyGeometries(scene: Scene, team?: string | null): BodyGeo
         const colors = new Float32Array(n * 3);
         for (let i = 0; i < n; i++) col.toArray(colors, i * 3);
         geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-        return geo;
+        const kind =
+          opts.look === "g1"
+            ? G1_KINDS.indexOf(g1PartKind(g.name, g.mat, col))
+            : opts.look === "mars"
+              ? MARS_KINDS.indexOf(marsPartKind(name, g.name))
+              : 0;
+        return { geo, kind };
       });
     if (!parts.length) return { name, geometry: null };
-    const merged = mergeGeometries(parts, false);
-    parts.forEach((p) => p.dispose());
-    merged.computeVertexNormals();
-    return { name, geometry: merged };
+    if (!cad) {
+      const merged = mergeGeometries(parts.map((p) => p.geo), false);
+      parts.forEach((p) => p.geo.dispose());
+      merged.computeVertexNormals();
+      return { name, geometry: merged };
+    }
+    if (!kinds) {
+      // Generic: keep the welded normals (re-smoothing the merge would blend
+      // across part seams, which is what makes a CAD robot look melted) and
+      // merge into ONE group — the per-geom colour already rode in on the
+      // vertex-colour channel, so one draw call paints the whole body.
+      const merged = mergeGeometries(parts.map((p) => p.geo), false);
+      parts.forEach((p) => p.geo.dispose());
+      return { name, geometry: merged, look: "generic" as const };
+    }
+    // G1 / MARS: keep each part's welded normals (re-smoothing the merge would
+    // blend across part seams) and group the parts by kind, one draw per
+    // material.
+    parts.sort((a, b) => a.kind - b.kind);
+    const merged = mergeGeometries(parts.map((p) => p.geo), true);
+    parts.forEach((p) => p.geo.dispose());
+    const groups: { start: number; count: number; materialIndex: number }[] = [];
+    merged.groups.forEach((grp, i) => {
+      const last = groups[groups.length - 1];
+      if (last && last.materialIndex === parts[i].kind) last.count += grp.count;
+      else groups.push({ start: grp.start, count: grp.count, materialIndex: parts[i].kind });
+    });
+    merged.clearGroups();
+    groups.forEach((grp) => merged.addGroup(grp.start, grp.count, grp.materialIndex));
+    return { name, geometry: merged, look: opts.look as "g1" | "mars" };
   });
   meshGeos.forEach((g) => g.dispose());
   return out;
@@ -130,6 +209,25 @@ export function Duck({
   duckId: string; // stable stream id ("d0"…, "trainee") — assignment target
 }) {
   const bodyRefs = useRef<(THREE.Group | null)[]>([]);
+  // The hinged lower bill (world/compose.py `split_jaw`): its group takes the
+  // streamed pose like every body, and its MESH takes the voice on top — a
+  // rotation about the body origin, which is the pivot, on the hinge axis.
+  const mouthIdx = useMemo(() => bodies.findIndex((b) => b.name === "mouth"), [bodies]);
+  const billRef = useRef<THREE.Mesh>(null);
+  const g1Materials = useG1Materials(bodies.some((b) => b.look === "g1"));
+  // MARS's material table. The colorway is a VIEWER default today
+  // (MARS_DEFAULT_COLORWAY, Innate's Blue / White hero): a duck's colorway
+  // rides in on the frame's `team`, and that channel carries the four Pollen
+  // DUCK colorways — the lab validates it against them and rejects anything
+  // else (world/scenario.py), so a MARS cannot borrow it. A per-slot choice
+  // would pass a `colorway` here from a new field on the roster row.
+  const marsMaterials = useMarsMaterials(bodies.some((b) => b.look === "mars"));
+  // A generic body is lit like the G1's shell but takes its colour from the
+  // geometry, so one material serves every one of them.
+  const genericMaterial = useMemo(
+    () => new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0.2 }),
+    []
+  );
   const labelRef = useRef<THREE.Group>(null);
   const labelDivRef = useRef<HTMLDivElement>(null);
   const spawnDivRef = useRef<HTMLDivElement>(null);
@@ -141,7 +239,9 @@ export function Duck({
   useFrame((_, dt) => {
     const duck = frameRef.current;
     if (!duck) return;
-    const alpha = 1 - Math.exp(-16 * Math.min(dt, 0.1));
+    // Scaled by the world's speed: the filter's lag is fixed in WALL
+    // time, the sim time a frame carries is not (lib/sim.ts POSE_SMOOTH_HZ).
+    const alpha = 1 - Math.exp(-POSE_SMOOTH_HZ * simRate.speed * Math.min(dt, 0.1));
     duck.bodies.forEach((pose, b) => {
       const grp = bodyRefs.current[b];
       if (!grp) return;
@@ -150,6 +250,14 @@ export function Duck({
       grp.position.lerp(tmpP, alpha);
       grp.quaternion.slerp(tmpQ, alpha);
     });
+    // Lip-sync: open the bill to the wider of what the servo is doing and
+    // what the voice asks, so a duck carrying a toy keeps its grip while it
+    // chirps, and a silent duck shows exactly the physics. The servo's
+    // opening is already in the streamed pose, so only the EXCESS is added.
+    if (billRef.current) {
+      const voice = duckMouths.open(duckId, performance.now() / 1000);
+      billRef.current.rotation.y = Math.max(0, voice - (duck.mouth ?? 0)) * MOUTH_TRAVEL_RAD;
+    }
     // Float the label above the trunk (body 1 = trunk_base in this model).
     const trunk = duck.bodies[1];
     if (labelRef.current && trunk) {
@@ -217,9 +325,17 @@ export function Duck({
       {bodies.map((body, b) =>
         body.geometry ? (
           <group key={b} ref={(el) => void (bodyRefs.current[b] = el)}>
-            <mesh geometry={body.geometry}>
-              <meshStandardMaterial vertexColors roughness={0.55} metalness={0.08} />
-            </mesh>
+            {body.look === "g1" && g1Materials ? (
+              <mesh geometry={body.geometry} material={g1Materials} />
+            ) : body.look === "mars" && marsMaterials ? (
+              <mesh geometry={body.geometry} material={marsMaterials} />
+            ) : body.look === "generic" ? (
+              <mesh geometry={body.geometry} material={genericMaterial} />
+            ) : (
+              <mesh geometry={body.geometry} ref={b === mouthIdx ? billRef : undefined}>
+                <meshStandardMaterial vertexColors roughness={0.55} metalness={0.08} />
+              </mesh>
+            )}
           </group>
         ) : (
           <group key={b} ref={(el) => void (bodyRefs.current[b] = el)} />

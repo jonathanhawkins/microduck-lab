@@ -1,0 +1,1135 @@
+"""The Innate MARS body: the download, the URDF rewrites, the model, the servo.
+
+`tests/test_body_conformance.py` is the definition of "supported" and holds
+MARS to everything a body must satisfy (its scene compiles, its names
+resolve, its numbers agree, it attaches beside a duck, its stage pitch
+matches its measured width, the viewer can see it, and it holds its arm at
+HOME). This file is what that suite does NOT cover, and it is mostly the
+things `robots/mars.py` inherited from somebody else's repo:
+
+* the asset manifest and its sha256s — the only thing between a moved
+  revision or a captive-portal HTML page and a compiled robot;
+* the three URDF rewrites, each of which is invisible when it works and
+  silent when it does not (no meshes; no `ee_link`; 31 g of missing markers);
+* Innate's contact tuning, where every constant is load-bearing for a grasp;
+* the arm servo, and the joint2 guard that keeps the arm out of the head;
+* the answers that are deliberately refusals — no env, no tasks, no shipped
+  policies — so a phase that lands one has to come here and say so (Phase 3a
+  landed `driver()`, and this file says so in two places rather than one).
+
+Network: none. `mars._download` is the seam; every fetch case replaces it,
+and the cases that need real bytes are skipped without the assets.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+import mujoco
+import numpy as np
+import pytest
+
+from microduck_local import contract as C
+from microduck_local.robots import mars
+from microduck_local.robots import registry as R
+from microduck_local.robots.body import conforms
+from microduck_local.robots.spec import RobotSpec
+
+needs_mars = pytest.mark.skipif(
+    not mars.mars_ready(), reason="MARS assets missing — uv run fetch-robot mars")
+
+
+# ------------------------------------------------------------- the manifest
+
+def test_the_manifest_is_eleven_pinned_files_under_one_revision():
+    """Eleven paths, eleven distinct sha256s, one sha in the URL.
+
+    The manifest is the whole trust story of a body whose assets live in
+    someone else's repository: a tag that moves, a `main` that advances or a
+    proxy that answers with a login page are all the same event to a
+    downloader, and only the hash tells them from the robot.
+    """
+    assert len(mars.ASSETS) == 11
+    paths = [p for p, _ in mars.ASSETS]
+    hashes = [h for _, h in mars.ASSETS]
+    assert len(set(paths)) == 11, "a path is listed twice"
+    assert len(set(hashes)) == 11, "two files share a hash"
+    assert sorted(paths) == sorted(
+        ["urdf/mars.urdf", "urdf/arm.srdf"]
+        + [f"meshes/{m}.STL" for m in ("base", "head", "link1", "link2",
+                                       "link3", "link4", "link5", "link61",
+                                       "link62")])
+    for h in hashes:
+        assert len(h) == 64 and all(c in "0123456789abcdef" for c in h)
+    assert len(mars.INNATE_OS_SHA) == 40
+    assert mars.INNATE_OS_SHA in mars.RAW_BASE, (
+        "the download URL must carry the pinned revision, or the manifest "
+        "describes a different tree than the one being fetched")
+    assert "Apache-2.0" in mars.INNATE_OS_LICENCE
+
+
+@needs_mars
+def test_every_manifest_hash_matches_the_file_on_disk():
+    """The bytes in the cache ARE the pinned revision's.
+
+    Re-hashed here rather than trusted from the download, because the file
+    on disk is what `load_robot_spec` reads and the rewrites are applied to
+    a COPY in memory — so nothing else in the tree would notice an edited
+    STL.
+    """
+    d = mars.asset_dir()
+    for rel, want in mars.ASSETS:
+        assert (d / rel).is_file(), rel
+        assert mars._sha256(d / rel) == want, f"{rel} is not the pinned file"
+
+
+# ------------------------------------------------------------- the download
+
+_FAKE = (("urdf/mars.urdf", hashlib.sha256(b"<robot/>").hexdigest()),
+         ("meshes/base.STL", hashlib.sha256(b"solid\n").hexdigest()))
+_FAKE_BYTES = {"urdf/mars.urdf": b"<robot/>", "meshes/base.STL": b"solid\n"}
+
+
+def _fake_downloader(calls: list[str], payload=None):
+    """A `_download` that writes known bytes and records what was asked for."""
+    def download(url: str, dest):
+        rel = url[len(mars.RAW_BASE) + 1:]
+        calls.append(rel)
+        dest.write_bytes((payload or _FAKE_BYTES)[rel])
+    return download
+
+
+def test_fetch_downloads_every_missing_file_and_verifies_it(tmp_path, monkeypatch,
+                                                           capsys):
+    """One download per file, each checked against the manifest."""
+    calls: list[str] = []
+    monkeypatch.setattr(mars, "ASSETS", _FAKE)
+    monkeypatch.setattr(mars, "_download", _fake_downloader(calls))
+    out = mars.fetch(tmp_path)
+    assert out == tmp_path
+    assert sorted(calls) == sorted(p for p, _ in _FAKE)
+    assert mars.mars_ready(tmp_path)
+    assert (mars.asset_dir(tmp_path) / "urdf/mars.urdf").read_bytes() == b"<robot/>"
+    assert "2 file(s) downloaded" in capsys.readouterr().out
+
+
+def test_a_second_fetch_downloads_nothing(tmp_path, monkeypatch):
+    """Idempotence, which is what makes `fetch-robot mars` safe to re-run and
+    what `scripts/setup.sh` will lean on: a present file that hashes right is
+    skipped, so the second call costs 11 hashes and no bytes."""
+    calls: list[str] = []
+    monkeypatch.setattr(mars, "ASSETS", _FAKE)
+    monkeypatch.setattr(mars, "_download", _fake_downloader(calls))
+    mars.fetch(tmp_path)
+    assert len(calls) == 2
+    mars.fetch(tmp_path)
+    assert len(calls) == 2, f"a second fetch re-downloaded {calls[2:]}"
+
+
+def test_fetch_refuses_a_file_whose_hash_is_not_the_manifests(tmp_path,
+                                                              monkeypatch):
+    """The planted regression for the manifest: wrong bytes, refused.
+
+    And refused WITHOUT leaving anything behind — the temp file is cleaned
+    and the target never appears, so a failed fetch cannot be followed by a
+    `ready()` that says yes.
+    """
+    wrong = {"urdf/mars.urdf": b"<html>sign in</html>", "meshes/base.STL": b"solid\n"}
+    monkeypatch.setattr(mars, "ASSETS", _FAKE)
+    monkeypatch.setattr(mars, "_download", _fake_downloader([], wrong))
+    with pytest.raises(RuntimeError, match="hashes .* the manifest says"):
+        mars.fetch(tmp_path)
+    assert not (mars.asset_dir(tmp_path) / "urdf/mars.urdf").exists()
+    assert not mars.mars_ready(tmp_path)
+    assert not list(mars.asset_dir(tmp_path).glob("urdf/.*")), "a temp file was left"
+
+
+def test_fetch_replaces_a_file_that_was_corrupted_after_it_arrived(tmp_path,
+                                                                   monkeypatch):
+    """A cached file that no longer hashes right is re-downloaded, not kept.
+
+    `ready()` only checks presence (it is asked per roster change), so this
+    is the case that makes that cheap answer safe: the next fetch repairs
+    what a truncated write, a half-finished copy or an edit left behind.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(mars, "ASSETS", _FAKE)
+    monkeypatch.setattr(mars, "_download", _fake_downloader(calls))
+    mars.fetch(tmp_path)
+    victim = mars.asset_dir(tmp_path) / "meshes/base.STL"
+    victim.write_bytes(b"truncated")
+    mars.fetch(tmp_path)
+    assert calls[-1] == "meshes/base.STL"
+    assert victim.read_bytes() == b"solid\n"
+
+
+def test_ready_is_false_on_an_empty_cache_and_the_hint_says_what_to_run(
+        tmp_path, monkeypatch):
+    """The palette's "not set up yet — ⤓" affordance rests on this answer."""
+    monkeypatch.setattr(mars, "CACHE_DIR", tmp_path / "nothing-here")
+    assert mars.mars_ready() is False
+    assert mars.MARS.ready() is False
+    assert mars.MARS.setup_hint() == "uv run fetch-robot mars"
+    with pytest.raises(FileNotFoundError, match="uv run fetch-robot mars"):
+        mars.require_mars()
+
+
+def test_the_registry_lists_mars_on_a_machine_that_never_fetched_it(monkeypatch):
+    """`--robot mars` must be ACCEPTED and then answered with the download
+    command, exactly as `--robot g1` is: an argparse "invalid choice" would
+    tell somebody their robot does not exist when it is one command away.
+    `ids()` therefore reads the DECLARATION, not the loaded body.
+
+    A prefix, not an equality: `menagerie:<name>` bodies are DISCOVERED from
+    a cache and follow the built-ins (see
+    `test_registry.test_ids_lists_a_known_body_whether_or_not_it_loads`).
+    """
+    monkeypatch.setattr(R, "_load_builtin", lambda b: None)
+    assert R.ids()[:3] == ("microduck", "g1", "mars")
+    assert R.setup_hint("mars") == "uv run fetch-robot mars"
+    with pytest.raises(KeyError, match="uv run fetch-robot mars"):
+        R.get("mars")
+
+
+def test_fetch_robot_with_no_argument_lists_mars(capsys):
+    """`uv run fetch-robot` is the inventory, and a body absent from it is a
+    body nobody knows how to install."""
+    from microduck_local.fetch_robot import main
+
+    main([])
+    out = capsys.readouterr().out
+    assert "mars" in out
+    assert "uv run fetch-robot mars" in out
+
+
+# ---------------------------------------------------------------- the body
+
+def test_mars_is_a_body_and_deliberately_not_a_robot_spec():
+    """The design decision, as a test.
+
+    `RobotSpec` is "what the WALKING env needs to know about a robot" — foot
+    geoms, fall thresholds, air-time windows, a gyro. MARS has none of them
+    and a wheeled base cannot fall, so it is a `BodyBase`. If somebody ever
+    makes it a `RobotSpec` to reuse a reward or an env, this fails and says
+    why: the walker's fields would have to be invented, and an invented fall
+    height is a threshold a policy can satisfy by doing nothing.
+    """
+    assert conforms(mars.MARS) == ()
+    assert not isinstance(mars.MARS, RobotSpec)
+    assert mars.MARS.kind == "wheeled"
+    assert (mars.MARS.id, mars.MARS.noun, mars.MARS.title) == (
+        "mars", "MARS", "Innate MARS")
+    assert mars.MARS.look() == "mars"
+    assert R.get("mars") is mars.MARS
+
+
+#: Every constant this module carries from Innate's simulator, as a LITERAL.
+#: Written out here rather than read from `mars` so that the test below
+#: compares two independent statements of the number. Asserting
+#: `model.geom_friction[i] == mars.FINGER_FRICTION` is a tautology the moment
+#: the question is "did the ported value drift" — and it was: the first draft
+#: of this file did exactly that, and a planted `FINGER_ARMATURE = 0.0` and a
+#: planted `GRIPPER_CLOSED_ON_AIR_RAD = 0.0` both passed it.
+#:
+#: Source (innate-os at the pinned sha):
+#:   world.py   FINGER_*, WHEEL_GEOMS, GRIPPER_CLOSED_ON_AIR_RAD, ARM_HOME,
+#:              STRUCT_STIFFNESS, ARM_BACKLASH_RAD, BACKLASH_TANH_NM
+#:   core.py    KP_JOINT, KD_JOINT, EFFORT_LIMIT, GRIPPER_EFFORT_LIMIT,
+#:              KD_GRIPPER, JOINT2_GUARD_MIN
+INNATE_CONSTANTS = {
+    "KP_JOINT": 50.0,
+    "KD_JOINT": 1.0,
+    "EFFORT_LIMIT": 50.0,
+    "GRIPPER_EFFORT_LIMIT": 2.0,
+    "KD_GRIPPER": 0.0,
+    "JOINT2_GUARD_MIN": -0.25,
+    "GRIPPER_CLOSED_ON_AIR_RAD": -0.085,
+    "FINGER_CONDIM": 6,
+    "FINGER_FRICTION": (2.0, 0.05, 0.02),
+    "FINGER_SOLREF": (0.005, 1.0),
+    "FINGER_SOLIMP": (0.95, 0.99, 0.001, 0.5, 2),
+    "FINGER_DAMPING": 1.0,
+    "FINGER_ARMATURE": 1e-4,
+    "STRUCT_STIFFNESS": 25.0,
+    "ARM_BACKLASH_RAD": 0.055,
+    "BACKLASH_TANH_NM": 0.05,
+    "CONTROL_HZ": 25.0,
+}
+
+
+def test_every_constant_carried_from_innate_is_still_theirs():
+    """The port has not drifted.
+
+    Each of these was measured by Innate against something failing — a
+    grasped object creeping out of the claw, 1.1 kN of pinch ejecting it,
+    12 g blades sinking into whatever they touch, an arm sweeping through
+    the head. None of them is a tuning knob for this harness, and a number
+    changed here is a robot that behaves differently in this lab than on
+    their machine while claiming to be the same recipe.
+    """
+    for name, want in INNATE_CONSTANTS.items():
+        got = getattr(mars, name)
+        if isinstance(want, tuple):
+            assert tuple(got) == want, name
+        else:
+            assert got == pytest.approx(want), name
+    assert mars.ARM_HOME["joint1"] == 1.445009902188274
+    assert mars.ARM_HOME["joint6"] == 0.0015339807878856412
+    assert mars.WHEEL_GEOMS == ("base_wheel_left", "base_wheel_right")
+    assert mars.FINGER_LINKS == ("link61", "link62")
+
+
+def test_the_spawn_keyframe_is_named_home():
+    """The keyframe's NAME is a contract, not an implementation detail.
+
+    `docs/mars-roadmap.md` Phase 2 names it, the lab and `render-rollout`
+    spawn a body by `stand_keyframe`, and a scenario or a test elsewhere may
+    hard-code the string. Renaming it inside this module is self-consistent
+    — MEASURED: every other test in this file and the whole conformance
+    suite still pass with the keyframe called NOT_A_KEY — so the name needs
+    its own assertion or nothing holds it.
+    """
+    assert mars.HOME_KEY == "HOME"
+    assert mars.MARS.stand_keyframe == "HOME"
+
+
+def test_the_policy_contract_is_six_joints_eight_actions_and_thirty_two_floats():
+    """The widths the lab, the exporter and Phase 4's env all read.
+
+    `num_actions != num_joints` is the point: six joint targets plus the
+    base twist. `BodyBase`'s default is one action per joint, which would
+    have handed a MARS policy 6 outputs and silently dropped the wheels.
+    """
+    assert mars.MARS.joint_names == ("joint1", "joint2", "joint3", "joint4",
+                                     "joint5", "joint6")
+    assert mars.MARS.num_joints == 6
+    assert mars.MARS.num_actions == 8 == mars.NUM_ACTIONS
+    assert mars.MARS.obs_dim == 32 == mars.OBS_DIM
+    assert len(mars.MARS.default_pose) == 6
+    assert len(mars.MARS.joint_groups) == 6
+
+
+def test_the_observation_layout_tiles_the_contract_exactly():
+    """The v1 obs layout is a set of slices, and nothing fills it yet.
+
+    So this is the only thing standing between a documented layout and one
+    that overlaps or leaves a hole: Phase 4 will index these constants, and
+    two slices sharing a float is a task reading another task's channel with
+    no error anywhere. Checked as a tiling — contiguous, in order, ending at
+    `OBS_DIM` — rather than field by field.
+    """
+    layout = [mars.OBS_ARM_QPOS, mars.OBS_ARM_QVEL, mars.OBS_HEAD_PITCH,
+              mars.OBS_GRIPPER_LOAD, mars.OBS_LAST_ACTION,
+              mars.OBS_TARGET_BASE, mars.OBS_TARGET_SEEN,
+              mars.OBS_BASE_TWIST, mars.OBS_RESERVED]
+    at = 0
+    for s in layout:
+        assert s.start == at, f"{s} does not start where the last one ended ({at})"
+        assert s.stop > s.start
+        at = s.stop
+    assert at == mars.OBS_DIM
+    # The slots whose width is a body fact, not a choice.
+    assert mars.OBS_ARM_QPOS.stop - mars.OBS_ARM_QPOS.start == mars.MARS.num_joints
+    assert mars.OBS_ARM_QVEL.stop - mars.OBS_ARM_QVEL.start == mars.MARS.num_joints
+    assert (mars.OBS_LAST_ACTION.stop - mars.OBS_LAST_ACTION.start
+            == mars.MARS.num_actions)
+    assert mars.ACT_ARM.stop == mars.ACT_BASE_TWIST.start
+    assert mars.ACT_BASE_TWIST.stop == mars.NUM_ACTIONS
+
+
+def test_an_overlapping_obs_slot_is_caught():
+    """The planted regression for the tiling above: two slots sharing a
+    float must not read as a valid layout."""
+    layout = [slice(0, 6), slice(5, 12)]          # one float over
+    at = 0
+    ok = True
+    for s in layout:
+        ok = ok and s.start == at
+        at = s.stop
+    assert not ok
+
+
+def test_the_head_is_a_command_slot_not_a_policy_joint():
+    """`joint_head` and `joint6M` are real joints and neither is an action.
+
+    The head is the duck's neck all over again — a command the operator or a
+    brain sets, not something a task policy is scored on — and `joint6M` is
+    a `<mimic>` in the URDF driven by the gripper's geartrain. Putting
+    either in `joint_names` would widen the contract by two and give a
+    policy two outputs that fight the servo.
+    """
+    assert mars.HEAD_JOINT == "joint_head"
+    assert mars.HEAD_JOINT not in mars.MARS.joint_names
+    assert mars.MIMIC_JOINT[0] not in mars.MARS.joint_names
+    assert mars.MIMIC_JOINT == ("joint6M", "joint6", -1.0)
+    assert mars.DRIVEN_JOINTS == mars.MARS.joint_names + (mars.HEAD_JOINT,)
+
+
+def test_the_default_pose_is_innates_arm_home_in_joint_order():
+    """`default_pose` is what a zero action means and where the lab parks an
+    unpolicied slot, so it has to be Innate's own home to the digit — their
+    webapp's ARM_HOME_POSITIONS, which is the pose the real arm folds to."""
+    assert np.allclose(mars.MARS.default_pose,
+                       [mars.ARM_HOME[j] for j in mars.MARS.joint_names])
+    assert mars.ARM_HOME["joint_head"] == 0.0
+    assert set(mars.ARM_HOME) == set(mars.DRIVEN_JOINTS)
+
+
+def test_the_answers_that_are_refusals_name_the_phase_that_lands_them():
+    """A body whose remaining gaps refuse by name.
+
+    Each of these could return something plausible — the duck's env, an
+    empty walker, a duck recipe — and each would be a wrong answer that only
+    shows up as bad behaviour. Raising with the phase number is also how the
+    next person finds out where the work goes.
+
+    Three of these were refusals until the phase named in them landed, and
+    the progression is what this test is for: `driver()` became real in Phase
+    3a (`robots/mars_drive.py`, measured next door), `env_class` / `tasks` in
+    **Phase 4a** (`reach` builds `MarsArmEnv` and the 🎓 panel lists
+    `mars_reach`) and `pick` in **Phase 4b** (`MarsPickEnv`, a block in the
+    scene, `mars_pick`) — all measured in `tests/test_mars_env.py` and
+    `tests/test_mars_pick.py`. What is still a refusal is `place`, and it
+    refuses by NAMING the ones that exist rather than by falling back to
+    anything.
+    """
+    from microduck_local.robots.mars_env import MarsArmEnv, MarsPickEnv
+
+    assert mars.MARS.env_class("reach") is MarsArmEnv
+    assert mars.MARS.env_class("pick") is MarsPickEnv
+    for absent in ("walk", "place", "stand"):
+        with pytest.raises(SystemExit, match="unknown --task"):
+            mars.MARS.env_class(absent)
+    assert [b.id for b in mars.MARS.tasks()] == ["mars_reach", "mars_pick"]
+    # Still nothing: Innate's learned skills are ACT checkpoints, not ONNX.
+    assert mars.MARS.shipped_policies() == ()
+    assert mars.MARS.train_env_kwargs(None) == {}
+
+
+@needs_mars
+def test_the_body_hands_out_a_driver_for_the_prefix_it_is_asked_about():
+    """`Body.driver(model, prefix)` — the seam `/sim` steps a MARS through.
+
+    Here rather than in `tests/test_mars_drive.py` because what is being
+    checked is the BODY's answer: that the registry's MARS returns a driver
+    bound to the model and prefix it was given, so a room with two of them
+    gets two independent controllers. The drive itself is measured next door.
+    """
+    m = mars.model()
+    drv = mars.MARS.driver(m, "")
+    assert type(drv).__name__ == "MarsDriver"
+    assert drv.model is m and drv.prefix == ""
+    assert drv.base_id == mujoco.mj_name2id(
+        m, mujoco.mjtObj.mjOBJ_BODY, mars.BASE_BODY)
+    with pytest.raises(KeyError, match="attached under this prefix"):
+        mars.MARS.driver(m, "m0/")     # nothing is attached under m0/ here
+
+
+# ------------------------------------------------------- the URDF rewrites
+
+@needs_mars
+def test_the_discardvisual_rewrite_keeps_all_nine_meshes():
+    """MuJoCo's URDF importer DISCARDS `<visual>` geometry by default.
+
+    Without Innate's embedded compiler override the robot still simulates —
+    it just has no shell, which reaches a person as an invisible robot on the
+    stage and nothing anywhere as an error.
+
+    Fourteen meshes rather than the description's nine: `add_cut_meshes`
+    cuts the tyres out of `base.STL`, the shoulder's and elbow's servo cases
+    out of `link2`/`link3.STL`, and the face panel and camera lenses out of
+    `head.STL` — the five meshes in a MARS this repo made.
+    """
+    m = mars.robot_spec().compile()
+    assert m.nmesh == 14, (
+        "the description's 9, plus the tyres out of base.STL, the shoulder "
+        "and elbow cases out of link2/link3.STL, and the face and lenses "
+        "out of head.STL")
+    visual = [i for i in range(m.ngeom)
+              if int(m.geom_group[i]) == mars.VISUAL_GROUP]
+    collision = [i for i in range(m.ngeom) if int(m.geom_contype[i]) == 1]
+    assert len(visual) == 17, "14 meshes + the 3 marker spheres"
+    assert len(collision) == 46
+    assert set(visual) & set(collision) == set()
+    # `paint_shell` swept every one of those out of the group MuJoCo's own
+    # renderers draw — without it a MARS renders as 46 black boxes.
+    assert all(int(m.geom_group[i]) == mars.COLLISION_GROUP
+               for i in collision)
+
+
+@needs_mars
+def test_without_the_rewrites_the_meshes_and_the_frames_are_gone():
+    """The planted regression for both of the rewrites that matter.
+
+    Loading the same URDF with the importer's own defaults must lose the
+    meshes (discardvisual) and the static frames (fusestatic) — if it ever
+    stops doing so, the rewrites are dead code and the test above is
+    passing for a reason that has nothing to do with them.
+    """
+    path = mars.urdf_path()
+    plain = path.read_text().replace(
+        "package://mars_description/", str(path.parent.parent.resolve()) + "/")
+    m = mujoco.MjSpec.from_string(plain).compile()
+    assert m.nmesh == 0, "discardvisual no longer discards"
+    assert mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "ee_link") < 0, (
+        "fusestatic no longer fuses")
+
+
+@needs_mars
+def test_the_static_frames_survive_and_an_attach_does_not_lose_their_mass():
+    """`fusestatic="false"`, and the 31 g that proves why it is there.
+
+    MEASURED on this URDF: with the importer's default (fuse ON), compiling
+    the robot alone gives 10 bodies and 1.3650 kg, and attaching that
+    already-compiled spec into a world gives 10 bodies and 1.3340 kg — the
+    marker links' mass is silently dropped the second time. The lab builds
+    the viewer's dump from one model and streams poses from another, indexed
+    positionally, so two compiles that disagree on the body list draw a robot
+    with its parts on the wrong joints.
+
+    The names also have to exist for their own sake: Phase 3 mounts the lidar
+    on `base_laser` and the camera on `head_camera_left`, and Phase 4's
+    reward reads `ee_link`.
+    """
+    alone = mars.robot_spec().compile()
+    assert alone.nbody == 18
+    assert float(sum(alone.body_mass)) == pytest.approx(1.365, abs=5e-4)
+    for name in (mars.BASE_BODY, mars.LIDAR_SITE, mars.CAMERA_BODY,
+                 mars.EFFECTOR_BODY, "base_footprint"):
+        assert mujoco.mj_name2id(alone, mujoco.mjtObj.mjOBJ_BODY, name) >= 0, name
+
+    world = mujoco.MjSpec()
+    # The lab's timestep, like `compose()` sets: `attach` keeps the PARENT's
+    # options, and a bare MjSpec's 2 ms would warn about overriding the
+    # scene's 5 ms — noise that says nothing about the mass.
+    world.option.timestep = C.PHYSICS_DT
+    frame = world.worldbody.add_frame(pos=[0, 0, 0])
+    mars.MARS.attach(world, prefix="m0/", frame=frame)
+    attached = world.compile()
+    assert attached.nbody == alone.nbody
+    assert float(sum(attached.body_mass)) == pytest.approx(
+        float(sum(alone.body_mass)), abs=1e-6), (
+        "the attach lost mass — see fusestatic in mars.load_robot_spec")
+
+
+# ---------------------------------------------------- innate's model recipe
+
+@needs_mars
+def test_the_planar_base_has_three_dofs_and_no_way_to_fall():
+    """(x, y, yaw) on `base_link` — and nothing else.
+
+    A free joint lets the arm's reaction torque tip the 0.89 kg base over
+    (Innate's own reason), which would make MARS a body that falls and put
+    every walker question back on the table. So the base's DoFs are pinned
+    here by TYPE, not just by name: two slides on x and y, one hinge on z.
+    """
+    m = mars.model()
+    want = (mujoco.mjtJoint.mjJNT_SLIDE, mujoco.mjtJoint.mjJNT_SLIDE,
+            mujoco.mjtJoint.mjJNT_HINGE)
+    axes = ([1, 0, 0], [0, 1, 0], [0, 0, 1])
+    for name, jtype, axis in zip(mars.BASE_JOINTS, want, axes):
+        j = m.joint(name)
+        assert int(j.type[0]) == int(jtype), name
+        assert np.allclose(j.axis, axis), name
+    assert m.nq == 11 and m.nv == 11, "3 planar + 6 arm + the mimic + the head"
+    # No free joint anywhere: a 7-qpos root is exactly what was excluded.
+    assert not any(int(m.jnt_type[i]) == int(mujoco.mjtJoint.mjJNT_FREE)
+                   for i in range(m.njnt))
+
+
+@needs_mars
+def test_the_drive_wheels_are_frictionless_and_win_their_contact_pairs():
+    """condim 1 AND priority 1, both of Innate's, both necessary.
+
+    The planar base pins z, so a tangent wheel answers every step with ~50 N
+    of spurious normal force whose friction cone glues the base. condim 1
+    drops the friction; priority 1 is what stops the floor's condim 3 from
+    winning the pair and putting it straight back.
+    """
+    m = mars.model()
+    for name in ("base_wheel_left", "base_wheel_right"):
+        g = m.geom(name)
+        assert int(g.condim[0]) == 1, name
+        assert int(g.priority[0]) == 1, name
+    assert int(m.geom(mars.FLOOR_GEOM).condim[0]) == 3, (
+        "the floor is condim 3 — which is why the wheels need priority")
+
+
+@needs_mars
+def test_the_finger_blades_carry_the_grasp_contact_model():
+    """Innate's grasp tuning, on the geoms it belongs to.
+
+    Every number here was measured against an object slipping out of the
+    claw, so a revision that drops one is a gripper that looks right and
+    cannot hold anything. Priority 2 is what makes the finger's parameters
+    govern every pair it is in — which is also why its condim must be 6.
+    """
+    m = mars.model()
+    blades = [i for i in range(m.ngeom)
+              if (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY,
+                                    m.geom_bodyid[i]) in mars.FINGER_LINKS
+                  and int(m.geom_contype[i]) == 1)]
+    assert len(blades) == 26, "13 collision shapes a blade"
+    # Against the LITERALS (`INNATE_CONSTANTS`), not against the module's own
+    # constants: comparing the model to the value it was built from cannot
+    # catch the value changing, and a planted `FINGER_ARMATURE = 0.0` passed
+    # exactly that version of this test.
+    for i in blades:
+        assert int(m.geom_priority[i]) == 2
+        assert int(m.geom_condim[i]) == 6
+        assert np.allclose(m.geom_friction[i], (2.0, 0.05, 0.02))
+        assert np.allclose(m.geom_solref[i], (0.005, 1.0))
+        assert np.allclose(m.geom_solimp[i], (0.95, 0.99, 0.001, 0.5, 2))
+    for name in (mars.MIMIC_JOINT[0], mars.MIMIC_JOINT[1]):
+        dof = int(m.joint(name).dofadr[0])
+        assert m.dof_damping[dof] == pytest.approx(1.0)
+        assert m.dof_armature[dof] == pytest.approx(1e-4)
+    # And the arm's joints are NOT re-tuned: the URDF's damping=5 stands
+    # everywhere the fingers are not (the fingers' 1.0 is what sets the
+    # ~0.45 s close, and applying it to the arm would triple its speed).
+    arm_dof = int(m.joint("joint1").dofadr[0])
+    assert m.dof_damping[arm_dof] == pytest.approx(5.0)
+
+
+@needs_mars
+def test_the_two_fingers_are_excluded_from_colliding_with_each_other():
+    """Their hub pins overlap by ~1 mm at joint6 = 0.
+
+    Without the exclude the claw fights itself at the closed pose — and
+    `arm.srdf` disables the same pair for MoveIt, so this is the robot's own
+    statement about its geometry, not a convenience.
+    """
+    m = mars.model()
+    b1 = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, mars.FINGER_LINKS[0])
+    b2 = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, mars.FINGER_LINKS[1])
+    pairs = {(int(m.exclude_signature[i]) >> 16,
+              int(m.exclude_signature[i]) & 0xFFFF) for i in range(m.nexclude)}
+    assert (b1, b2) in pairs or (b2, b1) in pairs, (
+        f"link61/link62 not excluded (exclusions: {pairs})")
+
+
+@needs_mars
+def test_the_gripper_range_is_clamped_to_the_real_hard_stop():
+    """Closed on air the encoder reads -0.085 rad, past nominal zero.
+
+    The URDF's canonical range starts at 0; unclamped, a -0.6 close target
+    scissors the blades through each other. The mimic finger's range is the
+    negation, or the geartrain has a reachable pose its partner does not.
+    """
+    m = mars.model()
+    j6 = m.joint(mars.MIMIC_JOINT[1]).range
+    j6m = m.joint(mars.MIMIC_JOINT[0]).range
+    # PAST nominal zero, asserted as the property and not just against the
+    # constant: `j6[0] == mars.GRIPPER_CLOSED_ON_AIR_RAD` alone passes when
+    # the constant is edited to 0.0, which is the clamp not existing.
+    assert j6[0] < 0.0, "the closed-on-air stop is past zero, or it is not a clamp"
+    assert j6[0] == pytest.approx(-0.085)
+    assert j6[1] == pytest.approx(0.8727, abs=1e-4)
+    assert j6m[1] == pytest.approx(0.085)
+    assert j6m[0] == pytest.approx(-j6[1], abs=1e-4)
+    # The URDF's own canonical range starts at 0, so the clamp is this
+    # module's edit and not something the file already said.
+    assert '<limit lower="0" upper="0.8727"' in mars.urdf_path().read_text()
+
+
+@needs_mars
+def test_the_home_keyframe_folds_the_arm_and_mirrors_the_mimic_finger():
+    """The keyframe every MARS spawns at, addressed by joint name.
+
+    The mimic finger is the one that cannot be typed in: it has to be
+    `-joint6` at spawn or the claw starts with one blade open, which reads
+    as a broken gripper the moment anything is put in it.
+    """
+    m = mars.model()
+    key = m.key(mars.HOME_KEY)
+    assert key.qpos.shape[0] == m.nq
+    for name, want in mars.ARM_HOME.items():
+        adr = int(m.joint(name).qposadr[0])
+        # 1e-5, not exact: the scene is written as XML text, which keeps ~6
+        # significant digits (joint2 lands at -1.38825 for Innate's
+        # -1.3882526130365052). 2.6e-6 rad is 0.00015 deg, three orders
+        # below the robot's own 2 mm repeatability — but it does mean
+        # ARM_HOME is the source of truth and the keyframe is a rounding of
+        # it, which is why `arm_servo` reads the dict and not the keyframe.
+        assert key.qpos[adr] == pytest.approx(want, abs=1e-5), name
+    mimic, source, mult = mars.MIMIC_JOINT
+    assert key.qpos[int(m.joint(mimic).qposadr[0])] == pytest.approx(
+        mult * mars.ARM_HOME[source], abs=1e-5)
+    # The base spawns at the origin, on the floor, with nothing moving.
+    for name in mars.BASE_JOINTS:
+        assert key.qpos[int(m.joint(name).qposadr[0])] == 0.0
+    assert np.all(key.qvel == 0.0)
+
+
+@needs_mars
+def test_two_mars_attach_under_two_prefixes_in_one_model():
+    """A roster is N bodies in ONE model, and MARS's names are all bare.
+
+    `tests/test_body_conformance.py` attaches one beside a duck; this is the
+    harder case — two of the SAME body, where every mesh, material, joint and
+    the `link61/link62` exclude has to survive being named twice.
+    """
+    world = mujoco.MjSpec()
+    world.option.timestep = C.PHYSICS_DT
+    world.worldbody.add_geom(name="floor", type=mujoco.mjtGeom.mjGEOM_PLANE,
+                             size=[5, 5, 0.05])
+    for i, y in enumerate((1.0, -1.0)):
+        frame = world.worldbody.add_frame(pos=[0, y, 0])
+        mars.MARS.attach(world, prefix=f"m{i}/", frame=frame)
+    m = world.compile()
+    assert m.nexclude == 2, "each MARS keeps its own finger exclude"
+    for i in range(2):
+        for name in mars.DRIVEN_JOINTS + mars.BASE_JOINTS:
+            assert mujoco.mj_name2id(
+                m, mujoco.mjtObj.mjOBJ_JOINT, f"m{i}/{name}") >= 0, name
+    data = mujoco.MjData(m)
+    mujoco.mj_step(m, data)
+    assert np.isfinite(data.qpos).all()
+
+
+@needs_mars
+def test_the_scene_is_rewritten_only_when_its_content_changes():
+    """`scene_fn` is called per env build, per lab slot and per test.
+
+    Rewriting the file each time would be a write under a vec-env worker
+    that may be importing it (the repo's atomic-write rule), so the content
+    is compared first and the write is temp + `os.replace`.
+    """
+    path = mars.scene_xml()
+    assert path.is_file() and path.name == mars.SCENE_NAME
+    before = path.stat().st_mtime_ns
+    assert mars.scene_xml() == path
+    assert path.stat().st_mtime_ns == before, "the scene was rewritten"
+    path.write_text(path.read_text() + "<!-- edited -->")
+    assert mars.scene_xml() == path
+    assert "edited" not in path.read_text(), "a changed scene was not regenerated"
+    assert not list(path.parent.glob(f".{path.name}.*.tmp")), "a temp file was left"
+
+
+# ---------------------------------------------------------------- the servo
+
+@needs_mars
+def test_there_are_no_actuators_and_the_servo_drives_qfrc_applied():
+    """`nu == 0` is the model being faithful, not broken.
+
+    mars.urdf has no `<actuator>` block because Innate's driver commands
+    positions through `qfrc_applied`. Anything in this tree that reaches for
+    `data.ctrl` on a MARS is writing into a zero-length array, so the fact
+    is pinned where somebody will read it.
+    """
+    m = mars.model()
+    assert m.nu == 0
+    data = mujoco.MjData(m)
+    mujoco.mj_resetDataKeyframe(m, data, m.key(mars.HOME_KEY).id)
+    mujoco.mj_forward(m, data)
+    assert np.all(data.qfrc_applied == 0.0)
+    mars.arm_servo(m, data, {**mars.ARM_HOME, "joint1": mars.ARM_HOME["joint1"] - 0.5})
+    driven = [mars.servo_addresses(m)[n][1] for n in mars.DRIVEN_JOINTS]
+    assert np.any(data.qfrc_applied[driven] != 0.0)
+    assert np.all(np.abs(data.qfrc_applied) <= mars.EFFORT_LIMIT + 1e-9)
+
+
+@needs_mars
+def test_the_gripper_runs_on_its_own_two_newton_metre_clamp():
+    """50 N*m on a 45 mm finger is 1.1 kN of pinch.
+
+    It ejects whatever it grabs and shakes the contact solver, so the two
+    finger DoFs are clamped at the real servo's rating while the arm keeps
+    the generic 50. A single clamp for the whole body is the mistake this
+    asserts against.
+    """
+    m = mars.model()
+    data = mujoco.MjData(m)
+    mujoco.mj_resetDataKeyframe(m, data, m.key(mars.HOME_KEY).id)
+    mujoco.mj_forward(m, data)
+    adr = mars.servo_addresses(m)
+    # Ask for the gripper wide open and the shoulder far away: both servos
+    # saturate, and the two limits must be different.
+    mars.arm_servo(m, data, {"joint6": 0.87, "joint1": -1.5}, adr=adr)
+    grip = abs(float(data.qfrc_applied[adr["joint6"][1]]))
+    mimic = abs(float(data.qfrc_applied[adr["joint6M"][1]]))
+    arm = abs(float(data.qfrc_applied[adr["joint1"][1]]))
+    assert grip == pytest.approx(mars.GRIPPER_EFFORT_LIMIT)
+    assert mimic == pytest.approx(mars.GRIPPER_EFFORT_LIMIT)
+    assert arm == pytest.approx(mars.EFFORT_LIMIT)
+
+
+@needs_mars
+def test_the_servo_refuses_a_joint_the_model_does_not_have():
+    """The planted regression for every name in the servo.
+
+    A renamed link in a URDF revision has to fail here. The alternative is
+    `mj_name2id` answering -1 and the servo writing into `qfrc_applied[-1]`
+    — the last DoF in the model, which on this body is the head.
+    """
+    m = mars.model()
+    with pytest.raises(KeyError):
+        mars.servo_addresses(m, prefix="m0/")      # nothing is attached here
+    with pytest.raises(KeyError):
+        mars.arm_servo(m, mujoco.MjData(m), mars.ARM_HOME, prefix="nope/")
+
+
+def test_the_joint2_guard_ramps_from_the_head_to_the_full_range():
+    """arm_control.cpp's "intelligent joint limits", ported.
+
+    The arm must duck UNDER the head rather than sweep through it when
+    joint1 crosses the front arc, so joint2's floor is a function of joint1.
+    Pinned as the shape of the ramp — a no-op outside the arc, the guard
+    value inside it, monotonic in between — because a sign error here is an
+    arm that is free to hit the head exactly where the guard was meant to
+    apply. It is a no-op at HOME (joint1 = 1.445), which is why the hold test
+    cannot be passing because of it.
+    """
+    full = -1.5708
+    assert mars.joint2_min_target(1.445, full) == full          # HOME
+    assert mars.joint2_min_target(-1.4, full) == full
+    assert mars.joint2_min_target(1.30, full) == full
+    assert mars.joint2_min_target(0.0, full) == mars.JOINT2_GUARD_MIN
+    assert mars.joint2_min_target(0.99, full) == mars.JOINT2_GUARD_MIN
+    # Inside the arc the guard RESTRICTS: a higher floor than the joint's own.
+    assert mars.joint2_min_target(0.0, full) > full
+    ramp = [mars.joint2_min_target(x / 100.0, full) for x in range(100, 126)]
+    assert ramp == sorted(ramp, reverse=True), "the ramp back to full is not monotonic"
+    assert ramp[0] == mars.JOINT2_GUARD_MIN and ramp[-1] == pytest.approx(full)
+
+
+@needs_mars
+def test_the_sag_model_is_off_by_default_and_moves_the_arm_when_on():
+    """Innate's structural sag, and why this harness leaves it off.
+
+    On the real robot the sag lives PAST the encoders and `/joint_states`
+    reports the encoder side, so `qpos` would disagree with the reported arm
+    by up to the backlash. Until the reporting layer exists (Phase 4's obs),
+    switching it on would make the observation less honest, not more — so
+    the default is off, and turning it on must visibly move the arm or the
+    port is dead code.
+    """
+    m = mars.model()
+    errs = {}
+    for sag in (False, True):
+        data = mujoco.MjData(m)
+        mujoco.mj_resetDataKeyframe(m, data, m.key(mars.HOME_KEY).id)
+        adr = mars.servo_addresses(m)
+        for _ in range(400):
+            mars.arm_servo(m, data, mars.ARM_HOME, adr=adr, sag=sag)
+            mujoco.mj_step(m, data)
+        errs[sag] = max(abs(float(data.qpos[adr[n][0]]) - t)
+                        for n, t in mars.ARM_HOME.items())
+    assert errs[False] < 0.01, f"the default hold drifted {errs[False]:.4f} rad"
+    assert errs[True] > errs[False] * 3, (
+        f"sag=True changed nothing ({errs}) — the port is dead code")
+
+
+# --------------------------------------------------------------- the viewer
+
+@needs_mars
+def test_the_visual_dump_paints_innates_colours_and_leaves_out_the_rest():
+    """`paint_shell`'s intent, arriving in the dump the browser draws.
+
+    The lab ships a colour per geom, so this is how a MARS arrives in
+    Innate's White shell without the viewer knowing anything about MARS —
+    white body and arm, BLACK tyres, blue on the head bar and the two
+    gripper fingers. What must NOT be in the dump is as important: 46
+    collision boxes and 3 frame-marker spheres, which would draw as a robot
+    inside a pile of blocks.
+    """
+    scene = mars.MARS.visual_scene()
+    by_name = {g["name"]: g for g in scene["geoms"]}
+    assert len(scene["geoms"]) == len(scene["meshes"]) == 14
+    assert set(by_name) == {"base", "head", "link1", "link2", "link3",
+                            "link4", "link5", "link61", "link62",
+                            *mars.MESH_PAINT}
+    # Black: the tyres, and the arm's first servo — one colour, because the
+    # tread and the servo case are the same moulded black on the real robot.
+    for name in (*mars.BLACK_MESHES, *mars.BLACK_LINKS):
+        assert by_name[name]["rgba"] == list(mars.INNATE_BLACK), name
+    for link in ("head", "link61", "link62"):
+        assert by_name[link]["rgba"] == list(mars.INNATE_BLUE), link
+    # The head's own two cut parts, which the blue must NOT have reached.
+    assert by_name[mars.FACE_MESH]["rgba"] == list(mars.FACE_BLACK)
+    assert by_name[mars.EYES_MESH]["rgba"] == list(mars.EYE_GREY)
+    for link in ("base", "link2", "link3", "link5"):
+        assert by_name[link]["rgba"] == list(mars.SHELL_WHITE), link
+    # Every geom names a body in the dump's own list, and the integer verts
+    # are what the viewer multiplies by vertScale.
+    assert scene["vertScale"] == mars.VERT_SCALE_M
+    for g in scene["geoms"]:
+        assert scene["bodies"][g["body"]] in ("base_link", "head") or \
+            scene["bodies"][g["body"]].startswith("link")
+    assert all(isinstance(v, int) for v in scene["meshes"][0]["v"][:10])
+
+
+@needs_mars
+def test_the_wheel_split_cuts_out_the_tyres_and_loses_no_triangle():
+    """`base.STL` in, a shell and two tyres out, with nothing dropped.
+
+    The cut is what makes "black wheels" sayable at all: the description has
+    the box, the turret, the neck and both tyres as ONE mesh, so before it
+    there was no geom a rubber colour could go on.
+    """
+    spec = mars.load_robot_spec()
+    _n, base = mars._read_binary_stl(mars.asset_dir() / "meshes" / "base.STL")
+    # From `base.STL`, not from the files on disk: those are CACHED on
+    # `base.STL`'s mtime, so a test that read them back would pass over any
+    # change to the cut itself. Reading both and comparing is what says the
+    # cache is current — and is the one thing that fails if it is stale.
+    tyre = mars._tyre_triangles(base, mars._wheel_cylinders(spec))
+    shell_path, wheel_path = mars.split_base_mesh(spec)
+    _n, shell = mars._read_binary_stl(shell_path)
+    _n, tyres = mars._read_binary_stl(wheel_path)
+    assert len(shell) + len(tyres) == len(base), "the cut lost or duplicated"
+    assert len(tyres) == 7360 == int(tyre.sum()), "two 3 680-triangle tyres"
+    assert np.array_equal(tyres, base[tyre]), "the cached tyres are stale"
+    assert np.array_equal(shell, base[~tyre]), "the cached shell is stale"
+    # Every tyre triangle is ON one of the two drive wheels: inside its disc
+    # and within a tyre's width of its plane.
+    cylinders = mars._wheel_cylinders(spec)
+    mid = tyres.mean(axis=1)
+    on_a_wheel = np.zeros(len(mid), dtype=bool)
+    for centre, radius, half_width in cylinders:
+        on_a_wheel |= (
+            (np.abs(mid[:, 1] - centre[1]) <= 3.0 * half_width)
+            & (np.hypot(mid[:, 0] - centre[0], mid[:, 2] - centre[2])
+               <= radius * mars.WHEEL_RADIUS_TOL))
+    assert on_a_wheel.all(), f"{(~on_a_wheel).sum()} tyre triangles are not"
+
+
+@needs_mars
+def test_the_split_follows_the_MESH_and_not_a_cylinder_around_it():
+    """The planted regression for cutting by geometry instead of by shell.
+
+    A cylinder test on triangles is the obvious implementation and it is
+    wrong. MEASURED on `base.STL`: a cylinder sized to the tyre's own extent
+    — |y| >= 73.7 mm and radius <= 37.3 mm, which is what anyone would take
+    off the mesh — selects 7 503 triangles where the two tyre shells are
+    7 360. The 143 extras are the WHEEL ARCH: chassis wrapped around the
+    tyre, which would have come out painted rubber.
+
+    So those 143 must still be ON THE SHELL, and this test fails the day the
+    component walk is simplified into a bounding test.
+    """
+    spec = mars.load_robot_spec()
+    _n, base = mars._read_binary_stl(mars.asset_dir() / "meshes" / "base.STL")
+    tyre = mars._tyre_triangles(base, mars._wheel_cylinders(spec))
+    shell, tyres = base[~tyre], base[tyre]
+    axis_z = float(mars._wheel_cylinders(spec)[0][0][2])
+
+    def inside(v):
+        """Every vertex inside the bounding cylinder OF THE TYRES."""
+        return ((np.abs(v[:, :, 1]) >= np.abs(tyres[:, :, 1]).min() - 1e-6)
+                & (np.hypot(v[:, :, 0], v[:, :, 2] - axis_z)
+                   <= np.hypot(tyres[:, :, 0], tyres[:, :, 2] - axis_z).max()
+                   + 1e-6)).all(axis=1)
+
+    assert int(inside(shell).sum()) == 143, (
+        f"{int(inside(shell).sum())} shell triangles sit inside the tyres' "
+        "own cylinder, not the 143 of the wheel arch")
+
+
+@needs_mars
+@pytest.mark.parametrize("link", sorted(mars.HOUSING_CUTS))
+def test_a_housing_cut_takes_the_case_and_leaves_the_arm(link):
+    """`<link>.STL` in, an arm and a servo case out, nothing dropped.
+
+    Each joint's housing is fused into the arm it drives — Innate prints
+    them as one part — so these cuts are PLANES where the tyres' is a seam,
+    and the plane is the URDF's own collision box for the housing rather
+    than a number.
+
+    What the test pins is that the plane still separates the two: the case
+    must sit entirely behind the face, the arm entirely in front of it, and
+    the arm must still reach its far end. A plane that drifted onto the
+    shaft would black out a whole arm, which is the failure these cuts
+    exist to avoid.
+
+    The axis is read off the MESH here as well as in the code, on purpose:
+    MEASURED, `link2` runs along its z and `link3` along its x, and pinning
+    either one would make this test agree with a hard-coded axis instead of
+    checking for one.
+    """
+    box_geom, _mesh = mars.HOUSING_CUTS[link]
+    spec = mars.load_robot_spec()
+    _n, whole = mars._read_binary_stl(mars.asset_dir() / "meshes" / f"{link}.STL")
+    case_mask = mars._housing_triangles(whole, spec, box_geom)
+    shell_path, case_path = mars.split_housing_mesh(spec, link)
+    _n, shell = mars._read_binary_stl(shell_path)
+    _n, case = mars._read_binary_stl(case_path)
+    assert len(shell) + len(case) == len(whole), "the cut lost or duplicated"
+    assert np.array_equal(case, whole[case_mask]), "the cached case is stale"
+    assert np.array_equal(shell, whole[~case_mask]), "the cached arm is stale"
+
+    flat = whole.reshape(-1, 3)
+    axis = int(np.argmax(flat.max(axis=0) - flat.min(axis=0)))
+    box = spec.geom(box_geom)
+    face = float(np.asarray(box.pos)[axis] + np.asarray(box.size)[axis])
+    assert case.mean(axis=1)[:, axis].max() < face
+    assert shell.mean(axis=1)[:, axis].min() >= face
+    # A housing on the NEAR END, not the shaft. Measured by LENGTH, never by
+    # triangle count: MEASURED, the elbow case is 57 % of link3's triangles
+    # and 47 % of its length, because a moulded box is tessellated far more
+    # finely than a 15 cm shaft — counting faces called this cut a half-arm.
+    lo, hi = float(flat[:, axis].min()), float(flat[:, axis].max())
+    reach = (float(case[:, :, axis].max()) - lo) / (hi - lo)
+    assert 0.2 < reach < 0.55, f"the case reaches {reach:.0%} along {link}"
+    # …and the arm still reaches its far end.
+    assert float(shell[:, :, axis].max()) > lo + 0.9 * (hi - lo)
+
+
+@needs_mars
+@pytest.mark.parametrize("link", sorted(mars.HOUSING_CUTS))
+def test_a_housing_cut_refuses_a_plane_that_takes_everything(link):
+    """The guard for a description whose link and collision box disagree.
+
+    A plane is a blunter instrument than a seam: with the box moved, it
+    quietly takes all of an arm or none of it, and either answer would be
+    WRITTEN TO A FILE and cached. Off either end it raises — past the far
+    end because the housing is no longer at the joint, past the near end
+    because the plane then takes nothing.
+    """
+    box_geom, _mesh = mars.HOUSING_CUTS[link]
+    _n, whole = mars._read_binary_stl(mars.asset_dir() / "meshes" / f"{link}.STL")
+    for far, why in ((1.0, "not at the joint end"), (-1.0, "no longer describe")):
+        doctored = mars.load_robot_spec()
+        box = doctored.geom(box_geom)
+        box.pos = [far, far, far]
+        box.size = [0.001, 0.001, 0.001]
+        with pytest.raises(RuntimeError, match=why):
+            mars._housing_triangles(whole, doctored, box_geom)
+
+
+@needs_mars
+def test_the_head_cut_finds_the_lenses_by_shell_and_the_face_by_normal():
+    """`head.STL` in, a shell, a face panel and two lenses out.
+
+    One mesh, two methods, because that is what it offers: the barrels are a
+    printed part and come out as a SHELL; the black panel is not a part at
+    all — it is the flat front of the blue shell — and comes out by NORMAL.
+    """
+    spec = mars.load_robot_spec()
+    source = mars.asset_dir() / "meshes" / "head.STL"
+    normals, verts = mars._read_binary_stl(source)
+    eyes_mask = mars._eye_shell(verts, spec)
+    face_mask = mars._face_triangles(normals, verts, spec, eyes_mask)
+    assert not (eyes_mask & face_mask).any(), "a triangle is both"
+    shell_p, face_p, eyes_p = mars.split_head_mesh(spec)
+    _n, shell = mars._read_binary_stl(shell_p)
+    _n, face = mars._read_binary_stl(face_p)
+    _n, eyes = mars._read_binary_stl(eyes_p)
+    assert len(shell) + len(face) + len(eyes) == len(verts), "lost or duplicated"
+    assert np.array_equal(eyes, verts[eyes_mask]), "the cached lenses are stale"
+    assert np.array_equal(face, verts[face_mask]), "the cached face is stale"
+
+    axis = mars._look_axis(spec)
+    assert axis == 0, "the MARS head looks along its own x"
+    # Both camera frames sit inside the lens shell — that is what picked it.
+    for frame in mars.EYE_FRAMES:
+        origin = np.asarray(spec.body(frame).pos, float)
+        near = np.linalg.norm(eyes.mean(axis=1) - origin, axis=1).min()
+        assert near < mars.EYE_SHELL_NEAR_M, f"{frame} is {near:.4f} m away"
+    # The panel is at the FRONT and faces forward; the bevel around it does
+    # not, which is what leaves the real head's blue border.
+    front = float(verts[:, :, axis].max())
+    assert face.mean(axis=1)[:, axis].min() >= front - mars.FACE_DEPTH_M
+    # …and it is a panel, not the whole head: MEASURED, 124 of 7 770.
+    assert 50 < len(face) < 400, f"the face took {len(face)} triangles"
+
+
+@needs_mars
+def test_the_head_cut_refuses_a_camera_that_left_its_barrel():
+    """Both guards, because a wrong answer here would be CACHED.
+
+    A camera frame far from any head triangle means the barrels are not in
+    `head.STL` any more; two frames in two different shells means they are
+    no longer one printed part. Either way the cut stops rather than
+    painting some other shell grey.
+    """
+    _n, verts = mars._read_binary_stl(mars.asset_dir() / "meshes" / "head.STL")
+    doctored = mars.load_robot_spec()
+    doctored.body(mars.EYE_FRAMES[0]).pos = [3.0, 0.0, 0.0]
+    with pytest.raises(RuntimeError, match="no longer holds the camera barrels"):
+        mars._eye_shell(verts, doctored)
+    # And a frame moved onto ANOTHER shell of the same mesh — 2 mm off the
+    # blue shell's own side wall, so the distance guard passes and only the
+    # "one part" guard can catch it.
+    other = mars.load_robot_spec()
+    other.body(mars.EYE_FRAMES[0]).pos = [0.0, 0.058, 0.0]
+    with pytest.raises(RuntimeError, match="no longer one part"):
+        mars._eye_shell(verts, other)
+
+
+@needs_mars
+def test_the_split_refuses_a_wheel_it_cannot_find(monkeypatch):
+    """A cut that guessed would be CACHED, so every guard raises instead.
+
+    `split_base_mesh` writes a file; a wrong answer survives every later run
+    until someone deletes it by hand. So a cylinder with no mesh shell in it
+    (a URDF revision that moved a wheel), one that holds two, and a shell too
+    big to be a tyre are errors rather than quiet fallbacks.
+    """
+    spec = mars.load_robot_spec()
+    _n, base = mars._read_binary_stl(mars.asset_dir() / "meshes" / "base.STL")
+    wheel = mars._wheel_cylinders(spec)[0]
+    centre, radius, half_width = wheel
+    nowhere = (np.array([centre[0], centre[1] + 0.5, centre[2]]), radius, half_width)
+    with pytest.raises(RuntimeError, match="no mesh shell inside the wheel"):
+        mars._tyre_triangles(base, (nowhere,))
+    # A cylinder wide enough to hold most of the robot holds many shells.
+    with pytest.raises(RuntimeError, match="two mesh shells"):
+        mars._tyre_triangles(base, ((np.array([-0.06, 0.0, 0.15]), 0.4, 0.4),))
+    # And the real wheel, with the size contract tightened past what a tyre
+    # measures: the shell is found and then REJECTED for being the wrong size.
+    monkeypatch.setattr(mars, "WHEEL_RADIUS_TOL", 0.5)
+    with pytest.raises(RuntimeError, match="that is not a tyre"):
+        mars._tyre_triangles(base, (wheel,))
+
+
+@needs_mars
+def test_the_dump_quantises_fine_enough_not_to_melt_the_head():
+    """The viewer's lattice is a RESOLUTION, and MARS is a small robot.
+
+    The dump ships integer multiples of `vertScale` so the JSON stays small.
+    On the G1 a millimetre is free; MEASURED on MARS, whose head is 121 mm
+    across with 1-2 mm bevels, a millimetre lattice moves a vertex 0.50 mm on
+    average and 0.85 mm at worst, and the head arrived in the browser with
+    streaky normals on faces that are flat in MuJoCo.
+
+    So this pins the error the CURRENT lattice leaves, against the model the
+    dump was built from — not the lattice itself, which is the fix and not
+    the requirement.
+    """
+    model = mars.robot_spec().compile()
+    scene = mars.MARS.visual_scene()
+    scale = scene["vertScale"]
+    # The dump numbers its meshes in the order the VISUAL geoms first use
+    # them, which is not the model's mesh ids; a test that assumed otherwise
+    # compared one part against another and still "passed" on a lucky robot.
+    order: list[int] = []
+    for g in range(model.ngeom):
+        if int(model.geom_group[g]) != mars.VISUAL_GROUP:
+            continue
+        if model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH:
+            continue
+        mid = int(model.geom_dataid[g])
+        if mid not in order:
+            order.append(mid)
+    assert len(order) == len(scene["meshes"])
+    worst = 0.0
+    for mesh, mid in zip(scene["meshes"], order, strict=True):
+        sent = np.asarray(mesh["v"], dtype=np.float64).reshape(-1, 3) * scale
+        adr, num = int(model.mesh_vertadr[mid]), int(model.mesh_vertnum[mid])
+        true = model.mesh_vert[adr:adr + num]
+        assert len(sent) == len(true), f"mesh {mid} lost vertices"
+        worst = max(worst, float(np.linalg.norm(sent - true, axis=1).max()))
+    # A tenth of the 0.85 mm a millimetre lattice cost, with room to spare.
+    assert worst < 0.0002, f"the dump moves a vertex {worst * 1000:.3f} mm"
+
+
+@needs_mars
+def test_the_dump_is_json_serialisable_and_carries_the_whole_robot():
+    """The lab serves it over HTTP, so a numpy scalar that survived the dump
+    would be a 500 at `GET /scene?robot=mars` and a blank stage — which has
+    already cost one debugging session that went looking in the viewer."""
+    blob = json.dumps(mars.MARS.visual_scene())
+    assert len(blob) > 100_000
+    assert json.loads(blob)["bodies"][1] == "base_link"

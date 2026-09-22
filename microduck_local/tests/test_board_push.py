@@ -28,8 +28,8 @@ def _plan(b: Chase, odom, bx, by):
     return b._plan(odom, _seen_ball(b, odom, bx, by))
 
 
-def test_the_default_is_off():
-    assert ChaseParams().board_push == 0.0
+def test_the_default_is_the_own_goal_pack():
+    assert ChaseParams().board_push == 0.40
 
 
 def test_a_ball_along_the_side_board_is_pushed_up_the_pitch_from_the_open_side():
@@ -62,11 +62,15 @@ def test_the_end_boards_push_away_from_our_mouth_and_across_theirs():
 
 def test_in_the_open_and_off_the_kick_plan_is_untouched():
     odom = (-0.5, 0.0, 0.0)
-    on, off = _brain(board_push=0.25), _brain()
+    on, off = _brain(board_push=0.25), _brain(board_push=0.0)
     a, c = _plan(on, odom, 0.0, 0.0), _plan(off, odom, 0.0, 0.0)
     assert a[4] == "kick" and np.allclose(a[:2], c[:2]) and a[2:] == c[2:]
     bx, by = 0.0, HY - 0.15                                           # at the board with the knob off: a kick, as before
-    assert _plan(_brain(), (-0.5, HY - 0.4, 0.0), bx, by)[4] == "kick"
+    assert _plan(_brain(board_push=0.0), (-0.5, HY - 0.4, 0.0), bx, by)[4] == "kick"
+
+
+def test_the_shipped_pack_still_pushes_a_board_ball():
+    assert _plan(_brain(), (-0.5, HY - 0.4, 0.0), 0.0, HY - 0.15)[4] == "push"
 
 
 def test_a_push_spot_has_its_own_line_up_tolerance():

@@ -26,8 +26,11 @@ import * as THREE from "three";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { goalDefenders, PICKABLE_COLORS, PICKABLE_SIZES, TEAM_COLORWAYS,
-  type Scenario, type SimClient, type TeamName } from "@/lib/sim";
+import { goalDefenders, PICKABLE_COLORS, PICKABLE_SIZES, rugSize, TEAM_COLORWAYS,
+  type Scenario, type SimClient, type TeamName, POSE_SMOOTH_HZ, simRate } from "@/lib/sim";
+import type { Scene } from "@/lib/lab";
+import { CREASE_ANGLE_DEG, g1PartKind, weldAndSmooth, weldTolerance, type G1PartKind } from "./G1Look";
+import { MARS_KINDS, marsPartKind, useMarsMaterials, type MarsPartKind } from "./MarsLook";
 
 // -- palette -----------------------------------------------------------------
 // Kept close to the page's UI accents (amber / teal) so the stage and the
@@ -593,7 +596,7 @@ export function Statics({ scenario }: { scenario: Scenario | null }) {
       </mesh>
       {rug && (
         <mesh position={[(bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2, 0.0003]}>
-          <planeGeometry args={[Math.min(roomW * 0.44, 1.6), Math.min(roomH * 0.5, 1.2)]} />
+          <planeGeometry args={rugSize(roomW, roomH)} />
           <meshStandardMaterial map={rugTexture()} roughness={1} metalness={0} envMapIntensity={0.15} />
         </mesh>
       )}
@@ -761,7 +764,171 @@ const Z_BLOB = 0.0016;
 
 /** Free objects (balls, boxes with mass, toys, persons) posed from the frame
  *  stream, plus the instanced contact blobs under them and under every duck. */
-export function Dynamics({ scenario, client }: { scenario: Scenario | null; client: SimClient }) {
+/** Any non-duck body in the room: one group per body, one mesh per MJCF geom,
+ *  posed positionally from the frame stream.
+ *
+ *  STL/OBJ CAD duplicates verts per face; weld those, then smooth normals so
+ *  it matches the original model instead of looking low-poly.
+ *
+ *  `from` says which list of the frame carries this thing's poses — a G1 in a
+ *  room is still a `Person` (`objects`, kept for old scenarios), while a MARS
+ *  or a Menagerie model is a roster entry (`ducks`). Both stream `bodies` in
+ *  their own `GET /scene?robot=<id>` order, which is the whole reason one
+ *  component can draw either.
+ *
+ *  `look` picks the material: "g1" keeps its part-kind table (a glossy visor,
+ *  dark metal, a flat logo, a clear-coated shell), "mars" takes MARS's
+ *  (components/MarsLook.tsx — the graphite chassis and head, the colorway's
+ *  accent on the arm, the frame markers invisible), and everything else
+ *  paints each geom in its own streamed `rgba`, which is how a Menagerie
+ *  model arrives in its MJCF's colours. The two hand-built looks draw from
+ *  the SAME tables the lab stage uses (Duck.tsx), which is the only reason
+ *  the two pages cannot drift apart. */
+export function RobotBody({
+  id,
+  scene,
+  client,
+  from = "objects",
+  look = "g1",
+}: {
+  id: string;
+  scene: Scene;
+  client: SimClient;
+  from?: "objects" | "ducks";
+  look?: "g1" | "generic" | "mars";
+}) {
+  // /sim has no stage lights of its own, so it takes the full reflection —
+  // the 0.35 the lab uses would leave the chassis flat here (the same split
+  // `useG1Materials` documents).
+  // The room takes the SAME shell the lab stage does — Innate's Blue / White
+  // (MARS_DEFAULT_COLORWAY) — and this line used to pin it to orange/black
+  // instead. The reason it did is still true and still measured: on the
+  // playroom's pale wood floor a white chassis sits at 0.95x the background
+  // (3.7 luma points from the floor, 3 from the wall) where graphite sat at
+  // 0.47x, a 41-point step, while on the dark lab stage that same white is
+  // 8.6x the background. What changed is what the trade is BETWEEN. Picking a
+  // shell per floor meant the same robot was orange in one tab and white in
+  // the next, and neither was the machine the owner has on their desk; the
+  // blue head bar and the black tyres that shell carries are the contrast the
+  // graphite body used to supply, and they do not wash out on pale wood. A
+  // per-slot colorway field would let a scenario override it.
+  const marsMaterials = useMarsMaterials(look === "mars", { envScale: 1 });
+  const tree = useMemo(() => {
+    // Vertices arrive in metres, or in millimetre ints with a `vertScale`
+    // (the G1's dump is 21 MB that way instead of 78 MB of floats). Scaling
+    // here is what keeps a body from arriving 1000x too big, off camera,
+    // with nothing in the console.
+    const vs = scene.vertScale ?? 1;
+    const meshGeos = scene.meshes.map((m) => {
+      const raw = new THREE.BufferGeometry();
+      const v = vs === 1 ? m.v : m.v.map((x) => x * vs);
+      raw.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
+      raw.setIndex(m.f);
+      const g = weldAndSmooth(raw, weldTolerance(vs),
+                              look === "mars" ? CREASE_ANGLE_DEG : undefined);
+      raw.dispose();
+      return g;
+    });
+    const col = new THREE.Color();
+    const quat = new THREE.Quaternion();
+    const mat4 = new THREE.Matrix4();
+    const byBody = scene.bodies.map((_name, b) =>
+      scene.geoms
+        .filter((g) => g.body === b)
+        .map((g) => {
+          const geo = meshGeos[g.mesh].clone();
+          quat.set(g.quat[1], g.quat[2], g.quat[3], g.quat[0]);
+          mat4.compose(new THREE.Vector3(...g.pos), quat, new THREE.Vector3(1, 1, 1));
+          geo.applyMatrix4(mat4);
+          if (g.rgba) col.setRGB(g.rgba[0], g.rgba[1], g.rgba[2], THREE.SRGBColorSpace);
+          else col.set("#888888");
+          const kind: G1PartKind | MarsPartKind | "own" =
+            look === "g1"
+              ? g1PartKind(g.name, g.mat, col)
+              : look === "mars"
+                ? marsPartKind(scene.bodies[g.body], g.name)
+                : "own";
+          return { geo, color: "#" + col.getHexString(), kind };
+        }),
+    );
+    meshGeos.forEach((g) => g.dispose());
+    return byBody;
+  }, [scene, look]);
+  const refs = useRef<(THREE.Group | null)[]>([]);
+  const tmpP = useMemo(() => new THREE.Vector3(), []);
+  const tmpQ = useMemo(() => new THREE.Quaternion(), []);
+  useFrame((_, dt) => {
+    const f = client.frame;
+    const bodies =
+      from === "ducks"
+        ? f?.ducks.find((x) => x.id === id)?.bodies
+        : f?.objects.find((x) => x.id === id)?.bodies;
+    if (!bodies) return;
+    const a = 1 - Math.exp(-POSE_SMOOTH_HZ * simRate.speed * Math.min(dt, 0.1));
+    bodies.forEach((pose, b) => {
+      const g = refs.current[b];
+      if (!g) return;
+      tmpP.set(pose[0], pose[1], pose[2]);
+      tmpQ.set(pose[4], pose[5], pose[6], pose[3]);
+      g.position.lerp(tmpP, a);
+      g.quaternion.slerp(tmpQ, a);
+    });
+  });
+  return (
+    <group>
+      {tree.map((parts, i) =>
+        parts.length ? (
+          <group
+            key={scene.bodies[i]}
+            // Named so InsetRender can find ONE body of ONE robot without a
+            // ref registry: the camera's own housing is parked on SELF_LAYER
+            // for the inset pass and put back straight after.
+            userData={{ simRobotId: id, simBodyIndex: i }}
+            ref={(el) => { refs.current[i] = el; }}
+          >
+            {parts.map((p, k) =>
+              // MARS's materials come from the shared table (one material per
+              // kind for the whole robot), not from per-mesh JSX: the
+              // colorway, the clearcoats and the reflection have to be the
+              // same objects the lab stage uses or the two pages diverge.
+              marsMaterials ? (
+                <mesh
+                  key={k}
+                  geometry={p.geo}
+                  castShadow={false}
+                  receiveShadow={false}
+                  material={marsMaterials[Math.max(0, MARS_KINDS.indexOf(p.kind as MarsPartKind))]}
+                />
+              ) : (
+                <mesh key={k} geometry={p.geo} castShadow={false} receiveShadow={false}>
+                  {p.kind === "own" ? (
+                    // The body's OWN colour, straight from the scene dump.
+                    <meshStandardMaterial color={p.color} roughness={0.42} metalness={0.2}
+                      envMapIntensity={0.9} />
+                  ) : p.kind === "visor" ? (
+                    <meshPhysicalMaterial color={p.color} roughness={0.08} metalness={0.85}
+                      clearcoat={1} clearcoatRoughness={0.06} envMapIntensity={1.6} />
+                  ) : p.kind === "logo" ? (
+                    <meshStandardMaterial color={p.color} roughness={0.55} metalness={0} envMapIntensity={0.4} />
+                  ) : p.kind === "dark" ? (
+                    <meshStandardMaterial color={p.color} roughness={0.35} metalness={0.45} envMapIntensity={0.9} />
+                  ) : (
+                    <meshPhysicalMaterial color="#d8d8d8" roughness={0.34} metalness={0.06}
+                      clearcoat={0.35} clearcoatRoughness={0.28} envMapIntensity={0.75} />
+                  )}
+                </mesh>
+              ),
+            )}
+          </group>
+        ) : null,
+      )}
+    </group>
+  );
+}
+
+export function Dynamics({ scenario, client, g1Scene }: {
+  scenario: Scenario | null; client: SimClient; g1Scene?: Scene | null;
+}) {
   const refs = useRef(new Map<string, THREE.Group>());
   const blobs = useRef<THREE.InstancedMesh>(null);
   const tmpP = useMemo(() => new THREE.Vector3(), []);
@@ -818,7 +985,9 @@ export function Dynamics({ scenario, client }: { scenario: Scenario | null; clie
       if (im) im.count = 0;
       return;
     }
-    const a = 1 - Math.exp(-16 * Math.min(dt, 0.1));
+    // Scaled by the world's speed: the filter's lag is fixed in WALL
+    // time, the sim time a frame carries is not (lib/sim.ts POSE_SMOOTH_HZ).
+    const a = 1 - Math.exp(-POSE_SMOOTH_HZ * simRate.speed * Math.min(dt, 0.1));
     let n = 0;
     const put = (x: number, y: number, r: number, k: number) => {
       if (!im || n >= MAX_BLOBS || k <= 0.01) return;
@@ -875,7 +1044,7 @@ export function Dynamics({ scenario, client }: { scenario: Scenario | null; clie
           </mesh>
         </group>
       ))}
-      {persons.map((q) => (
+      {persons.filter((q) => q.kind !== "g1").map((q) => (
         <group key={q.id} ref={setRef(q.id)}>
           {/* a capsule standing on the floor; the nose cone shows its heading */}
           <mesh rotation={[Math.PI / 2, 0, 0]}>
@@ -887,6 +1056,9 @@ export function Dynamics({ scenario, client }: { scenario: Scenario | null; clie
             <meshStandardMaterial color={PERSON_NOSE} roughness={0.4} />
           </mesh>
         </group>
+      ))}
+      {g1Scene && persons.filter((q) => q.kind === "g1").map((q) => (
+        <RobotBody key={q.id} id={q.id} scene={g1Scene} client={client} />
       ))}
       {scenario.balls.map((ball, i) => (
         <group key={`ball${i}`} ref={setRef(`ball${i}`)}>

@@ -19,6 +19,9 @@ from pathlib import Path
 
 import numpy as np
 
+from .robots.microduck import MicroduckBody
+from .robots.spec import Effector
+
 # microduck_rl checkout providing the MJCF models. Sibling of this project by
 # default; override with MICRODUCK_RL_DIR for a non-standard layout.
 MICRODUCK_RL_DIR = Path(
@@ -73,6 +76,120 @@ NOISE_GYRO = 0.03
 NOISE_GRAVITY = 0.01
 NOISE_JOINT_POS = 0.001
 NOISE_JOINT_VEL = 0.25
+
+
+# ---------------------------------------------------------------- robot spec
+#
+# The same constants above, as the data `walk_env` resolves a body with (see
+# robots/spec.py). This is a DESCRIPTION of the duck, not a second source of
+# truth: every field is read from the constants above, so the deployment
+# contract still lives in exactly one place.
+# 🎬 editor data for the duck, served by pose.PoseScratch.meta(). The rig
+# controls are the set the viewer shipped in duck-viewer/lib/rig.ts, moved
+# here so a second body can carry its own; the coefficient signs come from
+# the WORLD hinge axes at STAND (x forward, y left, z up):
+#
+#   left  hip_pitch +y   knee −y   ankle +y      hip_roll +x   hip_yaw −z
+#   right hip_pitch −y   knee +y   ankle −y      hip_roll +x   hip_yaw −z
+#   neck_pitch −y   head_pitch +y
+#
+# A flat foot needs the leg's world-pitch sum (root + hip + knee + ankle) to
+# stay constant; every control below preserves it, and every pair of controls
+# is orthogonal in joint space (rig sliders read 0 until used).
+JOINT_GROUPS = ("left leg",) * 5 + ("head + neck",) * 4 + ("right leg",) * 5
+
+EFFECTORS = (
+    Effector("left_foot", "left foot", "ankle_left", "foot", "sole"),
+    Effector("right_foot", "right foot", "ankle_right", "foot", "sole"),
+    Effector("head", "head", "jaw_soft", "head", (0.0, 0.0, 0.0)),
+)
+
+RIG_CONTROLS = (
+    {"id": "squat", "label": "squat", "hint": "+ crouch",
+     "title": "fold both legs symmetrically, feet flat, trunk upright — the ⇕ "
+              "handle drags this when no other control is selected",
+     "parts": {"left_hip_pitch": -1, "left_knee": -2, "left_ankle": -1,
+               "right_hip_pitch": 1, "right_knee": 2, "right_ankle": 1},
+     "pick": ["left_knee", "right_knee"],
+     "handle": {"joint": "root", "offset": [-0.105, 0, 0.03]}},
+    {"id": "lean", "label": "lean", "hint": "+ fwd",
+     "title": "the trunk pitches while the legs counterbalance, feet flat",
+     "parts": {"root": 1,
+               "left_hip_pitch": -1 / 3, "left_knee": 1 / 3, "left_ankle": -1 / 3,
+               "right_hip_pitch": 1 / 3, "right_knee": -1 / 3, "right_ankle": 1 / 3},
+     "pick": ["root"],
+     "handle": {"joint": "root", "offset": [-0.105, 0, 0.115]}},
+    {"id": "swingL", "label": "L swing", "hint": "+ fwd",
+     "title": "swing the whole left leg forward/back about the hip, foot kept "
+              "level — pair with R swing for a stride",
+     "parts": {"left_hip_pitch": -1, "left_ankle": 1},
+     "pick": ["left_hip_pitch"],
+     "handle": {"joint": "left_hip_pitch", "offset": [0, 0.07, 0]}},
+    {"id": "swingR", "label": "R swing", "hint": "+ fwd",
+     "title": "swing the whole right leg forward/back about the hip, foot kept "
+              "level — pair with L swing for a stride",
+     "parts": {"right_hip_pitch": 1, "right_ankle": -1},
+     "pick": ["right_hip_pitch"],
+     "handle": {"joint": "right_hip_pitch", "offset": [0, -0.07, 0]}},
+    {"id": "sway", "label": "sway", "hint": "hips ±",
+     "title": "both hip rolls together — swing the legs sideways under the trunk",
+     "parts": {"left_hip_roll": 1, "right_hip_roll": 1},
+     "pick": ["left_hip_roll", "right_hip_roll"],
+     "handle": {"joint": "root", "offset": [0, 0.115, 0.01]}},
+    {"id": "stance", "label": "stance", "hint": "+ wide",
+     "title": "hip rolls apart — widen or narrow the stance",
+     "parts": {"left_hip_roll": -1, "right_hip_roll": 1},
+     "pick": [],
+     "handle": {"joint": "root", "offset": [0, -0.115, 0.01]}},
+    {"id": "twist", "label": "twist", "hint": "hips ±",
+     "title": "both hip yaws together — pivot the hips against the feet",
+     "parts": {"left_hip_yaw": 1, "right_hip_yaw": 1},
+     "pick": ["left_hip_yaw", "right_hip_yaw"],
+     "handle": {"joint": "root", "offset": [-0.145, 0, -0.025]}},
+    {"id": "toes", "label": "toes", "hint": "+ out",
+     "title": "hip yaws apart — duck-foot or pigeon-toe the stance",
+     "parts": {"left_hip_yaw": -1, "right_hip_yaw": 1},
+     "pick": ["left_ankle", "right_ankle"],
+     "handle": {"joint": "left_ankle", "offset": [0.075, 0, 0.015]}},
+    {"id": "look", "label": "look", "hint": "+ down",
+     "title": "neck and head pitch share the motion — one radian of control "
+              "is one radian of gaze",
+     "parts": {"neck_pitch": -0.5, "head_pitch": 0.5},
+     "pick": ["neck_pitch", "head_pitch", "head_yaw", "head_roll"],
+     "handle": {"joint": "head_pitch", "offset": [-0.02, 0, 0.115]}},
+)
+
+MICRODUCK = MicroduckBody(
+    id="microduck",
+    title="Microduck",
+    noun="duck",
+    joint_groups=JOINT_GROUPS,
+    effectors=EFFECTORS,
+    rig_controls=RIG_CONTROLS,
+    joint_names=JOINT_NAMES,
+    default_pose=DEFAULT_POSE,
+    obs_dim=OBS_DIM,
+    base_body="trunk_base",
+    gyro_sensor="imu_ang_vel",
+    foot_geoms={"left": ("left_foot_collision",),
+                "right": ("right_foot_collision",)},
+    scene_fn=lambda: SCENE_WALK_XML,
+    action_scale=None,               # contract: target = DEFAULT_POSE + action
+    pose_joint_ids=LEG_JOINT_IDS,
+    # walk_env's own thresholds, verbatim (FALL_GRAVITY_Z / FALL_HEIGHT).
+    fall_gravity_z=-0.342,
+    fall_height=0.07,
+    # Upstream HEAD_BODY_NAMES; walk_env.HEAD_COM_BODIES is the same tuple.
+    com_bodies=("neck", "neck_pitch", "yaw_roll_motion", "jaw_soft",
+                "bearing_roll"),
+    noise_gyro=NOISE_GYRO,
+    noise_gravity=NOISE_GRAVITY,
+    noise_joint_pos=NOISE_JOINT_POS,
+    noise_joint_vel=NOISE_JOINT_VEL,
+    lin_vel_x_range=LIN_VEL_X_RANGE,
+    lin_vel_y_range=LIN_VEL_Y_RANGE,
+    ang_vel_z_range=ANG_VEL_Z_RANGE,
+)
 
 
 def quat_rotate_inverse(quat_wxyz: np.ndarray, vec: np.ndarray) -> np.ndarray:

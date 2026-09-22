@@ -4,14 +4,17 @@
 // Reuses the lab page's stage (scene meshes, Duck renderer, selection store)
 // against the lab's world mode (/ws/sim, world_server.py). Keys: R restarts
 // the world, P toggles drive mode (WASD / arrows steer every duck), T toggles
-// the ToF overlay, 1–9 select a duck, Esc deselects.
+// the sensor overlay (a duck's ToF cone, a wheeled body's 360° scan — the
+// button names whichever the selected body has), L the ducks’ name labels,
+// M the occupancy map, Shift+M
+// mutes their voices, 1–9 select a duck, Esc deselects.
 //
 // WASD/QE are shared between two consumers, split by drive mode: with drive
 // OFF they fly the camera (the lab page's model, same CameraKeys component),
 // with drive ON they steer the ducks. That is why edit is Shift+E — plain E
 // is the camera's vertical truck.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
@@ -20,6 +23,10 @@ import { fetchScene, type DuckFrame, type Scene } from "@/lib/lab";
 import { assignDrag, nearestDuck, type AssignTarget } from "@/lib/assign";
 import { getSelectedDuck, setSelectedDuck } from "@/lib/select";
 import { loadJSON, saveJSON } from "@/lib/persist";
+import { Voices } from "@/lib/quack";
+import { duckAudio } from "@/lib/quackaudio";
+import { duckMouths } from "@/lib/mouth";
+import { setDuckLabels } from "@/lib/ui";
 import {
   cameraKeyDown,
   cameraKeyUp,
@@ -37,12 +44,20 @@ import {
   saveRecording,
   SimClient,
   capturePose,
+  fetchG1Scene,
   detectionBox,
   detectionRay,
   headCameraPose,
   tofZonePoints,
   CAM_FOV_DEG,
+  OVERLAY_LAYER,
+  SELF_LAYER,
   TOF_PRESETS,
+  SIM_SPEEDS,
+  SIM_SPEED_DEFAULT,
+  speedLabel,
+  speedShortfall,
+  stepSpeed,
   teamColor,
   teamSwatch,
   type FrameEvent,
@@ -52,57 +67,24 @@ import {
   type TofPreset,
   type WorldInfo,
 } from "@/lib/sim";
+import { rangeChannel, sensorOverlayLabel } from "@/lib/lidar";
 import { camAspect, renderInset } from "@/lib/inset";
 import { buildBodyGeometries, Duck, type BodyGeometry } from "./Duck";
+import { RobotBody } from "./SimStage";
+import { ArmBlock, GripperBlock, LidarOverlay, LidarPlot } from "./SimLidar";
+import { isDuck, robotCount, robotLook } from "@/lib/robots";
 import CameraKeys from "./CameraKeys";
 import { useTruckSwipe } from "./useTruckSwipe";
 import { CaptureCanvas, Snapshotter } from "./Capture";
 import { SimRecord } from "./SimRecord";
 import { BrainPanel } from "./SimBrain";
+import { PANEL, PanelToggle } from "./Panel";
+import { StateGraphPanel } from "./SimGraph";
 import { consumeDragged, HANDLE, useDrag } from "./useDrag";
 import { applyFloorClick, emptyDraft, SimEditor, type EditorState } from "./SimEditor";
 import { Dynamics, StageEnvironment, Statics } from "./SimStage";
 
 const BG = "#101216";
-const PANEL: React.CSSProperties = {
-  position: "absolute",
-  background: "rgba(16,18,22,0.86)",
-  border: "1px solid #2b313b",
-  borderRadius: 6,
-  color: "#e9edf1",
-  fontFamily: "ui-monospace, Menlo, monospace",
-  fontSize: 12,
-  padding: "8px 10px",
-  zIndex: 20,
-  backdropFilter: "blur(6px)",
-};
-/** The —/+ in a panel's title bar. Four panels had the same twelve style
- *  properties inline; the head camera's is NOT this one (its button floats
- *  over the video with its own backing, not in a title row).
- *
- *  `onPointerDown` stops propagation because two of these sit on a drag
- *  handle: without it, clicking the button starts a drag of the panel. */
-function PanelToggle({ open, onToggle, what, hint }: {
-  open: boolean;
-  onToggle: () => void;
-  what: string;                 // "the inspector" — reads out as "minimize the inspector"
-  hint?: string;                // the keyboard shortcut, shown in the tooltip
-}) {
-  const verb = open ? "minimize" : "expand";
-  return (
-    <button
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={onToggle}
-      title={hint ? `${verb} (${hint})` : verb}
-      aria-label={`${verb} ${what}`}
-      aria-expanded={open}
-      style={{ background: "none", border: "none", color: "#9aa5b1", cursor: "pointer", fontFamily: "inherit", fontSize: 12, padding: "0 4px", marginLeft: 10, lineHeight: 1 }}
-    >
-      {open ? "—" : "+"}
-    </button>
-  );
-}
-
 // Panel geometry: everything overlaid on the room is inset PAD from the edge,
 // and the inspector hangs GAP below the measured bottom of the top bar.
 const PAD = 10;
@@ -191,10 +173,24 @@ const CAM_MAX_DIST = 12;
  *  baked into the vertex-color channel, and there are at most four teams, so
  *  a 3v3 pitch costs two geometry sets and a room costs one. (Per duck is
  *  what lost the WebGL context at eight ducks before the bodies were merged.) */
-function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
+function SimDucks({
+  scene,
+  client,
+  robotScenes,
+}: {
+  scene: Scene;
+  client: SimClient;
+  /** Mesh sets for the NON-duck bodies in the room, by robot id. A room can
+   *  hold a MARS beside its ducks (world/scenario.Duck.robot), and each is
+   *  drawn from its own `GET /scene?robot=<id>` — one scene per robot, not
+   *  one per entry. */
+  robotScenes: Record<string, Scene>;
+}) {
   const plain = useMemo(() => buildBodyGeometries(scene), [scene]);
   const byTeam = useRef(new Map<string, BodyGeometry[]>());
-  const [roster, setRoster] = useState<{ id: string; name: string; team: string | null }[]>([]);
+  const [roster, setRoster] = useState<
+    { id: string; name: string; team: string | null; robot: string }[]
+  >([]);
   const sig = useRef("");
   const refs = useRef(new Map<string, React.MutableRefObject<DuckFrame | null>>());
   useEffect(() => {
@@ -212,10 +208,19 @@ function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
   useFrame(() => {
     const f = client.frame;
     if (!f) return;
-    const s = f.ducks.map((d) => `${d.id}\t${d.name}\t${d.team ?? ""}`).join("\n");
+    const s = f.ducks
+      .map((d) => `${d.id}\t${d.name}\t${d.team ?? ""}\t${d.robot ?? ""}`)
+      .join("\n");
     if (s !== sig.current) {
       sig.current = s;
-      setRoster(f.ducks.map((d) => ({ id: d.id, name: d.name, team: d.team ?? null })));
+      setRoster(
+        f.ducks.map((d) => ({
+          id: d.id,
+          name: d.name,
+          team: d.team ?? null,
+          robot: d.robot || "microduck",
+        }))
+      );
       const sel = getSelectedDuck();
       if (sel && !f.ducks.some((d) => d.id === sel)) setSelectedDuck(null);
     }
@@ -227,6 +232,29 @@ function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
   return (
     <>
       {roster.map((d) => {
+        if (d.robot !== "microduck") {
+          // Another body in the room. Its poses are already in the frame's
+          // `ducks` list in ITS scene's order, so the only thing missing is
+          // the mesh set — and until that arrives (a fetch away) it draws
+          // nothing rather than borrowing the duck's meshes, which would put
+          // a duck's parts on a MARS's joints.
+          const rs = robotScenes[d.robot];
+          // The body's own look, forwarded whole. "duck" cannot happen in
+          // this branch; it collapses to "generic" only to satisfy the type.
+          const look = robotLook(d.robot);
+          return rs ? (
+            <RobotBody
+              key={d.id}
+              id={d.id}
+              scene={rs}
+              client={client}
+              from="ducks"
+              // A look this page forgets to forward is how MARS stayed
+              // "generic" and near-invisible after its own table existed.
+              look={look === "duck" ? "generic" : look}
+            />
+          ) : null;
+        }
         let ref = refs.current.get(d.id);
         if (!ref) {
           ref = { current: null };
@@ -240,10 +268,9 @@ function SimDucks({ scene, client }: { scene: Scene; client: SimClient }) {
 
 const MAX_DOTS = 64 * 12;
 const CORNER_ZONES = [0, 7, 56, 63];
-// Overlays (ToF dots, detection rays, the map) live on this layer: the orbit
-// camera sees it, the head-camera inset does not - a duck does not see its
-// own sensor drawings.
-const OVERLAY_LAYER = 1;
+// Overlays (ToF dots, the LiDAR scan, detection rays, the map) live on
+// OVERLAY_LAYER, which lib/sim owns: the orbit camera sees it, the
+// head-camera inset does not — a robot does not see its own sensor drawings.
 // The DOM box the head-camera inset renders into (CamInset owns the element,
 // InsetRender reads its rectangle every frame). Module state on purpose: no
 // React state per frame.
@@ -266,7 +293,13 @@ function InsetRender({ scene, client, enabled }: { scene: Scene; client: SimClie
   const cam = useMemo(() => new THREE.PerspectiveCamera(CAM_FOV_DEG[1], 1.35, 0.03, 20), []);
   useEffect(() => {
     camera.layers.enable(OVERLAY_LAYER);
+    // The orbit view keeps the housing the inset hides — you are looking AT
+    // the robot there, not out of it.
+    camera.layers.enable(SELF_LAYER);
   }, [camera]);
+  // The housing parked on SELF_LAYER for the inset pass, so it can be put
+  // back the moment the pass is over: every other camera still sees it.
+  const parked = useRef<THREE.Object3D[]>([]);
   useFrame(() => {
     gl.setScissorTest(false);
     gl.render(three, camera);
@@ -291,7 +324,25 @@ function InsetRender({ scene, client, enabled }: { scene: Scene; client: SimClie
     // renderInset measures the box and shapes the camera to it: it takes the
     // two DOMRects, not a rectangle, because the measuring is what went wrong
     // once (a pixel ratio applied twice - lib/inset.ts, lib/inset.test.ts).
+    // A camera cannot see the shell it is bolted inside (lib/sim.SELF_LAYER).
+    // The lab names the body — `det.selfBody`, the one its own detector
+    // already refuses to detect — so the viewer needs no table of its own,
+    // and an older lab that sends none simply draws everything.
+    const self = det?.selfBody ?? -1;
+    parked.current.length = 0;
+    if (self >= 0) {
+      three.traverse((o) => {
+        if (o.userData?.simRobotId === d.id && o.userData?.simBodyIndex === self) {
+          o.traverse((c) => {
+            parked.current.push(c);
+            c.layers.set(SELF_LAYER);
+          });
+        }
+      });
+    }
     renderInset(gl, three, cam, el.getBoundingClientRect(), gl.domElement.getBoundingClientRect(), size);
+    for (const o of parked.current) o.layers.set(0);
+    parked.current.length = 0;
   }, 1);
   return null;
 }
@@ -331,7 +382,6 @@ function CamInset({ client, duckId, top, belowRef, hidden, enabled, open, onTogg
   useEffect(() => {
     if (!enabled) return;
     let raf = 0;
-    const aspect = camAspect(CAM_FOV_DEG);   // a pinhole's width/height
     const paint = () => {
       raf = requestAnimationFrame(paint);
       const el = box.current;
@@ -343,16 +393,19 @@ function CamInset({ client, duckId, top, belowRef, hidden, enabled, open, onTogg
       el.style.top = `${Math.round(custom ? custom.y : under ? under.bottom + GAP : top)}px`;
       el.style.left = `${custom ? custom.x : PAD}px`;
       el.style.width = `${CAM_W}px`;
-      el.style.height = open ? `${Math.round(CAM_W / aspect)}px` : "";
       const f = client.frame;
       const d = sensedDuck(f, duckId);
       const det = d?.sensors?.det;
+      // Aspect must match the detector FOV the boxes are drawn in. A 116°×60°
+      // duck camera in a 62°×48° rectangle is why the person box sat beside
+      // the G1 (inset.test.ts: different aspect → different horizontal fov).
+      const fov = det?.fov ?? CAM_FOV_DEG;
+      el.style.height = open ? `${Math.round(CAM_W / camAspect(fov))}px` : "";
       // A minimized bar stays put even with nothing selected — it is the only
       // way back to the view. The full inset still hides when there is no duck,
       // and both give the corner to the editor while it is open.
       el.style.display = hidden ? "none" : d || !open ? "block" : "none";
       if (!open) return;
-      const fov = det?.fov ?? CAM_FOV_DEG;
       let n = 0;
       if (det) {
         for (const it of det.items) {
@@ -1060,7 +1113,15 @@ function ScenePicker({
   }, [open]);
 
   const current = scenarios.find((s) => s.name === pick);
-  const label = (s: ScenarioListing) => `${s.name} (${s.ducks} ducks, ${s.objects} obj)`;
+  // "mars-follow (1 MARS, 4 obj)". The body breakdown when the lab sends one
+  // (`ScenarioListing.robots`), else the old all-ducks count — which is what
+  // called a room holding one MARS and no duck "1 ducks".
+  const label = (s: ScenarioListing) => {
+    const who = s.robots?.length
+      ? s.robots.map((r) => robotCount(r.n, r.noun)).join(" + ")
+      : robotCount(s.ducks, "duck");
+    return `${s.name} (${who}, ${s.objects} obj)`;
+  };
   const groups: [string, ScenarioListing[]][] = [
     ["built in", scenarios.filter((s) => s.builtin)],
     ["saved by you", scenarios.filter((s) => !s.builtin)],
@@ -1156,8 +1217,78 @@ function ScenePicker({
   );
 }
 
+/**
+ * The ducks' VOICES. Reads the live frame once a browser frame and, when a
+ * follower's brain state asks for one, plays a quack (lib/quack.ts decides,
+ * lib/quackaudio.ts makes the noise) and flaps the bill (lib/mouth.ts).
+ * Renders nothing — it is a component only so it lives with the page.
+ *
+ * Always mounted: MUTE is only the sound. The scheduler keeps running and
+ * the mouths keep moving with it, so a muted room still shows the ducks
+ * talking — the first cut unmounted the whole loop on mute and the bills
+ * went still with the audio, which reads as "the ducks stopped", not "I
+ * turned the sound off".
+ *
+ * The audio box is shared and long-lived (`duckAudio()`), not per-mount: a
+ * browser caps a page at a few dozen AudioContexts, and the 🎥 recorder's tap
+ * hangs off the same one.
+ */
+function DuckVoices({ client, sound }: { client: SimClient; sound: boolean }) {
+  const soundRef = useRef(sound);
+  soundRef.current = sound;
+  // The sound half: wake the audio box while unmuted, hand it back on mute.
+  // Nothing here touches the loop below, so muting never restarts it.
+  useEffect(() => {
+    if (!sound) return;
+    const audio = duckAudio();
+    audio.setActive(true);
+    audio.resume();
+    // A context made before the page has been touched starts suspended
+    // (autoplay policy) and no `resume()` of ours can lift that — the next
+    // real gesture can. Cheap, once, and removed the moment it lands.
+    const wake = () => audio.resume();
+    window.addEventListener("pointerdown", wake);
+    window.addEventListener("keydown", wake);
+    return () => {
+      audio.setActive(false);
+      window.removeEventListener("pointerdown", wake);
+      window.removeEventListener("keydown", wake);
+    };
+  }, [sound]);
+  // The loop: what each duck says and when, muted or not.
+  useEffect(() => {
+    const voices = new Voices();
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const f = client.frame;
+      if (!f) return;
+      const ducks = f.ducks.map((d) => ({
+        id: d.id, robot: d.robot, graph: d.brain?.graph, state: d.brain?.state,
+      }));
+      // Wall time schedules the voices; the world's own clock only says
+      // whether it is running (a scrubbed or paused world is silent).
+      const now = performance.now() / 1000;
+      for (const ev of voices.update(ducks, now, f.t)) {
+        duckMouths.say(ev.id, ev.kind, now);        // the bill moves with it (Duck.tsx)
+        if (soundRef.current) duckAudio().play(ev.kind, ev.pitch);
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [client]);
+  return null;
+}
+
 export default function SimViewer() {
   const [scene, setScene] = useState<Scene | null>(null);
+  const [g1Scene, setG1Scene] = useState<Scene | null>(null);
+  // Mesh sets for the non-duck BODIES a room holds (a MARS in the playroom,
+  // a Menagerie model on a floor), by robot id. Filled on demand from the
+  // frame stream — the same pattern the lab page uses — and never keyed on
+  // the scenario, because a `/world/load` while a 21 MB fetch is in flight
+  // would resolve it into a dead closure and throw the meshes away.
+  const [robotScenes, setRobotScenes] = useState<Record<string, Scene>>({});
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [scenarios, setScenarios] = useState<ScenarioListing[]>([]);
@@ -1168,6 +1299,16 @@ export default function SimViewer() {
   const [showTof, setShowTof] = useState(true);
   const [showMap, setShowMap] = useState(true);
   const [showCam, setShowCam] = useState(() => loadJSON("simCam", true));
+  // Floating duck name labels. The flag itself lives in the shared ui store,
+  // read PER-FRAME by every Duck inside the Canvas (lib/ui.ts says why a
+  // subscription there does not work); this owns the persistence, under the
+  // same key as the lab page's 🏷 button, so the preference is one preference.
+  const [showLabels, setShowLabels] = useState(() => loadJSON("duckLabels", true));
+  // The ducks' voices, on by default: this page is as much for showing the
+  // robots off as for debugging them, and only the FOLLOWERS have anything to
+  // say (lib/quack.ts) — a soccer battery left running is silent either way.
+  // Muting sticks, so a session that turns it off stays off across reloads.
+  const [sound, setSound] = useState(() => loadJSON("simSound", true));
   const inspectorRef = useRef<HTMLDivElement>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
   // The pitch scoreboard shares the top-left corner with the head-camera
@@ -1180,6 +1321,24 @@ export default function SimViewer() {
   const [selected, setSelected] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [possessed, setPossessed] = useState<string | null>(null);
+  // The world's wall-clock speed. The LAB owns it (a second tab, or a script
+  // POSTing /world/speed, must move this menu too), so this only ever
+  // mirrors the frame — every control here sends and waits.
+  const [speed, setSpeed] = useState<number>(SIM_SPEED_DEFAULT);
+  // …but a keypress must answer at once, and it must COMPOUND: three taps of
+  // ] are three separate events inside one 250 ms mirror window, so stepping
+  // from the mirrored value would send 2x three times. `asked` is what we
+  // last sent, held until the frame agrees (or gives up and tells us the lab
+  // clamped it, or that another tab moved it).
+  const asked = useRef<{ x: number; at: number } | null>(null);
+  const askSpeed = useCallback((x: number) => {
+    asked.current = { x, at: Date.now() };
+    setSpeed(x);
+    clientRef.current?.sendSpeed(x);
+  }, []);
+  // What the menu shows right now, readable from the key handler's own tick.
+  const speedNowRef = useRef(speed);
+  speedNowRef.current = speed;
   // The bottom-left controls panel folds into a pill, like the lab HUD's
   // 🎥 controls bar — it is reference text, and it sits over the room, so it
   // starts folded. Fresh storage key: the old one persisted the previous
@@ -1191,6 +1350,7 @@ export default function SimViewer() {
   // headline: minimizing a scoreboard should not cost you the score, only the
   // per-minute table under it, which is what covers the near half of the room.
   const [scoreOpen, setScoreOpen] = useState(() => loadJSON("simScoreOpen", true));
+  const [graphOpen, setGraphOpen] = useState(() => loadJSON("simGraphOpen", true));
   // The brain menu starts on the five brains that ship. The 44 experiment
   // runs are one click away, not in the face of someone opening /sim for
   // the first time — that list was the most daunting thing on the page.
@@ -1236,6 +1396,7 @@ export default function SimViewer() {
   useEffect(() => saveJSON("simControlsOpen", lessonOpen), [lessonOpen]);
   useEffect(() => saveJSON("simInspectorOpen", inspectorOpen), [inspectorOpen]);
   useEffect(() => saveJSON("simScoreOpen", scoreOpen), [scoreOpen]);
+  useEffect(() => saveJSON("simGraphOpen", graphOpen), [graphOpen]);
   useEffect(() => saveJSON("simCamOpen", camOpen), [camOpen]);
   useEffect(() => saveJSON("simBrainMenuAll", allBrains), [allBrains]);
 
@@ -1260,6 +1421,44 @@ export default function SimViewer() {
     return () => cancelAnimationFrame(raf);
   }, []);
   useEffect(() => saveJSON("simCam", showCam), [showCam]);
+  useEffect(() => saveJSON("simSound", sound), [sound]);
+  useEffect(() => {
+    saveJSON("duckLabels", showLabels);
+    setDuckLabels(showLabels);
+  }, [showLabels]);
+
+  // One mesh set per NON-DUCK body on the stage, loaded from the frame the
+  // way the lab page does it: a poll rather than an effect keyed on the
+  // scenario, so a scenario swap mid-fetch cannot strand the result, and a
+  // body whose assets this lab does not have (a 404 every time) is retried a
+  // few times and then left alone instead of polled forever.
+  const robotScenesRef = useRef(new Set<string>());
+  const robotSceneFails = useRef(new Map<string, number>());
+  useEffect(() => {
+    let stopped = false;
+    const tick = () => {
+      const f = clientRef.current?.frame;
+      if (!f) return;
+      for (const d of f.ducks) {
+        const id = d.robot || "microduck";
+        if (id === "microduck" || robotScenesRef.current.has(id)) continue;
+        if ((robotSceneFails.current.get(id) ?? 0) >= 5) continue;
+        robotScenesRef.current.add(id);
+        fetchScene(id)
+          .then((sc) => !stopped && setRobotScenes((prev) => ({ ...prev, [id]: sc })))
+          .catch(() => {
+            robotSceneFails.current.set(id, (robotSceneFails.current.get(id) ?? 0) + 1);
+            robotScenesRef.current.delete(id);     // retry on the next tick
+          });
+      }
+    };
+    const iv = setInterval(tick, 1000);
+    tick();
+    return () => {
+      stopped = true;
+      clearInterval(iv);
+    };
+  }, []);
 
   useEffect(() => {
     const client = new SimClient(setConnected);
@@ -1272,6 +1471,9 @@ export default function SimViewer() {
           setWorld(w);
           if (w.scenario) setPick(w.scenario.name);
           setError(null);
+          if ((w.scenario?.persons ?? []).some((p) => p.kind === "g1")) {
+            fetchG1Scene().then(setG1Scene).catch(() => setG1Scene(null));
+          }
         })
         .catch(() => {
           setError("duck-lab not reachable on :8788 — start it with `uv run duck-lab …`");
@@ -1299,6 +1501,12 @@ export default function SimViewer() {
       }));
       setSelected(getSelectedDuck());
       setPossessed(f?.possessed ?? null);
+      const served = f?.simSpeed ?? SIM_SPEED_DEFAULT;
+      const a = asked.current;
+      if (!a || a.x === served || Date.now() - a.at > 1500) {
+        asked.current = null;
+        setSpeed(served);
+      }
     }, 250);
     // Drive: while P-mode is on, held keys become one twist, re-sent every
     // 100 ms (the lab holds a manual command for 6 s after the last one).
@@ -1351,6 +1559,18 @@ export default function SimViewer() {
         if (!e.repeat) setShowCam((v) => !v);
         return;
       }
+      if (k === "l") {
+        if (!e.repeat) setShowLabels((v) => !v);
+        return;
+      }
+      // M is the map, as this page's button and the README have always said
+      // — it simply never had a handler until the voices needed a key next
+      // to it. Shift+M mutes the ducks: M alone is the mute key in every
+      // video player, but it was claimed here first.
+      if (k === "m") {
+        if (!e.repeat) (e.shiftKey ? setSound : setShowMap)((v) => !v);
+        return;
+      }
       if (k === "i") {
         if (!e.repeat) setInspectorOpen((v) => !v);
         return;
@@ -1359,10 +1579,25 @@ export default function SimViewer() {
         if (!e.repeat) setScoreOpen((v) => !v);
         return;
       }
+      if (k === "g") {
+        if (!e.repeat) setGraphOpen((v) => !v);
+        return;
+      }
       // Shift+E, not E: plain E is the camera's vertical truck (lib/camera).
       if (k === "e" && e.shiftKey) {
         e.preventDefault();
         if (!e.repeat) setEditor((st) => (st ? null : { draft: emptyDraft(worldRef.current?.scenario ?? null), tool: null, wallStart: null }));
+        return;
+      }
+      // [ slower, ] faster. Free keys (1-9 select ducks, WASD/QE fly or
+      // drive), and the pair every timeline in the world already uses.
+      if (k === "[" || k === "]") {
+        e.preventDefault();
+        // One step per PRESS, like every other key here. Auto-repeat walked
+        // the whole ladder in ~150 ms, so holding the key to slow down
+        // overshot to the far end and then re-sent that speed 30 times a
+        // second for as long as it was down.
+        if (!e.repeat) askSpeed(stepSpeed(asked.current?.x ?? speedNowRef.current, k === "]" ? 1 : -1));
         return;
       }
       if (k === "escape") {
@@ -1421,7 +1656,7 @@ export default function SimViewer() {
       window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("blur", onBlur);
     };
-  }, []);
+  }, [askSpeed]);
 
   const doLoad = async (name: string) => {
     setLoading(true);
@@ -1430,6 +1665,11 @@ export default function SimViewer() {
       setWorld(w);
       setPick(name);
       setSelectedDuck(null);
+      if ((w.scenario?.persons ?? []).some((p) => p.kind === "g1")) {
+        fetchG1Scene().then(setG1Scene).catch(() => setG1Scene(null));
+      } else {
+        setG1Scene(null);
+      }
     } catch (e) {
       setError(String((e as Error).message ?? e));
       setTimeout(() => setError(null), 4000);
@@ -1475,8 +1715,30 @@ export default function SimViewer() {
   };
 
   const selDuck: SimDuck | undefined = clientRef.current?.frame?.ducks.find((d) => d.id === selected);
+  // WHICH RANGE SENSOR the panel is talking about. MARS has no ToF — its
+  // range sense is a 360° planar scanner — so the inspector's block, the
+  // brain-input row's label, the preset's label and the overlay toggle's
+  // wording all come off the body's own channel instead of being the duck's
+  // by default (lib/lidar.rangeChannel).
+  const selChan = rangeChannel(selDuck);
+  // The block's own body: the selected one, else the first with senses —
+  // exactly the ToF grid's long-standing fallback, so the two cannot end up
+  // describing different robots.
+  const blockDuck = selDuck ?? clientRef.current?.frame?.ducks.find((d) => d.sensors);
+  const blockChan = rangeChannel(blockDuck);
+  // The toggle draws every body's range sensor when nothing is selected, so
+  // its label follows the selection first and the room second.
+  const overlayChan = selChan ?? rangeChannel(clientRef.current?.frame?.ducks.find((d) => rangeChannel(d)));
   const scenario = world?.scenario ?? null;
   const client = clientRef.current;
+  // Asked for more than this box can step. Not an error — the loop runs
+  // flat out and the RTF says what it got — but the page must not let the
+  // menu imply a speed the world is not running at.
+  // …and never while an ask is still in flight: `speed` is optimistic (the
+  // key answers at once) but `status.rtf` is the lab's trailing window, so
+  // comparing the two across the change accused the lab of a shortfall every
+  // single time the speed went up.
+  const behind = asked.current === null && speedShortfall(status.rtf, speed);
   // While editing, the statics on stage are the DRAFT's; the ducks and
   // objects keep streaming from the loaded world underneath.
   const shown = editor ? editor.draft : scenario;
@@ -1513,9 +1775,14 @@ export default function SimViewer() {
         <group rotation={[-Math.PI / 2, 0, 0]}>
           <Statics scenario={shown} />
           {editor && <EditorFloor state={editor} onClick={(x, y) => setEditor((st) => (st ? applyFloorClick(st, x, y) : st))} />}
-          {client && <Dynamics scenario={scenario} client={client} />}
-          {scene && client && <SimDucks scene={scene} client={client} />}
+          {client && <Dynamics scenario={scenario} client={client} g1Scene={g1Scene} />}
+          {scene && client && (
+            <SimDucks scene={scene} client={client} robotScenes={robotScenes} />
+          )}
           {scene && client && <TofOverlay scene={scene} client={client} enabled={showTof} />}
+          {/* …and the same toggle draws the planar scan for a body that has
+              one instead of a ToF (components/SimLidar.tsx). */}
+          {client && <LidarOverlay client={client} robotScenes={robotScenes} enabled={showTof} />}
           {scene && client && <DetOverlay scene={scene} client={client} enabled={showTof} />}
           {client && <ChaseOverlay client={client} enabled={showTof} />}
           {client && <MapOverlay client={client} duckId={selected} enabled={showMap} />}
@@ -1565,6 +1832,37 @@ export default function SimViewer() {
         <button style={BTN} onClick={() => client?.sendReset()} title="R">
           ↺ restart
         </button>
+        {/* Wall-clock speed. Amber when the lab cannot keep the promise —
+            a 3v3 pitch costs ~6.6 ms of the 20 ms tick, so it runs out of
+            box around 3x and asking for 4 gets you 3. The RTF beside it is
+            the honest number; this menu is only the ask. */}
+        <select
+          value={speed}
+          onChange={(e) => askSpeed(Number(e.target.value))}
+          style={{
+            ...BTN,
+            padding: "3px 6px",
+            borderColor: behind ? "#f2b632" : speed === 1 ? BTN_BORDER : "#43c2b8",
+          }}
+          title={
+            behind
+              ? `asked for ${speedLabel(speed)}, the lab is managing ${status.rtf.toFixed(2)}\u00d7 — this scene costs more than its 20 ms tick`
+              : "wall-clock speed of the world ([ and ]). Fast forward to reach the interesting part; slow down to watch a fall or a kick land. The same 25 frames a second either way — a fast world jumps further between them."
+          }
+        >
+          {/* A script may POST any speed in range, not just a preset, and a
+              controlled <select> with no matching <option> renders EMPTY —
+              the one thing this control must never do. So carry the current
+              value whenever it is not on the ladder. */}
+          {!SIM_SPEEDS.includes(speed as (typeof SIM_SPEEDS)[number]) && (
+            <option value={speed}>{`⏩ ${speedLabel(speed)}`}</option>
+          )}
+          {SIM_SPEEDS.map((x) => (
+            <option key={x} value={x}>
+              {x === 1 ? `⏵ ${speedLabel(x)}` : x < 1 ? `🐌 ${speedLabel(x)}` : `⏩ ${speedLabel(x)}`}
+            </option>
+          ))}
+        </select>
         <button
           style={{ ...BTN, background: driving ? "#3a2f10" : BTN.background, borderColor: driving ? "#f2b632" : BTN_BORDER }}
           onClick={() => setDriving((v) => !v)}
@@ -1593,11 +1891,23 @@ export default function SimViewer() {
         <button style={{ ...BTN, borderColor: showMap ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowMap((v) => !v)} title="M: the selected duck's occupancy map, in its own odometry frame">
           map
         </button>
+        {/* One toggle, whatever the selected body's range sensor is: the
+            duck's ToF cone, or a MARS's 360° scan (lib/lidar.sensorOverlayLabel). */}
         <button style={{ ...BTN, borderColor: showTof ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowTof((v) => !v)} title="T">
-          ToF overlay
+          {sensorOverlayLabel(overlayChan)}
         </button>
         <button style={{ ...BTN, borderColor: showCam ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowCam((v) => !v)} title="V: the selected duck's head camera, with the detector's boxes">
           cam
+        </button>
+        <button style={{ ...BTN, borderColor: showLabels ? "#43c2b8" : BTN_BORDER }} onClick={() => setShowLabels((v) => !v)} title="L: the floating d0 · policy labels over the ducks">
+          🏷 labels
+        </button>
+        <button
+          style={{ ...BTN, borderColor: sound ? "#43c2b8" : BTN_BORDER, color: sound ? undefined : "#7c8796" }}
+          onClick={() => setSound((v) => !v)}
+          title="Shift+M: the ducks' voices — chirps while a follower has its person in sight, a questioning quack when it loses them. Only DUCKS talk, and only following ones: a MARS, a pitch or a tidy room is silent. Mute is the sound only: the bills keep moving."
+        >
+          {sound ? "🔊 quacks" : "🔇 quacks"}
         </button>
         <button
           style={{ ...BTN, borderColor: editor ? "#f2b632" : BTN_BORDER }}
@@ -1615,7 +1925,11 @@ export default function SimViewer() {
             exact. */}
         <span style={{ color: "#9aa5b1", minWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {scenario ? scenario.name : "no world loaded"} · t <Slot w={6}>{status.t.toFixed(1)}</Slot> s · RTF{" "}
-          <Slot w={4}>{status.rtf.toFixed(2)}</Slot> · <Slot w={6} left>{status.mode}</Slot> · <Slot w={3}>{status.kbps.toFixed(0)}</Slot> kB/s
+          <span style={{ color: behind ? "#f2b632" : undefined }} title={behind ? `${speedLabel(speed)} asked, ${status.rtf.toFixed(2)} managed` : undefined}>
+            <Slot w={4}>{status.rtf.toFixed(2)}</Slot>
+            {behind ? `/${speedLabel(speed)}` : ""}
+          </span>{" "}
+          · <Slot w={6} left>{status.mode}</Slot> · <Slot w={3}>{status.kbps.toFixed(0)}</Slot> kB/s
           {status.perf && (
             <span title="lab cost per 20 ms tick: physics+policies + sensors + frame encode"> · {status.perf}</span>
           )}
@@ -1673,6 +1987,7 @@ export default function SimViewer() {
                 </div>
                 <div style={{ color: "#9aa5b1" }}>
                   beak {selDuck.beak}
+                  {selDuck.mouth === undefined ? "" : ` · mouth ${Math.round(selDuck.mouth * 100)}%`}
                   {selDuck.holding ? ` · holding ${selDuck.holding}` : ""}
                   {selDuck.skill ? ` · skill ${selDuck.skill}` : ""}
                 </div>
@@ -1727,14 +2042,24 @@ export default function SimViewer() {
                     <input type="checkbox" checked={selDuck.headApplied} onChange={(e) => client?.sendHead(selDuck.id, e.target.checked)} /> head
                   </label>
                 </div>
-                {selDuck.brain.inputs && (selDuck.brain.inputs.tof || selDuck.brain.inputs.det) && (
+                {selDuck.brain.inputs && (selDuck.brain.inputs.tof || selDuck.brain.inputs.lidar || selDuck.brain.inputs.det) && (
                   <div style={{ marginTop: 4, display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 8px", color: "#9aa5b1" }}>
-                    {(["tof", "det"] as const).map((k) => {
+                    {(["tof", "lidar", "det"] as const).map((k) => {
                       const inp = selDuck.brain.inputs[k];
                       if (!inp) return null;
+                      // A body with a scanner and no ToF still reports its
+                      // range input under `tof`, because the lab hands its
+                      // brains an ADAPTED 8×8 and keeps the SCAN's timestamp
+                      // (world/arena.World.senses_tof: a 6 Hz frame is up to
+                      // 167 ms old and a brain gating on freshness must see
+                      // that). So the row is labelled by the channel the body
+                      // HAS, and the duplicate is dropped if a lab ever sends
+                      // both.
+                      if (k === "tof" && selChan === "lidar" && selDuck.brain.inputs.lidar) return null;
+                      const label = k === "tof" && selChan === "lidar" ? "lidar" : k;
                       const age = inp.age === null ? null : Math.round(inp.age * 1000);
                       return [
-                        <span key={`${k}l`}>{k}</span>,
+                        <span key={`${k}l`} title={label === "lidar" ? "the age of the 360° SCAN the adapted 8×8 was binned from" : undefined}>{label}</span>,
                         <span key={`${k}v`} style={{ color: inp.stale ? "#f2b632" : "#43c2b8" }}>
                           {age === null ? "never" : `${age} ms`}{inp.stale ? " · stale" : ""}{k === "det" && "n" in inp ? ` · ${inp.n} seen` : ""}
                         </span>,
@@ -1801,6 +2126,12 @@ export default function SimViewer() {
                     <span title="person / ball / marker are simulated-only classes today; the robot's NPU detects ducks"> ⓘ</span>
                   </div>
                 )}
+                {/* The ARM channels, for a body that has a hand. Both render
+                    nothing until a lab sends them (lib/sim.GripperPayload /
+                    ArmPayload name what is still owed); `holding` beside the
+                    badge is the pickable's id, which the frame does carry. */}
+                {selDuck.sensors?.gripper && <GripperBlock g={selDuck.sensors.gripper} holding={selDuck.holding} />}
+                {selDuck.sensors?.arm && <ArmBlock arm={selDuck.sensors.arm} />}
                 <div style={{ marginTop: 4, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                   {selDuck.tof && (
                     <>
@@ -1812,6 +2143,35 @@ export default function SimViewer() {
                           </option>
                         ))}
                         {selDuck.tof === "custom" && <option value="custom">custom</option>}
+                      </select>
+                    </>
+                  )}
+                  {/* The same control for a body whose range sensor is the
+                      scanner. The LABEL is the device, because that is what
+                      the noise belongs to; the WIRE stays `tof`, because the
+                      scenario has one range-sensor field and
+                      `world/scenario.Duck`'s docstring says why ("how noisy
+                      is this robot's range sense" is one question). The lab
+                      REFUSES it today — `world_server.set_noise` has only a
+                      `tof` and a `det` branch and a MARS's `d.tof` is None,
+                      so it answers 409 and the event log says "noise
+                      ignored"; the scenario's own field is what sets it at
+                      load. A `lidar` branch there is the fix. */}
+                  {selDuck.lidar && (
+                    <>
+                      lidar{" "}
+                      <select
+                        value={selDuck.lidar}
+                        onChange={(e) => client?.sendNoise(selDuck.id, e.target.value as TofPreset, "tof")}
+                        style={{ ...BTN, padding: "1px 4px" }}
+                        title="the 360° scanner's noise preset (the scenario field is `tof` — one range-sensor field per body). NOTE: the lab has no live lidar branch yet and refuses the change; set it in the scenario."
+                      >
+                        {TOF_PRESETS.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                        {selDuck.lidar === "custom" && <option value="custom">custom</option>}
                       </select>
                     </>
                   )}
@@ -1845,11 +2205,36 @@ export default function SimViewer() {
             )}
             {/* A learned brain's own view of the world — nothing for rule brains. */}
             {client && <BrainPanel client={client} duckId={selected} />}
-            {client && <Heatmap client={client} duckId={selected} />}
+            {/* THE RANGE-SENSOR BLOCK, chosen by the body's CHANNEL and never
+                by its id: the duck's 8×8 grid, a wheeled body's polar plot
+                (components/SimLidar.tsx), or a line of text for a body with
+                neither. An empty ToF grid saying "no ToF frame yet" on a
+                robot that has no ToF is a lie about the hardware, which is
+                what a MARS in the playroom used to show. */}
+            {client && blockChan === "tof" && <Heatmap client={client} duckId={selected} />}
+            {client && blockChan === "lidar" && <LidarPlot client={client} duckId={selected} />}
+            {client && blockChan === null && (
+              <div style={{ color: "#9aa5b1" }}>
+                {blockDuck ? `${blockDuck.id} has no range sensor` : "select a robot with a range sensor"}
+              </div>
+            )}
           </>
         )}
       </div>
+      {client && <DuckVoices client={client} sound={sound} />}
       {client && <CamInset client={client} duckId={selected} top={inspectorTop} belowRef={pitchRef} hidden={!!editor} enabled={showCam} open={camOpen} onToggle={() => setCamOpen((v) => !v)} />}
+      {/* The states the selected duck's brain moves through, with the moves
+          it has actually made drawn between them (components/SimGraph). */}
+      {client && !editor && (
+        <StateGraphPanel
+          client={client}
+          duckId={selected}
+          graphs={world?.graphs}
+          open={graphOpen}
+          onToggle={() => setGraphOpen((v) => !v)}
+          minY={inspectorTop}
+        />
+      )}
 
       {/* keys — collapsible: reference text sitting over the room */}
       {lessonOpen ? (
@@ -1860,10 +2245,17 @@ export default function SimViewer() {
             </div>
             <PanelToggle open onToggle={() => setLessonOpen(false)} what="the controls" />
           </div>
-          WASD/QE fly the camera (A/D slide, W/S zoom, Q/E rise) · arrows orbit · Shift+R view home
+          WASD/EQ fly the camera (A/D slide, W/S zoom, E up, Q down) · arrows orbit · Shift+R view home
           <div style={{ marginTop: 6 }}>
-            R restart · P drive (the same WASD/arrows, Q/E steer the ducks instead) · T ToF · V cam ·
-            I inspector · B scoreboard · Shift+E edit · 1–9 select · Esc · space scrub
+            R restart · P drive (the same WASD/arrows steer the ducks instead; Q/E strafe them sideways) · T sensors · V cam ·
+            L labels · M map · Shift+M mute the ducks · I inspector · B scoreboard · G states · Shift+E edit ·
+            1–9 select · Esc · space scrub
+          </div>
+          <div style={{ marginTop: 6 }}>
+            [ and ] set the world&apos;s speed (0.25× … 8×): fast-forward to the interesting part,
+            slow down to watch a fall land. Frames arrive at the same rate either way — a fast
+            world jumps further between them — and RTF turns amber when the lab cannot keep up
+            (a 3v3 pitch runs out of box near 3×).
           </div>
         </div>
       ) : (
@@ -1889,6 +2281,11 @@ export default function SimViewer() {
             if (w.scenario) setPick(w.scenario.name);
             fetchScenarios().then(setScenarios).catch(() => {});
             setSelectedDuck(null);
+            if ((w.scenario?.persons ?? []).some((p) => p.kind === "g1")) {
+              fetchG1Scene().then(setG1Scene).catch(() => setG1Scene(null));
+            } else {
+              setG1Scene(null);
+            }
           }}
         />
       )}

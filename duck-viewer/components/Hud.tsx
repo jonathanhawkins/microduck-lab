@@ -792,7 +792,7 @@ export function Hud({
                 🖱 click a duck to select · ⌫ remove it · esc deselect
               </div>
               🎥 drag orbit · scroll zoom · 2-finger swipe slide · A/D slide ·
-              W/S·↑↓ dolly · ←/→ orbit · Q/E up·down · Shift+R reset view
+              W/S·↑↓ dolly · ←/→ orbit · E up · Q down · Shift+R reset view
             </div>
             <button
               onClick={() => setCmdBarOpen(false)}

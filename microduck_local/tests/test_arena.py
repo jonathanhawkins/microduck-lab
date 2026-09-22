@@ -12,6 +12,7 @@ from microduck_local import contract as C
 from microduck_local.sensors.detector import DetectorSpec
 from microduck_local.walk_env import MicroduckWalkEnv
 from microduck_local.world import Ball, Duck, Scenario, Wall, World, make_room
+from microduck_local.world.compose import scene_model
 
 pytestmark = pytest.mark.skipif(
     not C.SCENE_WALK_XML.exists(), reason="microduck_rl checkout not found")
@@ -104,7 +105,7 @@ def test_episode_timeout_respawns_without_a_fall():
 def test_duck_bodies_are_one_contiguous_slice_in_scene_order():
     world = World(Scenario(name="two", ducks=[Duck("a", (0, 0, 0), None, None),
                                               Duck("b", (0.5, 0, 0), None, None)]))
-    ref = mujoco.MjModel.from_xml_path(str(C.SCENE_WALK_XML))
+    ref = scene_model()   # the model GET /scene serves, mouth body and all
     ref_names = [ref.body(b).name for b in range(1, ref.nbody)]
     for did in ("a", "b"):
         s = world.duck_bodies[did]
@@ -286,3 +287,45 @@ def test_a_bump_that_lasts_one_substep_is_sensed():
     w.step()
     assert duck_duck_pairs() == 0                     # gone by the tick's last substep
     assert w.bumped(d0) and w.bumped(d1)
+
+
+def test_the_mouth_is_shut_at_spawn_and_opens_only_for_the_work():
+    """The 15th servo (roadmap 12.13). A duck's beak is SHUT at rest — the
+    first cut armed the drop-open window inside `release`, which spawning
+    calls on every duck to clear its hands, so a fresh room was full of ducks
+    gaping for MOUTH_DROP_S."""
+    from microduck_local.world.arena import MOUTH_DROP_S
+    from microduck_local.world.compose import mouth_frac_for_gape
+    from microduck_local.world.scenario import PICKABLE_KINDS, Pickable
+
+    sc = Scenario(name="m", ducks=[Duck("d0", (0, 0, 0), None, None)],
+                  pickables=[Pickable("t0", "brick", (0.25, 0.0)),
+                             Pickable("t1", "block", (0.0, 0.25))])
+    w = World(sc)
+    d = w.ducks["d0"]
+    for _ in range(20):
+        w.step()
+    assert d.mouth == 0.0, "a duck at rest has its beak shut"
+
+    # Releasing nothing is not a drop, so it must not open the beak.
+    assert w.release(d) is None and d.mouth_open_until == 0.0
+
+    # A held toy closes the bill as far as the toy allows: a 40 mm block is
+    # wider than the 36 mm gape and holds it wide, a 10 mm brick nearly shuts.
+    for toy, kind in (("t1", "block"), ("t0", "brick")):
+        d.holding = toy
+        w._mouth(d)
+        assert d.mouth == pytest.approx(
+            mouth_frac_for_gape(min(PICKABLE_KINDS[kind]["size"])), abs=1e-9)
+    assert w.ducks["d0"].mouth < 0.5, "the brick lets the bill close"
+    d.holding = None
+
+    # A real drop opens it, and only for as long as the window.
+    d.holding, d.beak_closed = "t0", True
+    w.data.eq_active[w._eq_id(d, "t0")] = 1
+    assert w.release(d) == "t0"
+    w._mouth(d)
+    assert d.mouth == 1.0
+    w.t += MOUTH_DROP_S + 1e-6
+    w._mouth(d)
+    assert d.mouth == 0.0

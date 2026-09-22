@@ -1633,8 +1633,9 @@ MuJoCo contacts between duck and basket, peak forward gravity, landing.
       median 0.225 vs 0.237), and 3 cm of forward creep during the stand
       (min distance 0.196 vs 0.226). By stop distance: **0 of 230 toppled at
       ≥ 0.24, 18 of 431 in 0.225–0.24, 16 of 53 in 0.21–0.225.** The
-      release is not the push — `beak: open` only drops the weld, no servo
-      moves — and 34 of the 35 toppled drops had already landed the toy IN.
+      release is not the push — `beak: open` only drops the weld; the mouth
+      servo added later (Track 12.13) moves a MASSLESS bill and cannot push
+      anything — and 34 of the 35 toppled drops had already landed the toy IN.
       So a topple costs a respawn (spawn point, odometry reset, a fresh
       search) and not a toy.
 - [x] **Move the stop out? NO — toys.** 64 paired datasheet seeds, the
@@ -1723,6 +1724,105 @@ MuJoCo contacts between duck and basket, peak forward gravity, landing.
       lost 7 points of landings because the standing look was no longer
       taken at 0.42 m; the hand-back to the ordinary servo-and-aim fixed
       it. Worth knowing before touching the deliver leg again.)
+
+## Track 12.13 — the mouth: the 15th servo, and a beak that actually opens — SHIPPED (2026-09-12)
+
+The duck picks toys up with a beak that never moved. The grasp was always real
+(`World.grasp` welds the toy to `jaw_soft` at the `mouth_tip` site, roadmap
+12.2) but the bill was a static geom: upstream's MJCF has no mouth joint,
+because onshape-to-robot cannot emit a closed loop into an MJCF tree, so the
+jaw's linkage was collapsed into the head at export.
+
+The robot itself has fifteen servos — left leg 5 · neck/head/**mouth** 5 ·
+right leg 5, the mouth being Dynamixel id 32, index 9 of `duck-control`'s
+table, travel −5°…+30°, commanded as an opening fraction by `RobotMouth`. It
+is deliberately absent from the 61-obs / 14-action contract: the policy's
+actions are scattered AROUND that slot. So the mouth costs no retrain and can
+never disturb a gait, on the robot or here.
+
+- [x] **Do not re-export the CAD.** The OnShape doc is Pollen's, and a
+      re-export regenerates the whole model — new pinned sha, new goldens, new
+      contract baselines — to gain one hinge. `world.compose.split_jaw` makes
+      the piece instead, at load time, on the `MjSpec` the world already
+      edits: a `mouth` body under `jaw_soft`, a hinge over the hardware
+      travel, and a 15th position actuator appended AFTER the 14 so the
+      contract slice is untouched (`DuckAddress` resolves by name).
+- [x] **The pivot, measured — no shipped file has it.** Upstream's MJCF, the
+      onboard `kinematics` crate and the mjlab scenes are all 14 joints.
+      `jaw.stl` carries a 6 mm through-bore at (+0.0030, ±0.042, −0.0181) in
+      the `jaw_soft` frame — the only full circle in the mesh, found by
+      circle-fitting with an empty-interior test — and the `seeed_bearing`
+      part inside the head sits at (+0.0032, −0.0385, −0.0180). A bearing
+      concentric with the bill's bore is the pivot; two measurements agreeing
+      to 0.2 mm. **Still worth an eye against the real robot** — the render
+      parts the bill from the head's underside by a millimetre or two.
+      Only `jaw` moves: it runs world x +0.017 → +0.0858 and ends exactly at
+      the `mouth_tip` site, while `bottom_head_shell` runs back to −0.030 and
+      is the fixed underside (upstream's own commented-out
+      `<exclude body1="jaw" body2="bottom_head_shell"/>` says the same).
+- [x] **Cosmetic by construction, and that is the point.** Only the VISUAL
+      geom moves; the collision geom stays on `jaw_soft`, so what the beak
+      MEETS is what it met before. The bill's mass is a picogram and the DOF's
+      whole inertia is the joint's `armature`. A held toy still welds to the
+      head, not to the bill — a massless bill cannot carry a 20 g block.
+- [x] **Two regressions the tests caught, both the same root cause.** A range
+      sensor excludes its MOUNT BODY only, and the ToF and the head camera
+      both mount on `jaw_soft` — which was a leaf until this. The moment the
+      bill got its own body the duck's downward rays hit its own beak instead
+      of the floor, and the detector's line of sight was blocked by it. Fixed
+      by `sensors.ray.UNSENSED_GROUP` (group 1): geometry that renders and is
+      never sensed, which the detector's occlusion mask now skips too. MuJoCo
+      draws group 1 by default, so `record-world` and `render-rollout` still
+      show the beak. **And** MuJoCo pads a short `<key qpos>` at the END,
+      while the mouth takes a slot in the MIDDLE of the chain — every upstream
+      keyframe landed the right leg one slot late, which surfaced as the
+      /pose preview's trunk sitting 3 mm high (`_reseat_keyframes`).
+- [x] **What it costs: seeded trajectories, not distributions.** A/B'd against
+      the unsplit model on the same scenario and the same scripted actions.
+      Nothing physical moves — same masses, inertias, contacts, sensing — but
+      carrying one more DOF through the constraint solver shifts the result
+      ~1.6e-9 per step, and this walker amplifies that (the same effect the
+      seventh-digit inertia note in `_pin_mass_properties_to_walk` documents).
+      The divergence scales with the bill's mass down to ~1e-12 and floors
+      there, so the mass is set at the floor. `tests/test_arena.py`'s
+      step-for-step lock against the walk env still holds at 1e-9 / 1e-6.
+      **A seeded world no longer replays the exact trajectory it did before
+      the mouth existed.** Benchmarks that quote a distribution (`eval-tidy`,
+      `eval-pitch`) are unaffected; a single remembered seed is not. It showed
+      up once, exactly where the precedent said it would:
+      `test_mapping.py`'s wall-line matcher, whose bounds were calibrated on
+      seed 0's path and whose own docstring records the 2026-09-06 audit
+      moving them the same way. Re-measured over six world seeds with the
+      mouth in — the matcher wins every one, err ratio 0.58–0.80 and on-wall
+      0.679–0.819 against 0.572–0.617 raw — and seed 0 is the WORST of the
+      six, so the bounds now sit under the six-seed minimum instead of on one
+      seed's old value.
+- [x] **Found while looking at the grab: `record-world` never drew the toys.**
+      Nothing to do with the mouth, and much worse for a clip. Toys are geom
+      group 4 (`PICKABLE_GROUP`, so the detector's line of sight looks THROUGH
+      them) and MuJoCo's default `mjvOption.geomgroup` is [1,1,1,0,0,0], so
+      every playroom video and contact sheet ever recorded showed a duck
+      tidying an EMPTY ROOM — basket, rug and all, six toys invisible. The
+      /sim viewer was always fine; it draws objects from the stream, not
+      through MjvOption. `record_world` now passes an explicit option with
+      0/1/2/4 on and the collision pads (3) off.
+- [ ] **The held toy sits ON the face, not in the gape.** `grasp` welds the toy
+      at exactly the pose it was caught in, and a catch is allowed anywhere
+      within 4 cm of the mouth tip, so the toy freezes wherever it happened to
+      be — measured on seed 0's first pick: 18 mm from the tip, 13 mm forward,
+      11 mm up, 6 mm left, which renders as a sock flat against the duck's
+      face just above the bill. Fine at the distance a room shot uses; it does
+      not read as gripped in a close-up. The fix is a canonical held pose
+      (centre it in the gape, oriented to the head) instead of the caught
+      pose. NOT free: a held toy is 20 g welded to the head, so moving it
+      18 mm changes the head's inertia and the tidy numbers with it — measure
+      `eval-tidy` paired if it ships.
+- [ ] **Not measured: whether `eval-tidy`'s mean moved.** The argument that it
+      cannot is above, and a 70 s `record-world playroom` run was clean (0
+      falls, 2/6 in the basket, the full pick → carry → drop loop). A paired
+      `eval-tidy --seeds 16 --seconds 300` against the pre-mouth tree would
+      settle it, and is the thing to run before quoting the README's 4.94–5.31
+      band again.
 
 ## Track 4 — positional soccer: teams by colorway, the right goal, role brains — OPEN (2026-09-05)
 
@@ -6337,6 +6437,441 @@ this stack has none of them.
       needs a different top-level loop from a striker — and the measured
       keeper does not.
 
+- [x] **F.2 Get behind the ball before touching it — the own-goal pack
+      SHIPS ON (2026-09-13): `board_push=0.40`, `chase_behind=0.40`,
+      `approach_keepout=0.20`, `chase_behind_upto=-0.5`, plus a line-up
+      veto from the wrong side in our third. `behind_ball` stays off.**
+
+      The shipped planner never asks for it. `aim_max` caps the walk-round,
+      so a duck standing between the ball and the goal it attacks is offered
+      the best line inside a 60 deg window of its own line of sight —
+      measured on a parked ball, a spot **97 deg** round (beside the ball;
+      behind is 180) for a kick **96 deg off the goal**, square across the
+      pitch. It then arrives 0.10 m from the ball, inside `duck_touch`, FROM
+      THE WRONG SIDE, and that arrival is the contact.
+
+      What the pitch looks like under that rule (6 seeds x 300 s of the lab's
+      `pitch-2v2`, every ball-moving touch classified as a kick or a body):
+      **84 % of touches are bodies, not kicks**; **28 % are made from
+      up-pitch and 81 % of those send the ball backwards** (median −0.091 m
+      against +0.148 m from behind); a kick from behind goes backwards 3 %
+      of the time and carries +0.561 m. The aim is not the fault — the
+      stance is.
+
+      `aim_mode="goal"` already walks round (143 deg, kick 24 deg off goal)
+      and ships off on item 3.1's numbers. The geometry says why: it is the
+      one arm whose straight servo line CROSSES the ball (0.05 m at 82–88 %
+      of the way in), so the duck arcs round in contact and shoves the ball
+      backwards — the target rule and the path have to land together.
+
+      **Built:** `ChaseParams.behind_ball` stages squarely behind the ball,
+      outside `duck_touch`, in its own mode `"around"` that neither settles
+      nor swings, triggered on the OUTCOME (`behind_ball_cos`, the exit
+      line against the goal direction, default cos(`aim_max`) = 0.5) so it
+      releases itself the moment a line that gains ground exists;
+      `ChaseParams.approach_keepout` bends the walk round a tangent of a
+      circle about the ball, radius `min(r, |target − ball|)` so the target
+      is never fenced off. `tests/test_behind_ball.py`, and off is
+      byte-identical to the old plan (checked in sim, not only by test).
+
+      **Measured, 4 arms x 6 paired seeds** (the table is in the knob's own
+      comment). Nothing resolves as a win; the single delta past the 6-seed
+      MDE is a cost — **−9.5 touches a run** at `behind 0.35 / keepout 0.30`,
+      worse on 5 of 6 seeds. Advance per touch is **+0.058 m, better on 5 of
+      6**, which is the right sign consistently and still under its MDE of
+      0.067. Slackening the threshold to `behind_ball_cos=0.3` throws the
+      gain away (+0.005 m) while a smaller keep-out keeps it (+0.054) and
+      halves the touch bill (−4.8, not resolved): **the threshold is the
+      lever, the radius is the cost.**
+
+      **AND THEN THE BATTERY WAS THE WRONG QUESTION — the duck never walks
+      round at all.** Instrumented over 180 s of the lab's `pitch-2v2` with
+      the arm on: 32 `around` spells, **0 arrivals**, and the closest the
+      duck EVER came to a staging spot it must reach within 0.06 m was
+      **0.50 m**. A spell lasts a median of about a quarter of a second: the
+      mode flips on, the duck takes a step or two, and the plan reverts to
+      "kick". It is CHATTER, not a treadmill, and the cause is that the
+      trigger is re-evaluated from scratch every tick against the duck's
+      current stance while the stance is changing under it and the tracked
+      ball jitters across the `behind_ball_cos` boundary.
+
+      So the measured "+0.058 m advance per touch, better on 5 of 6" is
+      **selection, not correction**: the rule talks the duck out of some bad
+      touches and never converts them into good ones. That is the honest
+      reading of the whole arm, and it is what the dead ball says too —
+      >20 s spells 10 -> 19, their total 248 s -> 538 s of 1800 s played,
+      and the longest 30.6 s -> 45.0 s. What was bought was HESITATION.
+
+      Two earlier hypotheses, both refuted by measurement rather than
+      argued: the `lineup_s` 4 s budget is NOT the blocker (line-up
+      timeouts 7 -> 6 and none of them from `around`), and the walk is not
+      failing on the boards (the fallback for a staging spot the body cannot
+      stand on fires as designed, `tests/test_behind_ball.py`).
+
+      **THE LATCH WAS BUILT, AND IT WORKED — mechanically.** `behind_ball_s`
+      (a budget) and `behind_ball_done` (the release angle) turn the trigger
+      into a one-shot decision; the latch lives BESIDE `spot` rather than in
+      it, so an `avoid` pauses the walk instead of cancelling it and keeps
+      its veto over the body. Counted over the LATCH's lifetime — the right
+      unit, because `avoid` chops one walk into several spot-spells and
+      counting spells measures the interruptions — **10 walk-rounds, 5 ended
+      BEHIND the ball, median final angle 125 deg, closest approach to the
+      staging spot 0.06 m**, against 0 of 32 / 56 deg / 0.50 m without it.
+
+      **And it still does not pay.** Same 6 paired seeds, shipped /
+      unlatched / latched:
+
+      | | shipped | unlatched | latched |
+      |---|---:|---:|---:|
+      | backward touches | 32.1 % | 25.1 % | 27.8 % |
+      | touches from up-pitch | 27.5 % | 23.5 % | **30.6 %** |
+      | advance a touch | 0.123 m | 0.167 m | 0.148 m |
+      | touches a run | 46.7 | 41.8 | 42.0 |
+      | dead spells > 20 s | 10 (248 s) | 19 (538 s) | **21 (599 s)** |
+
+      Nothing clears the 6-seed MDE, and the latched arm is worse than the
+      unlatched one on every column it was meant to win: making the
+      walk-round actually happen pushed the up-pitch touch share ABOVE the
+      shipped brain's and put a third of the run on a dead ball. Goals 8/9/5
+      and own goals 4/5/3 are not readings at this size (item 1.5).
+
+      **The hypothesis to test FIRST if this is picked up again** — stated as
+      a hypothesis, not a finding: a duck walking round the ball TRANSITS the
+      up-pitch region, and a 0.25 m keep-out does not stop the body clipping
+      the ball on the way past, so the manoeuvre manufactures the touches it
+      exists to prevent. Test a wider keep-out, or a walk-round routed the
+      way that never crosses up-pitch, before paying for an outcome battery.
+
+      **Then the cheap instrument killed the walk-round outright, and found
+      what actually works.** Every arm above was measured on 240-300 s
+      matches, which yield about nine wrong-side touches each — too few to
+      resolve anything, which is why four arms in a row looked good at n<=6
+      and died at n=12 or on fresh seeds. `scripts/wrongside_gym.py` (written
+      2026-09-12, modelled on `kick_gym`) is the rung this needed: one duck,
+      one still ball, the duck started on the GOAL SIDE of it, one episode
+      per placement, sixty episodes a minute.
+
+      **The walk-round, 400 episodes:** the duck moved the ball in **0 of
+      400**, took **0 kicks**, advanced it 0.000 m, against 92 % / 0.250 /
+      0.012 m shipped — three resolved deltas, all catastrophic. Left alone
+      with a ball it cannot lose, `behind_ball` never gets round to kicking.
+      It ships 0 and should not be revived.
+
+      **What works is upstream of all of it.** `_plan` is only ever called at
+      a ball range of 0.39-0.62 m (median 0.47, max 0.80), because
+      `lineup_range` is 0.6 and outside it the `chase` branch steers at
+      `ball.bearing` — straight at the ball. The duck runs at the ball and
+      only starts thinking about which side to be on once it is already
+      there, so every fix downstream of `_plan` is a close-range orbit.
+      `ChaseParams.chase_behind` moves the decision into the walk-in: while
+      chasing, steer at a point behind the ball on the ball-to-goal line
+      instead of at the ball, the offset SCALED by how wrong the side
+      currently is.
+
+      | wrong-side gym, `chase_behind=0.40, approach_keepout=0.20` | ball advance |  |
+      |---|---|---|
+      | discovery, seeds 0-7 | 0.025 -> 0.123 m | +0.098 (MDE 0.094) |
+      | **FRESH, seeds 100-107** | 0.044 -> **0.164 m** | **+0.121 RESOLVED** |
+      | pooled, 960 episodes | 0.034 -> **0.143 m** | **+0.109 RESOLVED** |
+
+      **A 4.2x improvement that replicates on a fresh block — the only thing
+      tried for this problem that has.** And free where it does not apply,
+      but only because of the scaling: unscaled it fired on good approaches
+      too and measured harm on `kick_gym`'s own right-side placement (swings
+      211 -> 166, whiff 5 -> 12 %, p=0.016); scaled, the same battery is
+      211 -> 211 and whiff null (p=0.178).
+
+      **At match level it is a wash, and that is dilution, not refutation:**
+      only about a quarter of match touches are made from the wrong side. 2v2
+      over 12 paired seeds — total advance a run 4.25 -> 4.46 (flat), advance
+      a touch 0.117 -> 0.153 (7/12), backward 31.3 -> 21.2 % (7/12), and
+      touches 36.0 -> 29.1, the one resolved delta and a cost. The cost is a
+      CROWD effect: at 1v1 it falls to -4.75 and stops resolving, with every
+      other column positive (advance a run +0.53, backward -7.5 %, 6 of 8).
+
+      **Verdict: everything ships 0**, because no match battery shows a win —
+      but `chase_behind` is the one with a real, replicated mechanism behind
+      it, and the dose is not its problem (0.25 / 0.40 / 0.55 all cost 6-9
+      touches a run). **The next question is where the crowd cost comes
+      from: try the bias on the designated ATTACKER only.** Also measured and
+      null on fresh seeds: `Team.side_s`, which prices the side of the ball
+      into the board's attacker choice and costs no walking at all — resolved
+      on the discovery block (advance a touch +0.067, 9/12; backward -11.4,
+      10/12) and flat on seeds 100-111 (+0.008, 6/12). It was selection.
+
+      **AND THE BIGGEST ONE: THE DUCKS ONLY EVER SHOOT, AND THE SHOT MISSES
+      HALF THE TIME.** Measured `p_whiff` on this floor is 50-61 %, which is
+      why 84 % of ball contacts are bodies rather than kicks — they are
+      ACCIDENTAL DRIBBLES. A deliberate push travels 0.26-0.64 m at 13-26 %
+      whiff. Item A.4 measured the push a clear win (possession +3.15 s/min,
+      p<0.001; advance +0.080, p=0.003) and parked it on OWN GOALS (+0.21 a
+      run, p=0.008 — "near our own mouth it walks the ball in"), explicitly
+      until the selector could choose a push under the same own-goal filter
+      as the kicks. That gate is `kick_select_push`, it is built, and it was
+      never turned on with the rest of the dribble.
+
+      The dribble configuration is
+      `chase_behind=0.40, approach_keepout=0.20, kick_select_push=1,
+      push_s=1.0, push_speed=0.45, kick_select_shoot=0.02` — approach from
+      the right side, then CARRY the ball, shooting whenever a kick has any
+      real chance. In the wrong-side gym, 480 episodes an arm over a
+      discovery and a fresh block:
+
+      | | ball advance | backward touches | moved it at all | kicks an episode |
+      |---|---|---|---|---|
+      | shipped | 0.034 m | 40.0 % | 90.8 % | 0.281 |
+      | **dribble** | **0.161 m** (+0.127 RES) | **26.3 %** (-13.8 RES) | 87.5 % (ns) | 0.294 (ns) |
+
+      **4.7x the ball advance and a third off the backward touches, both
+      resolved, both replicated on a fresh block, with NO resolved cost** —
+      and free on the right-side placement too (`kick_gym`: swings 211 ->
+      203, whiff 5 -> 9 %, verdict null, p=0.145). `kick_select_shoot` is the
+      lever and it is sharp: at 0.30 the duck never shoots at all (kicks
+      0.008 an episode), at 0.10 it wins bigger on backward (-22.3) and pays
+      for it in kicks (-0.142), at 0.02 it keeps every kick and every touch.
+
+      **In the match it does not pay, and the reason differs by roster.**
+      2v2 over 12 paired seeds: **crowd 0.286 -> 0.446 (+0.160, RESOLVED,
+      worse on 10 of 12)** — a duck carrying the ball holds it longer and the
+      others converge and stay converged — with possession, ballAdvance and
+      kickCount all flat. 3v3 over 8 paired seeds, where `brain_kwargs` turns
+      `support_field`'s lane repulsor on: **the crowding harm is GONE**
+      (+0.045, MDE 0.164) and **touches from up-pitch resolve as a win,
+      24.3 -> 15.1 %, better on 8 of 8 seeds** — the only resolved match-level
+      win this item ever produced — but **possession resolves as a LOSS,
+      42.4 -> 37.8 s/min (-11 %, worse on 7 of 8)**: the duck pushes the ball
+      away from itself instead of standing over it.
+
+      **Everything still ships 0.** The honest summary of the whole item is
+      that three separate mechanisms now have replicated, resolved gym
+      evidence (`chase_behind`, the dribble, and the two together) and NONE
+      of them survives contact with a match battery — 2v2 buys crowding, 3v3
+      buys a possession loss. What has NOT been tried, in order of promise:
+      a GENTLER push (`push_s`/`push_speed` at their shipped 0.5/0.3, which
+      may keep possession while still carrying); the chase bias on the
+      designated ATTACKER only (the crowd cost is the supporters'); and
+      `kick_select_pass`, which is the one real-soccer behaviour still
+      entirely untested with a working instrument.
+
+      **THE CLOSING MEASUREMENTS (2026-09-12), and they settle the item.**
+
+      *Push strength is not the lever.* `push_s`/`push_speed` at 1.0/0.45,
+      the shipped 0.5/0.3 and 0.7/0.30 are statistically indistinguishable in
+      the gym (advance +0.054 / +0.067 / +0.064, backward -20.4 / -20.4 /
+      -21.3, all resolved). The 3v3 possession loss is not the push shoving
+      too hard.
+
+      *That sweep also re-earned the dribble on a DIFFERENT WORLD.* It ran
+      against a snapshot taken after a peer session changed `world/compose.py`
+      mid-battery (the first attempt died with "mass and inertia of moving
+      bodies must be larger than mjMINVAL" on `d0/mouth`, a torn read of
+      their file). The control moved with it — advance 0.025 -> -0.058,
+      backward 40.8 -> 46.7 % — and the dribble's effect survived intact. An
+      unplanned robustness check, and it passed. (Batteries after that point
+      ran on a PYTHONPATH snapshot with `MICRODUCK_RL_DIR` pointed back at
+      the real upstreams, which is how to run one in a shared checkout.)
+
+      *Attacker-gating fixes the crowd and nothing else.* `chase_behind_
+      attacker` runs the bias only for the duck the board has made attacker,
+      on the theory that three ducks arcing at one point is a pile-up by
+      construction. On 3v3 it works as designed — crowd +0.022 (was +0.160
+      resolved at 2v2 ungated) — and delivers **two resolved positional
+      wins**: touches from up-pitch 25.7 -> 12.3 % and advance a touch
+      0.097 -> 0.147, both better on 7 of 8 seeds. And possession is still a
+      resolved loss, and **ballAdvance becomes one**: 1.269 -> 0.916.
+
+      *The decomposition, which is the finding.* 3v3, 8 paired seeds, one
+      snapshot, the two halves separately and together:
+
+      | arm | ballAdvance | possession |
+      |---|---|---|
+      | dribble only | -0.256 (1/8) | -1.95 (2/8) |
+      | chase only, attacker-gated | -0.289 (2/8) | -1.24 (4/8) |
+      | **both** | **-0.354 RESOLVED (1/8)** | **-3.03 RESOLVED (1/8)** |
+
+      **Each half costs ball advance on its own, consistently, and the costs
+      ADD.** There is no gating, dose or roster that escapes it.
+
+      **The conclusion the whole item earns.** Every intervention here is a
+      large, replicated, resolved WIN in isolation and a consistent LOSS in a
+      match, and the reason is a hypothesis worth writing down and testing
+      before anyone tries again: **in a match the ball's progress up the
+      pitch comes overwhelmingly from hard kicks that TRAVEL, and anything
+      that makes a duck spend time positioning, or keeps the ball close
+      (dribbling), reduces the number of those long-travel events.** The gym
+      measures a 10 s episode whose alternative is a bad touch; the match
+      measures a rate whose alternative is somebody else whacking it. That
+      also explains `aim_mode="goal"` (item 3.1) without needing the
+      possession story it was given at the time.
+
+      **What DID land, for the user's actual complaint.** The original
+      question was a duck kicking into its own net. The dribble configuration
+      halves the repo's own backward-kick count in a match (`kicksBack` 1.00
+      -> 0.50 at 2v2, 0.50 -> 0.375 at 3v3; neither resolved at these n) and
+      cuts backward touches from 40 % to 26 % in the gym, resolved and
+      replicated. It costs ball advance. That is a trade a human should make,
+      not a knob that should default on — so everything ships 0, and the
+      trade is written here.
+
+      ---
+
+      **AND THEN THE WHOLE ITEM TURNED OUT TO BE AIMED AT 8 % OF THE PROBLEM.**
+      Everything above — this item, `aim_mode`'s clamp (3.1), `kick_select`'s
+      own-goal filter — treats an own goal as a KICK sent the wrong way.
+      `scripts/owngoal_gym.py` (2026-09-12) puts the ball just off OUR OWN
+      line with the duck coming from up-pitch, the stance that makes them,
+      and asks only whether the ball ends in our net. 320 episodes of the
+      shipped brain:
+
+      | own goals | 16.2 % of episodes |
+      |---|---|
+      | ...**WALKED** in | **92 %** |
+      | ...KICKED in | 8 % |
+
+      **The duck bumps the ball over its own line with its BODY.** Confirmed
+      by the prediction that follows: tightening `kick_select_t_own` to 0.02
+      and then to 0.0 (plus a new `kick_select_safest`, which takes the fan's
+      least-bad line instead of falling back to a clamp line the own-goal
+      filter never checked) is a **dead null** — +1.2 points, MDE 8.3. A
+      filter on kicks cannot move a number made of walks.
+
+      It also explains every arm in this item: they all INCREASE body contact
+      near our own line, and pooled over every run in the session not one of
+      them lowered the own-goal share (shipped 22.5 %; the arms 26-57 %).
+
+      **What acts on the 92 %: `board_push`, which was measured and rejected
+      on the wrong metric.** Its own notes judge it as an ATTACKING tool
+      (advance a touch, whiff, kicks) where the kick beats it. It is a
+      DEFENSIVE one: `_board_line` on our own end board clears the ball
+      sideways toward the corner instead of letting the walk carry it at the
+      mouth.
+
+      | | own goals | | ball advance |
+      |---|---|---|---|
+      | shipped | 14.4 % | | 0.130 |
+      | **`board_push=0.25`** | **9.3 %** | **-5.1, MDE 3.6, RESOLVED (-35 %)** | 0.072 |
+
+      Pooled over **2560 episodes** across a discovery and a FRESH block,
+      better on **14 of 16** fresh seeds, and the entire reduction is in the
+      walked-in category. A third block (seeds 200-211) gives a clean
+      dose-response: 0.40 reaches 8.3 % (-6.5, RESOLVED) for more of the
+      advance.
+
+      **AND IT IS FREE IN A MATCH — the only thing in this item that is.**
+      2v2, 12 paired seeds at 0.25: every metric null and every one trending
+      the right way (ballAdvance +0.086, possession +0.56, crowd +0.024,
+      kickCount +0.08, spread -0.24). At 0.40 they are null too but all trend
+      negative (kickCount -1.17, 3 of 12), so **0.25 is the pick**.
+
+      **RECOMMENDATION: `board_push=0.25` is the one to turn on** if own goals
+      matter — a resolved 35 % cut in the stance that causes them, with no
+      measured cost anywhere. It stays 0 in the tree only because changing a
+      shipped default is the user's call, not the battery's.
+
+      **AND THE THREE COMBINE, which is the answer.** `board_push` alone gets
+      a third of the way; it attacks the ball AT the line. The approach work
+      above attacks the walk that brings it there — `chase_behind` puts the
+      duck on the own-goal side of the ball so a bump sends it up-pitch, and
+      `approach_keepout` stops the run-in crossing the ball. None of them
+      looked decisive alone because each owns a different half of the same
+      event. Together, `board_push=0.25, chase_behind=0.40,
+      approach_keepout=0.20`:
+
+      | block | own goals | |
+      |---|---|---|
+      | fresh, seeds 300-307 | 17.8 % -> **4.4 %** | -13.4, MDE 6.8, RESOLVED (-75 %) |
+      | fresh, seeds 400-411 | 15.5 % -> **3.2 %** | -12.3, MDE 4.6, RESOLVED (-80 %) |
+      | **pooled, n = 920** | **16.3 % -> 3.6 %** | **-12.7, MDE 3.8, RESOLVED (-78 %)** |
+
+      The walked-in category — the 92 % — goes **15.3 % -> 3.5 %**. Two
+      independent fresh blocks, no discovery block in the pool.
+
+      **The match trade, 12 paired 2v2 seeds.** Ball advance is FLAT
+      (-0.015; `board_push` gives back what the chase bias cost on its own),
+      possession -1.23, kickCount -0.75, kicksBack -0.25, spread -0.23, all
+      null — and **crowd +0.100, RESOLVED, worse on 11 of 12**. So the price
+      of a 78 % cut in own goals is a bunchier-looking team, with ball
+      progress unchanged. That is a trade a human should take or refuse; it
+      is not one a default should make silently.
+
+      **`chase_behind_attacker` is a DEAD KNOB, and it retracts a claim.**
+      The idea was that supporters doing approach geometry cause the crowd.
+      They cannot: `PRIORITY` puts `support` ahead of `seen`, so a support
+      duck never reaches the chase branch — only the attacker ever runs it.
+      Proven, not argued: gated and ungated arms return byte-identical crowd,
+      ballAdvance, possession, kickCount, kicksBack and spread over 12 paired
+      seeds. An earlier note the same day credited this gate with fixing the
+      3v3 crowd cost; that comparison changed the roster AND the config and
+      was not a test of the gate. Withdrawn.
+
+      **AND THE ITEM CLOSES WITH A FREE FIX (2026-09-12).** The costs above
+      are all paid by GENERAL PLAY for a DEFENSIVE problem: own goals happen
+      in our own third and the bias fires over the whole pitch.
+      `chase_behind_upto` gates it in attack coordinates, and the
+      dose-response is clean:
+
+      | bias applies | own goals (gym) | resolved match cost |
+      |---|---|---|
+      | everywhere (+1.0) | -88 % | possession -2.94 |
+      | our own half (0.0) | -91 % | kickCount -2.33 |
+      | **our defensive third (-0.5)** | **-94 %** | **none** |
+
+      **THE CONFIGURATION:**
+      `board_push=0.40, chase_behind=0.40, approach_keepout=0.20,
+      chase_behind_upto=-0.5`
+
+      | | own goals | |
+      |---|---|---|
+      | fresh, seeds 900-909 | 15.0 % -> **0.8 %** | -14.2, MDE 5.1, RESOLVED (-95 %) |
+      | fresh, seeds 1000-1011 | 14.0 % -> **1.0 %** | -13.0, MDE 4.1, RESOLVED (-93 %) |
+      | **pooled, n = 1000** | **14.4 % -> 0.9 %** | **-13.5, MDE 3.2, RESOLVED (-94 %)** |
+
+      Two fresh blocks, no discovery seeds pooled. The walked-in category —
+      92 % of all own goals — goes **13.5 % -> 0.9 %**, and kicked-in goes to
+      **zero**. And 12 paired 2v2 seeds show **every match metric null**:
+      possession -0.98, crowd **-0.028 (better)**, ballAdvance +0.007,
+      kickCount -1.25, kicksBack -0.167, spread -0.166.
+
+      **This is the recommendation: turn all four on.** A 94 % cut in the
+      failure the item was opened for, replicated, with no measured cost
+      anywhere. **SHIPPED (2026-09-13)** as `ChaseParams` defaults
+      (`board_push=0.40`, `chase_behind=0.40`, `approach_keepout=0.20`,
+      `chase_behind_upto=-0.5`), plus a line-up veto: a duck on the goal
+      side of the ball in our third no longer enters kick line-up inside
+      `lineup_range` — it keeps the chase-behind / keep-out approach.
+      `behind_ball` stays off.
+
+      **Why it took four knobs.** The failure is compound and each knob owns
+      one part: `chase_behind` puts the duck on the own-goal side of the ball
+      so a bump sends it up-pitch; `approach_keepout` stops the run-in
+      crossing the ball; `board_push` clears sideways at the line instead of
+      walking through; `chase_behind_upto` confines the whole thing to the
+      third where the failure lives so general play never pays. Every one of
+      them measured null or harmful ALONE. That is the second lesson of this
+      item and the more useful one.
+
+      **The lesson worth carrying past this item:** a knob that was "measured
+      and ships off" may have been measured on the wrong metric. `board_push`
+      sat off for weeks because it lost on ball advance, which is not what it
+      is for. And a fix for a compound failure can look null in every part
+      until the parts are combined.
+
+      ---
+
+      The superseded notes below are kept because they are how the mechanism
+      was found.
+
+      **Superseded — it is a commitment problem, not a battery:** the rule has
+      to LATCH. Once it decides to go round it must stay in `around` until
+      it is actually behind the ball, the ball has moved more than some
+      distance, or a time budget runs out — a self-releasing trigger read
+      fresh every tick cannot survive its own stance improving. Only when a
+      spell reliably ENDS IN AN ARRIVAL is a battery worth paying for; then
+      `scripts/kick_gym.py` for the event rates (19x cheaper per kick event,
+      item "Null means no instrument") and paired `eval-pitch` seeds with
+      `compare_pitch.py`. Do NOT judge it on `ownGoals`: the arms returned
+      4 / 6 / 1 / 5 and item 1.5 puts that metric at ~347 seeds.
+
 **What to read this list as (written 2026-09-06; revised 2026-09-07
 after the survey was worked through).** A.1 was the only item that could
 remove the limit item 7 hit, and it was measured: the one real camera CAN
@@ -6456,9 +6991,10 @@ test, and the measurement that moved.**
 - Paired benchmarks, same seeds: eval-pitch 4 seeds — goals 1 → 1, own
   goals 1 → 0, kicks 14 → 15, back-kicks 6 → 7, **falls 4 → 1**;
   eval-tidy 16 seeds — **0.82 → 0.90 tidied, 0.44 → 0.31 falls a run**
-  (9 seeds better, 3 worse, 4 tied). Saved scenes that pin
-  `"collision": "walk"` (`scenarios/follow-me-edit*.json`,
-  `pitch-roles-2v2.json`) keep the old bodiless duck until re-saved.
+  (9 seeds better, 3 worse, 4 tied). A saved scene that pins
+  `"collision": "walk"` keeps the old bodiless duck until it is re-saved —
+  no shipped scenario does today (the ones that did were local editor saves,
+  removed 2026-09-22).
 
 Clean, measured: solver/integrator options equal `scene_walk.xml` (and
 upstream's implicitfast/10-iteration choice makes zero difference to the
@@ -6560,6 +7096,18 @@ tests):
 
 ## Later / parked
 
+- ~~**A third body: the Innate MARS**~~ (wheeled base + 6-DoF arm) — **BUILT
+  2026-09-18**, Phases 1-5 of [`docs/mars-roadmap.md`](mars-roadmap.md), where
+  every number and every miss is written back into its own phase. The
+  `Body`/`RobotSpec` split landed, so the walker seam is no longer the only
+  door in; `fetch-robot mars` is 7.2 MB in 8 s; MARS drives, scans and senses
+  in `/sim` on the duck's own `wander` / `follow` brains unedited (follow 0.988
+  in band); `tidy_arm` tidies **0.94** of the playroom in 5 min over 3 seeds
+  (0.90 over 8) against the duck's 0.83; and the same seam gave
+  `fetch-robot menagerie:<name>` for free. **Still open:** the two arm tasks
+  miss their bars (`reach` holds 5/8 against 8/8, `pick` lifts 11/20 against
+  80 %), `train-brain --robot mars` is untouched, and Phase 6's Innate
+  code-skill template does not exist.
 - **Port `find_ball` to an mjlab cfg** and retrain on GPU in upstream
   `microduck_rl`. That stack, not this one, is the sim2real recipe. Blocked on
   the items above: there is no point porting a recipe whose back-bucket
@@ -14831,3 +15379,561 @@ ships 0.0 and `Chase.DET_MAX_AGE` reads 0.4 off the class. Agent's re-read:
 `det_max_periods` at `brain/controllers.py` (ChaseParams) and `det_gate` above `class Chase`; pair whiff 47.4 → 50.6 / 48.3 % over 24 seeds, `track_age` 1.88 s at the swing, arrival 24 → 26 cm; loss events 7159 → 1424 and median 0.10 → 1.22 s on the same rollouts — the tables reproduce from the rows.
 Rows: `runs/detrate/gym-detage-2hz-b{0,100}.jsonl` (3 arms × 480 episodes each), `runs/detrate/gym-detage-10hz-b0.jsonl` (3 × 480, the control), `runs/detrate/loss2fix/{shipped,p10}.jsonl` (12 seeds each), read against 12av follow-up (1)'s `runs/detrate/gym-ship2-b{0,100}.jsonl` (reproduced bit for bit) and `runs/detrate/loss{10,2}/shipped.jsonl`.
 Committed: `brain/controllers.py` (the knob, ships OFF), `scripts/probe_ball_loss.py` (the event rule), `tests/test_det_freshness.py` (new). **No default moved, no preset, no policy, no `docs/camera-hardware.md` edit.**
+
+### 13. A SECOND ROBOT: the Unitree G1 becomes trainable here — BUILT, MEASURED (2026-09-13)
+
+The G1 arrived in this workspace as a *prop*: `robots/g1.py` attached the Lucky
+Robots MJCF under a person prefix and drove it with a frozen `walker.onnx` for
+the `/sim` follow scenes. Nothing in the training half of the repo knew it
+existed — `train-walk`, `export-walk`, `symmetry.py`, the lab roster and the
+teach panel were all 14-joint / 61-obs duck. This item is the work that made it
+a body you can train, export, render, and select in the lab, and the numbers
+that decided each choice.
+
+**The seam.** `walk_env.py` resolved one body by hard-coded name (`trunk_base`,
+`floor`, `left/right_foot_collision`, `contract.JOINT_NAMES`). Those lookups now
+come from a `RobotSpec` (`robots/spec.py`); the duck's is `contract.MICRODUCK`,
+built from the contract constants rather than retyped. **The duck path is
+bit-identical**: the same 200-step rollout (noise + DR + action delay, seed 7)
+hashes to `0be2824a…` under `xml` and `f20ed2b1…` under `bam` before and after,
+measured against `git archive HEAD` on a PYTHONPATH copy. A name the model does
+not have now RAISES at construction — it used to come back as id −1 and a
+mistyped foot pad then paid no air-time reward with nothing saying so.
+
+**Freeze the hands, do not delete them.** The 14 finger DoFs are removed while
+the finger bodies, meshes and mass stay (`g1.freeze_hands`). Driving
+`walker.onnx` at 0.3 m/s for 30 s:
+
+| variant | nv | mass | physics ctrl steps/s | vs full | 30 s path |
+|---|---|---|---|---|---|
+| full (fingers free) | 49 | 33.99 kg | 5 271 | 1.00x | 2.97 m |
+| **hands frozen** | **35** | **33.99 kg** | **6 737** | **1.28x** | **2.96 m** |
+| frozen, fingers non-colliding | 35 | 33.99 kg | 7 142 | 1.35x | 2.19 m |
+| frozen + `fusestatic` | 35 | 33.99 kg | 6 504 | 1.23x | 2.24 m |
+| hands deleted | 35 | 33.34 kg | 6 900 | 1.31x | 1.09 m |
+
+Deleting buys 0.03x more than freezing and costs 0.65 kg of forearm. **Read the
+path column against its noise**: a 1e-6 rad nudge on one hip moves the 30 s
+figure between 2.32 and 3.11 m, so only the deleted row (1.09 m) is resolvable;
+the middle rows are inside the band. Two corrections to earlier claims in this
+session: an initial "1.76x for deleting" was measured at `qpos0` in free fall,
+where DoF count dominates because there are no contacts (under load the
+constraint solver does, and 1.28x is the honest figure); and the first chaos
+control perturbed the robot's *x* position, which is an exact symmetry of an
+infinite flat floor — it measured nothing, and the joint-angle probe replaced it.
+
+**Throughput** (`bench-walk --robot g1`, raw env stepping, M-series Mac):
+8 envs 19.0k vs the duck's 29.6k; 16 envs 24.5k vs 40.8k; 32 envs 32.5k vs
+61.3k. So ~1.9x the duck's cost per step at the working env count, not the 3.2x
+the free-fall bench implied.
+
+**The shipped walker has a dead zone below ~0.4 m/s.** Commanded vs achieved in
+`G1WalkEnv` (600 steps a command, STAND spawn, no noise): 0.2→0.01, 0.3→0.01,
+0.4→0.30, 0.5→0.43, 0.6→0.53, 0.8→0.73, 1.0→0.92 m/s. This is the POLICY, not
+the env: the env's observations are bit-identical to a standalone driver's over
+12 steps, and a spawn transient alone kicks it out of the stall at 0.3.
+`RobotSpec.min_forward_cmd` (0.4 for the G1) keeps the trainer's forward orders
+inside the regime a gait exists in.
+
+**What shipped.** `robots/spec.py` (RobotSpec + registry), `contract.MICRODUCK`,
+a spec-driven `walk_env`, `robots/g1.py` (freeze, generated training scene with
+a MEASURED stand keyframe, `G1_SPEC`, `MICRODUCK_G1_WALKER` so a locally trained
+policy drives the `/sim` person), `robots/g1_env.py` (99-d obs, no head term,
+BAM refused), `robots/g1_symmetry.py` (mirror derived from `jnt_axis` and
+checked against physics), `--robot` on `train-walk` / `bench-walk` / `distill` /
+`render-rollout` / `export-walk` (shape read from the run's own `run.json`), a
+camera that frames the body it is given, and robot selection through the lab:
+roster slots carry a robot, the palette tags every run, `GET /scene?robot=g1`
+serves the meshes, an assign moves the slot to the policy's body, a width
+mismatch is refused, and the teach panel refuses a non-duck trainee (trick
+recipes name duck joints).
+
+**Two process-wide leaks the suite caught, both mine.** `render_rollout.build_env`
+and `eval_onnx.main` publish their knobs into `os.environ` (the trainer
+subprocess reads them there), so a test that calls either without
+`monkeypatch` arms `MICRODUCK_EPISODE_S` / `MICRODUCK_RUN_CMD` for every test
+that runs AFTER it in the process — each one failed a different unrelated test
+300-700 tests downstream, and neither reproduced when its own file ran alone.
+The tests are sandboxed, and `eval_onnx` now refuses an impossible
+`--robot`/`--behavior` pair BEFORE it writes the global: an argument error
+must not leave a knob armed behind it.
+
+**What did NOT ship, deliberately.** No sim2real claim: the 99-d layout feeds
+base linear velocity, which no real humanoid observes without a state
+estimator. (The "no G1 recipes" line below is now superseded — see 13.1.)
+
+### 13.1 — G1 tasks: a held idle and a held squat — SHIPPED (2026-09-14)
+
+Two G1 recipes now exist (`behaviors/g1_tasks.py`), trained through the lab's
+teach panel rather than the CLI, via a `Behavior.trainer` argv that runs
+`train-walk --robot g1 --task <stand|squat>`. Both are env-owned rewards, so
+their teach-panel rows are display-only.
+
+`g1_squat` — hold the pelvis ~20 cm below standing. Final chain
+`teach-g1_squat-b8f63f` (0.7M + 0.5M steps, ~6 min wall clock on this Mac).
+**Deterministic, 60 s episodes, obs noise + DR on: 5/5 seeds held**, mean pelvis
+0.517-0.522 m, min 0.504, never below the 0.30 m floor. Immune to a 0.9 m/s
+drive command (mean pelvis 0.535 vs 0.533 undriven, drift 0.05-0.07 m over
+20 s). `render-rollout`: both feet down 99% of frames, nothing but feet on the
+floor, **0 trunk-z and 0 pitch reversals over 12 s** — a hold, not cycling.
+
+Three things had to be right, and each was wrong first:
+
+1. **The spawn solver measured a constant.** `_solve_squat_pose` bisected the
+   knee bend against `data.xpos[trunk][2]` — but the pelvis IS the free-joint
+   root, so its z is `qpos[2]` and no joint angle can move it. The bisection
+   saturated at its 2.0 rad bound and returned a fold. The quantity that
+   actually changes is LEG CLEARANCE (pelvis above the soles): 0.756 m at rest,
+   0.583 at 1.0 rad, 0.305 at 2.0. Solved properly it is 64 deg of knee.
+2. **Deleting the pose term deleted the only description of the SHAPE.**
+   `W_POSE = 0` was reasoned from "a squat is precisely not the default pose",
+   which is an objection to the TARGET, not to the term. With it off, nothing
+   priced the configuration at all — only "be 20 cm lower" — and the cheapest
+   way to drop the pelvis 20 cm is to pitch forward over the ankles. Measured
+   at 0.7M steps: the height term was paying 5.42 of 6.0 (it really was getting
+   low) while 2 of 3 deterministic seeds ended face-down inside 2 s, trunk
+   up-axis 0.19-0.27 where 1.0 is vertical, joints CLOSER to standing (pose err
+   1.47) than to the squat (4.33). Retargeting the term at the solved squat
+   pose — not deleting it — is the fix.
+3. **The recipes were being shoved.** Both reach the env through `train.py`,
+   not `BehaviorEnv`, so they never got its `push_robot=False` and inherited
+   the walk env's DR: +/-0.4 m/s every 3-6 s while the reward scored `still`
+   and `stay_home`. That breaks the invariant in AGENTS.md directly.
+
+**Honest limit on the attribution: 2 and 3 were changed together and not
+isolated.** The deterministic hold went 1/3 -> 6/6 seeds across that pair; the
+TRAINING CURVES barely separate them (height and upright at 0.7M are within
+0.02/step of the broken run), which is itself the lesson — this task's training
+ep_len is ~4 s under exploration noise while the deterministic policy holds
+60 s, so the curve cannot see the difference that matters. Judge by the
+deterministic probe, never by the chart.
+
+**A held pose needs a term for the CARRIAGE, not just the height.** The chain
+above met every number — 5/5 seeds, 60 s, upright, on target — and still looked
+wrong to a human watching the lab: back twisted, one arm folded onto the thigh,
+torso turned. Measured on it: waist_roll +29.8 deg, waist_pitch +29.9,
+right_shoulder_roll -29.1 against left -9.5, and 20-25 deg left/right
+mismatches on wrists, ankles and shoulders. The cause is that `pose` spreads
+ONE Gaussian over all 29 joints at std2 4.0, so ~1.05 rad^2 of upper-body error
+still pays 0.77 of a weight-1.0 term — nothing was asking for a tidy carriage.
+A separate `carriage` term (waist + shoulders + elbows + wrists, std2 0.25,
+weight 2.0) fixed it in one retrain, `teach-g1_squat-823050`: worst carriage
+joint 29.9 -> 6.9 deg, mean |dev| 10.3 -> 2.8, waist roll 29.8 -> 4.0, trunk
+tilt 7 -> 1-2 deg. It also made the HEIGHT more accurate (mean pelvis 0.558-0.560
+against a 0.558 target, where the untidy policy sat 4 cm deep at 0.517-0.522) —
+the sloppy carriage was costing it height it could not hold. Deliberately OFF
+for the idle (W_CARRIAGE = 0.0), whose shipped policy predates the term.
+
+### 13.2 — karate: a front kick and a straight punch — SHIPPED (2026-09-14)
+
+`robots/g1_karate.py`, tasks `front_kick` and `punch`, both teachable in the
+lab ("do a karate kick", "throw a punch"). Built as HOLDS of a SOLVED pose,
+the shape 13.1 proved this harness learns.
+
+| | held 20 s (clean) | held 20 s (noise+DR) | pose error |
+|---|---|---|---|
+| straight punch | 5/5 | 5/5 | 9-11 deg mean |
+| front kick | 4/5 | 5/5 | 4-15 deg mean |
+
+The kick stands on the left foot with the right raised for the whole episode
+(`feet L=1 R=0` on every rendered frame), upright at 1-2 deg tilt, zero
+trunk-z and pitch reversals. HONEST LIMIT: the kicking foot reaches 0.322 m
+above the support sole against the 0.545 m the solved pose asks for (59%) —
+the kick leg's own joints are within 2-4 deg of target, but the support leg
+carries more bend than solved, which lowers the whole body. It reads as a
+mid-height front kick rather than a high mae geri.
+
+**The balance had to be solved before any reward was written.** MEASURED:
+standing, the CoM sits 0.118 m to the side of either foot and a foot is
+0.073 m wide, so a one-leg stance is impossible until the support leg adducts
+to bring the foot under the midline (at hip_roll -0.20 the offset is -0.015 m,
+inside). A leg thrown forward then puts the CoM 0.117 m ahead of a foot only
+0.203 m long, so the fore-aft counter-lean is solved jointly with it. The
+solver returns a pose whose CoM is 0.001 m from the support foot's centre and
+RAISES if it cannot find one. A caution for the next person: the first attempt
+searched in the ROOT frame and measured nothing, because the pelvis is the
+free joint's root — the same trap as 13.1's height solver.
+
+**Four reward mistakes, each costing a retrain, all the same mistake.** Every
+one was a term switched off or narrowed because its DEFAULT target was wrong
+for the new task, when the fix was to retarget or widen it:
+
+1. `W_HEIGHT = 0` ("a strike is not defined by pelvis height") left nothing
+   paying to stay up: the punch sagged from 0.735 to 0.479-0.493 and tripped
+   its own fall floor on all 5 seeds. Retargeted at the solved pose's height.
+2. `HEIGHT_STD2 = 0.004` (the idle's HOLDING width) is flat long before the
+   sag that actually happens — e^-14 at 0.24 m. Widened to 0.03.
+3. `STRIKE_STD2 = 0.35` made the strike term pay 0.00 of 6 to a STANDING
+   robot, i.e. perfectly flat across the whole approach; the punch abandoned
+   the pose (27 deg mean error). Widened to 2.0, where standing pays 1.54.
+4. `carriage` scores every joint above the hips, which for a punch is exactly
+   the punching joints — it paid 0.00 at the punch pose, charging the robot
+   for striking. It now excludes whatever the strike moves.
+
+**A level punch is genuinely harder than a raised one**, and this was measured
+rather than guessed. A hand-typed shoulder angle rendered as a 36 deg uppercut
+with 12.8 cm of reach; solving for a level fist gives 0 deg and 28.4 cm. But
+level is the MAXIMUM gravitational moment on the shoulder, and against an
+otherwise identical recipe the raised version held 4/5 seeds while the level
+one held 0/5 — balancing cleanly for 3 s then losing it in half a second.
+Training here is deterministic, so re-running reproduced it exactly; doubling
+the budget (1.5M + 1.0M) fixed it at 5/5. Judge a pose change by a paired
+budget, not by one run.
+
+**The kick needed three stages, not two.** A 1.5M two-stage chain reached the
+pose within 3-6 deg and stood one-legged on 90-100% of frames, then fell at
+1.4-2.4 s on every seed; on the runs that began STANDING its CoM was already
+1.2-3.2 foot half-widths outside the support before it had lifted — it was
+learning the weight transfer and the one-leg hold at once. Stage 1 now spawns
+in the finished kick 100% of the time (`MICRODUCK_G1_SPAWN_IN_POSE`), stage 2
+drops to 0.4, stage 3 adds the command. Episode length went 2.7 -> 10.5 ->
+18.0 s across them. (Open-loop, commanding the solved pose every step, falls
+at 1.14 s — so the 2.4 s the two-stage policy managed was real balancing, just
+not enough of it.)
+
+### 13.3 — the kick-and-recover cycle: what worked, and a measured negative
+
+The held kick (13.2) stands on one leg; asked for one that RECOVERS to a normal
+stance, the cycle version is `robots/g1_karate.G1FrontKickEnv` with `CYCLE_S`
+> 0 — the phase rides the three command slots, because a memoryless policy
+cannot time a repeating movement otherwise.
+
+**Best artifact: `teach-g1_front_kick-df756a`.** Deterministic, from a FORCED
+standing start (the spawn cannot flatter it): 5/5 seeds hold 20 s clean and
+under noise+DR, foot 0.104 m at full extension, returns to both feet 97-99% of
+the idle phase, yaw drift 23-27 deg.
+
+**Reward search cannot discover this kick; a warm start can.** Six independent
+reward formulations from scratch all converged to standing through the kick
+window (foot 0.001-0.003 m): a `lift` earner paying 0 for standing, a spawn
+biased into the window, a slower cycle, a 5-rung gravity ladder, a
+no-termination drill, retuned widths. The barrier is structural — falling ends
+the episode, so the gradient at standing points AWAY from kicking, and PPO is
+local. Warm-starting from 13.2's held kick put the skill on the far side of
+that barrier and produced a real kick immediately (0.003 -> 0.104 m).
+
+**Height is bought from stability, roughly linearly.** `W_LIFT` 4 -> 8: kick
+0.104 -> 0.208 m, survival 5/5 -> 0/5, recovery 99% -> 49%, yaw 27 -> 141 deg.
+Not a trade worth taking; 4.0 is the shipped value.
+
+**SHIPPED: `teach-g1_front_kick-e97553`** — a low front kick that repeats and
+recovers. Deterministic, honest standing start, 8 seeds: **8/8 hold 20 s**
+clean and under noise+DR, foot 0.096-0.106 m at full extension, 5 kicks per
+episode, back on both feet 99-100% of the idle stretch, yaw drift 13-17 deg
+(down from 42 on the previous best). `render-rollout`: 6 trunk-z reversals
+over 12 s, both feet down 91% of frames, nothing but feet on the floor.
+
+**Two measurement bugs invalidated earlier numbers; both are fixed.**
+1. A forced standing start that overwrote the joints but left the ROOT where a
+   mid-cycle spawn had lowered it — burying both soles 35 mm in the floor, so
+   the robot began interpenetrating and fell in ~1 s regardless of quality.
+   `scripts/eval_kick.py` re-seats the root; it also takes `phase0=None` for a
+   randomised start, because pinning phase 0 hands the policy a full idle
+   stretch before its first kick.
+2. `render_rollout` built non-duck envs with `action_delay=False`. That is not
+   a randomiser, it is the actuation lag the policy TRAINS under, and removing
+   it cost a policy that holds 5/5 one seed in five — so the render disagreed
+   with the evaluation and the render was wrong. Fixed; `random_yaw` and the
+   noise stay off, the dynamics stay on.
+
+**`train.py` had no action-std cap.** `train_behavior` has capped log_std at
+-0.5 since 2026-09-01 with a comment recording the exact failure; `train.py` —
+the trainer every G1 task uses — had none. Measured on a kick warm-start chain:
+action std ratcheted to 0.89 mean / 1.57 peak, stochastic episodes surviving
+40 s while the DETERMINISTIC policy `export-walk` ships fell in 1.5 s. Every
+deterministic evaluation of those runs was reading a mean the training had
+never optimised. The cap is now bound on warm-start load and every rollout.
+
+**Height trades against survival, and the frontier was bracketed.** From a
+standing start: `W_LIFT` 4 -> 8 took the kick 0.104 -> 0.208 m and survival
+5/5 -> 0/5. Freeing the arms and pricing real angular momentum took it to
+0.846-1.038 m (105-131% of target) and 0/5. Lowering the TARGET does not raise
+the achieved height — 0.806, 0.545 and 0.353 m targets all yield ~0.1 m of
+actual foot clearance from a surviving policy. **~0.1 m is this configuration's
+stable kick**, and it took ~22 training chains to establish that.
+
+**The ~0.1 m ceiling is STRUCTURAL, not a starting-point artifact.** The
+decisive control: warm-start the cycle from 13.2's HELD kick — a policy that
+demonstrably reaches 0.545 m from a standing start and balances there for
+20 s, i.e. one that has already solved the hard half at five times the shipped
+height — with the momentum term, freed arms, log_std cap and corrected harness
+all in place. It converged to **0.082 m**, the same ceiling, at 8/8 survival.
+Every starting point tried (scratch, the stable low kick, the ballistic high
+kick, the held kick) and every target tried (0.806, 0.545, 0.353 m) lands a
+SURVIVING policy at ~0.1 m. That is the number to beat, and reward search is
+not going to beat it.
+
+**What did work, in order:** the warm start (skill on the far side of the
+exploration barrier), pricing ACTUAL angular momentum instead of prescribing
+arm angles, and freeing the arms during the strike so the counter-motion is
+reachable. Yaw drift fell 42 -> 13 deg from the momentum term alone.
+
+**What to try next, and it is not more reward weights.** Every lever pushed
+today moves along the same height-vs-stability line, which is the signature of
+a policy that has not learned a CONTROLLED high kick rather than one that is
+mis-incentivised. That is what imitation is for: track a reference trajectory
+instead of discovering one. The clip machinery already exists (`motion.py`,
+the viewer timeline, "train this"). Mocap would need human->G1 retargeting and
+should wait until authored references have demonstrably topped out.
+
+**NEGATIVE RESULT — a solved arm counter-swing makes it worse.** The kick
+generates Lz = -0.174 kg m^2/s (the leg swings 0.145 m off the centreline) and
+nothing in the reference opposed it, while `carriage` pinned all 14 arm joints
+at their default. A 2x2 solve over antisymmetric shoulder pitch (yaw authority
+-0.789 per rad) and same-sign shoulder roll (roll -0.756) cancels both axes
+EXACTLY for a subtle 12 deg / 7 deg motion. Measured against the same
+baseline, one variable changed: yaw drift 27 -> 139 deg clean, 23 -> 234 under
+noise, survival 5/5 -> 2/5, recovery 97% -> 65%, kick height unchanged.
+
+The cause is the assumption, not the arithmetic: **a feed-forward cancellation
+is only valid if the policy TRACKS the reference.** Measured at full extension,
+it performs **-21%** of the commanded arm swing (it moves them the wrong way)
+and **28%** of the kick. Cancelling momentum that is not being generated, with
+a motion that is not being followed, is a disturbance. `ARM_COUNTERSWING` is
+kept in the code, off, because the solver and its numbers are the evidence for
+the closed-loop version: score the robot's ACTUAL angular momentum and let it
+find its own counter-motion, rather than prescribing arm angles that would
+work if everything else were perfect. Not yet tried.
+
+Two knobs were dead and are now live (both found by review, both verified
+against the running object): `RobotSpec.push_vel_range` (the G1 declared
++/-0.4 for 34 kg and trained under the duck's +/-0.3) and
+`com_bodies=("torso_link",)`, a body the model does not have — it is
+`torso_link_rev_1_0`, so the G1's CoM randomization was a silent no-op. A
+spec-declared name now raises via `_need()` instead of being dropped.
+
+**The open question for whoever takes this further**: a 29-DoF humanoid from
+scratch is tens of millions of steps, and at ~32k env-steps/s that is hours, not
+minutes. The distil-then-fine-tune path (`distill --robot g1` from
+`walker.onnx`, then `train-walk --robot g1 --init-from`) is the one that fits
+this harness; the fidelity rule from the duck's own distillation applies (clone
+fall rate tracks action MSE, so use the long recipe, not the smoke one).
+
+```bash
+uv run fetch-g1
+uv run --with pytest pytest tests/test_g1_env.py tests/test_g1_symmetry.py \
+    tests/test_g1_pipeline.py tests/test_robot_spec.py tests/test_lab_robots.py
+uv run bench-walk --robot g1 --envs 32
+uv run distill --robot g1 --teacher .cache/unitree_g1/walker.onnx --run-name g1-clone \
+    --episodes 250 --epochs 120
+uv run train-walk --robot g1 --envs 32 --steps 2_000_000 --init-from runs/g1-clone \
+    --run-name g1-walk
+uv run export-walk runs/g1-walk && uv run render-rollout --policy runs/g1-walk/policy.onnx \
+    --out /tmp/rr-g1 --seconds 8
+```
+
+### 13.4 — the kick is DRAWN, not discovered: IK for the 🎬 editor, on both bodies (2026-09-14)
+
+13.3 ended with the measurement that the ~0.1 m kick ceiling is structural —
+every reward formulation, every start point, every target converges there —
+and the conclusion that the next step is imitation of a reference, not more
+reward weights. This track is that step, and it is a tooling track: the
+reference had to be AUTHORABLE.
+
+**What exists now.**
+
+- `pose.py` — the editor's posing engine, generalised from the duck-only
+  `viz_server.PoseScratch` to any `RobotSpec`: forward kinematics, the
+  balance read (capsule feet print a stadium; mesh soles their flat) and a
+  new **inverse-kinematics solve** — damped least squares on `mj_jac`,
+  restricted to the effector's own chain, joint limits honoured, `level`
+  soft, the centre of mass as a draggable target via `mj_jacSubtreeCom`.
+  ~1 ms a solve; `POST /ik?robot=`. Spec fields carry the editor data
+  (`joint_groups`, `effectors`, `rig_controls`, sole/ground tolerances), so
+  `/joints?robot=g1` serves the G1's 5 groups, 4 effectors + CoM and 12 rig
+  controls, and the viewer's panel switches bodies.
+- Clips carry `robot`; `motion.load_clip` validates the joint count per body;
+  `/teach` routes a clip to its own body's imitation recipe (`g1_imitate`,
+  `robots/g1_imitate.G1ImitateEnv`, `train --robot g1 --task imitate --clip`).
+- `render-clip <name>`: FK playback of the authored clip to mp4 + a sheet
+  whose captions carry the balance read per tile.
+
+**The IK met the root trap twice more, and the fixes are the design.** (1) A
+pinned foot's `level` row at equal weight with its position row SLID the
+pinned foot 5 cm across the floor when the ankle roll hit its ±0.26 rad stop
+under a weight shift — the least-squares compromise bought tilt with
+position. Level is now a 0.2-weight preference, and a joint on a stop that is
+asked to go through it has its column dropped. (2) With both feet pinned and
+the root held, the legs are a closed chain: "CoM over the left foot" stalled
+6 mm short, served by the arms alone. The root's translation is a solver
+variable whenever the goals span more than one limb (weighted 0.3 so a far
+target bends the leg rather than sliding the pelvis), and the frame the
+editor DRAWS is anchored on the grounded soles' centroid — the feet stay put
+and the hips move, which is what a standing body does; root-fixed it looked
+like the feet skating the other way.
+
+**The kick clip: `clips/g1-front-kick.json`**, seven keys over 3.0 s,
+looping, authored in ~20 ms of solves: weight over the left sole with both
+feet down (3 iterations), chamber (right foot 0.18 fwd / 0.32 up, 7 it.),
+snap (0.55 fwd / 0.62 up, 7 it.), back down the same way. Every frame is
+statically balanced — 35 mm inside the left sole through the whole swing —
+and the apex foot is 0.62 m up, six times the reward-search ceiling.
+`render-clip g1-front-kick` shows it.
+
+**Training: `teach-g1_imitate-g1_front_kick-fb59e7` (2 stages, 3.5 M
+steps), launched through the lab.** The reward is every term of the idle
+retargeted at the clip's instant (pose wide, carriage tight over all 29,
+height at the FK-grounded reference, upright at the clip's lean, feet
+planted-and-flat where the clip plants and progress-paid toward the clip's
+lift where it lifts) plus a Cartesian `foot_track` term on each foot's
+pelvis-frame position — two layers, because the tight layer alone paid 0.001
+of 4 to a standing body against a foot half a metre away. 60% of spawns
+start mid-clip, posed to it. Tests: `tests/test_pose.py` (22),
+`tests/test_g1_imitate.py` (14), every retarget checked for "pays more at the
+pose than off it, and pays SOMETHING off it".
+
+**RESULTS so far (deterministic, `scripts/eval_imitate.py`: standing start
+at a random phase, 20 s, 6-8 seeds).**
+
+| run | start | rule | held | apex (clip 0.605 m) |
+|---|---|---|---|---|
+| `fb59e7` (2 stages, 3.5 M) | scratch | none | s1 snapshot 6/6, final export 0/6 (falls in 1.3 s) | **0.000 m** — stood through every kick |
+| `b3eddb` (3 M) | warm from the 0.1 m cycle kick e97553 | not-lifting ends the episode at 5 cm | 6/8 clean, 5/8 under noise+DR | 0.075 / 0.088 m (12-15%) |
+
+Two lessons, both now in the env. (1) The imitation reward alone did NOT
+cross the barrier: standing earns ~65% of the maximum at every frame
+(height, upright, still, spin, anchor and the planted half of `feet` are all
+satisfied by standing) and a kick attempt that falls forfeits the episode, so
+the scratch run converged exactly where reward search did — the same
+"standing through the kick" at 6/6 survival. (2) DeepMimic's second half was
+missing: **early termination on NOT tracking**. `G1ImitateEnv` now ends an
+episode that stands through 15 frames of a lift the clip asks for, as if it
+had fallen, so not kicking is no safer than kicking. The 5 cm rung is
+satisfied by the donor's own 0.1 m kick and moved nothing; the rung is a
+STRICTNESS ladder (`MICRODUCK_G1_LIFT_MIN`: 5 → 15 → 30 cm, three
+curriculum stages) and the chain `25ac56` is running rungs 2-3 from
+`b3eddb` at the time of writing — at the 15 cm rung the mean episode drops
+from 40 s to ~5 s immediately, which is the pressure the earlier run lacked.
+
+**RESULT of the ladder — the kick is real. Shipped artifact:
+`teach-g1_imitate-g1_front_kick-25ac56-s2`** (the 15 cm rung, 1 M steps from
+`b3eddb`). Deterministic, standing start at a random phase, 20 s, 8 seeds,
+judged WITHOUT the tracking cut (`MICRODUCK_G1_IMITATE_LOOSE=1`, so a seed
+that starts on an apex frame is not ended for standing there):
+
+| policy | held 20 s (clean / noise+DR) | apex clearance | real lifts / ep | both feet down when planted | yaw drift |
+|---|---|---|---|---|---|
+| reward search, best of 13.3 (`e97553`) | 8/8 / 8/8 | 0.10 m | 5 | 99% | 14-23° |
+| imitation, no cut (`fb59e7`) | 6/6 snapshot, export falls | 0.00 m | 0 | 100% | — |
+| ladder rung 1, 5 cm (`b3eddb`) | 6/8 / 5/8 | 0.075 m | 0 | 100% | 13° |
+| **ladder rung 2, 15 cm (`25ac56-s2`)** | **8/8 / 7/8** | **0.62 m (102% of the clip)** | **6.4** | 76% / 65% | 68° |
+| ladder rung 3, 30 cm (`25ac56-s3`) | 3/8 / 5/8 | 0.92 m (151%) | 4.4 | 47% | 80° |
+
+`render-rollout` on the pick: 12 s, six full kicks, nothing but feet on the
+floor, the raised foot at hip height at every apex (sheet in the run record).
+Rung 3 over-shoots the clip by half and pays for it in balance — the rule
+demands 30 cm of lift but nothing caps it, so the policy buys margin above
+the rung with height and loses the recovery. The pick is rung 2.
+
+What is left, measured: the return to BOTH feet between kicks is 76% (the
+clip plants both for 40% of the cycle; the policy sometimes hovers the
+kicking foot), and yaw drift is 68° over 20 s — the same spin the karate
+cycle fought. Neither is a height problem any more; both are terms to
+retarget (`feet` planted-half weight, `no_spin` width) on the next pass.
+
+The one-line version for the next person: reward search spent a day and six
+formulations at 0.10 m; drawing the kick with the IK (twenty milliseconds)
+and training against it with not-tracking termination reached the drawn
+0.62 m in about 25 minutes of lab time. Choreography is authored; RL solves
+the physics.
+
+### 13.5 — a run that can say what it is: `record.json` (2026-09-14)
+
+Found by the user, immediately after 13.4 shipped: *"how come i don't see that
+clean record in my policy — did you train that outside the lab?"* Everything
+HAD been trained through the lab (every run is named `teach-…`, which only
+`TrainingJob` produces), but the palette showed five rows of
+`teach-g1_imitate-g1_front_kick-<hash>-sN` with nothing to tell them apart,
+and the chain's own `▶` and `⤓` pointed at the FINAL stage — which in that
+chain is the over-shooting `s3` (3/8 seeds) rather than the `s2` that holds
+8/8. The measurements existed in a chat log and in this file, which is
+exactly where the person looking at the palette is not.
+
+- `run_record.py` — `runs/<name>/record.json`: `title`, `description`,
+  `note` (one measured sentence), `group`, `pick`, and `measured` (per-tool
+  numbers, replaced not appended, so a run is never quoted at its best-ever
+  rather than its present). `train.py` writes the facts at launch — task,
+  body, clip, warm-start parent, curriculum rung — and never a verdict; the
+  lab passes its own job title down as `MICRODUCK_RUN_TITLE` so the record
+  keeps the name the watcher saw.
+- `describe-run` — `--title/--description/--note/--group`, `--pick`,
+  `--backfill` (derive from an old run's own `run.json`, never overwriting a
+  hand-written field). `scripts/eval_imitate.py --record --pick` closes the
+  loop: the number that an eval measures lands on the chip.
+- `pick` is unique within a chain by construction (setting it clears the
+  siblings), and the palette's chain chip now reads `▶ best stage (sN)` with
+  its `⤓` following it. Only a measurement may set it.
+
+The rule this earns, now in AGENTS.md: **where a number is quoted decides
+whether it is read.** A finding that reaches a doc but not the artifact has
+not been reported.
+
+### 13.6 — what the karate work is still missing — OPEN (written 2026-09-15)
+
+Written the day 13.4/13.5 shipped, while the numbers are fresh. Ordered by
+what would change the result most per hour spent, not by how interesting it
+is. Each item names the measurement that would settle it.
+
+**1. The recovery, not the height.** `25ac56-s2` returns to both feet 76% of
+the frames the clip plants both, and drifts 68° of yaw over 20 s. Neither is
+a height problem, and neither needs a new term: `feet` already pays a
+planted half (it is the lift half that is doing the work) and `no_spin` is
+inherited from the idle at a width tuned for a robot that is not throwing a
+limb. Retarget both and re-measure.
+→ **judge on** both-feet-when-planted (76% now) and yaw (68° now), at an
+apex no worse than 0.60 m. Nothing below 0.55 m counts as a win here.
+
+**2. Cap the lift the termination rule asks for.** Rung 3 demands 30 cm and
+nothing bounds the top, so the policy buys margin with height — 0.92 m,
+151% of the clip — and survival falls 8/8 → 3/8. The rule wants a BAND:
+terminate below the rung, and stop paying above the clip's own apex.
+→ **judge on** whether a 30 cm rung can be reached at 8/8 with apex ≤ 0.70 m.
+
+**3. Draw the rest of the move set.** This is the cheapest item on the list
+and the reason the editor exists: a move cost days of reward engineering
+before 13.4 and costs minutes of posing now. Roundhouse, side kick, knee
+strike, a guard-to-guard combination. The kick's own authoring is the
+recipe — weight shift, chamber, extension, back the same way, every frame
+statically balanced before it is saved.
+→ **judge on** clips that `render-clip` shows balanced in every frame, then
+the same 8-seed probe each.
+
+**4. Mirroring.** Every clip is one-sided; `g1-front-kick` is right-footed
+only. The joint permutation already exists (`RobotSpec.mirror_joint_perm`,
+`robots/g1_symmetry.py`), so a `--mirror` on the clip loader or a button in
+the panel gives the left side for free. Note the duck's lesson first: a clip
+turns the symmetry PRIOR off (`behaviors/core.is_symmetric`), and that stays
+true — mirroring the DATA is not the same as asking the loss for symmetry.
+→ **judge on** the mirrored clip reaching the same apex within 10%.
+
+**5. Blending and chaining.** There is no way to run a kick into a punch.
+The clip format has no transition and the phase clock has no notion of "next
+clip", so a combination is currently one long authored clip. A blend window
+between two clips, or a phase that can be handed over, is the smallest thing
+that makes a combination authorable.
+→ **judge on** a two-clip combination held for 20 s at 8/8.
+
+**6. The editor cannot preview PHYSICS.** It shows forward kinematics and a
+static balance read; whether a transition is dynamically reachable is only
+learned by training on it. A "simulate this clip open-loop" button (drive
+the pose targets through the real env and report where it falls) would catch
+an impossible transition in seconds instead of a 25-minute training run. The
+machinery exists — `render-clip` already poses every frame, and the envs
+already step.
+→ **judge on** whether it predicts the failure of a deliberately impossible
+clip (e.g. a 0.9 m apex in 0.2 s).
+
+**7. Sim2real honesty, restated.** None of 13.x is a hardware path. The G1's
+99-d observation carries `base_lin_vel`, which no real humanoid has without
+state estimation (`robots/g1.py` says so at the layout). Anything that
+leaves the lab needs that slot removed and the policy retrained, and the
+gap should be measured before it is promised, not after.
+
+**8. Housekeeping the palette pays for.** `discover_policies` takes ~285 ms
+for 1004 runs+checkpoints, almost entirely the directory walk and per-run
+stat; the record read added 7 ms of it. The viewer polls it. Either cache on
+mtime or prune — `runs/` holds many dead chains whose only value is a
+sentence that now lives in their `record.json` anyway (see the cleanup
+policy in AGENTS.md before deleting anything with a chain tip).
+→ **judge on** the poll under 50 ms with the same roster on screen.
+

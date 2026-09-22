@@ -47,9 +47,11 @@ machine-facts = "microduck_local.machine:main"
 duck-lab = "microduck_local.viz_server:main"
 train-behavior = "microduck_local.train_behavior:main"
 render-rollout = "microduck_local.render_rollout:main"
+render-clip = "microduck_local.render_clip:main"
 train-brain = "microduck_local.train_brain:main"
 select-brain = "microduck_local.select_brain:main"
 describe-brain = "microduck_local.describe_brain:main"
+describe-run = "microduck_local.describe_run:main"
 select-run = "microduck_local.select_run:main"
 eval-brain = "microduck_local.eval_brain:main"
 eval-tidy = "microduck_local.eval_tidy:main"
@@ -58,6 +60,10 @@ trace-tidy = "microduck_local.trace_tidy:main"
 walker-facts = "microduck_local.walker_facts:main"
 eval-find-ball = "microduck_local.eval_find_ball:main"
 record-world = "microduck_local.record_world:main"
+fetch-robot = "microduck_local.fetch_robot:main"
+# The G1's own name, kept: the README, scripts/setup.sh and the memory index
+# all say `fetch-g1`. It is `fetch-robot g1` with the body spelled in.
+fetch-g1 = "microduck_local.fetch_g1:main"
 
 [tool.pytest.ini_options]
 markers = [

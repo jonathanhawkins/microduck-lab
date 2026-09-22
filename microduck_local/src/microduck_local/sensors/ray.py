@@ -13,7 +13,11 @@ upstream quirk this module ignores.
 
 The mount body is excluded from hits (a sensor cannot see its own housing);
 the REST of the robot is not — a duck looking down at its feet sees its feet,
-as the real sensor would.
+as the real sensor would. `exclude_body=` moves that exclusion off the mount
+for a sensor whose mount FRAME and whose housing are different bodies: MARS's
+lidar is a jointless `base_laser` frame inside the turret box that models its
+own housing, and both hang off `base_link` (`sensors/lidar.py` has the
+measurement — all 360 rays hit the turret otherwise).
 """
 
 from __future__ import annotations
@@ -25,9 +29,19 @@ import numpy as np
 
 # Geom groups a range sensor "sees": 0 = scenery (floor, walls, objects),
 # 2 = the robot's visual meshes (upstream puts the shells there), 3 = the
-# collision pads, 4 = toys (`world.compose.PICKABLE_GROUP`). Group 1/5 are
-# left for sensor-only proxies later.
+# collision pads, 4 = toys (`world.compose.PICKABLE_GROUP`). Group 5 is left
+# for sensor-only proxies later.
 DEFAULT_GROUPS: tuple[int, ...] = (0, 2, 3, 4)
+
+# Group 1: geometry that RENDERS but is never sensed - by a range sensor here
+# or by the detector, which occludes on everything else. It exists because a
+# sensor's self-exclusion is its MOUNT BODY only (below), so a visual part
+# that moves off the mount body starts blocking the sensor that is bolted to
+# it. The hinged bill (`world.compose.split_jaw`) is the case: it used to be
+# a geom of `jaw_soft`, the very body the ToF and the head camera mount on,
+# and the duck's downward rays began hitting its own beak the moment it got
+# its own body. Its sensed twin is the collision geom, still on `jaw_soft`.
+UNSENSED_GROUP = 1
 
 
 @dataclass
@@ -53,6 +67,7 @@ class RayFan:
         body: str | None = None,
         max_range: float = 4.0,
         groups: tuple[int, ...] = DEFAULT_GROUPS,
+        exclude_body: str | None = None,
     ):
         if (site is None) == (body is None):
             raise ValueError("give exactly one of site= or body=")
@@ -74,6 +89,17 @@ class RayFan:
             self.body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body)
             if self.body_id < 0:
                 raise KeyError(f"body {body!r} not in model")
+        # Which body this sensor is BLIND to. The mount by default — a sensor
+        # cannot see its own housing — but a mount frame is not always the
+        # housing: MARS's `base_laser` is a jointless frame whose geometry
+        # lives on `base_link`, and Innate's own `lidar_scan` casts from the
+        # frame while excluding the base for exactly that reason.
+        self.exclude_id = self.body_id
+        if exclude_body is not None:
+            self.exclude_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_BODY, exclude_body)
+            if self.exclude_id < 0:
+                raise KeyError(f"exclude_body {exclude_body!r} not in model")
         gg = np.zeros(6, dtype=np.uint8)
         for g in groups:
             gg[int(g)] = 1
@@ -107,7 +133,7 @@ class RayFan:
         mujoco.mj_multiRay(
             self.model, data, pnt, self._vec, self.geomgroup,
             1,                      # flg_static: static geoms (floor, walls) count
-            self.body_id,           # the mount body is invisible to itself
+            self.exclude_id,        # the sensor's own housing is invisible to it
             self._geomid, self._dist, None,
             self.n, self.max_range,
         )
@@ -145,10 +171,22 @@ def tof_fan(rows: int, cols: int, fov_deg: float, subrays: int = 1) -> np.ndarra
     return d / np.linalg.norm(d, axis=1, keepdims=True)
 
 
-def planar_fan(n: int, fov_deg: float) -> np.ndarray:
+def planar_fan(n: int, fov_deg: float, *, ccw: bool = False) -> np.ndarray:
     """Directions for an n-ray scan in the x-y plane centred on +x
-    (left, +y, first) — what a 2D LiDAR would be, if the hardware ever grows one."""
+    (left, +y, first) — a planar slice of a ToF-shaped aperture.
+
+    `ccw=True` is a ROTATING scanner's convention instead: n rays `fov_deg/n`
+    apart going counter-clockwise, the FIRST one on +x, no duplicated
+    endpoint — Innate's `lidar_scan` (`yaw + arange(n) * 2*pi/n`), and what
+    `sensors/lidar.py` mounts on MARS. Left-first cannot express a full turn:
+    360 rays across 360° puts ray 0 on -x, repeats ±180° as two rays, and
+    leaves NO ray on +x at all — the one bearing every obstacle question is
+    asked about — because the two ends of a closed circle are one direction.
+    """
     if n < 1:
         raise ValueError("n must be >= 1")
-    a = np.deg2rad(np.linspace(fov_deg / 2, -fov_deg / 2, n))
+    if ccw:
+        a = np.deg2rad(np.arange(n) * (float(fov_deg) / n))
+    else:
+        a = np.deg2rad(np.linspace(fov_deg / 2, -fov_deg / 2, n))
     return np.stack([np.cos(a), np.sin(a), np.zeros(n)], axis=1)

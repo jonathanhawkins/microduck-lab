@@ -5,6 +5,7 @@ from .core import *  # noqa: F401,F403 — cascades the full upstream namespace,
 
 _register(Behavior(
     id="one_leg",
+    suggest="stand on one leg",
     emoji="🦩",
     title="Stand on one leg",
     description=(
@@ -117,6 +118,7 @@ def _stand_spawn_ground(env):
 
 _register(Behavior(
     id="stand",
+    suggest="stand still",
     emoji="🧍",
     title="Stand still",
     description=(
@@ -166,6 +168,7 @@ _register(Behavior(
 
 _register(Behavior(
     id="crouch",
+    suggest="crouch down",
     emoji="🐥",
     title="Crouch down low",
     description="Bend the knees and hold a steady squat about 3.5 cm lower than normal standing.",
@@ -268,6 +271,7 @@ _register(Behavior(
 
 _register(Behavior(
     id="spin",
+    suggest="spin in place",
     emoji="🌀",
     title="Spin in place",
     description="Turn on the spot as fast as it can without falling or walking away.",

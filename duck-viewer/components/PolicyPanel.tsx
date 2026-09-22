@@ -12,18 +12,32 @@
 // from disk (a chain deletes all its stages at once). It is irreversible, so
 // it always goes through the confirm dialog below — never a bare click.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  chainPick,
+  policyTitle,
+  robotTag,
   deleteRun,
-  fetchPolicies,
+  DEFAULT_ROBOTS,
+  fetchLab,
+  fetchRobot,
+  policyRobotId,
+  type LabRobot,
   formatBytes,
   isRunPolicy,
   LAB_HTTP,
   loadTeachRun,
+  OUR_GROUPS,
   type LabClient,
   type Policy,
+  type ShippedGroup,
+  type TrickName,
 } from "@/lib/lab";
+// The switch's chips go through `robotChipLabel`, which is where the emoji
+// lives (lib/robots.robotEmoji) — one definition of one label.
+import { robotChipLabel, setActiveRobot, useActiveRobot } from "@/lib/activeRobot";
+import { runRows, splitTail, trickGroups, type RunRow } from "@/lib/tricks";
 import { assignDrag, clearAssignDrag, isCanvasAt, nearestDuck } from "@/lib/assign";
 import { loadJSON, saveJSON } from "@/lib/persist";
 import { modalIsOpen, setPolicyOpen, useTeachHeight } from "@/lib/ui";
@@ -32,10 +46,14 @@ import { pushToast } from "./Toasts";
 
 const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
-const GROUPS: { key: Policy["group"]; title: string }[] = [
+/** Our own sections, always in this order and always first. Every OTHER
+ *  section is a body's shipped drop and comes from the lab
+ *  (`Lab.shipped`, in registry order) — it used to be two more literals
+ *  here, so a third body would have been a fifth. An empty group draws
+ *  nothing, so a duck-only lab looks exactly as it always has. */
+const OUR_SECTIONS: { key: string; title: string }[] = [
   { key: "runs", title: "Our runs" },
   { key: "checkpoints", title: "Checkpoints" },
-  { key: "pollen", title: "Pollen (shipped)" },
 ];
 
 const DRAG_THRESHOLD_PX = 5; // less movement than this counts as a click
@@ -61,35 +79,25 @@ function matchesQuery(p: Policy, terms: string[]): boolean {
   return terms.every((t) => hay.includes(t));
 }
 
-/** "Our runs" rows: curriculum chains (same teach-…-<hash> prefix, -sN
- *  suffixes) fold into one family of compact stage chips, positioned by
- *  their NEWEST stage (the list arrives newest-first from the server, so
- *  first-seen = newest); everything else stays a single chip + time. */
-type RunRow =
-  | { kind: "single"; p: Policy }
-  | { kind: "chain"; chain: string; newest: number; stages: Policy[] };
-
-function runRows(list: Policy[]): RunRow[] {
-  const rows: RunRow[] = [];
-  const chains = new Map<string, Extract<RunRow, { kind: "chain" }>>();
-  for (const p of list) {
-    if (p.chain) {
-      let row = chains.get(p.chain);
-      if (!row) {
-        row = { kind: "chain", chain: p.chain, newest: p.mtime ?? 0, stages: [] };
-        chains.set(p.chain, row);
-        rows.push(row);
-      }
-      row.stages.push(p);
-      row.newest = Math.max(row.newest, p.mtime ?? 0);
-    } else {
-      rows.push({ kind: "single", p });
-    }
-  }
-  for (const row of chains.values())
-    row.stages.sort((a, b) => (a.stage ?? 0) - (b.stage ?? 0));
-  return rows;
+/** A label whose END stays readable however narrow its row gets: the head
+ *  shrinks behind an ellipsis, the tail never does (lib/tricks.ts splitTail).
+ *  The parent must be a flex container with `minWidth: 0`. `pre`, because a
+ *  flex item drops the space a split can leave at its edge. */
+function TailText({ text, tail }: { text: string; tail?: number }) {
+  const [head, end] = splitTail(text, tail);
+  return (
+    <>
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "pre" }}>
+        {head}
+      </span>
+      {end && <span style={{ flexShrink: 0, whiteSpace: "pre" }}>{end}</span>}
+    </>
+  );
 }
+
+/** Whether chips prefix their robot ("g1 · "). Only needed when the list
+ *  mixes bodies — with the switch on one robot every chip is that robot's. */
+const ShowRobotTag = createContext(false);
 
 function Chip({
   policy,
@@ -103,9 +111,9 @@ function Chip({
   onDouble,
 }: {
   policy: Policy;
-  /** Chip text override (stage chips show "s2"); drag ghost, toasts and
-   *  tooltips keep the full policy.label so nothing ambiguous ships over
-   *  the wire. */
+  /** Chip text override (stage chips show "s2"); without one the chip shows
+   *  the run's human title. Drag ghost, toasts and tooltips keep the full
+   *  policy.label so nothing ambiguous ships over the wire. */
   display?: string;
   armed: boolean;
   /** Warm-tinted styling for the chain-level "whole trick" chip, so it
@@ -123,14 +131,25 @@ function Chip({
   onDouble: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const showRobot = useContext(ShowRobotTag);
   return (
     <button
       type="button"
       title={
-        title ??
-        (armed
-          ? `armed — click a duck to assign ${policy.label}, or empty floor to spawn`
-          : `drag onto a duck to assign — double-click (or drop on empty floor) to spawn — click to arm: ${policy.label}`)
+        // `title=""` still means NO native tooltip: that chip's explainer is
+        // the styled <Tip> around it, and a second box over it reads as a bug.
+        title === ""
+          ? ""
+          : // The raw run name leads, then the server's own measured one-liner
+            // when it has one: the chip face shows a human title now, and the
+            // directory name is the identifier a user needs for `--init-from`
+            // and for the docs, so hover has to keep handing it over. What a
+            // shipped policy actually DOES is the other thing worth reading.
+            `${policy.label}${policy.note ? ` — ${policy.note}` : ""}\n` +
+            (title ??
+              (armed
+                ? `armed — click a duck to assign ${policy.label}, or empty floor to spawn`
+                : `drag onto a duck to assign — double-click (or drop on empty floor) to spawn — click to arm: ${policy.label}`))
       }
       onPointerDown={onDown}
       onPointerMove={onMove}
@@ -158,11 +177,14 @@ function Chip({
         maxWidth: 186,
         boxSizing: "border-box",
         overflow: "hidden",
-        textOverflow: "ellipsis",
         whiteSpace: "nowrap",
+        display: "inline-flex",
       }}
     >
-      {display ?? policy.label}
+      {/* A battery's titles differ only at the END ("… (left, seed 2)"), which
+          is exactly what a tail ellipsis cut off: 24 chips read "Last metre,
+          lan…". The hover still carries the whole thing. */}
+      <TailText text={`${showRobot ? robotTag(policy.robot, policy.group) : ""}${display ?? policyTitle(policy)}`} />
     </button>
   );
 }
@@ -470,6 +492,36 @@ export function PolicyPanel({
   // panel's list grows into whatever teach leaves free.
   const teachHeight = useTeachHeight();
   const [policies, setPolicies] = useState<Policy[]>([]);
+  const [robots, setRobots] = useState<LabRobot[]>(DEFAULT_ROBOTS);
+  // The palette's shipped sections, as the lab names them. The viewer held
+  // this list itself until Phase 1b, which is why "Unitree G1 (shipped)" was
+  // a string in this file.
+  const [shipped, setShipped] = useState<ShippedGroup[]>([]);
+  // Which robot's policies the list shows: the ONE active robot every panel
+  // shares (lib/activeRobot.ts), so picking the G1 here is also what 🎓 teach
+  // is about to train. "all" is this list's own override — it lays every body
+  // out side by side, chips tagged by robot, and changes nobody else's robot.
+  const activeRobot = useActiveRobot();
+  const [allRobots, setAllRobots] = useState<boolean>(() => loadJSON("policyAllRobots", false));
+  const pickRobot = (id: string) => {
+    const all = id === "all";
+    setAllRobots(all);
+    saveJSON("policyAllRobots", all);
+    if (!all) setActiveRobot(id);
+  };
+  // What each trick id is called, for the "Our runs" headings.
+  const [tricks, setTricks] = useState<Record<string, TrickName>>({});
+  // Tricks whose older runs are showing ("N more" clicked). Persisted: someone
+  // working through a battery wants it open after a reload too.
+  const [moreOpen, setMoreOpen] = useState<Record<string, boolean>>(() =>
+    loadJSON("policyTricksOpen", {})
+  );
+  const toggleMore = (trick: string) =>
+    setMoreOpen((m) => {
+      const next = { ...m, [trick]: !m[trick] };
+      saveJSON("policyTricksOpen", next);
+      return next;
+    });
   const [err, setErr] = useState(false);
   // Free-text filter over every group — typing "head" leaves only the
   // headstand chips. Deliberately NOT persisted: a hidden filter surviving a
@@ -532,10 +584,13 @@ export function PolicyPanel({
 
   const refresh = useCallback(() => {
     let stale = false;
-    fetchPolicies()
-      .then((p) => {
+    fetchLab()
+      .then(({ policies: p, robots: r, shipped: sh, tricks: t }) => {
         if (stale) return;
         setPolicies(p);
+        setRobots(r);
+        setShipped(sh);
+        setTricks(t);
         setErr(false);
       })
       .catch(() => {
@@ -545,6 +600,14 @@ export function PolicyPanel({
       stale = true;
     };
   }, []);
+
+  // While a robot download runs on the lab, re-poll until it lands (or fails).
+  const downloading = robots.some((r) => r.fetching);
+  useEffect(() => {
+    if (!downloading) return;
+    const t = setInterval(refresh, 2000);
+    return () => clearInterval(t);
+  }, [downloading, refresh]);
 
   // (Re)fetch whenever the panel is expanded — new training runs appear over time.
   useEffect(() => {
@@ -819,7 +882,288 @@ export function PolicyPanel({
   // memo needed). Groups that filter down to nothing render nothing, so the
   // headings disappear along with their chips.
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const shown = terms.length ? policies.filter((p) => matchesQuery(p, terms)) : policies;
+  // A lab without the chosen robot (older server, or a stale saved choice)
+  // falls back to showing everything rather than an empty list.
+  const view = !allRobots && robots.some((r) => r.id === activeRobot) ? activeRobot : "all";
+  const viewRobot = robots.find((r) => r.id === view);
+  const forRobot = view === "all" ? policies : policies.filter((p) => policyRobotId(p) === view);
+  const shown = terms.length ? forRobot.filter((p) => matchesQuery(p, terms)) : forRobot;
+  // Sections in render order: ours first, then every body's shipped drop as
+  // the lab names it — except when the list is showing ONE body, where that
+  // body's own drop comes first (it is what a newcomer is here for).
+  const sections = (() => {
+    const all = [...OUR_SECTIONS, ...shipped];
+    const mine = shipped.filter((g) => g.robot === view);
+    return mine.length ? [...mine, ...all.filter((g) => !mine.includes(g as never))] : all;
+  })();
+  // The first shipped chip of the viewed body, for the "new here?" hint.
+  const firstShipped = forRobot.find((p) => !OUR_GROUPS.includes(p.group));
+
+  // One "Our runs" row: a single run (chip + age), or a curriculum chain
+  // folded into one family of stage chips — every chip, stage chips included,
+  // drags/arms exactly like before.
+  const renderRunRow = (row: RunRow) => {
+    if (row.kind === "single")
+      return (
+        <div
+          key={row.p.id}
+          onPointerEnter={() => setHoverRow(row.p.id)}
+          onPointerLeave={() => setHoverRow((h) => (h === row.p.id ? null : h))}
+          style={{ display: "flex", alignItems: "center", gap: 6, margin: "3px 0" }}
+        >
+          <Chip
+            policy={row.p}
+            armed={chipArmed(row.p.id)}
+            onDown={chipDown(row.p)}
+            onMove={chipMove}
+            onUp={chipUp(row.p)}
+            onDouble={chipDouble(row.p)}
+          />
+          {row.p.mtime != null && (
+            <span style={{ color: "#8b93a3", fontSize: 9, flexShrink: 0 }}>
+              {relTime(row.p.mtime)}
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          <DownloadBtn
+            show={hoverRow === row.p.id}
+            run={row.p.label}
+            label={row.p.label}
+            onFocus={() => setHoverRow(row.p.id)}
+            onBlur={() => setHoverRow((h) => (h === row.p.id ? null : h))}
+          />
+          <DeleteBtn
+            show={hoverRow === row.p.id}
+            label={row.p.label}
+            onFocus={() => setHoverRow(row.p.id)}
+            onBlur={() => setHoverRow((h) => (h === row.p.id ? null : h))}
+            onClick={() =>
+              askDelete({
+                name: row.p.label,
+                chain: false,
+                runs: [row.p.label],
+                bytes: row.p.sizeBytes ?? 0,
+              })
+            }
+          />
+        </div>
+      );
+    // The chain-level chip assigns ONE stage's policy —
+    // normally the final one (each stage fine-tunes the same
+    // network, so the last carries the entire curriculum),
+    // but a record that names a measured-best stage wins over
+    // that default. Flagged showcase either way, so the duck's
+    // env rehearses the whole trick arc instead of only a
+    // standing start. Ghost/toast label is the chain's name
+    // (✨), matching the server's roster label.
+    const last = row.stages[row.stages.length - 1];
+    const picked = chainPick(row.stages);
+    // A pick that isn't the tail has to SAY so on the chip:
+    // silently handing out a different brain than "the whole
+    // trick" promises is how a user ends up comparing two
+    // things they think are one.
+    const earlyPick = picked !== last;
+    const whole: Policy = {
+      ...picked,
+      label: `${row.chain.replace(/^teach-/, "")} ✨`,
+    };
+    // The stages of a chain share a title in practice, so the
+    // header speaks for the family: the picked stage's title,
+    // else the tail's, else any stage that has one. The raw
+    // chain prefix stays in the tooltip — it is what the run
+    // dirs on disk are named after.
+    const chainName = row.chain.replace(/^teach-/, "");
+    const chainTitle =
+      picked.title ?? last.title ?? row.stages.find((p) => p.title)?.title;
+    return (
+      <div
+        key={row.chain}
+        onPointerEnter={() => setHoverRow(row.chain)}
+        onPointerLeave={() => setHoverRow((h) => (h === row.chain ? null : h))}
+        style={{ margin: "4px 0" }}
+      >
+        <div
+          style={{
+            color: "#aab3c0",
+            fontSize: 10,
+            display: "flex",
+            gap: 6,
+            alignItems: "baseline",
+          }}
+        >
+          <span
+            title={
+              chainTitle ? `${chainTitle}\n${row.chain}` : row.chain
+            }
+            style={{
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {chainTitle ?? chainName}
+          </span>
+          <span style={{ color: "#8b93a3", fontSize: 9, flexShrink: 0 }}>
+            {row.stages.length} stages · {relTime(row.newest)}
+          </span>
+          <span style={{ flex: 1 }} />
+          {/* ⤓ downloads the stage the ▶ chip assigns — the
+              picked one when something measured a stage best,
+              else the final one (each stage fine-tunes the
+              same network, so the last IS the whole trick).
+              Handing over a different brain from the one the
+              row plays is the same "which do I use?" confusion
+              the pick exists to end. */}
+          <DownloadBtn
+            show={hoverRow === row.chain}
+            run={picked.label}
+            label={`${row.chain.replace(/^teach-/, "")} (${
+              earlyPick ? `best stage, s${picked.stage}` : "final stage"
+            })`}
+            onFocus={() => setHoverRow(row.chain)}
+            onBlur={() => setHoverRow((h) => (h === row.chain ? null : h))}
+          />
+          {/* One ✕ for the family: the stages of a chain are
+              one trick's training data, and a half-deleted
+              chain can't be resumed or fine-tuned from. */}
+          <DeleteBtn
+            show={hoverRow === row.chain}
+            label={`the whole ${row.chain.replace(/^teach-/, "")} chain`}
+            onFocus={() => setHoverRow(row.chain)}
+            onBlur={() => setHoverRow((h) => (h === row.chain ? null : h))}
+            onClick={() =>
+              askDelete({
+                name: row.chain,
+                chain: true,
+                runs: row.stages.map((p) => p.label),
+                bytes: row.stages.reduce((n, p) => n + (p.sizeBytes ?? 0), 0),
+              })
+            }
+          />
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
+          <Tip
+            tip={
+              earlyPick ? (
+                <>
+                  stage {picked.stage} is the one that measured best,
+                  so ▶ assigns THAT brain, not the last stage — the
+                  later stages are kept for comparison. Showcase
+                  mode: the duck rehearses spawns across the whole
+                  trick arc, so every section gets performed.
+                </>
+              ) : (
+                <>
+                  each stage trains the same brain — the final stage
+                  carries all of it. ▶ assigns that finished policy in
+                  showcase mode: the duck rehearses spawns across the
+                  whole trick arc, so every section gets performed.
+                </>
+              )
+            }
+          >
+            <Chip
+              policy={whole}
+              display={
+                earlyPick ? `▶ best stage (s${picked.stage})` : "▶ whole trick"
+              }
+              accent
+              title=""
+              armed={chipArmed(picked.id, true)}
+              onDown={chipDown(whole, true)}
+              onMove={chipMove}
+              onUp={chipUp(whole, true)}
+              onDouble={chipDouble(whole, true)}
+            />
+          </Tip>
+          {row.stages.map((p) => (
+            // ★ + the chain chip's own warm tint on the stage
+            // the record picked, so the row shows WHICH stage
+            // the ▶ above hands out without a hover.
+            <Chip
+              key={p.id}
+              policy={p}
+              display={p.pick ? `★ s${p.stage}` : `s${p.stage}`}
+              accent={p.pick}
+              armed={chipArmed(p.id)}
+              onDown={chipDown(p)}
+              onMove={chipMove}
+              onUp={chipUp(p)}
+              onDouble={chipDouble(p)}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // "Our runs", grouped by the trick each run practised (lib/tricks.ts): the
+  // measured pick and the newest run show, the rest wait behind "N more".
+  // Newest-first throughout (server-sorted by mtime). An active filter shows
+  // every hit — a match hiding behind "N more" would read as "found nothing".
+  const renderRuns = (list: Policy[]) => {
+    const rows = runRows(list);
+    const groups = trickGroups(rows);
+    if (!groups) return rows.map(renderRunRow); // an older lab names no tricks
+    return groups.map((g) => {
+      const name = tricks[g.trick];
+      const count = g.lead.length + g.rest.length;
+      const expanded = terms.length > 0 || !!moreOpen[g.trick];
+      return (
+        <div key={g.trick || "(other)"} style={{ margin: "6px 0 9px" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 11 }}>
+            {/* Sibling tricks differ at the END too — "… (left foot)" beside
+                "… (right foot)" — so the heading keeps its tail like a chip. */}
+            <span
+              title={`${name?.title ?? ""}${g.trick ? `\nrecipe: ${g.trick}` : "runs with no recipe on record"}`.trim()}
+              style={{ color: "#cfd6e2", minWidth: 0, display: "flex" }}
+            >
+              <TailText
+                tail={11}
+                text={
+                  name
+                    ? `${name.emoji ? `${name.emoji} ` : ""}${name.title}`
+                    : g.trick || "other runs"
+                }
+              />
+            </span>
+            {/* No age here: every row under the heading carries its own. */}
+            {count > 1 && (
+              <span style={{ color: "#8b93a3", fontSize: 9, flexShrink: 0 }}>{count} runs</span>
+            )}
+          </div>
+          <div
+            style={{
+              borderLeft: "1px solid rgba(255,255,255,0.08)",
+              paddingLeft: 8,
+              marginTop: 2,
+            }}
+          >
+            {(expanded ? [...g.lead, ...g.rest] : g.lead).map(renderRunRow)}
+            {g.rest.length > 0 && !terms.length && (
+              <button
+                type="button"
+                onClick={() => toggleMore(g.trick)}
+                aria-expanded={expanded}
+                style={{
+                  background: "none",
+                  border: "none",
+                  padding: "1px 0",
+                  color: "#8b93a3",
+                  fontFamily: mono,
+                  fontSize: 10,
+                  cursor: "pointer",
+                }}
+              >
+                <span style={{ fontSize: 8 }}>{expanded ? "▾" : "▸"}</span> {g.rest.length} more
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    });
+  };
 
   const ghost = (
     <div
@@ -968,6 +1312,66 @@ export function PolicyPanel({
           </button>
         </div>
 
+        {/* Robot switch: which body's policies the list holds.
+            WRAPS. It was one non-wrapping row of `flex: 1` chips, which was
+            fine for two bodies and pushed the "all" chip off the panel
+            entirely at five (a duck, a G1, a MARS and two Menagerie models
+            — and a catalogue can add more at any time). Chips size to their
+            text and ellipsise a long title instead. */}
+        {robots.length > 1 && (
+          <div
+            role="radiogroup"
+            aria-label="robot"
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 4,
+              padding: "6px 10px",
+              borderBottom: "1px solid rgba(255,255,255,0.08)",
+              flexShrink: 0,
+            }}
+          >
+            {[
+              ...robots.map((r) => ({
+                id: r.id as string,
+                label: robotChipLabel(r),
+                name: r.label,
+                ready: r.ready,
+              })),
+              { id: "all", label: "all", name: "every robot", ready: true },
+            ].map((o) => {
+              const on = view === o.id;
+              return (
+                <button
+                  key={o.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  onClick={() => pickRobot(o.id)}
+                  title={o.ready ? `show ${o.name} policies` : `${o.name} — not set up yet`}
+                  style={{
+                    flex: "0 1 auto",
+                    maxWidth: "100%",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    background: on ? "#2a3548" : "#1c2230",
+                    color: on ? "#cfe4f5" : o.ready ? "#9fb4d8" : "#6b7280",
+                    border: `1px solid ${on ? "#7db8d8" : "rgba(255,255,255,0.08)"}`,
+                    borderRadius: 8,
+                    padding: "3px 8px",
+                    fontFamily: mono,
+                    fontSize: 11,
+                    cursor: "pointer",
+                  }}
+                >
+                  {o.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* Filter box. Sits between the header and the scrolling list so it
             stays put while the chips scroll under it. */}
         <div
@@ -1038,13 +1442,95 @@ export function PolicyPanel({
           )}
         </div>
 
+        <ShowRobotTag.Provider value={view === "all"}>
         <div style={{ overflowY: "auto", padding: "4px 10px 10px" }}>
+          {viewRobot && !viewRobot.ready && (
+            <div style={{ color: "#d8cfa0", margin: "8px 0", fontSize: 11, lineHeight: 1.5 }}>
+              <div>
+                {viewRobot.label} isn&apos;t downloaded yet — its model and meshes.
+              </div>
+              <button
+                type="button"
+                disabled={viewRobot.fetching}
+                onClick={() =>
+                  fetchRobot(viewRobot.id)
+                    .then(refresh)
+                    .catch((e) => pushToast(`⚠ ${e instanceof Error ? e.message : e}`))
+                }
+                style={{
+                  margin: "6px 0",
+                  background: "#2a3548",
+                  color: "#cfe4f5",
+                  border: "1px solid #7db8d8",
+                  borderRadius: 8,
+                  padding: "4px 10px",
+                  fontFamily: mono,
+                  fontSize: 11,
+                  cursor: viewRobot.fetching ? "wait" : "pointer",
+                }}
+              >
+                {viewRobot.fetching ? "downloading…" : `⤓ download ${viewRobot.label}`}
+              </button>
+              {viewRobot.fetchError && (
+                <div style={{ color: "#e07a5f" }}>failed: {viewRobot.fetchError}</div>
+              )}
+              <div style={{ color: "#8b93a3", fontSize: 10 }}>
+                or from microduck_local/:{" "}
+                <code>{viewRobot.setup || `uv run fetch-robot ${viewRobot.id}`}</code>
+              </div>
+            </div>
+          )}
+          {/* Only for someone with no runs of their OWN on this body yet —
+              once they have trained or kept one, the hint is noise. It shows
+              whatever the body's first shipped chip happens to be called,
+              rather than naming the G1's `walker`, so it says something true
+              on the next body that ships policies. */}
+          {firstShipped && viewRobot?.ready && !terms.length &&
+            !forRobot.some((p) => OUR_GROUPS.includes(p.group)) && (
+            <div style={{ color: "#8b93a3", fontSize: 10, margin: "6px 0 0" }}>
+              new here? double-click{" "}
+              <b style={{ color: "#9fb4d8" }}>{firstShipped.label}</b> to spawn a{" "}
+              {viewRobot.noun ?? viewRobot.label}
+            </div>
+          )}
+          {/* A body that ships NOTHING to assign — MARS until somebody
+              trains it, every Menagerie model — could not be put on the
+              stage at all: the only way on was a policy chip. This is that
+              way (the server's `spawn_robot`); the slot idles. */}
+          {viewRobot && viewRobot.ready && !terms.length && !forRobot.length && (
+            <div style={{ color: "#8b93a3", fontSize: 10, margin: "8px 0 0", lineHeight: 1.5 }}>
+              <div>
+                no {viewRobot.noun ?? viewRobot.label} policies yet — put one on the stage to look
+                at it.
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  clientRef.current?.sendSpawnRobot(viewRobot.id);
+                  pushToast(`＋ ${viewRobot.noun ?? viewRobot.label} on the stage`);
+                }}
+                style={{
+                  margin: "6px 0",
+                  background: "#2a3548",
+                  color: "#cfe4f5",
+                  border: "1px solid #7db8d8",
+                  borderRadius: 8,
+                  padding: "4px 10px",
+                  fontFamily: mono,
+                  fontSize: 11,
+                  cursor: "pointer",
+                }}
+              >
+                ＋ put a {viewRobot.noun ?? viewRobot.label} on the stage
+              </button>
+            </div>
+          )}
           {err && (
             <div style={{ color: "#e07a5f", margin: "6px 0" }}>
               ⚠ can&apos;t load policies from :8788
             </div>
           )}
-          {GROUPS.map(({ key, title }) => {
+          {sections.map(({ key, title }) => {
             const list = shown.filter((p) => p.group === key);
             if (!list.length) return null;
             const isFolded = !!folded[key] && !terms.length;
@@ -1082,163 +1568,7 @@ export function PolicyPanel({
                   )}
                 </button>
                 {isFolded ? null : key === "runs" ? (
-                  // Newest-first (server-sorted by mtime), curriculum chains
-                  // folded into one family row of stage chips — every chip,
-                  // stage chips included, drags/arms exactly like before.
-                  runRows(list).map((row) => {
-                    if (row.kind === "single")
-                      return (
-                        <div
-                          key={row.p.id}
-                          onPointerEnter={() => setHoverRow(row.p.id)}
-                          onPointerLeave={() => setHoverRow((h) => (h === row.p.id ? null : h))}
-                          style={{ display: "flex", alignItems: "center", gap: 6, margin: "3px 0" }}
-                        >
-                          <Chip
-                            policy={row.p}
-                            armed={chipArmed(row.p.id)}
-                            onDown={chipDown(row.p)}
-                            onMove={chipMove}
-                            onUp={chipUp(row.p)}
-                            onDouble={chipDouble(row.p)}
-                          />
-                          {row.p.mtime != null && (
-                            <span style={{ color: "#8b93a3", fontSize: 9, flexShrink: 0 }}>
-                              {relTime(row.p.mtime)}
-                            </span>
-                          )}
-                          <span style={{ flex: 1 }} />
-                          <DownloadBtn
-                            show={hoverRow === row.p.id}
-                            run={row.p.label}
-                            label={row.p.label}
-                            onFocus={() => setHoverRow(row.p.id)}
-                            onBlur={() => setHoverRow((h) => (h === row.p.id ? null : h))}
-                          />
-                          <DeleteBtn
-                            show={hoverRow === row.p.id}
-                            label={row.p.label}
-                            onFocus={() => setHoverRow(row.p.id)}
-                            onBlur={() => setHoverRow((h) => (h === row.p.id ? null : h))}
-                            onClick={() =>
-                              askDelete({
-                                name: row.p.label,
-                                chain: false,
-                                runs: [row.p.label],
-                                bytes: row.p.sizeBytes ?? 0,
-                              })
-                            }
-                          />
-                        </div>
-                      );
-                    // The chain-level "whole trick" chip assigns the FINAL
-                    // stage's policy — each stage fine-tunes the same network,
-                    // so the last one carries the entire curriculum — flagged
-                    // showcase so the duck's env rehearses the whole trick arc
-                    // instead of only a standing start. Ghost/toast label is
-                    // the chain's name (✨), matching the server's roster label.
-                    const last = row.stages[row.stages.length - 1];
-                    const whole: Policy = {
-                      ...last,
-                      label: `${row.chain.replace(/^teach-/, "")} ✨`,
-                    };
-                    return (
-                      <div
-                        key={row.chain}
-                        onPointerEnter={() => setHoverRow(row.chain)}
-                        onPointerLeave={() => setHoverRow((h) => (h === row.chain ? null : h))}
-                        style={{ margin: "4px 0" }}
-                      >
-                        <div
-                          style={{
-                            color: "#aab3c0",
-                            fontSize: 10,
-                            display: "flex",
-                            gap: 6,
-                            alignItems: "baseline",
-                          }}
-                        >
-                          <span
-                            style={{
-                              minWidth: 0,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {row.chain.replace(/^teach-/, "")}
-                          </span>
-                          <span style={{ color: "#8b93a3", fontSize: 9, flexShrink: 0 }}>
-                            {row.stages.length} stages · {relTime(row.newest)}
-                          </span>
-                          <span style={{ flex: 1 }} />
-                          {/* ⤓ downloads the FINAL stage's brain — each stage
-                              fine-tunes the same network, so the last one IS
-                              the whole trick. */}
-                          <DownloadBtn
-                            show={hoverRow === row.chain}
-                            run={last.label}
-                            label={`${row.chain.replace(/^teach-/, "")} (final stage)`}
-                            onFocus={() => setHoverRow(row.chain)}
-                            onBlur={() => setHoverRow((h) => (h === row.chain ? null : h))}
-                          />
-                          {/* One ✕ for the family: the stages of a chain are
-                              one trick's training data, and a half-deleted
-                              chain can't be resumed or fine-tuned from. */}
-                          <DeleteBtn
-                            show={hoverRow === row.chain}
-                            label={`the whole ${row.chain.replace(/^teach-/, "")} chain`}
-                            onFocus={() => setHoverRow(row.chain)}
-                            onBlur={() => setHoverRow((h) => (h === row.chain ? null : h))}
-                            onClick={() =>
-                              askDelete({
-                                name: row.chain,
-                                chain: true,
-                                runs: row.stages.map((p) => p.label),
-                                bytes: row.stages.reduce((n, p) => n + (p.sizeBytes ?? 0), 0),
-                              })
-                            }
-                          />
-                        </div>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
-                          <Tip
-                            tip={
-                              <>
-                                each stage trains the same brain — the final stage
-                                carries all of it. ▶ assigns that finished policy in
-                                showcase mode: the duck rehearses spawns across the
-                                whole trick arc, so every section gets performed.
-                              </>
-                            }
-                          >
-                            <Chip
-                              policy={whole}
-                              display="▶ whole trick"
-                              accent
-                              title=""
-                              armed={chipArmed(last.id, true)}
-                              onDown={chipDown(whole, true)}
-                              onMove={chipMove}
-                              onUp={chipUp(whole, true)}
-                              onDouble={chipDouble(whole, true)}
-                            />
-                          </Tip>
-                          {row.stages.map((p) => (
-                            <Chip
-                              key={p.id}
-                              policy={p}
-                              display={`s${p.stage}`}
-                              armed={chipArmed(p.id)}
-                              onDown={chipDown(p)}
-                              onMove={chipMove}
-                              onUp={chipUp(p)}
-                              onDouble={chipDouble(p)}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })
+                  renderRuns(list)
                 ) : (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                     {list.map((p) => (
@@ -1263,6 +1593,7 @@ export function PolicyPanel({
             </div>
           )}
         </div>
+        </ShowRobotTag.Provider>
 
         {armed && (
           <div

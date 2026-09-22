@@ -5,20 +5,44 @@ description: Restart the microduck dev stack — the duck-lab backend (farm, :87
 
 Restart both microduck servers, in this order:
 
-1. **WARNING — training dies with the farm.** If a teach job is running
-   (check `curl -s http://127.0.0.1:8788/teach/stop` is NOT needed — just ask
-   or look at the viewer), a farm restart kills it. Its checkpoint survives;
-   resume after with `POST /teach {"text": ..., "initFrom": "<run>"}`.
+1. **WARNING — training dies with the farm.** A farm restart kills any live
+   teach job. Its checkpoint survives; resume after with
+   `POST /teach {"text": ..., "initFrom": "<run>"}`. The script refuses on
+   its own when a trainer is up — a `train_behavior` (duck) or a
+   `microduck_local.train` (G1 task) python process, or the lab's own
+   `GET /teach/status` saying `"running": true` — but check first anyway,
+   **as a separate command**, never combined with the restart:
 
-2. Run the script (kills both servers, restarts the backend cwd-proof and
-   entry-point-rename-proof, verifies :8788 health):
+   ```
+   curl -s -m 2 http://127.0.0.1:8788/teach/status
+   ```
+
+   Only `MICRODUCK_RESTART_FORCE=1` overrides the refusal.
+
+2. Run the script (stops the lab, restarts it cwd-proof and
+   entry-point-rename-proof, verifies :8788 health, then bounces the viewer):
 
    ```
    bash .claude/skills/restart-servers/restart.sh
    ```
 
+   After a lab-only code change (viz_server, behaviors, world, brain…) leave
+   the viewer dev server alone — it hot-reloads on its own:
+
+   ```
+   bash .claude/skills/restart-servers/restart.sh --backend-only
+   ```
+
    Pass `--fresh` plus `.onnx` paths to reseed the duck roster; with no args
    the saved roster (lab-state.json) is kept.
+
+   **Only the process LISTENING on :8788 is stopped** (`lsof … -sTCP:LISTEN`,
+   TERM, then KILL by pid after 10 s). It used to `pkill -f duck-lab`, which
+   matched every lab on the machine: on 2026-09-17 another session had a
+   scratch lab on :8799 (`--world pitch-3v3`) that the old script would have
+   killed along with the real one. A scratch lab on another port — with its
+   own `LAB_STATE_PATH=…` so it never rewrites the real `lab-state.json` —
+   survives a restart of :8788 now.
 
 3. The script now starts the viewer too, detached, by calling `viewer.sh`.
    Nothing more to do. To (re)start only the viewer:

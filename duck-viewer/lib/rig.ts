@@ -148,6 +148,16 @@ export const RIG_CONTROLS: RigControl[] = [
   },
 ];
 
+/** The rig controls for the body the metadata describes: the lab serves each
+ *  robot its own (the G1's name its own joints), and a lab older than that
+ *  serves none — those are ducks, and the constant above is the duck's.
+ *  Nothing below this line is duck-specific once the controls are data:
+ *  joint names resolve against `meta.joints`, "root" against the trunk, and
+ *  a control naming a joint this body lacks resolves to null and is hidden. */
+export function rigControlsFor(meta: JointsMeta | null): RigControl[] {
+  return meta?.rig && meta.rig.length ? meta.rig : RIG_CONTROLS;
+}
+
 /** Resolved (index, coefficient, limits, default) per part — ROOT_SEL carries
  *  rootPitch. Null when a joint name is missing from the lab's metadata. */
 export interface RigVector {

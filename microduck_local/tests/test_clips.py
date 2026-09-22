@@ -459,3 +459,43 @@ def test_clip_listing_skips_unreadable_files(app, tmp_path):
     _endpoint(app, "/clips/{name}", "PUT")("good", _clip())
     (tmp_path / "clips" / "broken.json").write_text("{not json")
     assert [c["name"] for c in _endpoint(app, "/clips", "GET")()["clips"]] == ["good"]
+
+
+def test_every_pose_producer_agrees_with_the_body_list_the_viewer_draws():
+    """The viewer zips poses against `GET /scene` POSITIONALLY, so a producer
+    that emits a different number of bodies — or the same number in a
+    different order — silently draws the wrong link at the wrong place.
+
+    That is what happened when the hinged `mouth` was inserted at scene index
+    11: the world stream was updated, the lab stream and the pose scratchpad
+    were not, and the lab page drew the bill at the bearing's pose with the
+    whole right leg one link late and `ankle_right` never written. Nothing
+    failed, because no test compared a producer against the scene."""
+    import mujoco
+
+    from microduck_local import contract as C
+    from microduck_local import viz_server as V
+
+    scene = V.extract_scene()["bodies"]
+    assert len(scene) == len(set(scene)), "scene body names must be unique to zip by"
+
+    # The lab stream maps the walk model onto the scene list by name.
+    walk = mujoco.MjModel.from_xml_path(str(C.SCENE_WALK_XML))
+    mapping = V._scene_to_env(walk)
+    assert len(mapping) == len(scene), "the lab stream would emit the wrong shape"
+    for i, (own, parent) in enumerate(mapping):
+        if own >= 0:
+            assert walk.body(own).name == scene[i], f"scene[{i}] maps to the wrong body"
+        else:
+            # A body the walk model lacks rides its scene parent, which must
+            # itself be a body that model HAS — never a silent index 0.
+            assert parent >= 0 and walk.body(parent).name == \
+                V.extract_scene()["bodies"][int(_scene_parent(i))]
+
+    # …and the pose scratchpad is built on the scene model itself.
+    assert V.PoseScratch().model.nbody == len(scene)
+
+
+def _scene_parent(i: int) -> int:
+    from microduck_local.world.compose import scene_model
+    return int(scene_model().body_parentid[i])

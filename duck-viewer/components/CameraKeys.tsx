@@ -4,7 +4,7 @@
 // the same way. Keys land in the lib/camera held-set; this integrates them ×
 // dt every frame — smooth game-editor flow, not per-keypress steps.
 //
-// The move that matters: A/D and Q/E truck the camera AND the orbit target
+// The move that matters: A/D and E/Q truck the camera AND the orbit target
 // together, so the view SLIDES through the room instead of pivoting around
 // one fixed point. W/S dolly, arrows orbit. Rates scale with distance, so the
 // feel is the same nose-close and across the room.

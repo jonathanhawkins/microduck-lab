@@ -12,8 +12,8 @@ export type CameraMotion =
   | "dollyOut"    // S / ↓
   | "orbitLeft"   // ←
   | "orbitRight"  // →
-  | "up"          // Q — vertical truck
-  | "down";       // E
+  | "up"          // E — vertical truck (E rises, Q sinks)
+  | "down";       // Q
 
 const KEY_MOTIONS: Record<string, CameraMotion> = {
   a: "truckLeft",
@@ -24,8 +24,8 @@ const KEY_MOTIONS: Record<string, CameraMotion> = {
   arrowdown: "dollyOut",
   arrowleft: "orbitLeft",
   arrowright: "orbitRight",
-  q: "up",
-  e: "down",
+  e: "up",
+  q: "down",
 };
 
 const held = new Set<CameraMotion>();

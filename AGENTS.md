@@ -70,6 +70,10 @@ by `setup.sh`; upstream no longer vendors them).
   (living room, playroom, soccer pitch) to video + a contact sheet + an events
   log, headless under a seed, and read what the ducks did. Debug the `/sim`
   page with this, not by describing what a browser tab looked like.
+- `docs/mars-roadmap.md` — the plan for a THIRD body, Innate's MARS (a
+  wheeled base with a 6-DoF arm): what is measured, the `Body`/`RobotSpec`
+  split that makes the next robot a registry entry, and the phases with
+  the number that settles each. Read it before adding any robot.
 - `docs/roadmap.md` — the working list of experiments: what to run next, the
   command for each, and the number that would settle it. Read it before
   starting anything open-ended, and **write the answer back into the item**
@@ -78,6 +82,9 @@ by `setup.sh`; upstream no longer vendors them).
 
 ## What runs where
 
+- **A second body:** the Unitree G1 (29 joints, 99-obs) trains, exports,
+  renders and appears in the lab beside the ducks — `robots/spec.py` is the
+  seam, `uv run fetch-g1` the setup. A lab contract, not a sim2real one.
 - **Any Mac (tuned on Apple Silicon), CPU-only:** everything in this repo —
   training (`train-walk`, `train-behavior`), eval, ONNX export, rendering,
   the lab + viewer. Linux works too (set `MUJOCO_GL=egl` for offscreen
@@ -104,16 +111,26 @@ uv run export-walk runs/my-run && uv run eval-walk runs/my-run/policy.onnx
 uv run train-behavior one_leg                 # teachable tricks (behaviors/)
 uv run train-brain --run-name follow-v6 --steps 2_000_000 --variety \
     --title "Follower v6" --description "what it tests, and later what it found" --group shipped-followers
-uv run describe-brain p-n256-s31 --title ... --description ... --group capacity   # name a run after the fact
+uv run describe-brain p-n256-s31 --title ... --description ... --group capacity   # name a BRAIN after the fact
+uv run describe-run <run> --title "Front kick (G1)" --note "8/8 hold 20 s, apex 0.62 m" --pick  # name a WALK/TASK run
+uv run describe-run <run> --backfill          # derive its title/description from run.json
 uv run render-rollout --policy runs/my-run/policy.onnx --behavior stand --out /tmp/rr
 uv run record-world pitch-2v2 --seconds 30 --out /tmp/rw   # world video + sheet + events.txt
 uv run record-world playroom --brain d0=tidy --camera follow:d0 --seconds 60 --out /tmp/rw-tidy
 uv run machine-facts                          # cores + thread profile for THIS machine
 uv run bench-envs                             # the right --envs for THIS machine
 uv run bench-envs --compare-profiles          # mac profile vs linux/cloud profile, interleaved
+
+# a SECOND robot (the Unitree G1) — see microduck_local/README.md
+uv run fetch-g1                               # MJCF + meshes + walker.onnx into .cache/
+uv run bench-walk --robot g1                  # it costs ~2x the duck per step
+uv run distill --robot g1 --teacher .cache/unitree_g1/walker.onnx --run-name g1-clone
+uv run train-walk --robot g1 --envs 32 --init-from runs/g1-clone --run-name g1-walk
+uv run export-walk runs/g1-walk               # obs[1,99] -> actions[1,29]
 uv run duck-lab --checkpoints runs/my-run    # + viewer below → watch it in the browser
 uv run duck-lab --world playroom              # world mode: rooms, sensors, brains (the /sim page)
 uv run eval-tidy --seeds 3 --seconds 300      # Track 12 benchmark; trace-tidy / walker-facts to debug it
+uv run eval-tidy --robot mars --seeds 3 --seconds 300   # the same room, tidied by MARS's ARM (brain tidy_arm)
 uv run eval-pitch --seeds 4 --seconds 300     # soccer benchmark: two chase brains, shipped kicks, goals
 uv run eval-pitch --seeds 12 --per-side 3 --out runs/poacher.jsonl --tag poacher   # resumable: re-run the SAME
                                               # command after any interruption and it continues (--seed0 extends)
@@ -143,6 +160,19 @@ uv run scripts/infer_policy.py --walking ../microduck_local/runs/my-run/policy.o
   the title is what the `/train` page and the `/sim` brain menu show. Write
   the finding into the description when the experiment resolves — see
   "Every run is a record" in `microduck_local/AGENTS.md`.
+- A walk or task run (every `train-walk` / G1 run) carries the same thing in
+  `runs/<name>/record.json` — written automatically by the trainer, edited
+  with `describe-run`, and shown by the lab's policy palette as the chip's
+  title and tooltip. **`--pick` names the stage of a curriculum chain worth
+  using**: without it the palette's ▶ and ⤓ point at the LAST stage, which in
+  the G1 kick chain was the worst one (3/8 seeds against 8/8 a rung earlier).
+  Only a measurement may set it.
+- **Start training through the lab, not the CLI** — `POST /teach` on
+  `127.0.0.1:8788` runs the recipe's curriculum and streams it to the viewer
+  at `localhost:63317`, so the person who asked can watch the robot practise
+  and stop it. A bare `uv run train-*` is invisible to them. Batteries and
+  paired A/Bs are the exception (use `MICRODUCK_RUNS_DIR`). Full rule in
+  `microduck_local/AGENTS.md`.
 - Before claiming anything about a trained policy, **render it and look**
   (`render-rollout`) — reward curves and eval sums have repeatedly lied here.
   The same rule for world mode: before claiming what happens in a room or on
@@ -151,3 +181,9 @@ uv run scripts/infer_policy.py --walking ../microduck_local/runs/my-run/policy.o
   curriculum, not the reward** — an unsampled state's value is never learned.
   The full lesson (and the servo-ladder pattern that solved it) is in
   `microduck_local/AGENTS.md` under "Reward design rules".
+- When a new task subclasses an existing one, **retarget an inherited reward
+  term, never switch it off** — and check it isn't flat where the policy
+  starts. Zeroing a weight because its default target is wrong for the new
+  task is the most repeated mistake here (five retrains in one day); it leaves
+  a proxy that failure also satisfies, and the robot sags, folds or topples
+  into it. Same section of `microduck_local/AGENTS.md`.

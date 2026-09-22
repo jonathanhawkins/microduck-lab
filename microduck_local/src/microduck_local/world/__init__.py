@@ -6,8 +6,8 @@ robot MJCF once per duck with `MjSpec`, so the whole room costs one physics
 step instead of one per duck.
 """
 
-from .arena import World, WorldDuck, WorldPerson, zero_infer
-from .compose import ROBOT_XML, DuckAddress, compose, duck_prefix, spawn_duck
+from .arena import World, WorldDuck, WorldPerson, WorldRobot, zero_infer
+from .compose import DUCK_ROBOT, ROBOT_XML, DuckAddress, compose, duck_prefix, spawn_duck
 from .scenario import (
     Ball,
     Basket,
@@ -26,7 +26,8 @@ from .scenario import (
 )
 
 __all__ = [
-    "ROBOT_XML", "DuckAddress", "World", "WorldDuck", "WorldPerson", "compose", "duck_prefix",
+    "DUCK_ROBOT", "ROBOT_XML", "DuckAddress", "World", "WorldDuck", "WorldPerson",
+    "WorldRobot", "compose", "duck_prefix",
     "spawn_duck", "zero_infer",
     "Ball", "Basket", "Box", "Duck", "Person", "Pickable", "Scenario", "Wall",
     "load_scenario", "make_pitch", "make_playroom", "make_room", "formation_roles",

@@ -1,4 +1,4 @@
-"""`World`: N ducks, their reflex policies and their sensors in one mjData.
+"""`World`: N robots, their reflex policies and their sensors in one mjData.
 
 The lab used to give every duck a private env (one mjData each, stepped in
 turn). A world composes them into one model so a room costs one `mj_step`
@@ -14,6 +14,26 @@ brain layer on top; reflex training keeps its own env.
 Command semantics match the lab's `Duck.set_cmd`: the policy is
 compass-blind, so a straight-ahead command closes a heading-hold loop on the
 duck's measured yaw, the way the robot runtime would.
+
+**Two kinds of body live in `World.ducks`**, and they are separate classes on
+purpose (`docs/mars-roadmap.md` §6.5):
+
+    WorldDuck   a POLICY-stepped body: 61 observations in, 14 actions out,
+                once per 50 Hz control tick, plus the beak and the skill
+                cycles. Sized by `contract.NUM_JOINTS` throughout.
+    WorldRobot  a DRIVER-stepped body: `Body.driver()` is a controller, not a
+                network, and it runs EVERY physics step. MARS's wheeled base
+                is the first (`robots/mars_drive.py`).
+
+Threading `if robot != "microduck"` through `WorldDuck` was the other option
+and it is the shape of mistake this repo has paid for most (`AGENTS.md`,
+"Retarget a term, don't delete it"): the duck's fields are a walker's —
+`prev_joint_vel` for a one-step obs lag, `kp_base` for a kick window's
+standing gain, `down_until` for a get-up — and a wheeled base answers none of
+them. What the two share is the plumbing around the body and not the body:
+odometry (`World._odom_step` reads `trunk_pos` and `yaw` off either), the bump
+sense, the sensor poll, the brain hand-off. Those are functions of the World,
+so they are shared by being written once there.
 """
 
 from __future__ import annotations
@@ -30,10 +50,56 @@ import mujoco
 import numpy as np
 
 from .. import contract as C
-from ..sensors import Detector, DetectorNoise, DetectorSpec, Target, TofNoise, TofSensor
+from ..sensors import Detector, Target, TofSensor
+from ..sensors.lidar import tof_from_lidar
 from ..walk_env import MicroduckWalkEnv
-from .compose import DuckAddress, compose, spawn_duck
+from .compose import (
+    DUCK_ROBOT,
+    DuckAddress,
+    compose,
+    duck_prefix,
+    mouth_frac_for_gape,
+    mouth_target,
+    spawn_duck,
+)
 from .scenario import PICKABLE_KINDS, Person, Scenario
+
+
+def mars_joint_names(body) -> tuple[str, ...]:
+    """The joint names a body's TELEMETRY reports, in its own order.
+
+    `Body.joint_names` plus its gaze joint: for MARS that is the six arm
+    joints and `joint_head`, which is exactly `mars.DRIVEN_JOINTS` and exactly
+    what `MarsDriver.set_arm` accepts. Asked of the BODY rather than imported
+    from one robot's module, so `WorldRobot.arm_qpos` names no robot.
+    """
+    head = getattr(body.frames(), "head_pitch_joint", None)
+    names = tuple(body.joint_names)
+    return names + ((head,) if head and head not in names else ())
+
+
+def _opt_float(v) -> float | None:
+    """`float(v)`, but None stays None.
+
+    For a body's OPTIONAL declarations (the claw's two constants): absent has
+    to survive as absent all the way to the wire, because a 0.0 full scale on
+    an inspector's bar is a division and a 0.0 threshold says every open jaw
+    is holding something. `float(getattr(..., None) or 0.0)` is the shape that
+    gets this wrong, so the conversion is one named function."""
+    return None if v is None else float(v)
+
+
+def _body_of(robot_id: str):
+    """The `Body` a scenario entry names (`robots/registry.get`).
+
+    Imported inside the function because `robots/microduck.py` reaches back
+    into `world/compose.py` for the attach sequence, and `robots/mars.py`'s
+    driver is what steps a MARS here — a module-level import either way is a
+    cycle. The registry is rebuilt per call and nothing in it is expensive
+    (`robots/registry.registry`'s docstring), so this is a dict lookup.
+    """
+    from ..robots.registry import get
+    return get(robot_id)
 
 # The shipped ground-pick cycle (upstream microduck_ground_pick_env_cfg.py):
 # a 4 s period encoded as [cos 2πφ, sin 2πφ, 0] in the twist slots; the beak
@@ -45,6 +111,10 @@ from .scenario import PICKABLE_KINDS, Person, Scenario
 GROUND_PICK_PERIOD_S = 4.0
 GROUND_PICK_CLOSE_PHI = 0.38
 GROUND_PICK_END_PHI = 0.7
+# How long the beak stays open after a drop (World._mouth). Long enough to read
+# at 50 Hz in the viewer; the release itself is instant - it deactivates the
+# weld, and a massless bill moving afterwards cannot push the toy.
+MOUTH_DROP_S = 0.6
 # The shipped kicks (ball_kick_left / ball_kick_right) run as a WINDOW, not a
 # phase: the robot hands the reflex tier to the kick network for
 # `kick_duration` (0.5 s in robotd's control.rs) with an all-zero command,
@@ -153,6 +223,11 @@ class WorldDuck:
     # skill cycle the reflex tier is running instead of the walker.
     holding: str | None = None
     beak_closed: bool = False
+    # The 15th servo, as an opening fraction: 0 shut, 1 wide (World._mouth).
+    # It is NOT in the obs contract and no policy writes it - on the robot the
+    # mouth is the app's, driven by `RobotMouth`, and here it is the world's.
+    mouth: float = 0.0
+    mouth_open_until: float = 0.0
     # Dead-reckoned pose the brain gets (World.odom): the truth plus OdomNoise.
     odom_preset: str = "ideal"
     odom_noise: OdomNoise = field(default_factory=OdomNoise)
@@ -182,6 +257,14 @@ class WorldDuck:
     bumped_t: float = -1e9             # when a body of this duck last touched another duck or a person
     episodes: int = 0
     _hold_yaw: float | None = None
+
+    @property
+    def root_body(self) -> int:
+        """The body every other body of this robot hangs off — the duck's
+        `trunk_base`. The name a `World` loop uses when it must not care which
+        KIND of body it holds (`duck_bodies`, `_geom_owner`); `WorldRobot` has
+        the same property over its own root."""
+        return self.adr.trunk_body
 
     # -- state readers (all straight off mjData, no caching) -------------------
     def trunk_quat(self, data: mujoco.MjData) -> np.ndarray:
@@ -249,17 +332,413 @@ class WorldDuck:
         self.head_cmd[:] = 0.0 if head is None else np.asarray(head, np.float32)
 
 
+class WorldRobot:
+    """One driver-stepped body in a room — a MARS today (`robots/mars.py`).
+
+    The counterpart of `WorldDuck` for a body whose reflex tier is a
+    CONTROLLER rather than a policy. `docs/mars-roadmap.md` Phase 3 is why
+    that is the cheap half of putting a wheeled base in a room: "for a
+    differential-drive base the reflex tier IS the base controller, so a MARS
+    drives on the day it is attached" — there is no gait to train first.
+
+    **The cadences are two and they are not the same.** The COMMAND is 50 Hz,
+    the duck's control tick, because that is when a brain decides and when the
+    lab streams. The DRIVER runs every 5 ms physics step, because it must:
+    MEASURED (`robots/mars_drive.py`'s docstring) at a 20 ms tick the forward
+    velocity loop's gain is `KP_FORWARD * dt / m` = 3.04, past the explicit
+    loop's bound of 2, and a 3 s run at 0.3 m/s ends going BACKWARDS at
+    2.6 m/s having covered nothing. `World.step` therefore calls
+    `driver.step(data)` inside its substep loop.
+
+    **A command is a lease.** `MarsDriver` carries Innate's 0.5 s `cmd_vel`
+    watchdog, so unlike a duck's `twist_cmd` — which persists until something
+    overwrites it — a MARS that stops being commanded STOPS. That is the
+    robot's own behaviour and it is kept: a brain that dies, or a socket that
+    drops, leaves the base still rather than driving at the last thing it was
+    told. `set_cmd` stamps `data.time`, so the world's clock is the
+    watchdog's and a slow host makes a robot late, never runaway.
+
+    **No heading hold.** `WorldDuck.set_cmd` closes a yaw loop on the duck's
+    measured yaw because the shipped walker is compass-blind and drifts.
+    MARS's drive is a body-frame velocity PD on a planar base reading its own
+    yaw rate, and MEASURED it does not need one: 0.3 m/s for 5 s ends 6.7 mm
+    off the line at -0.0045 rad. Adding one would be a second loop around a
+    loop that already tracks.
+
+    **`fallen()` is always False.** The base is three planar DoFs by
+    construction (`mars.add_planar_base`: "a wheeled chassis can't pitch, and
+    a free joint lets the arm's reaction torque tip the 0.89 kg base over"),
+    so there is no attitude to lose and the World's fall / get-up / respawn
+    machinery never fires on one. `falls` stays 0 for the life of the run,
+    which is what the frame reports.
+    """
+
+    # The duck's gaze intent is gated: the shipped walker's observation
+    # carries a head command block and it never trained with one, so a brain's
+    # `Intent.head` only reaches a duck that opted in (`world_server`'s
+    # `head_cmds`). A wheeled body has no such observation — its head is a
+    # position servo outside every policy — so there is nothing to disturb and
+    # the gaze is always applied.
+    head_always = True
+
+    def __init__(self, robot_id: str, spec, body, model: mujoco.MjModel,
+                 sensors: dict | None = None, max_steps: int = 2 ** 62):
+        self.id = robot_id
+        self.robot = spec.robot
+        self.body = body
+        self.spawn = spec.spawn
+        self.prefix = f"{robot_id}/"
+        self.model = model
+        self.driver = body.driver(model, self.prefix)
+        # The body DECLARES its root link and its gaze joint
+        # (`robots/body.RobotFrames`); the world asks. It is not a table here,
+        # which is the pattern `docs/mars-roadmap.md` §6.5 exists to delete —
+        # and it means a body from a pip-installed plugin needs no edit to
+        # this file to stand in a room.
+        self.frames = body.frames()
+        self.root_body = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_BODY, self.prefix + self.frames.base)
+        if self.root_body < 0:
+            raise KeyError(
+                f"{robot_id}: no body {self.prefix + self.frames.base!r} in the model — "
+                f"{body.id!r}'s frames() names a root link this model does not have")
+        #: Returns closer than this to the base origin are the robot looking
+        #: at itself — `robots/mars.FOOTPRINT_M`, measured there. A body that
+        #: has not declared one keeps every return.
+        self.footprint_m = float(getattr(body, "footprint_m", 0.0))
+        #: What a gripper reading MEANS on this body — the hold threshold and
+        #: the servo's torque clamp (`robots/mars.MarsBody.hold_load_nm` /
+        #: `gripper_limit_nm`). None for a body with no claw, which is what
+        #: makes the frame's `sensors.gripper` block absent rather than a pair
+        #: of zeros pretending to be a scale. Asked of the BODY for
+        #: `footprint_m`'s reason: the frame builder names no robot.
+        self.hold_load_nm: float | None = _opt_float(getattr(body, "hold_load_nm", None))
+        self.gripper_limit_nm: float | None = _opt_float(
+            getattr(body, "gripper_limit_nm", None))
+        self.sensors: dict = dict(sensors or {})
+        # The three channel names `Senses` has a field for. `tof` is None on
+        # this body and stays None: a planar scan reaches the duck's ToF
+        # brains through `sensors.lidar.tof_from_lidar`, which is the World's
+        # job at the moment it builds the senses, not a second sensor here.
+        self.tof = self.sensors.get("tof")
+        self.detector = self.sensors.get("detector")
+        self.lidar = self.sensors.get("lidar")
+        # The duck-shaped surface the lab's frame builder, the inspector and
+        # `record-world` read off every body in `World.ducks`. Each one is
+        # either real for a wheeled body or a documented constant.
+        self.policy_id: str | None = None      # no walker: `Body.driver` is the reflex tier
+        self.falls = 0                         # a planar base cannot topple
+        self.step_count = 0
+        self.episodes = 0
+        self.max_steps = int(max_steps)
+        self.holding: str | None = None        # Phase 4: the gripper's own grasp
+        self.beak_closed = False
+        self.mouth = 0.0
+        self.skill: str | None = None
+        self.twist_cmd = np.zeros(3, np.float32)
+        self.head_cmd = np.zeros(4, np.float32)
+        self.bumped_t = -1e9
+        self.down_until = -1.0
+        self.up_since = -1.0
+        self.down_since = -1.0
+        self.last_action = np.zeros(body.num_actions, np.float32)
+        self.prev_joint_vel = np.zeros(body.num_joints, np.float32)
+        self._arm_cmd: dict[str, float] = {}   # what the last `Intent.arm` asked for
+        # Odometry: `World._odom_step` and `_odom_reset` are body-agnostic —
+        # they read `trunk_pos` and `yaw` — so a MARS gets the same dead
+        # reckoning and the same drift presets a duck does, for free.
+        self.odom_preset = spec.odom
+        self.odom_noise = OdomNoise.preset(spec.odom)
+        self.odom_est = np.zeros(3)
+        self._odom_true_prev: np.ndarray | None = None
+        self._odom_scale = 1.0
+        self._odom_yaw_bias = 0.0
+        self._joint_qvel = np.array(
+            [int(model.joint(self.prefix + n).dofadr[0]) for n in body.joint_names])
+        self._scene_bodies: list[str] | None = None
+
+    # -- state readers ---------------------------------------------------------
+    def trunk_pos(self, data: mujoco.MjData) -> np.ndarray:
+        """Where the robot is. The base body's origin, which for a planar base
+        is on the floor plane at the chassis's own reference point."""
+        return data.xpos[self.root_body]
+
+    def yaw(self, data: mujoco.MjData) -> float:
+        """Heading, WRAPPED to +-pi.
+
+        `MarsDriver.pose` returns the planar hinge's qpos, which accumulates —
+        a robot that has turned twice reads past 2*pi. Wrapped here so that
+        this is the same quantity `WorldDuck.yaw` is (a quaternion's heading),
+        which is what `World._odom_step` and every brain reading
+        `senses.odom[2]` expect."""
+        yaw = self.driver.pose(data)[2]
+        return float(np.arctan2(np.sin(yaw), np.cos(yaw)))
+
+    def heading_speed(self, data: mujoco.MjData) -> float:
+        """Forward speed in the base's own frame — `MarsDriver.velocity`'s
+        first component, which is the quantity the drive PD regulates, so
+        what the lab shows and what the controller sees cannot disagree."""
+        return float(self.driver.velocity(data)[0])
+
+    def joint_vel(self, data: mujoco.MjData) -> np.ndarray:
+        """The arm's joint velocities. Only the World's respawn path reads
+        this (to seed `prev_joint_vel`); a wheeled body has no obs lag."""
+        return data.qvel[self._joint_qvel].astype(np.float32)
+
+    def fallen(self, data: mujoco.MjData) -> bool:
+        return False
+
+    # -- commands --------------------------------------------------------------
+    def set_cmd(self, data: mujoco.MjData, twist, head=None) -> None:
+        """One 50 Hz command: a body-frame twist, and optionally a gaze.
+
+        `WorldDuck.set_cmd`'s signature, so `world_server.drive` and every
+        test drive a MARS with the same call. Only `vx` and `wz` reach the
+        base — a differential-drive chassis cannot strafe, so a brain's `vy`
+        is dropped rather than quietly turned into something.
+
+        The gaze maps ONE component: the duck's `head_pitch` (intent slot 1)
+        onto MARS's `joint_head`, with a SIGN FLIP that is read off the two
+        models and not guessed. The duck's `head_pitch` turns about +y
+        (`contract.py`'s axis table) so positive is looking DOWN, which is
+        what every brain's `head_down` constant means. MARS's `joint_head` has
+        `axis="0 -1 0"` in mars.urdf, so positive is looking UP. Hence
+        `joint_head = -head_pitch`, and `MarsDriver.set_arm` clamps it to the
+        joint's own MJCF range (the URDF's +-0.3491 rad, +-20 degrees) — so a
+        brain asking for the duck's 0.6 rad look-down gets all 0.349 rad MARS
+        has and nothing breaks.
+
+        The duck's OTHER three slots are dropped, and that is a real gap
+        rather than a rounding: `neck_pitch` is the first joint of a two-joint
+        gaze chain whose combined depression is measured on the duck
+        (`brain/controllers.py`: 0.75 + 0.43 per unit), and MARS has one pitch
+        DoF. Summing them would need a gain nobody has measured on this robot.
+        `head_yaw` and `head_roll` have no joint at all here — MARS turns its
+        whole base to look sideways.
+        """
+        tw = np.asarray(twist, np.float32)
+        self.twist_cmd[:] = tw[:3]
+        self.driver.set_cmd(float(tw[0]), float(tw[2]), float(data.time))
+        self.head_cmd[:] = 0.0 if head is None else np.asarray(head, np.float32)
+        self._push_arm()
+
+    def set_arm(self, targets) -> None:
+        """A brain's `Intent.arm`: joint position targets by name.
+
+        ABSOLUTE, not a nudge, because `MarsDriver.set_arm` is — a joint the
+        mapping leaves out holds `ARM_HOME`. So this REPLACES what the last
+        `Intent.arm` asked for rather than merging with it, and a brain that
+        wants two joints held says both every tick."""
+        self._arm_cmd = {str(k): float(v) for k, v in dict(targets).items()}
+        self._push_arm()
+
+    def _push_arm(self) -> None:
+        """Write the arm AND the gaze in one call — the reason this exists.
+
+        `MarsDriver.set_arm` is absolute over the whole driven set, so two
+        independent writers (a brain's `Intent.arm` and the head component of
+        its `Intent.head`) would each silently return the other's joints to
+        `ARM_HOME` — a gaze intent every tick would have pinned the arm home
+        for as long as a brain looked anywhere. One writer, one union, and the
+        explicit arm mapping WINS when it names the head joint itself: a brain
+        that commands `joint_head` directly means it, and the gaze is the
+        fallback for one that only says "look down".
+        """
+        targets = dict(self._arm_cmd)
+        joint = self.frames.head_pitch_joint
+        if joint is not None and joint not in targets:
+            targets[joint] = self.frames.head_pitch_sign * float(self.head_cmd[1])
+        self.driver.set_arm(targets)
+
+    def arm_targets(self) -> dict[str, float]:
+        """The targets as the driver clamped and stored them."""
+        return self.driver.arm_targets()
+
+    # -- lifecycle -------------------------------------------------------------
+    def spawn_at(self, data: mujoco.MjData, x: float, y: float, yaw: float) -> None:
+        """`spawn_duck`'s job for this body: HOME pose, at rest, applied
+        forces cleared. Delegated to the driver, which owns both force
+        channels and must not leave the last step's drive push behind."""
+        self.driver.spawn(data, x, y, yaw)
+        self.step_count = 0
+        self.last_action[:] = 0.0
+        self.head_cmd[:] = 0.0
+        self.twist_cmd[:] = 0.0
+        self._arm_cmd = {}
+        self.holding = None
+
+    def arm_qpos(self, data: mujoco.MjData) -> dict[str, float] | None:
+        """The ACHIEVED joint positions, by name — `Senses.arm`.
+
+        What Innate's `/mars/arm/state` publishes, and NOT what `arm_targets`
+        returns: the servo carries their structural compliance and backlash,
+        so a commanded pose arrives with a few hundredths of a radian of sag
+        (MEASURED at the pick pose: 28.5 mm of claw height). A brain that
+        wants the claw somewhere has to read this.
+
+        None for a body whose driver has no joint table, the way `held_body`
+        answers -1 for one with no claw.
+        """
+        adr = getattr(self.driver, "adr", None)
+        if not adr:
+            return None
+        # The DRIVEN set only. `servo_addresses` also carries the mirrored
+        # finger (`mars.MIMIC_JOINT`), which is a constraint and not a
+        # commandable joint — Innate's own `/mars/arm/state` does not report
+        # it and `Intent.arm` refuses it, so neither does this.
+        return {name: float(data.qpos[adr[name][0]]) for name in mars_joint_names(self.body)
+                if name in adr}
+
+    def arm_limits(self) -> dict[str, tuple[float, float]] | None:
+        """(lo, hi) rad per driven joint, off THIS model.
+
+        The half of an arm reading that makes it mean something: an angle
+        without its travel is a number, and the `/sim` inspector draws each
+        joint as a fraction of the range it can actually reach. Read from
+        `jnt_range` rather than from a table in `robots/mars.py`, because the
+        MJCF is what the servo is clamped by (`MarsDriver.set_arm` clamps to
+        exactly this) — a table could disagree with the model and the bar
+        would be drawn against a limit the robot does not have.
+
+        A joint the model leaves UNLIMITED is omitted rather than given a
+        ±pi placeholder: a consumer can then say "no limits" for it instead of
+        drawing a full-scale bar that is a guess. `None` for a body with no
+        joint table, exactly as `arm_qpos`.
+        """
+        adr = getattr(self.driver, "adr", None)
+        if not adr:
+            return None
+        out: dict[str, tuple[float, float]] = {}
+        for name in mars_joint_names(self.body):
+            if name not in adr:
+                continue
+            j = self.model.joint(self.prefix + name)
+            if not bool(j.limited[0]):
+                continue
+            lo, hi = (float(v) for v in j.range)
+            if hi > lo:
+                out[name] = (lo, hi)
+        return out
+
+    def gripper_load(self, data: mujoco.MjData) -> float | None:
+        """The torque an object feeds back through the claw (N*m), or None.
+
+        Delegated the way `held_body` is, to the driver that owns the
+        measurement (`MarsDriver.gripper_load`: `qfrc_constraint` at joint6,
+        and its docstring has the table that decided it must not be the
+        servo's own `qfrc_applied`). Nothing re-derives the threshold here —
+        whether this counts as HOLDING is `held_body`'s answer, already
+        resolved into `self.holding` by `World.sense_grip` once a tick.
+
+        None (and not 0.0) for a driver with no claw: 0.0 N*m is what an open
+        jaw reads, so a body with no gripper at all reporting it would draw a
+        real instrument for hardware that does not exist.
+        """
+        fn = getattr(self.driver, "gripper_load", None)
+        return None if fn is None else float(fn(data))
+
+    def held_body(self, data: mujoco.MjData) -> int:
+        """Which body this robot's gripper has hold of, or -1.
+
+        Delegated to the driver, which owns the predicate
+        (`MarsDriver.held_body`: |constraint torque at joint6| past
+        `mars.HOLD_LOAD_NM` AND a blade contact with a body that is not part
+        of the robot). A driver with no claw answers -1 the way a body with no
+        beak ignores `Intent.beak` — the body vocabulary is per channel, and
+        `World.sense_grip` turns this into the pickable id that
+        `Senses.holding`, the events log and the tidy overlay all read.
+        """
+        fn = getattr(self.driver, "held_body", None)
+        return -1 if fn is None else int(fn(data))
+
+    def scene_bodies(self) -> list[str]:
+        """The body names the viewer's scene lists, in ITS order, stripped of
+        the prefix and with the world first.
+
+        The stream maps a robot's pose list onto `GET /scene?robot=<id>`'s
+        body list POSITIONALLY (`viz_server._robot_scene_to_env` resolves the
+        same list by name), so the two have to agree body for body or the
+        robot is drawn with its parts on the wrong joints — the exact failure
+        `robots/mars.load_robot_spec` turned `fusestatic` off to prevent.
+
+        Derived from THIS model's attached subtree rather than by calling
+        `Body.visual_scene()`, which would parse 7 MB of STL to read a list of
+        names. That the two agree is a claim, so it is a TEST and not a
+        comment: `tests/test_world_robot.py` compares this list against
+        `mars.visual_scene()["bodies"]` name for name, the way
+        `tests/test_arena.py` compares the composed duck against
+        `scene_model()`.
+        """
+        if self._scene_bodies is None:
+            sub = [b for b in range(self.model.nbody)
+                   if self.model.body_rootid[b] == self.root_body]
+            self._scene_bodies = ["world"] + [
+                self.model.body(b).name[len(self.prefix):] for b in sub]
+        return self._scene_bodies
+
+    def camera_housing_body(self) -> int:
+        """Which of `scene_bodies()` WRAPS this robot's camera, or -1.
+
+        The body a viewer must not draw when it renders from this robot's own
+        camera: on MARS that is the `head` its `head_camera_left` link sits
+        inside, whose shell is 1.5-2.8 cm from the lens and so sits right on
+        the /sim inset's 3 cm near plane — close enough to be clipped while
+        everything is still, and to swing into frame the moment the drawn
+        pose lags the captured one.
+
+        It is `Detector.exclude_body` and not a name written here, which is
+        the point: the detector ALREADY resolves its own housing (a body
+        mount takes its parent) and already refuses to detect it. A viewer
+        hiding a different body from the one the sensor ignores would be two
+        answers to one question.
+        """
+        det = getattr(self, "detector", None)
+        if det is None or getattr(det, "exclude_body", -1) < 0:
+            return -1
+        name = self.model.body(int(det.exclude_body)).name
+        if not name.startswith(self.prefix):
+            return -1
+        try:
+            return self.scene_bodies().index(name[len(self.prefix):])
+        except ValueError:
+            return -1
+
+    def bodies_payload(self, data: mujoco.MjData) -> list[list[float]]:
+        """Poses for `scene_bodies()`, world first as an identity pose — the
+        shape `world_server`'s frame puts under a duck's `bodies`."""
+        out = [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]]
+        for name in self.scene_bodies()[1:]:
+            b = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.prefix + name)
+            p, q = data.xpos[b], data.xquat[b]
+            out.append([round(float(v), 4) for v in (*p, *q)])
+        return out
+
+
 class WorldPerson:
-    """A mocap capsule walking its waypoints at a set speed, or driven by a
-    possessing human (`cmd` = [vx, vy, wz] in its own heading frame)."""
+    """A person the ducks can follow: a mocap capsule, or a Unitree G1.
+
+    Capsule: infinite-mass mocap, slid along waypoints. G1: the Lucky Robots
+    MJCF attached under this id's prefix, driven by walker.onnx with the same
+    waypoint twist as a command. Detector class stays "person" either way.
+    """
 
     def __init__(self, model: mujoco.MjModel, spec: Person):
         self.spec = spec
         self.id = spec.id
-        self.body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, spec.id)
-        self.mocap = int(model.body_mocapid[self.body])
+        self.robot = None
+        if spec.kind == "g1":
+            from ..robots.g1 import G1Walker
+            self.robot = G1Walker(model, spec.id)
+            self.body = self.robot.pelvis
+            self.mocap = -1
+        else:
+            self.body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, spec.id)
+            self.mocap = int(model.body_mocapid[self.body])
         self.x, self.y, self.yaw = spec.pos[0], spec.pos[1], spec.yaw
         self.wp = 0
+        # A private copy: G1 yield used to `pop` spec.path until one point
+        # remained, then the robot stood still for the rest of the session.
+        self.route = list(spec.path)
         self.cmd: np.ndarray | None = None      # possessed: heading-frame twist
         self.possessed = False
         self.waiting = 0.0                       # s stood behind a duck in the way (polite walkers)
@@ -269,14 +748,29 @@ class WorldPerson:
     def reset(self, data: mujoco.MjData) -> None:
         self.x, self.y, self.yaw = self.spec.pos[0], self.spec.pos[1], self.spec.yaw
         self.wp = 0
+        self.route = list(self.spec.path)
         self.cmd = None
         self.waiting = 0.0
         self.yields = 0
-        self.write(data)
+        if self.robot is not None:
+            self.robot.spawn(data, self.x, self.y, self.yaw)
+        else:
+            self.write(data)
 
     def write(self, data: mujoco.MjData) -> None:
+        if self.mocap < 0:
+            return
         data.mocap_pos[self.mocap] = [self.x, self.y, self.spec.height / 2]
         data.mocap_quat[self.mocap] = [np.cos(self.yaw / 2), 0.0, 0.0, np.sin(self.yaw / 2)]
+
+    def sync(self, data: mujoco.MjData) -> None:
+        """Read the G1 pelvis out of physics after mj_step. Capsules no-op."""
+        if self.robot is None:
+            return
+        self.x, self.y, self.yaw = self.robot.pose(data)
+
+    def fallen(self, data: mujoco.MjData) -> bool:
+        return bool(self.robot is not None and self.robot.fallen(data))
 
     def blocked_by(self, blockers, target_yaw: float) -> bool:
         """A polite walker's rule: something (a duck's trunk) inside
@@ -292,6 +786,9 @@ class WorldPerson:
         return False
 
     def step(self, data: mujoco.MjData, dt: float, blockers=()) -> None:
+        if self.robot is not None:
+            self._step_g1(data, dt, blockers)
+            return
         if self.possessed and self.cmd is not None:
             vx, vy, wz = (float(v) for v in self.cmd)
             self.yaw += wz * dt
@@ -336,11 +833,63 @@ class WorldPerson:
                 self.y += step * np.sin(self.yaw)
         self.write(data)
 
-    def payload(self) -> dict:
-        return {"id": self.id, "kind": "person", "waiting": self.waiting > 0,
-                "pose": [round(self.x, 4), round(self.y, 4), round(self.spec.height / 2, 4),
-                         round(float(np.cos(self.yaw / 2)), 4), 0.0, 0.0, round(float(np.sin(self.yaw / 2)), 4)],
-                "possessed": self.possessed}
+    def _step_g1(self, data: mujoco.MjData, dt: float, blockers) -> None:
+        """Waypoint / possess twist → G1 walk policy. Pose comes from physics."""
+        vx = vy = wz = 0.0
+        if self.possessed and self.cmd is not None:
+            vx, vy, wz = (float(v) for v in self.cmd)
+        elif self.route and self.spec.speed > 0:
+            tx, ty = self.route[self.wp]
+            dx, dy = tx - self.x, ty - self.y
+            dist = float(np.hypot(dx, dy))
+            if dist < 0.25:
+                self.wp = (self.wp + 1) % len(self.route)
+            else:
+                target_yaw = float(np.arctan2(dy, dx))
+                err = float(np.arctan2(np.sin(target_yaw - self.yaw),
+                                       np.cos(target_yaw - self.yaw)))
+                wz = float(np.clip(err / max(dt, 1e-3), -1.0, 1.0))
+                turning = abs(err) > 0.8
+                blocked = self.spec.yield_m > 0 and (
+                    self.blocked_by(blockers, target_yaw) or self.blocked_by(blockers, self.yaw))
+                if blocked:
+                    self.waiting += dt
+                    self.yields += 1 if self.waiting == dt else 0
+                    # Do NOT pop waypoints. A follower that stands at the G1's
+                    # feet used to erase the whole tour, then the G1 idled.
+                else:
+                    self.waiting = 0.0
+                if not turning and not blocked:
+                    vx = float(self.spec.speed)
+                elif blocked and self.waiting > self.WAIT_S:
+                    # Duck has been in the way long enough — walk anyway at
+                    # half speed rather than freeze the scene.
+                    vx = float(self.spec.speed) * 0.5
+        assert self.robot is not None
+        self.robot.cmd[:] = (vx, vy, wz)
+        self.robot.control(data)
+
+    def payload(self, data: mujoco.MjData | None = None) -> dict:
+        # Pose: capsule centre, or G1 pelvis. Viewer uses this for the
+        # capsule fallback and the contact blob.
+        if self.robot is None or data is None:
+            pose = [round(self.x, 4), round(self.y, 4), round(self.spec.height / 2, 4),
+                    round(float(np.cos(self.yaw / 2)), 4), 0.0, 0.0,
+                    round(float(np.sin(self.yaw / 2)), 4)]
+            bodies = None
+        else:
+            bodies = self.robot.bodies_payload(data, self.robot.scene_bodies)
+            pose = bodies[1] if len(bodies) > 1 else [
+                round(self.x, 4), round(self.y, 4), 0.79,
+                round(float(np.cos(self.yaw / 2)), 4), 0.0, 0.0,
+                round(float(np.sin(self.yaw / 2)), 4)]
+        out = {"id": self.id, "kind": "person", "waiting": self.waiting > 0,
+               "pose": pose, "possessed": self.possessed}
+        if self.spec.kind != "capsule":
+            out["robot"] = self.spec.kind
+        if bodies is not None:
+            out["bodies"] = bodies
+        return out
 
 
 class World:
@@ -450,6 +999,15 @@ class World:
                   f"ball through the recipe's projection in {what}. SIM-ONLY ABLATION: the robot has no "
                   "truth, this can never ship.", flush=True)
         self.model = compose(scenario)
+        # PHYSICS STEPS PER 50 Hz TICK, read off the compiled model rather
+        # than from `C.DECIMATION`. The control tick is fixed — it is when a
+        # brain decides, when the lab streams and what every sensor rate is
+        # scheduled against — and the timestep underneath it is the room's
+        # (`Scenario.physics_dt`: a MARS that must grasp needs 2 ms, and the
+        # grasp table is in that field's block). At the default 5 ms this is
+        # exactly `C.DECIMATION` = 4, which is what keeps `tests/test_arena.py`'s
+        # step-for-step lock against the walk env exact.
+        self.substeps = int(round(C.CTRL_DT / float(self.model.opt.timestep)))
         self.data = mujoco.MjData(self.model)
         self.t = 0.0
         self.tick = 0
@@ -461,9 +1019,18 @@ class World:
         # What a detector can find: every duck's trunk, every ball, every person.
         # A duck's colour is its team's colorway — the one thing about another
         # duck a camera could really read (world/compose.paint_team paints it).
+        # A non-duck body is NOT a detector target, and that is a stated gap
+        # rather than an oversight: `DETECT_CLASSES` is the robot's own YOLO
+        # class plus the sim-only ones this repo writes brains for, and
+        # "a wheeled base with an arm" is not one of them. A duck's camera
+        # therefore does not see a MARS; a MARS's LIDAR does see the duck,
+        # geometrically, because a ray does not need a class. Giving it a
+        # borrowed class would be worse than the gap — a `Target` on a body
+        # this world has no id for reads `xpos[-1]`, the LAST body in the
+        # model, and reports a detection of something somewhere else.
         targets = [Target(d.id, "duck", mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
                                                           f"{d.id}/trunk_base"), 0.10, color=d.team)
-                   for d in scenario.ducks]
+                   for d in scenario.ducks if d.robot == DUCK_ROBOT]
         targets += [Target(f"ball{i}", "ball", mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
                                                                 f"ball{i}"), b.radius)
                     for i, b in enumerate(scenario.balls)]
@@ -479,6 +1046,9 @@ class World:
         self.pickables: dict[str, int] = {
             t.id: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, t.id) for t in scenario.pickables}
         self.pickable_kind = {t.id: t.kind for t in scenario.pickables}
+        # ...and the reverse, for `sense_grip`: a gripper reports the BODY it
+        # has hold of and the rest of the world speaks toy ids.
+        self._pickable_of_body: dict[int, str] = {b: t for t, b in self.pickables.items()}
         targets += [Target(t.id, "toy", self.pickables[t.id],
                            max(PICKABLE_KINDS[t.kind]["size"]) / 2) for t in scenario.pickables]
         self.basket = scenario.basket
@@ -529,33 +1099,47 @@ class World:
             targets.append(Target("basket", "basket",
                                   mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "basket_marker"), 0.12))
         self.skills: dict[str, Infer] = {}
+        max_steps = (2**62 if not np.isfinite(max_episode_s)
+                     else int(round(max_episode_s / C.CTRL_DT)))
+        # A body mounts its OWN sensors (`robots/body.Body.make_sensors`): the
+        # duck's `tof` and `head_camera` site names used to be spelled out
+        # here, which is one of the two hacks `docs/mars-roadmap.md` §6.5
+        # counts against world mode. The seed callable is what keeps the move
+        # honest — the duck still draws its ToF seed before its detector's,
+        # off this world's RNG, in this order, so every golden bit and every
+        # seeded soccer number is the number it was.
+        def next_seed() -> int:
+            return int(self.rng.integers(0, 2**31 - 1))
+
         for d in scenario.ducks:
-            adr = DuckAddress.resolve(self.model, d.id)
-            tof = None
-            if d.tof is not None and adr.tof_site >= 0:
-                tof = TofSensor(self.model, site=adr.prefix + "tof",
-                                noise=TofNoise.preset(d.tof),
-                                seed=int(self.rng.integers(0, 2**31 - 1)),
-                                base_body=adr.trunk_body)
-            det = None
-            if d.detector is not None:
-                det = Detector(self.model, site=adr.prefix + "head_camera",
-                               spec=DetectorSpec.from_env(),          # MICRODUCK_CAMERA, a battery's sensor variant
-                               noise=DetectorNoise.preset(d.detector), targets=targets,
-                               seed=int(self.rng.integers(0, 2**31 - 1)))
+            body = _body_of(d.robot)
+            sensors = body.make_sensors(
+                self.model, duck_prefix(d.id),
+                presets={"tof": d.tof, "detector": d.detector},
+                targets=targets, seed=next_seed)
+            if d.robot != DUCK_ROBOT:
+                self.ducks[d.id] = WorldRobot(d.id, d, body, self.model,
+                                              sensors=sensors, max_steps=max_steps)
+                continue
             self.ducks[d.id] = WorldDuck(
-                id=d.id, adr=adr, spawn=d.spawn, infer=infer_for.get(d.id, zero_infer),
-                policy_id=d.policy, tof=tof, detector=det,
+                id=d.id, adr=DuckAddress.resolve(self.model, d.id), spawn=d.spawn,
+                infer=infer_for.get(d.id, zero_infer),
+                policy_id=d.policy, tof=sensors.get("tof"), detector=sensors.get("detector"),
                 odom_preset=d.odom, odom_noise=OdomNoise.preset(d.odom),
-                max_steps=(2**62 if not np.isfinite(max_episode_s)
-                           else int(round(max_episode_s / C.CTRL_DT))))
-        # Body ranges per duck: the attached subtree is contiguous after the
-        # trunk, so the viewer's per-duck body list is one slice.
+                max_steps=max_steps)
+        # Every body that a CONTROLLER steps rather than a policy, in roster
+        # order. `step()` iterates this inside its substep loop, so on a
+        # duck-only world it is empty and the loop body is unchanged — which
+        # is what keeps `tests/test_arena.py`'s step-for-step lock exact.
+        self._robots: list[WorldRobot] = [d for d in self.ducks.values()
+                                          if isinstance(d, WorldRobot)]
+        # Body ranges per robot: an attached subtree is contiguous after its
+        # root, so the viewer's per-robot body list is one slice.
         self.duck_bodies: dict[str, slice] = {}
         for d in self.ducks.values():
             sub = [b for b in range(self.model.nbody)
-                   if self.model.body_rootid[b] == d.adr.trunk_body]
-            assert sub == list(range(sub[0], sub[-1] + 1)), "duck subtree not contiguous"
+                   if self.model.body_rootid[b] == d.root_body]
+            assert sub == list(range(sub[0], sub[-1] + 1)), "robot subtree not contiguous"
             self.duck_bodies[d.id] = slice(sub[0], sub[-1] + 1)
         # Who owns each geom, for the bump sense: ducks 0..n-1, persons n.., -1 the rest (floor, walls, ball, toys).
         self._geom_owner = np.full(self.model.ngeom, -1, dtype=np.int64)
@@ -564,7 +1148,28 @@ class World:
             s = self.duck_bodies[d.id]
             self._geom_owner[(self.model.geom_bodyid >= s.start) & (self.model.geom_bodyid < s.stop)] = k
         for k, p in enumerate(self.persons.values()):
-            self._geom_owner[self.model.geom_bodyid == p.body] = len(self._owner_duck) + k
+            owner = len(self._owner_duck) + k
+            if p.robot is not None:
+                for b in p.robot.body_ids:
+                    self._geom_owner[self.model.geom_bodyid == b] = owner
+            else:
+                self._geom_owner[self.model.geom_bodyid == p.body] = owner
+        # THE BOARDS, as a thing a robot can hit (`wall_bumps`). Static
+        # scenery is every geom of the worldbody — walls, the cove's facets, a
+        # massless box, the basket's plates — and the FLOOR is the one to
+        # leave out, because a walker's soles are on it every step. That
+        # leaves exactly "a robot touched something built into the room",
+        # which is the number Phase 3's bar is stated in and which nothing
+        # else here measures: `_stamp_bumps` counts body-on-BODY contacts (the
+        # `Senses.bumped` channel), and a wall is not a body owner.
+        self._wall_geom = ((self.model.geom_bodyid == 0)
+                           & (self.model.geom_type != mujoco.mjtGeom.mjGEOM_PLANE))
+        #: Separate EPISODES of board contact per robot id — a run of ticks in
+        #: contact counts once, which is what a person means by "it bumped the
+        #: wall". `wall_ticks` is the duration beside it, in control ticks.
+        self.wall_bumps: dict[str, int] = {d: 0 for d in self.ducks}
+        self.wall_ticks: dict[str, int] = {d: 0 for d in self.ducks}
+        self._on_wall: set[str] = set()
         # Dynamic objects (free bodies that are not ducks): streamed each frame.
         self.objects: list[tuple[str, str, int]] = []
         for j in range(self.model.njnt):
@@ -599,6 +1204,12 @@ class World:
         self.ball_outs, self.ball_out_seq, self._ball_rest_t0 = 0, 0, None
         self.getups = self.getup_timeouts = 0
         self.getup_down_s = []
+        # The board counters are keyed to the clock that just went back to
+        # zero (`WorldState.restart`'s list of everything that outlived a
+        # reset is what this is guarding against).
+        for rid in self.wall_bumps:
+            self.wall_bumps[rid] = self.wall_ticks[rid] = 0
+        self._on_wall = set()
         for p in self.persons.values():
             p.reset(self.data)
         for d in self.ducks.values():
@@ -634,7 +1245,23 @@ class World:
             self.getup_down_s.append(round(self.t - d.down_since, 3))
             d.down_since = -1.0
 
-    def _respawn(self, d: WorldDuck) -> None:
+    def _respawn(self, d) -> None:
+        if isinstance(d, WorldRobot):
+            x, y, yaw = d.spawn
+            x, y = self._clear_of_persons(x, y)
+            d.spawn_at(self.data, x, y, yaw)
+            self._odom_reset(d, x, y, yaw)
+            d.episodes += 1
+            d.bumped_t = -1e9
+            # Every channel the body declared, whatever they are — the reason
+            # `Body.make_sensors` returns a dict and the arena does not name
+            # the sensors a robot has.
+            for s in d.sensors.values():
+                s.reset()
+            return
+        # The DUCK's path, from here down, byte for byte what it was: the
+        # spawn, the odometry, the beak, the skill, the gain, its two
+        # sensors and the tracker, in the order they were.
         x, y, yaw = d.spawn
         x, y = self._clear_of_persons(x, y)
         spawn_duck(self.model, self.data, d.adr, x, y, yaw)
@@ -647,6 +1274,12 @@ class World:
         d._hold_yaw = None
         d.episodes += 1
         self.release(d)
+        # …and the beak deadline goes with it. `release()` only re-arms this
+        # when something was actually held, so a duck that dropped a toy at
+        # t=182 kept `mouth_open_until = 182.9` through `World.reset()` — the
+        # clock then restarts at 0 and `_mouth` holds the bill wide open for
+        # the next 182 seconds of the new run.
+        d.mouth_open_until = 0.0          # the field's own "shut" value, not a second sentinel
         d.skill = None
         d.skill_infer = None
         self._set_gain_ratio(d, 1.0)
@@ -955,9 +1588,37 @@ class World:
         toy = d.holding
         if toy is None:
             return None
+        # Arm the drop-open window only for a release that released SOMETHING.
+        # Spawning calls this on every duck to clear its hands, and arming it
+        # up here left every duck in a fresh world gaping for MOUTH_DROP_S.
+        d.mouth_open_until = self.t + MOUTH_DROP_S
         self.data.eq_active[self._eq_id(d, toy)] = 0
         d.holding = None
         return toy
+
+    def _mouth(self, d: WorldDuck) -> None:
+        """Drive the 15th servo. The beak reaches open, snaps shut on the
+        grab - as far as the toy in it allows - and opens again to drop.
+
+        This is the whole of mouth control, as it is on the robot: the 14
+        actions a policy returns are scattered around this joint, never onto
+        it (`duck-control`'s MOUTH_INDEX), so nothing here can disturb a
+        gait."""
+        if d.holding is not None:
+            # A 40 mm block is wider than the 36 mm gape, so the bill goes
+            # AROUND it rather than closing through it; a 10 mm brick nearly
+            # shuts. `grasp` is an attachment either way (roadmap 12.2).
+            kind = self.pickable_kind.get(d.holding)
+            want = 1.0 if kind is None else mouth_frac_for_gape(min(PICKABLE_KINDS[kind]["size"]))
+        elif d.skill == "ground_pick" and not d.beak_closed:
+            want = 1.0                       # reaching: open on the way down
+        elif self.t < d.mouth_open_until:
+            want = 1.0                       # just dropped one
+        else:
+            want = 0.0                       # at rest a duck's beak is shut
+        d.mouth = want
+        if d.adr.mouth_act >= 0:
+            self.data.ctrl[d.adr.mouth_act] = mouth_target(want)
 
     def _set_gain_ratio(self, d: WorldDuck, ratio: float) -> None:
         """Scale this duck's position-actuator Kp (gain and the matching
@@ -1248,7 +1909,37 @@ class World:
             d.beak_closed = False          # a cycle starts with an open, empty beak
         return True
 
+    def sense_grip(self, d) -> str | None:
+        """Refresh a driver-stepped body's `holding` from its gripper, and
+        return the toy id it has hold of (or None).
+
+        **A MARS's grasp is PHYSICS, not an attachment.** A duck's is a weld
+        the World switches on (`grasp`, roadmap 12.2), because a soft bill
+        closing around a toy is not something a rigid convex hull does. MARS's
+        two blades are real geoms with Innate's own contact model on them
+        (`mars.FINGER_*`), and 4b measured that at 2 ms they hold the 4 cm
+        block 14 spots of 16 — so there is nothing to weld and nothing to
+        model: the claw either has it or it does not, and this reads which.
+        That is also why `pick`/`release` are not events a MARS emits. The
+        transition of THIS value is the event, which is what `record-world`'s
+        log and the `/sim` overlay already watch (`d.holding` changing).
+
+        Called once a tick, after the substep loop, beside the sensor polls —
+        `Senses.holding` is a sense.
+        """
+        bid = d.held_body(self.data)
+        d.holding = self._pickable_of_body.get(bid) if bid >= 0 else None
+        return d.holding
+
     def in_basket(self, toy: str) -> bool:
+        """Is this toy in the basket? GEOMETRY, and body-agnostic on purpose.
+
+        Nothing here asks who put it there or how: the footprint of the tray
+        and a height under the rim plus 5 cm. So the tidy score, `eval-tidy`'s
+        count and `record-world`'s overlay measure a MARS's arm and a duck's
+        beak with the same instrument, and "toys in the basket" is one number
+        across bodies rather than two definitions that could drift.
+        """
         if self.basket is None:
             return False
         p = self.data.xpos[self.pickables[toy]]
@@ -1261,8 +1952,19 @@ class World:
         done = sum(self.in_basket(t) for t in self.pickables)
         return {"total": n, "inBasket": done, "held": [d.holding for d in self.ducks.values() if d.holding]}
 
-    def apply_intent(self, d: WorldDuck, intent) -> None:
-        """Route a brain's non-twist intents to the reflex tier."""
+    def apply_intent(self, d, intent) -> None:
+        """Route a brain's non-twist intents to the reflex tier.
+
+        A driver-stepped body takes `arm` and ignores `skill` and `beak`: it
+        has no skill-policy tier (its reflex tier IS the driver) and no beak.
+        Ignoring rather than raising, for the same reason a duck ignores
+        `arm`: a brain is written against the intent vocabulary and not
+        against one robot, and `wander` setting no arm and `tidy` asking for
+        a beak must both be legal on both bodies."""
+        if isinstance(d, WorldRobot):
+            if intent.arm:
+                d.set_arm(intent.arm)
+            return
         if intent.skill:
             self.start_skill(d, intent.skill)
         if intent.beak == "close" and not d.beak_closed:
@@ -1289,15 +1991,39 @@ class World:
 
     def _stamp_bumps(self, pairs: list[np.ndarray]) -> None:
         """Every duck whose body touched ANOTHER owner's (a duck's or a
-        person's) in any substep of the tick: its `bumped_t` is now."""
+        person's) in any substep of the tick: its `bumped_t` is now. And,
+        separately, every robot that touched the BOARDS (`wall_bumps`).
+
+        The two are different questions and are counted apart on purpose.
+        `bumped_t` is the `Senses.bumped` channel a brain reads — "something
+        that can move is against me" — and its owner table has no entry for
+        scenery, so a duck walking into a wall has never been `bumped` and
+        must not start being (every soccer number is measured on that
+        meaning). The board count is an INSTRUMENT: Phase 3's bar for a
+        wheeled body is stated in wall contacts, and no brain reads it.
+        """
         if not pairs or len(self._owner_duck) == 0:
             return
-        own = self._geom_owner
-        o1, o2 = own[np.concatenate(pairs[0::2])], own[np.concatenate(pairs[1::2])]
+        own, wall = self._geom_owner, self._wall_geom
+        g1, g2 = np.concatenate(pairs[0::2]), np.concatenate(pairs[1::2])
+        o1, o2 = own[g1], own[g2]
+        nd = len(self._owner_duck)
+        # The boards, first, because it is unconditional: a tick with no
+        # body-on-body contact can still be a tick against a wall.
+        on_wall: set[str] = set()
+        touch = np.flatnonzero((wall[g2] & (o1 >= 0)) | (wall[g1] & (o2 >= 0)))
+        if touch.size:
+            for k in set(o1[touch].tolist()) | set(o2[touch].tolist()):
+                if 0 <= k < nd:
+                    on_wall.add(self._owner_duck[k].id)
+        for rid in on_wall:
+            self.wall_ticks[rid] += 1
+            if rid not in self._on_wall:
+                self.wall_bumps[rid] += 1        # a new episode, not another tick of one
+        self._on_wall = on_wall
         hit = (o1 >= 0) & (o2 >= 0) & (o1 != o2)
         if not hit.any():
             return
-        nd = len(self._owner_duck)
         for k in set(o1[hit].tolist()) | set(o2[hit].tolist()):
             if k < nd:
                 self._owner_duck[k].bumped_t = self.t
@@ -1342,6 +2068,12 @@ class World:
         for d in self.ducks.values():
             if hold or d.down_until > self.t:  # kickoff, or lying where it fell: stand, whatever the brain asked
                 d.set_cmd(data, (0.0, 0.0, 0.0))
+            if isinstance(d, WorldRobot):
+                # A driver-stepped body's 50 Hz work is the command, which
+                # `set_cmd` already did (here for a hold, or in the caller's
+                # `drive()` for a brain). Everything else it needs happens in
+                # the substep loop below, where its controller must run.
+                continue
             if self._sensed_kick and d.detector is not None:
                 ox, oy, oyaw = self.odom(d)       # the ball track a sensed kick reads, kept warm
                 self._ball_tracker(d).update(d.detector.last, self.t, oyaw, (ox, oy))
@@ -1356,12 +2088,22 @@ class World:
             raw = np.asarray((skill or (self.getup_infer if down else d.infer))(obs), np.float32)
             d.last_action = raw.copy()
             data.ctrl[d.adr.actuators] = C.DEFAULT_POSE + raw.clip(-4.0, 4.0)
+            self._mouth(d)
         blockers = [tuple(d.trunk_pos(data)[:2]) for d in self.ducks.values()] if any(
             p.spec.yield_m > 0 for p in self.persons.values()) else ()
         for p in self.persons.values():
             p.step(data, C.CTRL_DT, blockers)
         pairs: list[np.ndarray] = []
-        for _ in range(C.DECIMATION):
+        for _ in range(self.substeps):
+            # A controller-stepped body runs EVERY physics step, not once a
+            # control tick. MEASURED (`robots/mars_drive.py`): decimated to
+            # 50 Hz the base's velocity loop has gain 3.04 — past the explicit
+            # loop's bound of 2 — and a 0.3 m/s run ends going backwards at
+            # 2.6 m/s. `self._robots` is EMPTY on a duck-only world, so this
+            # loop body is what it always was and `tests/test_arena.py`'s
+            # step-for-step lock against the walk env is exact.
+            for r in self._robots:
+                r.driver.step(data)
             mujoco.mj_step(m, data)
             self._sense_bumps(pairs)
         # What the walk env does after its substep loop (`_refresh_derived`,
@@ -1374,6 +2116,12 @@ class World:
         mujoco.mj_comPos(m, data)
         mujoco.mj_comVel(m, data)
         mujoco.mj_sensorVel(m, data)
+        for p in self.persons.values():
+            p.sync(data)
+            if p.fallen(data):
+                p.reset(data)
+                mujoco.mj_forward(m, data)
+                p.sync(data)
         self.t += C.CTRL_DT
         self.tick += 1
         self._stamp_bumps(pairs)
@@ -1417,6 +2165,21 @@ class World:
                 self._check_ball_out()
         t1 = time.perf_counter()
         for d in self.ducks.values():
+            if isinstance(d, WorldRobot):
+                # Every channel this body declared, each at its own device
+                # rate: the lidar's `maybe_scan` beside the ToF's `sample`
+                # (`LidarSensor.maybe_scan` schedules off the grid for the
+                # same reason `TofSensor.sample` does — a 6 Hz sensor polled
+                # every step must not drift into a 5.9 Hz one).
+                if d.lidar is not None:
+                    d.lidar.maybe_scan(data, self.t)
+                if d.detector is not None:
+                    d.detector.sample(data, self.t)
+                # The claw is a sense too (`sense_grip`): a driver-stepped
+                # body's grasp is physics, so "am I holding something" is
+                # READ each tick rather than remembered from an event.
+                self.sense_grip(d)
+                continue
             if d.tof is not None:
                 d.tof.sample(data, self.t)
             if d.detector is not None:
@@ -1448,9 +2211,38 @@ class World:
             out.append(item)
         return out
 
+    def senses_tof(self, d) -> tuple:
+        """(frame, age) for the 8x8 ToF a brain reads off this body.
+
+        A duck's is its own sensor. A body with a planar scanner and no ToF
+        gets one ADAPTED from the newest scan (`sensors.lidar.tof_from_lidar`,
+        whose docstring has the approximation and what it costs), which is how
+        `wander` and `follow` drive a MARS with nothing in
+        `brain/controllers.py` edited. The age is the SCAN's age, unchanged by
+        the adaptation: a 6 Hz scanner's frame is up to 167 ms old and a brain
+        gating on freshness must see that, not a zero stamped by the
+        conversion.
+
+        One place, so the lab's stream, `record-world` and a test cannot
+        disagree about what a wheeled body's brain was handed.
+        """
+        if d.tof is not None:
+            f = d.tof.last
+            return (f, None if f is None else self.t - f.t)
+        lidar = getattr(d, "lidar", None)
+        f = None if lidar is None else lidar.last
+        if f is None:
+            return (None, None)
+        return (tof_from_lidar(f, footprint_m=getattr(d, "footprint_m", 0.0)),
+                self.t - f.t)
+
     def sensors_payload(self, duck_id: str) -> dict | None:
         d = self.ducks[duck_id]
         out: dict = {}
+        lidar = getattr(d, "lidar", None)
+        if lidar is not None and lidar.last is not None:
+            out["lidar"] = {**lidar.last.as_payload(),
+                            "age": round(self.t - lidar.last.t, 4)}
         if d.tof is not None and d.tof.last is not None:
             out["tof"] = {**d.tof.last.as_payload(), "age": round(self.t - d.tof.last.t, 4)}
         if d.detector is not None and d.detector.last is not None:
@@ -1461,7 +2253,7 @@ class World:
         return out or None
 
     def persons_payload(self) -> list[dict]:
-        return [p.payload() for p in self.persons.values()]
+        return [p.payload(self.data) for p in self.persons.values()]
 
     def possess(self, person_id: str | None) -> None:
         """Hand one person to a human (None releases all). A possessed person

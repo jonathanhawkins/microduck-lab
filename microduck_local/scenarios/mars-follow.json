@@ -1,5 +1,5 @@
 {
-  "name": "follow-me-edit-edit-edit",
+  "name": "mars-follow",
   "seed": 0,
   "floor": {
     "size": [
@@ -67,11 +67,14 @@
         0.0,
         0.0
       ],
-      "policy": "pollen:alpha_walking",
+      "policy": null,
       "tof": "datasheet",
       "detector": "datasheet",
       "brain": "follow",
-      "odom": "ideal"
+      "odom": "ideal",
+      "team": null,
+      "role": null,
+      "robot": "mars"
     }
   ],
   "persons": [
@@ -102,12 +105,17 @@
       ],
       "speed": 0.25,
       "radius": 0.2,
-      "height": 1.0
+      "height": 1.0,
+      "yield_m": 0.55,
+      "kind": "capsule"
     }
   ],
   "pickables": [],
   "basket": null,
   "goal_width": 0.0,
-  "collision": "walk",
+  "attacks": {},
+  "collision": "all",
+  "cove": 0.0,
+  "physics_dt": 0.002,
   "version": 1
 }

@@ -1,6 +1,6 @@
 """Measure env throughput on this machine.
 
-    uv run bench-walk [--envs 16]
+    uv run bench-walk [--envs 16] [--robot g1]
 
 Prints control-steps/sec for a single env and for the parallel vec env —
 the number that decides how long a training run takes here.
@@ -13,17 +13,23 @@ import time
 
 import numpy as np
 
+from .robots import registry
+from .train import env_class
 from .vec_env import make_vec_env
-from .walk_env import MicroduckWalkEnv
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--envs", type=int, default=16)
     ap.add_argument("--steps", type=int, default=2000)
+    ap.add_argument("--robot", default="microduck", choices=registry.ids(),
+                    help="which body to bench (measured here: the G1 holds "
+                         "32.5k ctrl steps/s at 32 envs against the duck's "
+                         "61.3k — 1.9x the cost. Measure, do not extrapolate)")
     args = ap.parse_args()
+    cls = env_class(args.robot)
 
-    env = MicroduckWalkEnv(seed=0)
+    env = cls(seed=0)
     env.reset(seed=0)
     t0 = time.perf_counter()
     for _ in range(args.steps):
@@ -34,7 +40,7 @@ def main() -> None:
     print(f"single env: {single:,.0f} ctrl steps/s ({single * 4:,.0f} physics steps/s)")
 
     venv = make_vec_env([
-        (lambda r: (lambda: MicroduckWalkEnv(seed=r)))(i) for i in range(args.envs)
+        (lambda r: (lambda: cls(seed=r)))(i) for i in range(args.envs)
     ])
     venv.reset()
     acts = np.stack([venv.action_space.sample() * 0.1 for _ in range(args.envs)])

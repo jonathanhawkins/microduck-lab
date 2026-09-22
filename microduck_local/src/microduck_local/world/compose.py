@@ -25,6 +25,7 @@ import mujoco
 import numpy as np
 
 from .. import contract as C
+from ..sensors.ray import UNSENSED_GROUP
 from .scenario import PICKABLE_KINDS, TEAM_COLORWAYS, Scenario, Wall
 
 # Toys live in their own geom group: range sensors see them (they are
@@ -33,6 +34,10 @@ from .scenario import PICKABLE_KINDS, TEAM_COLORWAYS, Scenario, Wall
 # once hid a basket for a whole run, and a real detector would look at a
 # 30 cm basket, not at a point its centre.
 PICKABLE_GROUP = 4
+#: The `Duck.robot` value that means "the upstream Microduck MJCF, attached
+#: the way this file has always attached it". Every other value goes through
+#: `robots.registry.get(id).attach(...)`.
+DUCK_ROBOT = "microduck"
 ROBOT_DIR = C.MICRODUCK_RL_DIR / "src/mjlab_microduck/robot/microduck"
 ROBOT_XML = {
     "walk": ROBOT_DIR / "robot_walk.xml",
@@ -213,9 +218,244 @@ def _pin_mass_properties_to_walk(robot: mujoco.MjSpec) -> None:
         b.explicitinertial = r.explicitinertial
 
 
+# --- the mouth ------------------------------------------------------------
+#
+# The robot has FIFTEEN servos: the extra one is the mouth (Dynamixel id 32,
+# index 9 of `duck-control`'s joint table), and every alpha policy skips it -
+# the 61-obs / 14-action contract has no mouth slot, so the beak belongs to
+# the app, not to the network. Upstream's MJCF has no mouth joint at all:
+# onshape-to-robot cannot emit a closed loop into an MJCF tree, so the jaw's
+# linkage was collapsed and the lower bill (`jaw`) became a static geom
+# inside `jaw_soft`. The beak is welded shut in every render.
+#
+# Split the bill onto a hinge, and take the cheap half of the trade: only the
+# VISUAL geom moves. The collision geom stays on `jaw_soft`, so the bill never
+# takes a contact force, and the new body's mass is a picogram - MuJoCo
+# refuses an exactly-zero mass on a moving body, so this is as close to
+# nothing as the compiler allows. The DOF's whole inertia is the joint's
+# `armature`, which adds to that DOF's diagonal of M and to nothing else.
+#
+# What that buys, measured (scratch A/B on a ONE-DUCK empty floor, the same
+# scripted actions, with and without this function): nothing PHYSICAL changes
+# - same masses, same inertias, same contacts, same sensing - but the
+# trajectories are not bit-identical. Carrying one more DOF through the
+# constraint solver moves the result ~1.6e-9 per step, and this walker is
+# chaotic enough to amplify that (the note in `_pin_mass_properties_to_walk`
+# is the same effect from a seventh-digit inertia). So a SEEDED world no
+# longer replays the exact trajectory it did before the mouth existed.
+#
+# What that costs is NOT yet measured, and must not be read as untouched:
+# `docs/roadmap.md` keeps it open ("Not measured: whether `eval-tidy`'s mean
+# moved"). A per-step divergence this size compounds, so any battery banked
+# under a `--tag` before the mouth and resumed after it is mixing two
+# populations - re-run those from scratch rather than appending, and re-quote
+# the README's tidy and pitch bands only once someone has re-measured them.
+# `tests/test_arena.py`'s step-for-step lock
+# against the walk env still holds at its 1e-9 / 1e-6 tolerances. What the
+# beak MEETS is what it met before; what it LOOKS like now moves. A bill that
+# bore contacts would be a different robot and a re-measure.
+#
+# The pivot is MEASURED, not sourced: no shipped file has it (upstream's
+# MJCF, the onboard `kinematics` crate and the mjlab scenes are all 14
+# joints). `jaw.stl` carries a 6 mm through-bore at (+0.0030, +/-0.042,
+# -0.0181) in the `jaw_soft` frame - found by fitting circles with an
+# empty-interior test, the only full circle in the mesh - and the
+# `seeed_bearing` part inside the head sits at (+0.0032, -0.0385, -0.0180).
+# A bearing concentric with the bill's bore is the pivot: two independent
+# measurements agreeing to 0.2 mm. Worth an eye against the real robot.
+#
+# `bottom_head_shell` does NOT move. It reaches the bill tip but runs back to
+# world x -0.030, the whole underside of the head; `jaw` runs +0.017 -> +0.0858
+# and ends exactly at the `mouth_tip` site. Upstream's own commented-out
+# `<exclude body1="jaw" body2="bottom_head_shell"/>` says the same: they were
+# separate bodies before the collapse.
+MOUTH_BODY = "mouth"
+# The bill renders but is never SENSED. Every range sensor excludes its own
+# mount body (`sensors/ray.py`), and until the split the bill was IN that body
+# - `jaw_soft` was a leaf - so the ToF never saw it. A child body is not
+# excluded, and the first cut had the duck's downward rays hitting its own
+# beak instead of the floor (tests/test_sensors.py, test_detector.py caught
+# it). `sensors.ray.UNSENSED_GROUP` is the group for exactly this, and MuJoCo
+# renders it by default (mjvOption.geomgroup = [1,1,1,0,0,0]), so the bill
+# still shows up in `record-world` and `render-rollout`. The sensed twin is
+# the collision geom, which stays on `jaw_soft` and stays excluded.
+MOUTH_GROUP = UNSENSED_GROUP
+MOUTH_MESH = "jaw"
+MOUTH_PIVOT = (0.0030, 0.0, -0.0181)   # in the `jaw_soft` frame
+MOUTH_AXIS = (0.0, 1.0, 0.0)           # the head's left-right axis; +ve drops the bill
+MOUTH_CLOSED = math.radians(-5.0)      # duck-control/src/model.rs, the v1.6 travel
+MOUTH_OPEN = math.radians(30.0)
+MOUTH_KP = 12.0
+# The bill has no mass of its own, so the servo's whole second-order response
+# is set here: w = sqrt(KP / ARMATURE) = 49 rad/s (w*dt = 0.25 at the 5 ms
+# step) and zeta = DAMPING / (2 sqrt(KP * ARMATURE)) = 0.82, which opens the
+# beak in about 0.1 s without ringing. The first cut ran zeta = 0.065 and the
+# bill oscillated 50 degrees past its own limit. Armature and damping are
+# diagonal terms on the mouth DOF and touch nothing else, so tuning this
+# costs the rest of the robot nothing.
+MOUTH_ARMATURE = 5e-3
+MOUTH_DAMPING = 0.02   # a touch of joint damping; the servo's own kv does the work
+MOUTH_KV = 0.40
+# 1e-12, not 1e-9: measured, the divergence from the unsplit model scales with
+# this mass down to ~1e-12 and then hits a floor (1.6e-9 over 60 steps) that is
+# the extra DOF in the constraint solver, not the link. Ten times quieter for
+# nothing. MuJoCo refuses an exactly-zero mass on a moving body.
+MOUTH_MASS = 1e-12
+
+
+# Pivot to the `mouth_tip` site: the bill's lever, and so the arithmetic that
+# turns "how thick is this toy" into "how far can the beak close on it".
+MOUTH_LEVER = 0.0606
+MOUTH_TRAVEL = MOUTH_OPEN - MOUTH_CLOSED
+
+
+def mouth_gape(open_frac: float) -> float:
+    """Tip-to-tip opening, metres, at an opening fraction. Wide is 36 mm - so
+    a 40 mm block does NOT fit between the bills, which is why a held toy is
+    an attachment (`World.grasp`) and not a pinch."""
+    return 2.0 * MOUTH_LEVER * math.sin(0.5 * min(max(open_frac, 0.0), 1.0) * MOUTH_TRAVEL)
+
+
+def mouth_frac_for_gape(gap_m: float) -> float:
+    """The inverse: how far the bill closes on something `gap_m` thick. Wider
+    than the beak can open saturates at 1 - the bill goes AROUND the toy
+    rather than through it."""
+    half = min(max(0.5 * gap_m / MOUTH_LEVER, 0.0), 1.0)
+    return min(max(2.0 * math.asin(half) / MOUTH_TRAVEL, 0.0), 1.0)
+
+
+def mouth_target(open_frac: float) -> float:
+    """Joint angle for an opening fraction - 0 closed, 1 wide. The sim half of
+    `duck_control::model::mouth_target`, clamped the same way (anything outside
+    0..1, NaN included, is clamped rather than fed to a servo)."""
+    f = open_frac if math.isfinite(open_frac) else 0.0
+    return MOUTH_CLOSED + min(max(f, 0.0), 1.0) * (MOUTH_OPEN - MOUTH_CLOSED)
+
+
+def split_jaw(robot: mujoco.MjSpec) -> None:
+    """Re-parent the bill's visual geom onto a hinged `mouth` body under
+    `jaw_soft`, and add the 15th actuator. Idempotent-ish: a spec that
+    already has the body is left alone.
+
+    The new body carries no mass and no contacts, so nothing physical about
+    the rest of the robot changes - but it is one more DOF in the solver, and
+    that is not free at the last few digits. See the note above."""
+    head = next((b for b in robot.bodies if b.name == "jaw_soft"), None)
+    if head is None or any(b.name == MOUTH_BODY for b in robot.bodies):
+        return
+    bill = [g for g in head.geoms
+            if g.meshname == MOUTH_MESH and g.classname and g.classname.name == "visual"]
+    if not bill:
+        return
+    jaw = head.add_body(name=MOUTH_BODY, pos=MOUTH_PIVOT, quat=[1.0, 0.0, 0.0, 0.0])
+    jaw.mass, jaw.inertia, jaw.explicitinertial = MOUTH_MASS, [1e-12] * 3, True
+    j = jaw.add_joint(name=MOUTH_BODY, type=mujoco.mjtJoint.mjJNT_HINGE,
+                      axis=list(MOUTH_AXIS), range=[MOUTH_CLOSED, MOUTH_OPEN])
+    j.limited = int(mujoco.mjtLimited.mjLIMITED_TRUE)
+    j.armature = MOUTH_ARMATURE   # the whole of the DOF's inertia: the link has none
+    j.damping[0] = MOUTH_DAMPING
+    # The `microduck` childclass hands every joint the XL330's 0.1 Nm of
+    # stiction, which on a bill with no mass is a half-degree dead band and
+    # nothing else. A cosmetic joint tracks its target.
+    j.frictionloss = 0.0
+    for i, g in enumerate(bill):
+        ng = jaw.add_geom(name=f"{MOUTH_BODY}_bill_{i}", type=mujoco.mjtGeom.mjGEOM_MESH,
+                          meshname=g.meshname,
+                          pos=[p - c for p, c in zip(g.pos, MOUTH_PIVOT)], quat=g.quat,
+                          material=g.material, rgba=g.rgba, group=MOUTH_GROUP,
+                          contype=g.contype, conaffinity=g.conaffinity)
+        ng.classname = g.classname
+        robot.delete(g)
+    a = robot.add_actuator(name=MOUTH_BODY, target=MOUTH_BODY,
+                           trntype=mujoco.mjtTrn.mjTRN_JOINT)
+    # What `<position kp=...>` expands to. `add_actuator` defaults to
+    # biastype NONE, which is a CONSTANT-FORCE actuator, not a servo: the
+    # first cut drove the bill into whichever limit the sign of `ctrl`
+    # pointed at and sat there, 1.5 degrees past it, for every target.
+    a.gaintype = mujoco.mjtGain.mjGAIN_FIXED
+    a.biastype = mujoco.mjtBias.mjBIAS_AFFINE
+    a.gainprm[0], a.biasprm[1], a.biasprm[2] = MOUTH_KP, -MOUTH_KP, -MOUTH_KV
+    a.ctrlrange = [MOUTH_CLOSED, MOUTH_OPEN]
+    a.ctrllimited = int(mujoco.mjtLimited.mjLIMITED_TRUE)
+
+
+def _reseat_keyframes(model: mujoco.MjModel) -> None:
+    """Put the mouth's slot back into keyframes authored without it.
+
+    MuJoCo pads a `<key qpos>` that is one short with a zero at the END, but
+    the mouth takes a slot in the MIDDLE of the chain (it hangs off `jaw_soft`,
+    and the right leg comes after), so every upstream keyframe landed the whole
+    right leg one slot late. The STAND pose came back with a scrambled right
+    leg and the trunk 3 mm high, which the /pose grounding test caught.
+
+    Only for a model whose keyframes predate `split_jaw` - which is every one
+    we compile, since no upstream file has ever had a mouth joint."""
+    j = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, MOUTH_BODY)
+    if j < 0 or model.nkey == 0:
+        return
+    q, v = int(model.jnt_qposadr[j]), int(model.jnt_dofadr[j])
+    a = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, MOUTH_BODY)
+    for k in range(model.nkey):
+        row = model.key_qpos[k].copy()
+        model.key_qpos[k, q] = MOUTH_CLOSED       # a keyed pose has its beak shut
+        model.key_qpos[k, q + 1:] = row[q:-1]
+        row = model.key_qvel[k].copy()
+        model.key_qvel[k, v] = 0.0
+        model.key_qvel[k, v + 1:] = row[v:-1]
+        if a >= 0 and model.nu:
+            row = model.key_ctrl[k].copy()
+            model.key_ctrl[k, a] = MOUTH_CLOSED
+            model.key_ctrl[k, a + 1:] = row[a:-1]
+
+
+def scene_model() -> mujoco.MjModel:
+    """The single-robot scene the viewer draws every duck from, with the same
+    `split_jaw` surgery the composed world gets.
+
+    The stream's per-duck body list is mapped onto `GET /scene`'s body list
+    POSITIONALLY (world_server's `bodies`), so the two models have to agree
+    body for body - `tests/test_arena.py` locks exactly that."""
+    spec = mujoco.MjSpec.from_file(str(C.SCENE_WALK_XML))
+    split_jaw(spec)
+    model = spec.compile()
+    _reseat_keyframes(model)
+    return model
+
+
 def compose(scenario: Scenario) -> mujoco.MjModel:
     """Compile the scenario. Raises FileNotFoundError if microduck_rl is not
-    checked out (same message as the walk env)."""
+    checked out (same message as the walk env).
+
+    **The option block is the PARENT's, and a MARS does not need its own.**
+    `MjSpec.attach` keeps this spec's `<option>`, so an attached body runs on
+    whatever is set here — which is why the G1 branch above sets
+    `implicitfast` / 10 / 20 before its person is attached.
+    `mars._scene_spec` sets three of its own for the standalone scene
+    (`implicitfast`, elliptic cone, impratio 10), and MEASURED on 2026-09-17
+    they buy a MARS in a room NOTHING: the same walled room, the same
+    `MarsDriver`, this block against MARS's own three written onto `opt`
+    after compile, agrees to five decimals on every number —
+
+        hold 2 s at ARM_HOME     max |q - HOME| 0.00344 rad   (both)
+        0.3 m/s for 5 s          x 1.4994 m, y -6.7 mm, yaw -0.0045 rad (both)
+        arm while driving        max |q - HOME| 0.00344 rad   (both)
+        contacts                 6 (both)
+
+    and those are also the standalone scene's own figures
+    (`robots/mars_drive.py`'s measured block), so the coarser cone costs the
+    drive and the hold nothing. The mechanism: the arm is a position servo
+    through `qfrc_applied` with no contacts on it, and MARS's only contacts
+    are its two wheels, which `mars.tune_contacts` makes FRICTIONLESS
+    (condim 1, priority 1) — a contact with no friction cone cannot care
+    which cone model is in use. So the world's block stays as it is and the
+    duck's physics is not perturbed by the presence of a MARS.
+
+    What this measurement does NOT cover is a GRASP: elliptic + impratio 10
+    are what Innate set to stop a held object creeping out of a closed claw
+    (MuJoCo docs, "Preventing slip"), and with an empty gripper there is
+    nothing for them to hold. Phase 4's pick is where this has to be
+    re-measured, and if it needs them then it needs them for the whole room.
+    """
     robot_xml = ROBOT_XML[scenario.collision]
     if not robot_xml.exists():
         raise FileNotFoundError(
@@ -223,7 +463,19 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
             "or set MICRODUCK_RL_DIR")
     spec = mujoco.MjSpec()
     spec.modelname = f"world:{scenario.name}"
-    spec.option.timestep = C.PHYSICS_DT
+    # THE ROOM'S CLOCK, from the scenario (`Scenario.physics_dt`, whose block
+    # carries the 5 ms / 2 ms grasp table). `DEFAULT_PHYSICS_DT` is
+    # `C.PHYSICS_DT`, so every duck scenario compiles to the model it always
+    # did and `tests/test_arena.py`'s step-for-step lock against the walk env
+    # is untouched; a MARS room that has to GRASP says 0.002 and gets it.
+    spec.option.timestep = scenario.physics_dt
+    # The G1 XML wants implicitfast / 10 / 20; attach keeps the PARENT, so
+    # set it here before the robot is attached. Capsule-only worlds stay on
+    # the spec default — test_arena's duck lock does not load a G1.
+    if any(p.kind == "g1" for p in scenario.persons):
+        spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
+        spec.option.iterations = 10
+        spec.option.ls_iterations = 20
     w = spec.worldbody
     w.add_light(pos=[0, 0, 3.5], dir=[0, 0, -1],
                 type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL)
@@ -319,6 +571,13 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
         mk.add_geom(name="basket_marker_geom", type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.02, 0, 0],
                     contype=0, conaffinity=0, group=1, rgba=[0.2, 0.9, 0.5, 1.0])
     for i, person in enumerate(scenario.persons):
+        if person.kind == "g1":
+            from ..robots.g1 import g1_spec
+            robot = g1_spec()
+            frame = w.add_frame(pos=[person.pos[0], person.pos[1], 0.0],
+                                quat=_yaw_quat(person.yaw))
+            spec.attach(robot, prefix=duck_prefix(person.id), frame=frame)
+            continue
         # A mocap body: the world moves it kinematically (data.mocap_pos /
         # mocap_quat); ducks collide with it like a wall that walks. A capsule
         # standing on the floor, its "chest" at duck-head height.
@@ -330,10 +589,36 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
                       size=[person.radius, half, 0], group=0,
                       rgba=[0.35, 0.55, 0.85, 1.0])
     for duck in scenario.ducks:
+        x, y, yaw = duck.spawn
+        if duck.robot != DUCK_ROBOT:
+            # A body that is not the duck attaches ITSELF: `Body.attach` is the
+            # declared seam (`robots/body.py`), so a fourth robot is a registry
+            # entry and not a fourth branch here. The duck path below is
+            # untouched byte for byte — `tests/test_arena.py`'s step-for-step
+            # lock against the walk env is what says so.
+            #
+            # **At the ORIGIN, not at the spawn**, and its DRIVER poses it
+            # (`world/arena.WorldRobot.spawn_at`). A frame's transform is
+            # baked into the attached body's `pos`/`quat`, which for a body on
+            # a FREE joint is only its default — the joint's qpos replaces it,
+            # which is why `spawn_duck` can write a duck's pose and why the
+            # duck keeps its frame here. For SLIDE and HINGE joints that
+            # transform is the joint's REFERENCE FRAME, so the two compose:
+            # MEASURED, a MARS whose scenario spawn was (0.4, -0.3, 0.9 rad)
+            # and whose planar base was then written to the same numbers
+            # landed at (0.884, -0.173) — the spawn applied twice, and
+            # silently, because both halves were individually right. A planar
+            # base's three DoFs ARE its world pose (`mars.add_planar_base`),
+            # so the frame must be the identity for `MarsDriver.pose` to mean
+            # anything. Safe for any driver-posed body: a driver's `spawn`
+            # writes the root state either way.
+            from ..robots.registry import get as _get_body
+            _get_body(duck.robot).attach(spec, duck_prefix(duck.id), w.add_frame())
+            continue
         robot = mujoco.MjSpec.from_file(str(robot_xml))
         if scenario.collision != "walk":
             _pin_mass_properties_to_walk(robot)
-        x, y, yaw = duck.spawn
+        split_jaw(robot)
         frame = w.add_frame(pos=[x, y, 0.0], quat=_yaw_quat(yaw))
         spec.attach(robot, prefix=duck_prefix(duck.id), frame=frame)
     # Grasp = attachment: one INACTIVE weld per (duck, pickable). The world
@@ -346,6 +631,8 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
     # (measured, tests/test_tidy.py). The jaw still meets the floor, the
     # boards, the ball, the basket, persons and other ducks.
     for duck in scenario.ducks:
+        if duck.robot != DUCK_ROBOT:
+            continue          # a beak weld needs a beak; MARS's grasp is its gripper (Phase 4)
         for t in scenario.pickables:
             spec.add_equality(name=f"{duck.id}/hold/{t.id}", type=mujoco.mjtEq.mjEQ_WELD,
                               objtype=mujoco.mjtObj.mjOBJ_BODY,
@@ -358,6 +645,8 @@ def compose(scenario: Scenario) -> mujoco.MjModel:
             paint_team(model, duck.id, duck.team)
     # Feet win the friction pair, as the walk env sets for every model.
     for duck in scenario.ducks:
+        if duck.robot != DUCK_ROBOT:
+            continue          # no feet, no soles; MARS's wheels are tuned in `mars.tune_contacts`
         for side in ("left", "right"):
             gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
                                     f"{duck_prefix(duck.id)}{side}_foot_collision")
@@ -402,6 +691,10 @@ class DuckAddress:
     gyro_adr: int           # sensordata start of imu_ang_vel (3)
     foot_geoms: tuple[int, int]
     tof_site: int
+    # The 15th servo. -1 on a model built before `split_jaw`, so a caller
+    # that wants the beak checks rather than indexing ctrl with -1.
+    mouth_act: int = -1
+    mouth_qpos: int = -1
 
     @classmethod
     def resolve(cls, model: mujoco.MjModel, duck_id: str) -> "DuckAddress":
@@ -436,6 +729,10 @@ class DuckAddress:
                 mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, p + "right_foot_collision"),
             ),
             tof_site=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, p + "tof"),
+            mouth_act=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, p + MOUTH_BODY),
+            mouth_qpos=(int(model.jnt_qposadr[mouth_j])
+                        if (mouth_j := mujoco.mj_name2id(
+                            model, mujoco.mjtObj.mjOBJ_JOINT, p + MOUTH_BODY)) >= 0 else -1),
         )
 
 
@@ -453,3 +750,9 @@ def spawn_duck(model: mujoco.MjModel, data: mujoco.MjData, adr: DuckAddress,
     data.qvel[adr.root_qvel:adr.root_qvel + 6] = 0.0
     data.qvel[adr.joint_qvel] = 0.0
     data.ctrl[adr.actuators] = pose
+    if adr.mouth_qpos >= 0:
+        # A duck spawns with its beak SHUT. Zero is 5 degrees open on this
+        # joint (the travel runs -5..+30), which is a visibly ajar bill in
+        # every first frame until the servo pulls it closed.
+        data.qpos[adr.mouth_qpos] = MOUTH_CLOSED
+        data.ctrl[adr.mouth_act] = MOUTH_CLOSED
